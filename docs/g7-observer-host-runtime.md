@@ -16,6 +16,13 @@ database credentials outside every application-writable mount. The application
 receives only its deployment registry and the corresponding Ed25519 public key.
 It must not receive a Docker socket or host signing/anchor credentials.
 
+The disposable journey can inject audit, intent, and receipt write failures by
+setting `X-UVM-G7-Fixture-Failpoint` on a public publish request. The API honors
+that header only when `UVM_G7_DISPOSABLE_MODE=1` and only for the three named
+stages. It raises inside the active transaction after the preceding writes, so
+the public 503, unchanged revision, absent receipt, and unchanged bounded audit
+count verify rollback. Production deployments do not enable the fixture mode.
+
 The host policy is an exact schema-v1 object validated on each process start.
 Its timing bounds and controller cadence/deadlines are independent host policy;
 all seven public timing fields require explicit integer min/max bounds. The

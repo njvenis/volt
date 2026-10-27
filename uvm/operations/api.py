@@ -198,11 +198,19 @@ def _root_dto(connection, policy_row, deployment, principal, context):
     # A signed policy-only report can precede the first desired configuration.
     # It establishes host policy/report evidence, but has no application intent
     # to which an application outcome can be attributed.
-    if status and status["application_status"] and intent:
-        application = {"status": status["application_status"],
-            "operation_id": intent["intent_id"] if intent else None,
-            "latest_report_id": status["latest_report_id"],
-            "failure_code": status["latest_failure_code"]}
+    if intent:
+        matching_report = None
+        if status and status["latest_report_id"]:
+            matching_report = connection.execute(sa.select(g7_observer_host_reports).where(
+                g7_observer_host_reports.c.report_id == status["latest_report_id"],
+                g7_observer_host_reports.c.deployment_id == deployment)).mappings().one_or_none()
+        report_matches_intent = bool(matching_report
+            and matching_report["requested_revision"] == int(intent["revision"])
+            and matching_report["requested_digest"] == intent["digest"])
+        application = {"status": intent["status"],
+            "operation_id": intent["intent_id"],
+            "latest_report_id": status["latest_report_id"] if report_matches_intent else None,
+            "failure_code": status["latest_failure_code"] if report_matches_intent else None}
     desired = None
     if desired_row:
         desired = {"revision": int(desired_row["revision"]),
@@ -353,6 +361,13 @@ def install_observer_settings_routes(app: FastAPI) -> None:
         if command_id != body["command_id"]:
             raise HTTPException(400, {"code": "invalid_request", "message": "Command ID must be canonical"})
         request_digest = command_digest(principal, deployment_id, body)
+        fixture_failpoint = None
+        supplied_failpoint = request.headers.get("x-uvm-g7-fixture-failpoint")
+        if supplied_failpoint is not None:
+            if (os.environ.get("UVM_G7_DISPOSABLE_MODE") != "1"
+                    or supplied_failpoint not in {"audit", "intent", "receipt"}):
+                raise HTTPException(404, {"code": "not_found", "message": "Fixture endpoint is unavailable"})
+            fixture_failpoint = supplied_failpoint
         try:
             with engine.begin() as connection:
                 from uvm.assessment.policy_lock import lock_policy
@@ -376,7 +391,8 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                         expected_revisions=body["expected_revisions"], rationale=body["rationale"].strip(),
                         evidence_ref=body.get("evidence_ref"), values=body.get("values"),
                         rollback_revision=body.get("rollback_revision"), now=app.state.utc_now(),
-                        authorization_context=context.document() if context else None)
+                        authorization_context=context.document() if context else None,
+                        disposable_failpoint=fixture_failpoint)
                 except ObserverSettingsConflict as exc:
                     code = "command_conflict" if str(exc).startswith("command_id") else "revision_conflict"
                     raise HTTPException(409, {"code": code, "message": str(exc),

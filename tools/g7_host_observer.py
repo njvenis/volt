@@ -165,8 +165,22 @@ def _http_error_code(error: urllib.error.HTTPError) -> str | None:
         payload = json.loads(error.read())
     except (OSError, ValueError):
         return None
-    detail = payload.get("detail") if isinstance(payload, dict) else None
+    error._uvm_g7_payload = payload
+    detail = payload.get("detail", payload.get("error")) if isinstance(payload, dict) else None
     return detail.get("code") if isinstance(detail, dict) and isinstance(detail.get("code"), str) else None
+
+
+def _http_error_summary(error: urllib.error.HTTPError) -> dict:
+    payload = getattr(error, "_uvm_g7_payload", None)
+    detail = payload.get("detail", payload.get("error")) if isinstance(payload, dict) else None
+    return {"response_type": type(payload).__name__,
+        "response_keys": sorted(payload) if isinstance(payload, dict) else [],
+        "response_code": detail.get("code") if isinstance(detail, dict) and isinstance(detail.get("code"), str) else None,
+        "response_error": detail.get("message")[:160] if isinstance(detail, dict) and isinstance(detail.get("message"), str) else None,
+        "response_message": payload.get("message")[:160] if isinstance(payload, dict) and isinstance(payload.get("message"), str) else None,
+        "detail_type": type(detail).__name__,
+        "detail_keys": sorted(detail) if isinstance(detail, dict) else [],
+        "detail_message": detail.get("message")[:160] if isinstance(detail, dict) and isinstance(detail.get("message"), str) else None}
 
 
 def signed_report(policy: dict, unsigned: dict) -> dict:
@@ -264,7 +278,9 @@ def _controller_once_unlocked(policy: dict) -> dict:
                 except (urllib.error.URLError, TimeoutError, OSError):
                     return {"status": "uncertain", "failure_code": "report_acknowledgement_lost"}
             else:
-                return {"status": "uncertain", "failure_code": "host_report_rejected"}
+                return {"status": "uncertain", "failure_code": "host_report_rejected",
+                    "report_http_status": error.code, "report_error_code": error_code,
+                    "report_error_summary": _http_error_summary(error)}
         except (urllib.error.URLError, TimeoutError, OSError):
             return {"status": "uncertain", "failure_code": "report_acknowledgement_lost"}
         if not superseded:
@@ -626,6 +642,8 @@ def stop(_signum, _frame):
 
 
 def main() -> int:
+    global STOP
+    STOP = False
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=("controller", "observer", "supervisor"))
     parser.add_argument("--policy", required=True, type=Path)
@@ -644,7 +662,9 @@ def main() -> int:
             try:
                 print(json.dumps(controller_once(policy), sort_keys=True), flush=True)
             except Exception as error:
-                print(json.dumps({"status": "error", "error_type": type(error).__name__}), flush=True)
+                print(json.dumps({"status": "error", "error_type": type(error).__name__,
+                    "http_status": error.code if isinstance(error, urllib.error.HTTPError) else None,
+                    "api_error_code": _http_error_code(error) if isinstance(error, urllib.error.HTTPError) else None}, sort_keys=True), flush=True)
             cadence = policy["poll_seconds"]
         else:
             try:

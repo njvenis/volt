@@ -1,0 +1,129 @@
+{
+  "created_at": "2026-10-27",
+  "classification": "original-project-palette",
+  "source": "design/tokens.json",
+  "description": "VOLT warm-neutral surfaces and violet accents composed for this project. No external brand source or font assets.",
+  "contrast_method": "WCAG sRGB relative luminance; flat opaque colours",
+  "contrast_pairs": [
+    {
+      "label": "Body on surface",
+      "foreground": "#252331",
+      "background": "#FFFFFF",
+      "ratio": 15.402,
+      "minimum": 4.5
+    },
+    {
+      "label": "Body on canvas",
+      "foreground": "#252331",
+      "background": "#F7F6F3",
+      "ratio": 14.252,
+      "minimum": 4.5
+    },
+    {
+      "label": "Primary action",
+      "foreground": "#252331",
+      "background": "#C4B5FD",
+      "ratio": 8.343,
+      "minimum": 4.5
+    },
+    {
+      "label": "Link on surface",
+      "foreground": "#6442B5",
+      "background": "#FFFFFF",
+      "ratio": 7.027,
+      "minimum": 4.5
+    },
+    {
+      "label": "Link on tint",
+      "foreground": "#6442B5",
+      "background": "#EEEAF6",
+      "ratio": 5.935,
+      "minimum": 4.5
+    },
+    {
+      "label": "Muted on canvas",
+      "foreground": "#625D6D",
+      "background": "#F7F6F3",
+      "ratio": 5.878,
+      "minimum": 4.5
+    },
+    {
+      "label": "Muted on tint",
+      "foreground": "#625D6D",
+      "background": "#EEEAF6",
+      "ratio": 5.365,
+      "minimum": 4.5
+    },
+    {
+      "label": "Sidebar text",
+      "foreground": "#EEEAF6",
+      "background": "#252331",
+      "ratio": 13.008,
+      "minimum": 4.5
+    },
+    {
+      "label": "Sidebar secondary text",
+      "foreground": "#C9C2D8",
+      "background": "#252331",
+      "ratio": 8.942,
+      "minimum": 4.5
+    },
+    {
+      "label": "Selected navigation",
+      "foreground": "#FFFFFF",
+      "background": "#4B435F",
+      "ratio": 9.262,
+      "minimum": 4.5
+    },
+    {
+      "label": "Light-surface focus",
+      "foreground": "#6442B5",
+      "background": "#FFFFFF",
+      "ratio": 7.027,
+      "minimum": 3
+    },
+    {
+      "label": "Dark-surface focus",
+      "foreground": "#C4B5FD",
+      "background": "#252331",
+      "ratio": 8.343,
+      "minimum": 3
+    },
+    {
+      "label": "Control border",
+      "foreground": "#86818F",
+      "background": "#FFFFFF",
+      "ratio": 3.784,
+      "minimum": 3
+    },
+    {
+      "label": "Danger on tint",
+      "foreground": "#A52635",
+      "background": "#EEEAF6",
+      "ratio": 6.056,
+      "minimum": 4.5
+    },
+    {
+      "label": "Warning on tint",
+      "foreground": "#805500",
+      "background": "#EEEAF6",
+      "ratio": 5.513,
+      "minimum": 4.5
+    },
+    {
+      "label": "Success on tint",
+      "foreground": "#216544",
+      "background": "#EEEAF6",
+      "ratio": 5.893,
+      "minimum": 4.5
+    },
+    {
+      "label": "Info on tint",
+      "foreground": "#3056A6",
+      "background": "#EEEAF6",
+      "ratio": 5.897,
+      "minimum": 4.5
+    }
+  ],
+  "limits": "Token measurements only. Component states, keyboard, reflow and human visual review are separate checks."
+}

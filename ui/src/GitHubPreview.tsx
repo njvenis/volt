@@ -1,0 +1,28 @@
+import { useEffect, useRef, useState } from 'react';
+import { AssessmentError } from './assessment-api';
+import { acknowledgePreview, commandComment, GitHubError, type SignedPreview } from './github-api';
+import { EvidenceLink, Message, Status, UTC } from './assessment-components';
+export default function GitHubPreview({preview,token,issueUrl,onBack,onConflict}:{preview:SignedPreview;token:string;issueUrl:string|null;onBack:()=>void;onConflict:(error:AssessmentError)=>void}){
+  const [ack,setAck]=useState(false),[acknowledged,setAcknowledged]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState<AssessmentError>(),[copied,setCopied]=useState(false),[copyError,setCopyError]=useState(false),[now,setNow]=useState(Date.now());
+  const heading=useRef<HTMLHeadingElement>(null),copy=useRef<HTMLTextAreaElement>(null),active=useRef(true);
+  useEffect(()=>{active.current=true;heading.current?.focus();const timer=setInterval(()=>setNow(Date.now()),1000);return()=>{active.current=false;clearInterval(timer);};},[]);
+  const expired=now>=Date.parse(preview.expires_at),comment=commandComment(preview);
+  async function acknowledge(){if(busy||!ack)return;if(Date.now()>=Date.parse(preview.expires_at)){setNow(Date.now());return;}setBusy(true);setError(undefined);try{await acknowledgePreview(preview,token);if(active.current)setAcknowledged(true);}catch(e){if(!active.current)return;const failure=e instanceof AssessmentError?e:new GitHubError(0,'preview_outcome_unknown');setAck(false);setError(failure);if(failure.status===409||failure.status===0||failure.code==='preview_invalid')onConflict(failure);}finally{if(active.current)setBusy(false);}}
+  async function copyComment(){if(!acknowledged)return;if(Date.now()>=Date.parse(preview.expires_at)){setNow(Date.now());return;}try{await navigator.clipboard.writeText(comment);setCopied(true);setCopyError(false);}catch{setCopied(false);setCopyError(true);copy.current?.focus();copy.current?.select();}}
+  return <section className="github-preview" aria-label="Command for GitHub">
+    <h3 ref={heading} tabIndex={-1}>Review command for GitHub</h3>
+    <Message title="Review, approve, then copy to GitHub">Review this command and approve it for copying. Your change is saved only after you post it to GitHub and VOLT accepts it. Approval does not reserve the change: your access and the affected instances are checked again when VOLT processes the comment.</Message>
+    {error&&<Message alert title="Command approval could not be confirmed" tone="danger">{error.message}</Message>}
+    <dl className="facts"><div><dt>Linked GitHub account</dt><dd>{preview.github_account_id}</dd></div><div><dt>Your VOLT account ID</dt><dd>{preview.principal_id}</dd></div><div><dt>Repository / issue</dt><dd>{preview.repository_id} / {preview.issue_number}</dd></div><div><dt>Expires</dt><dd><UTC value={preview.expires_at} seconds/></dd></div><div><dt>Change / included instances</dt><dd>{preview.command.action==='confirm_remediation'?'Confirm fixes':'Assign owners'} / {preview.command.scope==='portion'?'This assigned set':'This finding'}</dd></div><div><dt>Request ID</dt><dd><code className="break">{preview.command.command_id}</code></dd></div></dl>
+    {issueUrl&&<p><EvidenceLink value={issueUrl}/></p>}
+    <details><summary>Command details</summary><pre className="policy-json" tabIndex={0} role="region" aria-label="Full command details">{JSON.stringify(preview.command,null,2)}</pre></details>
+    <details><summary>Access checked for this preview</summary><ul>{Object.entries(preview.permission_hints).map(([action,allowed])=><li key={action}>{({'owners.assign':'Assign owners','portion.transfer':'Change set owners','remediation.confirm_group':'Confirm remaining fixes','remediation.confirm_portion':'Confirm fixes for this set'} as Record<string,string>)[action]??action}: {allowed?'Allowed when prepared':'Not allowed when prepared'}</li>)}</ul><p className="permission-note">Your access will be checked again when the command is processed.</p></details>
+    {expired?<Message title="This command has expired" tone="warning" alert>Go back and refresh the finding to prepare a new command. Do not post this expired command.</Message>:acknowledged?<>
+      <div role="status"><Status value="acknowledged"/><p>Approved for copying. Your change has not been saved yet.</p></div>
+      <label className="github-copy-label">Comment to copy to GitHub<textarea ref={copy} aria-label="Comment to copy to GitHub" readOnly value={comment} spellCheck={false}/></label>
+      <p className="permission-note">Post the complete comment below, unchanged, on the linked issue using GitHub account {preview.github_account_id} before it expires. To change it, go back and prepare a new command. After VOLT processes your comment, refresh this finding to check the saved decision and GitHub update.</p>
+      <button type="button" className="primary" onClick={()=>void copyComment()}>Copy GitHub command</button><p role="status">{copied?'✓ GitHub command copied.':copyError?'Clipboard access unavailable. The exact comment is selected; use your device’s copy action.':''}</p>
+    </>:<><label className="acknowledge"><input type="checkbox" checked={ack} disabled={busy} onChange={e=>setAck(e.target.checked)}/>I have reviewed this command, the account, the issue and the expiry time, and approve it for copying.</label><button type="button" className="primary" disabled={!ack||busy} onClick={()=>void acknowledge()}>{busy?'Approving for copying…':'Approve for copying'}</button></>}
+    <div className="form-actions"><button type="button" disabled={busy} onClick={onBack}>Back to decision</button></div>
+  </section>;
+}

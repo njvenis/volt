@@ -1,0 +1,239 @@
+{
+  "source": "evidence/G4/correction-20261003T-ui-live/ui-browser/browser-responses.json",
+  "source_sha256": "c2ae8593ba434031d1a1baf5eb82412e9b9d1a2aa27707ad7582bff25847e4b1",
+  "group": {
+    "schema_version": 1,
+    "group": {
+      "group_id": "48d0384f-b666-46ec-b58b-18152e01acd4",
+      "source_family": "sysdig",
+      "native_id_scheme": "plugin",
+      "native_id_authority": "synthetic-g4",
+      "native_id_value": "GH-RECOVERY-3Tuilive",
+      "identity_revision": 1
+    },
+    "assessment": {
+      "revision": 3,
+      "policy_revision": 1,
+      "owner_revision": 3,
+      "native_severity": {
+        "value": "high",
+        "source": "sysdig",
+        "observed_at": "2026-10-03T06:50:53.665545+01:00"
+      },
+      "assessed_severity": null,
+      "owners": [
+        {
+          "owner_id": "g4-owner-team",
+          "owner_type": "team",
+          "display_name": "Synthetic Owner Team"
+        }
+      ],
+      "portions": [],
+      "routing": {
+        "status": "unresolved",
+        "owner_ids": [],
+        "override": null,
+        "evaluated_policy_revision": 1,
+        "evidence": []
+      },
+      "acceptances": [],
+      "membership": {
+        "revision": 471853234,
+        "outstanding_ids": [
+          "08424133-7783-47fb-8161-c4dcd7a3b011",
+          "41a52b37-3b3a-47e9-915c-486c3ff2907c",
+          "571086d2-8fa5-40f0-8aaa-be6f6db77830",
+          "6ff65233-cf56-4d1d-a16d-709b0f8c340a",
+          "9ccc0ed6-b31b-4ca8-baf5-2e9b71a42ffb"
+        ],
+        "review_ids": [],
+        "completed_ids": [],
+        "reconciliation_pending_ids": [],
+        "actionable_ids": [
+          "08424133-7783-47fb-8161-c4dcd7a3b011",
+          "41a52b37-3b3a-47e9-915c-486c3ff2907c",
+          "571086d2-8fa5-40f0-8aaa-be6f6db77830",
+          "6ff65233-cf56-4d1d-a16d-709b0f8c340a",
+          "9ccc0ed6-b31b-4ca8-baf5-2e9b71a42ffb"
+        ]
+      },
+      "clocks": [
+        {
+          "occurrence_id": "08424133-7783-47fb-8161-c4dcd7a3b011",
+          "first_observed_at": "2026-10-03T05:50:53.665545Z",
+          "deadline_at": null,
+          "deadline_status": "unknown",
+          "policy_ref": null,
+          "deadline_reference_revision": 0,
+          "deadline_reference": null
+        },
+        {
+          "occurrence_id": "41a52b37-3b3a-47e9-915c-486c3ff2907c",
+          "first_observed_at": "2026-10-03T05:50:53.665545Z",
+          "deadline_at": null,
+          "deadline_status": "unknown",
+          "policy_ref": null,
+          "deadline_reference_revision": 0,
+          "deadline_reference": null
+        },
+        {
+          "occurrence_id": "571086d2-8fa5-40f0-8aaa-be6f6db77830",
+          "first_observed_at": "2026-10-03T05:50:53.665545Z",
+          "deadline_at": null,
+          "deadline_status": "unknown",
+          "policy_ref": null,
+          "deadline_reference_revision": 0,
+          "deadline_reference": null
+        },
+        {
+          "occurrence_id": "6ff65233-cf56-4d1d-a16d-709b0f8c340a",
+          "first_observed_at": "2026-10-03T05:50:53.665545Z",
+          "deadline_at": null,
+          "deadline_status": "unknown",
+          "policy_ref": null,
+          "deadline_reference_revision": 0,
+          "deadline_reference": null
+        },
+        {
+          "occurrence_id": "9ccc0ed6-b31b-4ca8-baf5-2e9b71a42ffb",
+          "first_observed_at": "2026-10-03T05:50:53.665545Z",
+          "deadline_at": null,
+          "deadline_status": "unknown",
+          "policy_ref": null,
+          "deadline_reference_revision": 0,
+          "deadline_reference": null
+        }
+      ],
+      "latest_receipt": {
+        "intent_id": "bacc6acc-748d-4766-bc90-cf242bcda883",
+        "command_id": "0f6fce6f-20c2-4997-adb2-c8535da5ad78",
+        "projection": "pending",
+        "decision_id": "17776cc6-5702-4a02-818a-87dad6561819",
+        "audit_event_id": "af980dfd-af97-4980-98c1-5e416f8e07b0",
+        "schema_version": 1,
+        "committed_revision": 3
+      },
+      "pending_projection_intents": [
+        {
+          "intent_id": "acfc07a5-1e13-4bb1-9a18-cd60e79f8ef7",
+          "membership_ids": [
+            "08424133-7783-47fb-8161-c4dcd7a3b011",
+            "41a52b37-3b3a-47e9-915c-486c3ff2907c",
+            "571086d2-8fa5-40f0-8aaa-be6f6db77830",
+            "6ff65233-cf56-4d1d-a16d-709b0f8c340a",
+            "9ccc0ed6-b31b-4ca8-baf5-2e9b71a42ffb"
+          ],
+          "status": "pending"
+        },
+        {
+          "intent_id": "bacc6acc-748d-4766-bc90-cf242bcda883",
+          "membership_ids": [
+            "08424133-7783-47fb-8161-c4dcd7a3b011",
+            "41a52b37-3b3a-47e9-915c-486c3ff2907c",
+            "571086d2-8fa5-40f0-8aaa-be6f6db77830",
+            "6ff65233-cf56-4d1d-a16d-709b0f8c340a",
+            "9ccc0ed6-b31b-4ca8-baf5-2e9b71a42ffb"
+          ],
+          "status": "pending"
+        }
+      ]
+    },
+    "episodes": [
+      {
+        "exposure_id": "8994995f-256e-4bb3-9965-11ce1f2248d5",
+        "episode_id": "cb0373cf-0af9-5e31-9364-a28078a02e84",
+        "episode_number": 1,
+        "state_revision": 3,
+        "state": "open",
+        "members": [
+          {
+            "membership_id": "41a52b37-3b3a-47e9-915c-486c3ff2907c",
+            "status": "outstanding",
+            "coverage_reason": "outstanding",
+            "original_confirmation_decision_id": null,
+            "original_confirmation_at": null,
+            "confirmed_by_decision_id": null,
+            "confirmed_at": null
+          },
+          {
+            "membership_id": "571086d2-8fa5-40f0-8aaa-be6f6db77830",
+            "status": "outstanding",
+            "coverage_reason": "outstanding",
+            "original_confirmation_decision_id": null,
+            "original_confirmation_at": null,
+            "confirmed_by_decision_id": null,
+            "confirmed_at": null
+          },
+          {
+            "membership_id": "6ff65233-cf56-4d1d-a16d-709b0f8c340a",
+            "status": "outstanding",
+            "coverage_reason": "outstanding",
+            "original_confirmation_decision_id": null,
+            "original_confirmation_at": null,
+            "confirmed_by_decision_id": null,
+            "confirmed_at": null
+          }
+        ],
+        "recurrence": {
+          "count": 0,
+          "last_event_at": null,
+          "reason_codes": []
+        },
+        "review_reasons": []
+      },
+      {
+        "exposure_id": "dcb8c382-656e-417f-8a7a-b11e0750034e",
+        "episode_id": "468ef927-e95a-543b-b0e3-ace99c1d6096",
+        "episode_number": 1,
+        "state_revision": 2,
+        "state": "open",
+        "members": [
+          {
+            "membership_id": "08424133-7783-47fb-8161-c4dcd7a3b011",
+            "status": "outstanding",
+            "coverage_reason": "outstanding",
+            "original_confirmation_decision_id": null,
+            "original_confirmation_at": null,
+            "confirmed_by_decision_id": null,
+            "confirmed_at": null
+          },
+          {
+            "membership_id": "9ccc0ed6-b31b-4ca8-baf5-2e9b71a42ffb",
+            "status": "outstanding",
+            "coverage_reason": "outstanding",
+            "original_confirmation_decision_id": null,
+            "original_confirmation_at": null,
+            "confirmed_by_decision_id": null,
+            "confirmed_at": null
+          }
+        ],
+        "recurrence": {
+          "count": 0,
+          "last_event_at": null,
+          "reason_codes": []
+        },
+        "review_reasons": []
+      }
+    ],
+    "github_identity": {
+      "link_state": "linked",
+      "repository_id": "900000002",
+      "account_id": "900000001",
+      "principal_id": "g4-engineer",
+      "link_revision": 3
+    },
+    "github": {
+      "state": "applied",
+      "repository_id": "900000002",
+      "issue_number": 102,
+      "issue_url": "https://github.example.invalid/volt-fixture/repository/issues/102",
+      "desired_revision": 3,
+      "applied_revision": 3,
+      "last_reconciled_at": "2026-10-03T05:51:08.124216Z",
+      "discrepancy_codes": []
+    },
+    "audit": {
+      "next_cursor": null
+    }
+  }
+}

@@ -1,0 +1,61 @@
+/* Keep the retained administration wrapper from sizing the shared grid to its tables.
+   Dense tables scroll inside their labelled, keyboard-focusable regions. */
+.report-workspace{display:grid;grid-template-columns:minmax(0,1fr);gap:20px;min-width:0}
+.report-workspace>*{min-width:0}.report-workspace .tabs{margin:0;flex-wrap:wrap;gap:20px}.report-workspace .tabs button{border:0;border-radius:0;border-bottom:2px solid transparent;padding:10px 0;background:transparent;color:var(--semantic-muted-text);font-size:13px}.report-workspace .tabs button[aria-current]{color:var(--semantic-link);border-bottom-color:var(--semantic-link)}.report-toolbar{display:flex;justify-content:space-between;align-items:end;flex-wrap:wrap;gap:16px}.report-toolbar form{display:flex;align-items:end;gap:8px;flex:1;min-width:0;flex-wrap:wrap}.report-toolbar label{display:grid;gap:6px;font-size:12px;min-width:0;flex:1}.report-toolbar input{width:100%}.report-toolbar .row{flex-wrap:wrap}.report-context .facts{padding:0 20px}.report-context details{padding:0 20px 16px}.report-context .eyebrow{display:block;margin-bottom:4px}.report-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.metric-card{padding:20px;display:flex;flex-direction:column;align-items:start;gap:8px}.metric-heading{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;width:100%}.metric-heading h3{font-size:13px;margin:0}.metric-value{font-size:32px;font-weight:650;letter-spacing:-.8px;font-variant-numeric:tabular-nums;line-height:1.3}.metric-count{font-size:12px;margin:0;font-variant-numeric:tabular-nums}.metric-basis{font-size:11px;color:var(--semantic-muted-text);margin:0 0 8px}.metric-card button{margin-top:auto;font-size:12px}.report-workspace .panel-head{flex-wrap:wrap}.report-workspace .notice{margin-bottom:0}.report-workspace .badge{white-space:normal}.report-workspace pre{max-height:360px;overflow:auto}.report-workspace .load-status{margin:0}.report-drill-context{padding:16px 20px;font-size:12px;color:var(--semantic-muted-text);border-bottom:1px solid var(--semantic-border)}.report-filter-form{display:grid;gap:16px}.report-filter-form .form-grid{align-items:start}.report-filter-form fieldset{min-width:0}.report-filter-form textarea{width:100%}.report-policy-list{display:grid;gap:16px}.report-policy-list .facts{margin:16px 0}.report-admin-scope{padding:20px}.report-workspace .table-scroll td{min-width:150px}.report-workspace .table-scroll td:first-child{min-width:210px}.report-workspace .policy-json{white-space:pre-wrap;overflow-wrap:anywhere}.report-workspace .row{flex-wrap:wrap}.report-compact{font-size:12px}.report-workspace .table-foot{flex-wrap:wrap}.report-workspace .facts code{font-size:11px}.report-workspace button:disabled{opacity:1}
+@media(max-width:1200px){.report-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:760px){.report-metrics{grid-template-columns:1fr}.report-context .facts{padding:0 16px;grid-template-columns:1fr}.report-toolbar{align-items:stretch}.report-toolbar form{flex-basis:100%}.report-toolbar label{flex-basis:100%}.report-workspace .tabs{gap:16px}.metric-card{padding:16px}.report-context details{padding:0 16px 16px}.report-workspace .panel-head{flex-direction:column}.report-workspace .table-foot>.row{width:100%}}
+.sla-heads{display:flex;gap:16px;justify-content:space-between;align-items:center;flex-wrap:wrap}.sla-heads .facts{flex:1;min-width:0}.sla-authority{margin:16px 0;font-size:12px}.sla-authority>p{margin:8px 0}.sla-rating-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr)) auto;gap:8px;align-items:end;margin-bottom:12px}.sla-rating-row label,.sla-member>label{display:grid;gap:6px;font-size:12px}.sla-rating-row input,.sla-member input:not([type=checkbox]){width:100%}.sla-member{padding:12px 0;border-bottom:1px solid var(--semantic-border)}.sla-member small{display:block;overflow-wrap:anywhere}.sla-member code{overflow-wrap:anywhere}.sla-member>label+label{margin:12px 0 0}.sla-administration .policy-grant h3{margin-top:0}.sla-administration .report-toolbar label{min-width:0;flex:1}.sla-administration .facts{grid-template-columns:repeat(3,minmax(0,1fr))}.sla-administration pre{overflow-wrap:anywhere}.report-workspace button[aria-pressed=true]{background:var(--brand-tint);border-color:var(--semantic-link)}
+@media(max-width:760px){.sla-rating-row{grid-template-columns:1fr}.sla-heads .facts,.sla-administration .facts{grid-template-columns:1fr}.sla-heads{display:block}.sla-administration .report-toolbar{display:grid;grid-template-columns:1fr}.sla-administration .report-toolbar label{width:100%}}
+/* Shared reporting treatments: ink structure, violet interaction, semantic cues.
+   Only approved token values; no status or metric is inferred from colour. */
+.report-workspace{gap:24px}
+.report-workspace>.tabs{background:var(--brand-ink);padding:8px;border-radius:var(--radius-panel);gap:4px;border:0;box-shadow:0 2px 0 var(--brand-support)}
+.report-workspace>.tabs button{display:flex;align-items:center;gap:8px;padding:10px 16px;border:0;border-radius:var(--radius-control);color:var(--brand-tint);font-weight:650}
+.report-workspace>.tabs button[aria-current]{background:var(--brand-accent);color:var(--brand-ink)}
+.report-workspace>.tabs button:not([aria-current]):hover{background:var(--brand-support);color:var(--brand-white)}
+.report-workspace>.tabs button:focus-visible{outline-color:var(--brand-accent);outline-offset:2px}
+.report-workspace>.tabs button[aria-current]:focus-visible{outline-color:var(--brand-white)}
+.report-workspace>.report-toolbar{padding:16px 20px;background:var(--semantic-surface);border:1px solid var(--semantic-border);border-radius:var(--radius-panel)}
+.report-workspace>.report-toolbar label{font-weight:650}
+.report-workspace .panel-head{background:var(--brand-panel-soft);padding:20px;border-bottom:1px solid var(--semantic-border)}
+.report-workspace .panel-head h2{font-size:17px;letter-spacing:-.2px}
+.report-context>.panel-head,.sla-administration>.panel-head{background:var(--brand-ink);color:var(--brand-white);border-bottom:3px solid var(--brand-accent)}
+.report-context>.panel-head .eyebrow,.sla-administration>.panel-head .muted{color:var(--brand-pale)}
+.report-mode{display:flex;align-items:center;gap:8px;color:var(--brand-tint);font-size:12px}
+.report-context .facts{gap:20px;margin:24px 0}.report-context dt{font-size:12px}.report-context dd{font-size:13px}
+.report-context>details{border-top:1px solid var(--brand-tint);padding-top:12px;background:var(--brand-panel-soft)}
+.metric-card{border-top:3px solid var(--brand-support);gap:12px;position:relative}
+.metric-card[data-emphasis=deadline]{border-top-color:var(--semantic-danger)}
+.metric-card[data-emphasis=gap]{border-top-color:var(--semantic-warning)}
+.metric-heading{align-items:flex-start}.metric-heading h3{display:flex;gap:8px;align-items:center;font-size:14px;line-height:1.5;flex:1;min-width:150px}
+.metric-symbol{background:var(--brand-tint);color:var(--brand-ink);width:28px;height:28px;display:inline-grid;place-items:center;flex-shrink:0;border-radius:var(--radius-control)}
+.metric-card[data-emphasis=deadline] .metric-symbol{color:var(--semantic-danger);background:var(--semantic-surface)}
+.metric-card[data-emphasis=gap] .metric-symbol{color:var(--semantic-warning);background:var(--semantic-surface)}
+.metric-value{font-size:36px;font-weight:700;letter-spacing:-1px;color:var(--brand-ink)}
+.metric-count{font-size:13px}.metric-basis{font-size:12px;line-height:1.6;margin:0;max-width:46ch}
+.metric-definition{font-size:11px;width:100%;border-top:1px solid var(--brand-tint);padding-top:8px}.metric-definition summary{font-size:11px}.metric-definition p{overflow-wrap:anywhere;padding:0}
+.metric-card>.text-button{border-top:1px solid var(--brand-tint);width:100%;padding:12px 0 0;min-height:40px;text-decoration:none;font-weight:650}
+.report-workspace .table-scroll th{background:var(--brand-tint);color:var(--brand-ink);font-size:12px}
+.report-workspace .table-scroll tbody tr:nth-child(even){background:var(--brand-panel-soft)}
+.report-workspace .table-scroll tbody tr:hover{background:var(--brand-tint)}
+.report-drill-context{border-left:4px solid var(--semantic-link);background:var(--brand-panel-soft);line-height:1.8}
+.report-drill-context .row{margin:12px 0}.report-workspace button[aria-pressed=true]{background:var(--brand-ink);color:var(--brand-white);border-color:var(--brand-ink)}
+.report-workspace .notice{border-left-width:4px;padding:16px 20px}.report-workspace .notice strong{font-size:14px}.report-workspace .message-body{color:var(--semantic-text);line-height:1.7}
+.report-workspace .badge{background:var(--semantic-surface);font-size:11px}
+.sla-administration .sla-heads{padding:16px;background:var(--brand-panel-soft);border:1px solid var(--semantic-border);border-radius:var(--radius-control);margin:16px 0}
+.sla-authority>summary{padding:8px 0}.report-workspace .empty{background:var(--brand-panel-soft)}
+.report-workspace .policy-json:focus-visible{outline-offset:-3px}
+@media(max-width:760px){.report-workspace{gap:16px}.report-workspace>.tabs button{flex:1 1 42%;justify-content:center;padding:10px 8px}.report-workspace>.report-toolbar{padding:16px}.report-workspace .panel-head{padding:16px;align-items:flex-start}.metric-heading h3{min-width:0}.report-context .facts{gap:16px}.sla-administration .sla-heads{padding:12px}.metric-value{font-size:32px}}
+/* Three headline SLA measures; all other server measures remain visible in compact groups. */
+.report-section-title{margin:0 0 12px}.report-section-title h2{font-size:20px}.report-section-title p{font-size:12px;color:var(--semantic-muted-text);margin:4px 0 0}
+.report-headlines .metric-card{gap:16px}.metric-description{min-width:0}.metric-description .metric-basis{margin-top:8px}.metric-result{font-variant-numeric:tabular-nums;min-width:0}.metric-result .metric-count{margin-top:4px}
+.metric-actions{min-width:0}.metric-card .metric-actions{width:100%;margin-top:auto}.metric-actions .text-button{font-size:12px;min-height:32px}.metric-actions .metric-definition{margin-top:4px;border:0;padding:0}
+.report-measure-groups{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;align-items:start}.metric-group:last-child:nth-child(odd){grid-column:1/-1}
+.metric-group .panel-head{border-top:3px solid var(--brand-support);padding:16px 20px}.metric-group .panel-head p{font-size:12px;color:var(--semantic-muted-text);margin:4px 0 0}
+.metric-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(100px,auto);gap:8px 16px;padding:16px 20px;border-bottom:1px solid var(--brand-tint)}.metric-row:last-child{border-bottom:0}.metric-row:nth-child(odd){background:var(--brand-panel-soft)}
+.metric-row .metric-heading{display:block}.metric-row .metric-heading h3{display:block;min-width:0;font-size:13px;margin:0;line-height:1.5}.metric-row .metric-heading .badge{margin-top:6px}
+.metric-row .metric-value{font-size:22px;letter-spacing:-.4px;line-height:1.2}.metric-row .metric-result{text-align:right;max-width:190px}.metric-row .metric-count{font-size:11px}.metric-row .metric-basis{font-size:11px;line-height:1.5;margin-top:4px}
+.metric-row .metric-actions{grid-column:1/-1;display:flex;align-items:start;justify-content:space-between;gap:16px}.metric-row .metric-actions>.text-button{font-size:11px;max-width:65%;text-decoration:none;padding:0;min-height:28px}.metric-row .metric-definition{width:auto;max-width:60%;text-align:right}.metric-row .metric-definition[open]{text-align:left}.metric-row .metric-definition summary{min-height:28px}
+.report-table-equivalent{padding:16px 20px;background:var(--semantic-surface);border:1px solid var(--semantic-border);border-radius:var(--radius-panel)}.report-table-equivalent[open]>.panel{margin-top:12px}
+@media(max-width:1100px){.report-measure-groups{grid-template-columns:1fr}.metric-group:last-child:nth-child(odd){grid-column:auto}}
+@media(max-width:760px){.metric-row{padding:16px;gap:8px 12px;grid-template-columns:minmax(0,1fr) minmax(80px,110px)}.metric-row .metric-value{font-size:20px}.metric-row .metric-actions{display:block}.metric-row .metric-actions>.text-button{max-width:100%}.metric-row .metric-definition{max-width:100%;text-align:left}.report-table-equivalent{padding:16px}}

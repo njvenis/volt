@@ -1,0 +1,23 @@
+{
+  "partial_command": {
+    "preview": {
+      "errors": [],
+      "github_account_id": "900000001",
+      "group_id": "adcdd3c3-5c58-4777-b68c-3577995ee302",
+      "issue_node_id": "I_SYNTHETIC_VOLT_G4_101",
+      "issue_number": 101,
+      "link_id": "40000000-0000-4000-8000-000000000101",
+      "link_revision": 1,
+      "permission_hints": {
+        "owners.assign": true,
+        "portion.transfer": true,
+        "remediation.confirm_group": true,
+        "remediation.confirm_portion": true
+      },
+      "principal_id": "g4-engineer",
+      "repository_id": "900000002",
+      "schema_version": 1,
+      "signature": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  }
+}

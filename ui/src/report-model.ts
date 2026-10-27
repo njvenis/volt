@@ -1,0 +1,8 @@
+import type {ExclusionDTO,InventoryDTO,PortionDTO,NativeGroupDTO} from './report-api';
+// UI presentation types. The reporting adapter supplies all calculated values;
+// these types do not define policy, eligibility, authorisation or API semantics.
+export type ReportMetric = {id:string;label:string;display:string;numerator:number|null;denominator:number|null;unit:string;basis:string;status:string;filter:string};
+export type ReportAtom = {exclusion:ExclusionDTO;id:string;groupId:string;episodeId:string;occurrenceId:string;eligible:string;gapReasons:string[];start:string|null;originalDeadline:string|null;currentDeadline:string|null;completion:string;confirmedAt:string|null;disposition:string;owners:string[];assessment:string;policy:string;provenance:unknown;firstAge:string;openAge:string;overdueAge:string};
+export type ReportSource = {id:string;status:string;expected:number|null;observed:number|null;receipt:string|null;observation:string|null;attempt:string|null;watermark:string|null;reasons:string[]};
+export type ReportContext = {id:string;mode:string;asOf:string;knownAt:string;timezone:string;definition:string;scope:string[];periodStart:string|null;periodEnd:string|null;predecessor:string|null;manifest:unknown};
+export type ReportPresentation = {groups:NativeGroupDTO[];context:ReportContext;status:string;projection:string;metrics:ReportMetric[];quality:{status:string;reasons:string[]};sources:ReportSource[];inventory:InventoryDTO[];portions:PortionDTO[];differences:unknown;rollups:{id:string;label:string;status:string;earliestDeadline:string|null;newOnTime:number;late:number;unknown:number;carried:number}[]};

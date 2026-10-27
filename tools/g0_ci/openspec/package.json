@@ -1,0 +1,9 @@
+{
+  "name": "volt-openspec-pin",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Deterministic pin of @fission-ai/openspec 1.11.0 and its transitive dependencies for public specification validation.",
+  "dependencies": {
+    "@fission-ai/openspec": "1.11.0"
+  }
+}

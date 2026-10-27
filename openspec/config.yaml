@@ -1,0 +1,29 @@
+schema: spec-driven
+context: |
+  Read openspec/project.md first. UVM uses DefectDojo Community Edition as the
+  engine. Native vulnerability identifiers take priority over CVE grouping.
+  Preserve rebuild lineage and occurrence evidence. Assessment, configurable
+  RBAC, multi-owner portions, bidirectional GitHub, hardened audit and SLA
+  coverage/breach reporting are core. Local POC has product-quality UI using
+  Original VOLT palette, accessible workflows and polished interaction design.
+  REQUIREMENTS.md owns target requirements; GATES.md governs development.
+  openspec/specs is verified built behaviour; changes contain target deltas.
+  AGENTS.md owns the root-only Paseo profile routing and fan-out policy.
+  Sensitive source data and existing automation remain within their authorised
+  private environment. Unknown contracts must be validated, not invented. All
+  gates begin pending.
+rules:
+  proposal:
+    - Cite requirement IDs, gate, dependencies, non-goals and decisions needed.
+    - Distinguish accepted decisions from proposals and assumptions requiring external validation.
+  specs:
+    - Use SHALL requirements and concrete WHEN/THEN scenarios with stable IDs.
+    - Cover denied, incomplete, stale, retry and concurrent-change behaviour.
+  design:
+    - Identify data authority, audit, permission, identity and migration impact.
+    - Include UI/brand impact, rollback, verification environment and open risks.
+    - Require a reviewable approval record before implementation as defined in GATES.md.
+  tasks:
+    - Tag tasks AGENT, HUMAN or EXTERNAL; identify prerequisite and evidence.
+    - Split independent work into bounded packets with exclusive file ownership.
+    - Never claim a gate passed from checked boxes alone.

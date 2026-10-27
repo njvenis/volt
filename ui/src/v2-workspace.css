@@ -1,0 +1,119 @@
+/* Approved V2 hierarchy, using the existing VOLT semantic tokens. */
+.page-heading .eyebrow {color:var(--semantic-link);font-weight:750}
+h1 {font-weight:750;font-size:28px}
+.page-heading p {font-size:14px;max-width:75ch}
+.sidebar .wordmark {font-size:32px;letter-spacing:-1px}
+.sidebar .wordmark span {text-transform:uppercase;letter-spacing:.08em;max-width:145px}
+.sidebar nav a {min-height:44px}
+.session-panel {max-width:680px;margin:40px auto;padding:32px;border-top:4px solid var(--semantic-link)}
+.session-panel h2 {font-size:24px;letter-spacing:-.4px}
+.session-panel p {font-size:14px;margin:16px 0 24px}
+.session-emblem {display:grid;place-items:center;width:44px;height:44px;background:var(--brand-tint);color:var(--semantic-link);border-radius:var(--radius-panel);font-size:24px;margin-bottom:24px}
+.finding-row-link {font-family:var(--font-mono);font-size:13px;text-decoration:none}
+.finding-row-link:hover {text-decoration:underline}
+.finding-list td:first-child {min-width:220px}
+.finding-list td {padding:20px 16px}
+.finding-list th {padding-top:16px;padding-bottom:16px}
+.finding-list td details {margin-top:8px}
+.finding-list td summary {font-size:11px;font-weight:400}
+.finding-cves {margin-top:8px;font-size:11px}
+.finding-cves .finding-reference-list {display:flex;gap:8px;flex-wrap:wrap}
+.finding-cves .finding-reference-list li {margin:0}
+.finding-filters .panel-head {border-bottom:0;padding-bottom:0}
+.finding-filters .finding-sort {font-size:11px}
+.assessment-lookup {margin-bottom:16px}
+.assessment-lookup>summary {font-size:12px}
+.assessment-lookup .assessment-context {padding-top:12px}
+.finding-summary {display:flex;gap:24px;flex-wrap:wrap;padding:16px 24px;background:var(--semantic-canvas);border-top:1px solid var(--semantic-border);font-size:12px;color:var(--semantic-muted-text)}
+.finding-summary strong {color:var(--semantic-text)}
+.finding-title .eyebrow {color:var(--semantic-link)}
+.assessment-tabs {border-bottom:0}
+.assessment-main>.panel>.panel-head {background:var(--semantic-canvas)}
+.assessment-dialog .detail-head {border-top:4px solid var(--semantic-link)}
+.decision-actor {font-size:12px;margin-bottom:8px}
+.scope-preview {margin:0;background:var(--semantic-surface);padding:16px}
+.scope-preview .scope-versions {margin:12px 0}
+.scope-versions summary {font-size:12px}
+.scope-preview .membership-list {margin-top:12px;padding:3px}
+.scope-preview .membership-list li {border:0;background:var(--semantic-canvas)}
+.assessment-result {padding:20px;border:1px solid var(--semantic-border);border-left:4px solid var(--semantic-success);border-radius:var(--radius-control);background:var(--semantic-surface)}
+.assessment-result h3 {margin:0 0 12px;font-size:17px}
+.assessment-result .permission-note {font-size:13px}
+.assessment-form .form-actions {background:var(--semantic-canvas);padding:16px;border-radius:var(--radius-control)}
+@media(max-width:760px) {
+  .sidebar nav {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px}
+  .sidebar nav a {min-height:40px}
+  main {padding:24px 16px}
+  .session-panel {margin:16px auto;padding:24px 20px}
+  .session-panel h2 {font-size:22px}
+  .finding-title h2 {font-size:20px}
+  .finding-summary {padding:16px;gap:12px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+  .assessment-dialog .detail-head {align-items:flex-start;flex-wrap:nowrap;gap:8px}
+  .assessment-dialog .detail-head h2 {font-size:18px;overflow-wrap:anywhere}
+  .assessment-dialog .detail-head>div {min-width:0}
+  .assessment-dialog .detail-head>button {flex-shrink:0}
+  .assessment-dialog .detail-body {padding:16px}
+  .assessment-form .form-actions {padding:12px;display:grid;grid-template-columns:minmax(0,1fr);gap:8px}
+  .assessment-form .form-actions button {width:100%;white-space:normal}
+  .scope-preview {padding:12px}
+  .assessment-result {padding:16px}
+  .assessment-result .facts {grid-template-columns:1fr}
+  .scope-preview .scope-versions .facts {grid-template-columns:1fr}
+  .topbar {align-items:flex-start}
+  .topbar>span {padding-top:8px}
+  .session-identity {max-width:65%}
+  .session-identity>button {max-width:none}
+}
+
+.finding-filter-primary {grid-template-columns:minmax(0,2fr) minmax(0,1fr)}
+.finding-more-filters>summary {margin:0 24px 12px;font-size:12px}
+.finding-more-filters .finding-filter-grid {grid-template-columns:repeat(2,minmax(0,1fr));padding-top:4px}
+@media(max-width:760px) {
+  .finding-filter-primary,.finding-more-filters .finding-filter-grid {grid-template-columns:minmax(0,1fr)}
+  .finding-more-filters>summary {margin-left:16px;margin-right:16px}
+}
+
+/* Identity review keeps unresolved membership separate from import progress. */
+.identity-review td {min-width:160px}
+.identity-review td:first-child {min-width:220px}
+.identity-review tr[data-selected] {background:var(--semantic-canvas);box-shadow:inset 3px 0 var(--semantic-link)}
+.identity-record-link {font-weight:650;overflow-wrap:anywhere;max-width:100%}
+.identity-record-link code {font:inherit;font-family:var(--font-mono);font-size:12px}
+.identity-reason {margin:12px 0;font-size:13px;overflow-wrap:anywhere}
+.identity-review td .badge {white-space:normal}
+.identity-inspector {border-top:1px solid var(--semantic-border);scroll-margin-top:16px}
+.identity-inspector-head {padding:24px;display:flex;justify-content:space-between;align-items:start;gap:16px;background:var(--semantic-canvas);border-bottom:1px solid var(--semantic-border)}
+.identity-inspector-head>div {min-width:0}
+.identity-inspector-head .eyebrow {color:var(--semantic-link)}
+.identity-inspector-head h3 {margin:0 0 8px;font-size:22px}
+.identity-inspector-head code {overflow-wrap:anywhere}
+.identity-inspector-head button {flex-shrink:0}
+.identity-inspector-body {padding:24px;display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:32px}
+.identity-review-main,.identity-review-context {min-width:0;display:grid;align-content:start;gap:24px}
+.identity-review-main section+section {border-top:1px solid var(--semantic-border);padding-top:24px}
+.identity-review-main h4,.identity-review-context h4 {font-size:14px;margin:0 0 12px}
+.identity-review-main p,.identity-review-context p {font-size:13px;color:var(--semantic-muted-text)}
+.identity-review-context {background:var(--semantic-canvas);padding:20px;border-radius:var(--radius-control)}
+.identity-review-context .facts {grid-template-columns:1fr;margin:0 0 16px}
+.identity-review-context section+section {border-top:1px solid var(--semantic-border);padding-top:20px}
+.identity-group-id {display:block;overflow-wrap:anywhere}
+.identity-finding-link {display:inline-flex;padding:8px 0;font-weight:650;margin:8px 0}
+.identity-evidence {list-style:none;padding:0;margin:0;display:grid;gap:12px;counter-reset:evidence}
+.identity-evidence>li {padding:16px;border:1px solid var(--semantic-border);border-radius:var(--radius-control);overflow-wrap:anywhere}
+.identity-evidence .candidate-reference {font-size:12px}
+.identity-evidence summary,.identity-imports summary {font-size:12px}
+.identity-evidence dl {display:grid;grid-template-columns:1fr;gap:12px;margin:12px 0 0}
+.identity-evidence dd {margin:4px 0 0}
+.identity-imports {display:grid;gap:16px}
+.identity-imports article {padding:16px;border:1px solid var(--semantic-border);border-radius:var(--radius-control);min-width:0;overflow-wrap:anywhere}
+.identity-import-summary {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}
+.identity-import-summary p {margin-top:12px}
+.identity-imports .facts {grid-template-columns:repeat(2,minmax(0,1fr))}
+@media(max-width:1100px) {.identity-inspector-body {grid-template-columns:1fr}.identity-review-context {grid-template-columns:repeat(2,minmax(0,1fr))}.identity-review-context section+section {border-top:0;padding-top:0}}
+@media(max-width:760px) {
+  .identity-inspector-head {padding:20px 16px;flex-wrap:wrap}
+  .identity-inspector-head h3 {font-size:20px}
+  .identity-inspector-body {padding:16px;gap:24px}
+  .identity-review-context,.identity-import-summary,.identity-imports .facts {grid-template-columns:1fr}
+  .identity-review-context section+section {border-top:1px solid var(--semantic-border);padding-top:20px}
+}

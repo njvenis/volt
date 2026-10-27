@@ -1,0 +1,38 @@
+/* Generated from design/tokens.json: original VOLT light theme. */
+:root {
+  --brand-accent: #C4B5FD;
+  --brand-ink: #252331;
+  --brand-rail: #302B40;
+  --brand-night: #191622;
+  --brand-support: #4B435F;
+  --brand-tint: #EEEAF6;
+  --brand-pale: #C9C2D8;
+  --brand-accent-strong: #6442B5;
+  --brand-panel-soft: #F7F6F3;
+  --brand-white: #FFFFFF;
+  --semantic-canvas: #F7F6F3;
+  --semantic-surface: #FFFFFF;
+  --semantic-text: #252331;
+  --semantic-muted-text: #625D6D;
+  --semantic-border: #86818F;
+  --semantic-action-background: #C4B5FD;
+  --semantic-action-text: #252331;
+  --semantic-link: #6442B5;
+  --semantic-focus: #6442B5;
+  --semantic-danger: #A52635;
+  --semantic-warning: #805500;
+  --semantic-success: #216544;
+  --semantic-info: #3056A6;
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+  --radius-control: 6px;
+  --radius-panel: 10px;
+  --radius-dialog: 12px;
+  --space-4: 4px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-24: 24px;
+  --space-32: 32px;
+  --space-48: 48px;
+}

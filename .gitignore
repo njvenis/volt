@@ -1,0 +1,28 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Node and build output
+node_modules/
+ui/dist/
+dist/
+build/
+
+# Local configuration, secrets and generated evidence
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+evidence/
+*.log
+*.sqlite
+*.db
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/

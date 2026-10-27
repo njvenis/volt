@@ -1,0 +1,61 @@
+{
+  "coverage": "SYNTHETIC_CONTRACT_FIXTURES_NOT_EXECUTION_EVIDENCE",
+  "original_revision": "00538b73f900a1293828f9c73f50f8db0bf0ebf4",
+  "inputs": [
+    {
+      "fixture": "partial-group-dto.json",
+      "source_path": "evidence/G4/live-20261003T1210Z/partial-group-dto.json",
+      "source_sha256": "2496b865c2ceba8f87a990b4a0f3890b4d53dd058927a0baffb89595a9814b4f",
+      "fixture_sha256": "04b6d1a3f6bfd1d2587246f46b5c55f10cd3ff56f4a27e529dae44460fa3341c",
+      "selection": "Full public synthetic GroupView; retained receipt IDs replaced consistently with deterministic synthetic UUIDs; all states/counts/revisions preserved; external GitHub identities, issue numbers/URLs and preview account-link ID replaced with deterministic synthetic values"
+    },
+    {
+      "fixture": "g4-live-journey.json",
+      "source_path": "evidence/G4/live-20261003T1210Z/g4-live-journey.json",
+      "source_sha256": "7effb3a0603b0f9d907bf2499b5f0c336e8be51e17609060ac3b783f7f7508f4",
+      "fixture_sha256": "814884aeafc9722f7f4fedd8ee75bcfe11df5105d7f5eb9b4aa5cd54114a6499",
+      "selection": "Only partial_command.preview template fields used by staticRoutes; request-overwritten fields omitted; real signature replaced by 64 zeroes; no live trace, actor fixture, session, posted comment, acknowledgement or receipt; external GitHub identities, issue numbers/URLs and preview account-link ID replaced with deterministic synthetic values"
+    },
+    {
+      "fixture": "../g4-coverage-reasons.json",
+      "fixture_sha256": "d704f6f885aa81eb69f3bae9cf23875b7ea270595ff71955f942f28424ed8b74",
+      "selection": "Complete scenario with deterministic synthetic GitHub identities and issue links; all other fields unchanged",
+      "source_path": "evidence/G4/correction-20261003T-six-defects-v16/ui-browser/preview/browser-responses.json",
+      "source_sha256": "dbce513c5f70a98c97208c351a1493b5d489fd15ceaaa7be01416ba3db0520cc"
+    },
+    {
+      "fixture": "../g4-language-v26.json",
+      "fixture_sha256": "08291fa1032fddaacccfa63069b9c2340e4d2e1577673680035ec6c190b8ff34",
+      "selection": "Complete scenario with deterministic synthetic GitHub identities and issue links; all other fields unchanged",
+      "source_path": "evidence/G4/correction-20261003T-poll-races-live-v26/ui-browser/preview/browser-responses.json",
+      "source_sha256": "c570beb9305b4b72f57c01b6f4ef0768719b3b3dfd193abfd77e51de24d461cc"
+    },
+    {
+      "fixture": "../g4-scrollable-scope.json",
+      "fixture_sha256": "acc3f829b045879b02756a9a6f1c70461f2cbae45841a92270c0304a64f987d5",
+      "selection": "Complete scenario with deterministic synthetic GitHub identities and issue links; all other fields unchanged",
+      "source_path": "evidence/G4/correction-20261003T-ui-live/ui-browser/browser-responses.json",
+      "source_sha256": "c2ae8593ba434031d1a1baf5eb82412e9b9d1a2aa27707ad7582bff25847e4b1"
+    },
+    {
+      "fixture": "../g4-successor-states.json",
+      "fixture_sha256": "7731711dc93c20a67a9e0dd2a5ed73bf643e407f5a8667a1d61b01ab1b19b086",
+      "selection": "Complete scenario with deterministic synthetic GitHub identities and issue links; all other fields unchanged"
+    }
+  ],
+  "public_identity_policy": {
+    "classification": "deterministic-synthetic-identifiers",
+    "account_id": "900000001",
+    "repository_id": "900000002",
+    "issue_origin": "https://github.example.invalid",
+    "issue_numbers": [
+      101,
+      102,
+      103,
+      104
+    ],
+    "issue_node_id": "I_SYNTHETIC_VOLT_G4_101",
+    "link_id": "40000000-0000-4000-8000-000000000101",
+    "meaning": "Original scenario states, membership, revisions, timestamps and confirmation relationships retained. External identities replaced; source hashes identify historical inputs, not current fixture bytes. No live GitHub identity or transport authority."
+  }
+}

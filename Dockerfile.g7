@@ -1,0 +1,125 @@
+# UVM G7 packaging image. CE is the runtime base so its supported Django,
+# uwsgi and Celery installation is exactly the approved 3.3.100 build.
+ARG CE_IMAGE=defectdojo/defectdojo-django@sha256:c597abdbb5350315cfd73a2fb2004c8ff93293c3a2b05605aa7966638410ffcc
+ARG VALKEY_IMAGE=valkey/valkey:9.1.2-alpine@sha256:a174b894902bd3367e330d47cc2054367dc4917701776aaf336f41d83b65ec7a
+FROM ${CE_IMAGE} AS uvm-build
+USER root
+RUN python -m pip install --no-cache-dir uv==0.12.18
+WORKDIR /build
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+COPY uvm ./uvm
+COPY migrations ./migrations
+COPY alembic.ini ./
+RUN uv sync --frozen --no-dev
+
+FROM node:24.15.0-bookworm-slim@sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d AS ui-build
+WORKDIR /ui
+COPY ui/package.json ui/package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY ui ./
+RUN npm run build
+
+FROM ${VALKEY_IMAGE} AS valkey-bin
+
+FROM ${CE_IMAGE} AS runtime
+USER root
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+RUN python3 - <<'PY'
+from pathlib import Path
+path = Path('/entrypoint-uwsgi.sh')
+source = path.read_text()
+needle = '--http 0.0.0.0:8081 --http-to'
+replacement = '--http 127.0.0.1:8081 --http-to'
+count = source.count(needle)
+if count != 1:
+    raise SystemExit(f'expected exactly one CE HTTP bind directive, found {count}')
+path.write_text(source.replace(needle, replacement))
+PY
+RUN python3 - <<'PY'
+from pathlib import Path
+path = Path('/entrypoint-celery-beat.sh')
+source = path.read_text()
+needle = '  --schedule=/var/run/defectdojo/celerybeat-schedule'
+replacement = needle + ' \\\n  --scheduler=beat_progress_scheduler.G7ProgressScheduler'
+if source.count(needle) != 1:
+    raise SystemExit('expected exactly one CE celery beat schedule option')
+path.write_text(source.replace(needle, replacement))
+PY
+COPY docker/g7/versions.lock /tmp/uvm-g7-versions.lock
+RUN set -eu; \
+    export DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none; \
+    apt-get update -qq; \
+    mkdir -p /tmp/os-packages; cd /tmp/os-packages; \
+    packages=''; expected_delta=''; \
+    dpkg-query -W -f='${binary:Package}=${Version}\n' | sort > /tmp/g7-packages-before; \
+    while IFS='=|' read -r key version digest; do \
+      case "$key" in \
+        os_delta_package_*) package=${key#os_delta_package_}; expected_delta+="$package=$version"$'\n' ;; \
+        os_package_*) package=${key#os_package_} ;; \
+        *) continue ;; \
+      esac; \
+      apt-get download -qq "$package=$version"; \
+      deb=$(find . -maxdepth 1 -type f -name "${package%%:*}_*.deb" -print -quit); \
+      test -n "$deb"; \
+      printf '%s  %s\n' "$digest" "$deb" | sha256sum -c -; \
+      packages="$packages $package=$version"; \
+    done < <(grep -E '^os_(delta_)?package_' /tmp/uvm-g7-versions.lock); \
+    apt-get install -yqq --no-install-recommends $packages; \
+    for entry in $packages; do expected=${entry#*=}; package=${entry%%=*}; \
+      actual=$(dpkg-query -W -f='${Version}' "$package"); test "$actual" = "$expected"; \
+    done; \
+    dpkg-query -W -f='${binary:Package}=${Version}\n' | sort > /tmp/g7-packages-after; \
+    python3 -c 'import sys; read=lambda p: dict(line.rstrip("\n").split("=",1) for line in open(p)); before,after=map(read,sys.argv[1:3]); open(sys.argv[3],"w").writelines(f"{k}={v}\n" for k,v in sorted(after.items()) if before.get(k)!=v); open(sys.argv[4],"w").write("\n".join(sorted(before.keys()-after.keys())))' /tmp/g7-packages-before /tmp/g7-packages-after /tmp/g7-packages-added-or-upgraded /tmp/g7-packages-removed; \
+    printf '%s' "$expected_delta" | sort > /tmp/g7-packages-expected; \
+    diff -u /tmp/g7-packages-expected /tmp/g7-packages-added-or-upgraded; \
+    test ! -s /tmp/g7-packages-removed; \
+    cd / && rm -rf /tmp/os-packages /var/lib/apt/lists/* \
+    && groupadd --system --gid 1800 uvm \
+    && useradd --system --uid 1800 --gid uvm --home-dir /opt/uvm --create-home uvm \
+    && groupadd --system --gid 1801 valkey \
+    && useradd --system --uid 1801 --gid valkey --home-dir /var/lib/valkey --create-home valkey \
+    && pg_dropcluster --stop 18 main \
+    && rm -rf /var/lib/postgresql/18/main /etc/postgresql/18/main /var/log/postgresql \
+    && install -d -o 1001 -g 1337 /app/media \
+    && install -d -o uvm -g uvm /opt/uvm/state
+COPY --from=valkey-bin /usr/local/bin/valkey-server /opt/valkey/bin/valkey-server
+COPY --from=valkey-bin /usr/local/bin/valkey-cli /opt/valkey/bin/valkey-cli
+COPY --from=valkey-bin /lib/ld-musl-x86_64.so.1 /opt/valkey/lib/ld-musl-x86_64.so.1
+COPY --from=valkey-bin /lib/libc.musl-x86_64.so.1 /opt/valkey/lib/libc.musl-x86_64.so.1
+COPY --from=valkey-bin /usr/lib/libssl.so.3 /opt/valkey/lib/libssl.so.3
+COPY --from=valkey-bin /usr/lib/libcrypto.so.3 /opt/valkey/lib/libcrypto.so.3
+WORKDIR /opt/uvm/app
+COPY --from=uvm-build --chown=uvm:uvm /build/.venv /opt/uvm/venv
+COPY --from=uvm-build --chown=uvm:uvm /build/uvm ./uvm
+COPY --chown=1001:1337 docker/g7/beat_progress_scheduler.py /app/beat_progress_scheduler.py
+COPY --chown=uvm:uvm tools/g7_container_audit_export.py /opt/uvm/app/tools/g7_container_audit_export.py
+COPY --chown=uvm:uvm tools/g7_network_assert.py /opt/uvm/app/tools/g7_network_assert.py
+COPY --from=uvm-build --chown=uvm:uvm /build/migrations ./migrations
+COPY --from=uvm-build --chown=uvm:uvm /build/alembic.ini ./alembic.ini
+COPY --from=ui-build --chown=uvm:uvm /ui/dist /opt/uvm/ui
+WORKDIR /app
+COPY docker/g7/entrypoint.sh /usr/local/bin/uvm-g7-entrypoint
+COPY docker/g7/healthcheck.sh /usr/local/bin/uvm-g7-healthcheck
+COPY docker/g7/valkey-server /usr/local/bin/valkey-server
+COPY docker/g7/valkey-cli /usr/local/bin/valkey-cli
+RUN chmod 0755 /usr/local/bin/uvm-g7-entrypoint /usr/local/bin/uvm-g7-healthcheck /usr/local/bin/valkey-server /usr/local/bin/valkey-cli
+ENV PATH=/opt/uvm/venv/bin:$PATH \
+    PYTHONPATH=/opt/uvm/app \
+    PGDATA=/var/lib/postgresql/data \
+    DD_MEDIA_ROOT=/app/media \
+    DD_DATABASE_HOST=127.0.0.1 \
+    DD_DATABASE_PORT=5432 \
+    DD_CELERY_BROKER_URL=redis://127.0.0.1:6379/0 \
+    DD_CACHE_URL=redis://127.0.0.1:6379/1 \
+    DD_ALLOWED_HOSTS='*' \
+    DD_INITIALIZE=true \
+    DD_DEDUPLICATION_ALGORITHM_PER_PARSER='{"Generic Findings Import":"unique_id_from_tool"}' \
+    DD_UWSGI_MODE=socket \
+    DD_UWSGI_ENDPOINT=127.0.0.1:3031 \
+    UVM_API_HOST=0.0.0.0 \
+    UVM_API_PORT=8000
+VOLUME ["/var/lib/postgresql/data", "/app/media", "/opt/uvm/state"]
+EXPOSE 8000
+HEALTHCHECK --interval=10s --timeout=4s --start-period=180s --retries=3 CMD ["/usr/local/bin/uvm-g7-healthcheck"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/uvm-g7-entrypoint"]

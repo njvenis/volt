@@ -1,0 +1,136 @@
+"""Independent G7 audit anchors and append-only integrity observations.
+
+The local disposable fixture stores this inventory in the separately
+credentialled SIEM PostgreSQL service.  The application exporter has read
+access to anchors and insert-only access to anomaly observations; it cannot
+change the retained inventory.
+"""
+from __future__ import annotations
+
+from contextlib import contextmanager
+from datetime import datetime, timezone
+import hashlib
+import json
+from typing import Any, Iterator
+from uuid import UUID, uuid4
+
+import psycopg
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+
+
+ANCHOR_VERSION = "g7-audit-anchor/v1"
+INCIDENT_VERSION = "g7-operations-incident/v1"
+DEPLOYMENT_ID = "uvm-local-disposable-v1"
+
+
+def canonical_event(event: dict[str, Any]) -> bytes:
+    """Return the versioned complete-event representation used by anchors."""
+    def normalise(value):
+        if isinstance(value, datetime):
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError("audit timestamps must include a timezone")
+            return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        if isinstance(value, UUID):
+            return str(value)
+        if isinstance(value, dict):
+            return {str(key): normalise(item) for key, item in value.items()}
+        if isinstance(value, (tuple, list)):
+            return [normalise(item) for item in value]
+        return value
+    return json.dumps(normalise(event), ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+def event_digest(event: dict[str, Any]) -> str:
+    return hashlib.sha256(canonical_event(event)).hexdigest()
+
+
+def advisory_key(deployment_id: str, sink_id: str, event_id: str) -> int:
+    raw = f"{deployment_id}\0{sink_id}\0{event_id}".encode()
+    return int.from_bytes(hashlib.sha256(raw).digest()[:8], "big", signed=True)
+
+
+class AuditAnchorAuthority:
+    """Client for the independent inventory and its per-event serialisation."""
+
+    def __init__(self, dsn: str, *, connect=psycopg.connect,
+                 deployment_id: str = DEPLOYMENT_ID):
+        if not dsn:
+            raise ValueError("independent audit anchor DSN is required")
+        self.dsn, self._connect, self.deployment_id = dsn, connect, deployment_id
+
+    @contextmanager
+    def locked(self, sink_id: str, event_id: str) -> Iterator["AnchorLease"]:
+        conn = self._connect(self.dsn, autocommit=True, row_factory=dict_row)
+        key = advisory_key(self.deployment_id, sink_id, str(event_id))
+        try:
+            conn.execute("SELECT pg_advisory_lock(%s)", (key,))
+            yield AnchorLease(conn, self.deployment_id, sink_id, str(event_id))
+        finally:
+            try:
+                conn.execute("SELECT pg_advisory_unlock(%s)", (key,))
+            finally:
+                conn.close()
+
+    def inventory(self, sink_id: str | None = None) -> list[dict[str, Any]]:
+        query = """SELECT deployment_id, sink_id, event_id, event_sequence,
+                   payload_sha256, sink_receipt, affected_scope, anchored_at,
+                   contract_version FROM uvm_audit_anchor.inventory
+                   WHERE deployment_id=%s"""
+        params: tuple[Any, ...] = (self.deployment_id,)
+        if sink_id is not None:
+            query += " AND sink_id=%s"
+            params += (sink_id,)
+        query += " ORDER BY event_sequence, event_id"
+        with self._connect(self.dsn, row_factory=dict_row) as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+
+class AnchorLease:
+    def __init__(self, connection, deployment_id: str, sink_id: str, event_id: str):
+        self.connection = connection
+        self.deployment_id, self.sink_id, self.event_id = deployment_id, sink_id, event_id
+
+    def get(self) -> dict[str, Any] | None:
+        row = self.connection.execute("""SELECT deployment_id, sink_id, event_id,
+            event_sequence, payload_sha256, sink_receipt, affected_scope,
+            anchored_at, contract_version FROM uvm_audit_anchor.inventory
+            WHERE deployment_id=%s AND sink_id=%s AND event_id=%s""",
+            (self.deployment_id, self.sink_id, self.event_id)).fetchone()
+        return dict(row) if row is not None else None
+
+    def anomaly(self, condition: str, evidence: dict[str, Any], *, detected_at=None) -> str:
+        """Durably record a stable open integrity episode before returning."""
+        incident_id = str(uuid4())
+        self.connection.execute("""INSERT INTO uvm_audit_anchor.incidents
+            (incident_id, deployment_id, sink_id, event_id, condition, detected_at,
+             observed_at, state, evidence, contract_version)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,'open',%s,%s)""",
+            (incident_id, self.deployment_id, self.sink_id, self.event_id, condition,
+             detected_at or datetime.now(timezone.utc), datetime.now(timezone.utc),
+             Jsonb(evidence), INCIDENT_VERSION))
+        return incident_id
+
+
+def anchor_payload(authority: AuditAnchorAuthority, *, sink_id: str,
+                   event: dict[str, Any], sink_receipt: str,
+                   sink_payload: dict[str, Any], affected_scope: str,
+                   anchored_at: datetime | None = None) -> dict[str, Any]:
+    """Observer-only insertion helper; the exporter must never call this."""
+    event_id = str(event["event_id"])
+    with authority.locked(sink_id, event_id) as lease:
+        if lease.get() is not None:
+            return {"status": "already-anchored", "event_id": event_id}
+        if event_digest(event) != event_digest(sink_payload):
+            lease.anomaly("siem_integrity", {"reason": "source_sink_mismatch"})
+            raise RuntimeError("source and SIEM differ; event was not anchored")
+        conn = lease.connection
+        conn.execute("""INSERT INTO uvm_audit_anchor.inventory
+            (deployment_id,sink_id,event_id,event_sequence,payload_sha256,
+             sink_receipt,affected_scope,anchored_at,contract_version)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (authority.deployment_id, sink_id, event_id, int(event["event_sequence"]),
+             event_digest(event), sink_receipt, affected_scope,
+             anchored_at or datetime.now(timezone.utc), ANCHOR_VERSION))
+    return {"status": "anchored", "event_id": event_id}

@@ -1,0 +1,23 @@
+.native-admin {display:grid;gap:20px;min-width:0}
+.native-admin .tabs {margin:0;display:flex;flex-wrap:wrap}
+.native-admin .tabs button[aria-current=page] {border-bottom:3px solid var(--brand-accent-strong);color:var(--semantic-text);font-weight:700}
+.native-toolbar {display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap}
+.native-toolbar label {display:grid;gap:6px;flex:1;min-width:180px}
+.native-list {display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));gap:16px}
+.native-card,.native-receipt {padding:24px;min-width:0}
+.native-card h2 {margin:0;flex:1;min-width:0}
+.native-card code,.native-id,.native-receipt dd {overflow-wrap:anywhere}
+.native-open {text-align:left;padding:0;border:0;background:transparent;color:var(--semantic-link);font-size:inherit;font-weight:inherit;overflow-wrap:anywhere}
+.native-record,.native-intent {padding:16px 0;border-top:1px solid var(--semantic-border);min-width:0;overflow-wrap:anywhere}
+.native-record summary {font-weight:700;cursor:pointer}
+.native-form {display:grid;gap:20px;min-width:0}
+.native-form label:not(.choice):not(.native-check) {display:grid;gap:6px;min-width:0}
+.native-form input:not([type=checkbox]),.native-form select,.native-form textarea {max-width:100%;width:100%;min-width:0}
+.native-form textarea {min-height:80px}
+.native-form fieldset {min-width:0}
+.native-form .native-check {display:flex;align-items:flex-start;gap:8px}
+.native-form .native-check input {flex:0 0 auto;margin-top:4px}
+.native-fields {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.native-form-actions {display:flex;gap:12px;flex-wrap:wrap;justify-content:flex-end;border-top:1px solid var(--semantic-border);padding-top:16px}
+.native-form .policy-facts dd {overflow-wrap:anywhere}
+@media(max-width:520px){.native-card,.native-receipt {padding:16px}.native-fields {grid-template-columns:1fr}.native-toolbar {align-items:stretch}.native-toolbar label {flex-basis:100%}.native-form-actions button {flex:1}.native-admin .tabs button {flex:1;padding:10px 8px}.native-revisions{font-size:12px}}

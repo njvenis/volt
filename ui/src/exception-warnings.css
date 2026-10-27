@@ -1,0 +1,25 @@
+.exception-warnings > .panel-head {
+  background: var(--semantic-canvas);
+  border-top: 3px solid var(--semantic-link);
+}
+.exception-warnings .eyebrow {display:block;margin-bottom:var(--space-4)}
+.exception-warnings .warning-explanation {max-width:70ch;line-height:1.65}
+.exception-warnings .badge {white-space:normal}
+.warning-acknowledgement {
+  border-top:1px solid var(--semantic-border);
+  margin-top:var(--space-16);
+  padding-top:var(--space-16);
+}
+.warning-acknowledgement p {font-size:12px;overflow-wrap:anywhere}
+.exception-warnings summary {padding:var(--space-8) 0}
+.exception-warnings details {margin-top:var(--space-16)}
+.warning-failure-alerts {padding:var(--space-16) var(--space-24);background:var(--semantic-canvas);border-bottom:1px solid var(--semantic-border)}
+.warning-failure-alerts>h3 {margin-top:0}
+.warning-failure-alerts p {font-size:12px}
+.warning-failure {padding:var(--space-16);background:var(--semantic-surface);border:1px solid var(--semantic-border);border-left:3px solid var(--semantic-warning);border-radius:var(--radius-control);margin-top:var(--space-12)}
+.warning-failure .card-heading {margin-bottom:var(--space-8)}
+.warning-failure h4 {text-transform:none;margin:0}
+@media(max-width:760px) {
+  .exception-warnings .acceptance-card .facts {grid-template-columns:1fr}
+  .warning-failure-alerts {padding:var(--space-16)}
+}

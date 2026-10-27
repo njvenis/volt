@@ -1,0 +1,1140 @@
+{
+  "label": "EXPLICIT_SYNTHETIC_A_B_SUCCESSOR_FIXTURES_NOT_BACKEND_EXECUTION",
+  "membership_names": {
+    "A": "2861a292-151b-4408-9098-3b4482bcb92a",
+    "B": "73d569b8-636d-44b5-ab28-8cbc0d63492d"
+  },
+  "stages": {
+    "historical_completed": {
+      "assessment": {
+        "acceptances": [],
+        "assessed_severity": null,
+        "clocks": [
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "2861a292-151b-4408-9098-3b4482bcb92a",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "73927571-0a36-42dc-b05d-991286c130d5",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "73d569b8-636d-44b5-ab28-8cbc0d63492d",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "7be01b76-9989-4d9f-a8d6-8014e47fb398",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "d439e2c7-9e32-406b-8bce-5b43f603d3b7",
+            "policy_ref": null
+          }
+        ],
+        "latest_receipt": null,
+        "membership": {
+          "actionable_ids": [],
+          "completed_ids": [
+            "2861a292-151b-4408-9098-3b4482bcb92a",
+            "73d569b8-636d-44b5-ab28-8cbc0d63492d",
+            "73927571-0a36-42dc-b05d-991286c130d5",
+            "7be01b76-9989-4d9f-a8d6-8014e47fb398",
+            "d439e2c7-9e32-406b-8bce-5b43f603d3b7"
+          ],
+          "outstanding_ids": [],
+          "reconciliation_pending_ids": [],
+          "review_ids": [],
+          "revision": 1541608437
+        },
+        "native_severity": {
+          "observed_at": "2026-10-03T05:53:10.824043+01:00",
+          "source": "sysdig",
+          "value": "high"
+        },
+        "owner_revision": 3,
+        "owners": [
+          {
+            "display_name": "Synthetic Owner A",
+            "owner_id": "g4-owner-a",
+            "owner_type": "person"
+          },
+          {
+            "display_name": "Synthetic Owner Team",
+            "owner_id": "g4-owner-team",
+            "owner_type": "team"
+          }
+        ],
+        "pending_projection_intents": [],
+        "policy_revision": 1,
+        "portions": [
+          {
+            "active": true,
+            "completed_membership_ids": [
+              "2861a292-151b-4408-9098-3b4482bcb92a",
+              "73d569b8-636d-44b5-ab28-8cbc0d63492d"
+            ],
+            "created_at": "2026-10-03T04:53:16.575346Z",
+            "membership_ids": [
+              "2861a292-151b-4408-9098-3b4482bcb92a",
+              "73d569b8-636d-44b5-ab28-8cbc0d63492d"
+            ],
+            "outstanding_membership_ids": [],
+            "owner_ids": [
+              "g4-owner-a",
+              "g4-owner-team"
+            ],
+            "portion_id": "465e34fe-8c16-4a3b-b30c-562df70a317b",
+            "revision": 1
+          }
+        ],
+        "revision": 40,
+        "routing": {
+          "evaluated_policy_revision": 1,
+          "evidence": [],
+          "override": null,
+          "owner_ids": [],
+          "status": "unresolved"
+        }
+      },
+      "audit": {
+        "next_cursor": null
+      },
+      "episodes": [
+        {
+          "episode_id": "0ff9533b-5a25-459d-82a1-65c80dc8d008",
+          "episode_number": 1,
+          "exposure_id": "2713736d-ef1d-4c03-84fc-ac0412f66d76",
+          "members": [
+            {
+              "confirmed_at": "2026-10-01T08:00:00Z",
+              "confirmed_by_decision_id": "10000000-0000-4000-8000-000000000001",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "2861a292-151b-4408-9098-3b4482bcb92a",
+              "original_confirmation_at": "2026-10-01T08:00:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000001",
+              "status": "confirmed"
+            },
+            {
+              "confirmed_at": "2026-10-01T09:00:00Z",
+              "confirmed_by_decision_id": "10000000-0000-4000-8000-000000000002",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "73d569b8-636d-44b5-ab28-8cbc0d63492d",
+              "original_confirmation_at": "2026-10-01T09:00:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000002",
+              "status": "confirmed"
+            }
+          ],
+          "recurrence": {
+            "count": 0,
+            "last_event_at": null,
+            "reason_codes": []
+          },
+          "review_reasons": [],
+          "state": "remediated",
+          "state_revision": 8
+        },
+        {
+          "episode_id": "cc1de263-c146-4bae-a693-bcff0c836cca",
+          "episode_number": 1,
+          "exposure_id": "bcabf5f2-99e1-4ea0-aede-1d34e0f0cd7d",
+          "members": [
+            {
+              "confirmed_at": "2026-10-01T09:30:00Z",
+              "confirmed_by_decision_id": "10000000-0000-4000-8000-000000000003",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "73927571-0a36-42dc-b05d-991286c130d5",
+              "original_confirmation_at": "2026-10-01T09:30:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000003",
+              "status": "confirmed"
+            },
+            {
+              "confirmed_at": "2026-10-01T09:30:00Z",
+              "confirmed_by_decision_id": "10000000-0000-4000-8000-000000000003",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "7be01b76-9989-4d9f-a8d6-8014e47fb398",
+              "original_confirmation_at": "2026-10-01T09:30:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000003",
+              "status": "confirmed"
+            },
+            {
+              "confirmed_at": "2026-10-01T09:30:00Z",
+              "confirmed_by_decision_id": "10000000-0000-4000-8000-000000000003",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "d439e2c7-9e32-406b-8bce-5b43f603d3b7",
+              "original_confirmation_at": "2026-10-01T09:30:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000003",
+              "status": "confirmed"
+            }
+          ],
+          "recurrence": {
+            "count": 0,
+            "last_event_at": null,
+            "reason_codes": []
+          },
+          "review_reasons": [],
+          "state": "remediated",
+          "state_revision": 8
+        }
+      ],
+      "github": {
+        "applied_revision": 40,
+        "desired_revision": 40,
+        "discrepancy_codes": [],
+        "issue_number": 101,
+        "issue_url": "https://github.example.invalid/volt-fixture/repository/issues/101",
+        "last_reconciled_at": "2026-10-03T04:53:15.817052Z",
+        "repository_id": "900000002",
+        "state": "applied"
+      },
+      "github_identity": {
+        "account_id": "900000001",
+        "link_revision": 1,
+        "link_state": "linked",
+        "principal_id": "g4-engineer",
+        "repository_id": "900000002"
+      },
+      "group": {
+        "group_id": "adcdd3c3-5c58-4777-b68c-3577995ee302",
+        "identity_revision": 1,
+        "native_id_authority": "synthetic-g4",
+        "native_id_scheme": "plugin",
+        "native_id_value": "GH-live20261003T1210Z",
+        "source_family": "sysdig"
+      },
+      "schema_version": 1
+    },
+    "a_outstanding_b_continuity": {
+      "assessment": {
+        "acceptances": [],
+        "assessed_severity": null,
+        "clocks": [
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "2861a292-151b-4408-9098-3b4482bcb92a",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "73927571-0a36-42dc-b05d-991286c130d5",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "73d569b8-636d-44b5-ab28-8cbc0d63492d",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "7be01b76-9989-4d9f-a8d6-8014e47fb398",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "d439e2c7-9e32-406b-8bce-5b43f603d3b7",
+            "policy_ref": null
+          }
+        ],
+        "latest_receipt": null,
+        "membership": {
+          "actionable_ids": [
+            "2861a292-151b-4408-9098-3b4482bcb92a"
+          ],
+          "completed_ids": [
+            "73d569b8-636d-44b5-ab28-8cbc0d63492d",
+            "73927571-0a36-42dc-b05d-991286c130d5",
+            "7be01b76-9989-4d9f-a8d6-8014e47fb398",
+            "d439e2c7-9e32-406b-8bce-5b43f603d3b7"
+          ],
+          "outstanding_ids": [
+            "2861a292-151b-4408-9098-3b4482bcb92a"
+          ],
+          "reconciliation_pending_ids": [],
+          "review_ids": [],
+          "revision": 1541608437
+        },
+        "native_severity": {
+          "observed_at": "2026-10-03T05:53:10.824043+01:00",
+          "source": "sysdig",
+          "value": "high"
+        },
+        "owner_revision": 3,
+        "owners": [
+          {
+            "display_name": "Synthetic Owner A",
+            "owner_id": "g4-owner-a",
+            "owner_type": "person"
+          },
+          {
+            "display_name": "Synthetic Owner Team",
+            "owner_id": "g4-owner-team",
+            "owner_type": "team"
+          }
+        ],
+        "pending_projection_intents": [],
+        "policy_revision": 1,
+        "portions": [
+          {
+            "active": true,
+            "completed_membership_ids": [
+              "73d569b8-636d-44b5-ab28-8cbc0d63492d"
+            ],
+            "created_at": "2026-10-03T04:53:16.575346Z",
+            "membership_ids": [
+              "2861a292-151b-4408-9098-3b4482bcb92a",
+              "73d569b8-636d-44b5-ab28-8cbc0d63492d"
+            ],
+            "outstanding_membership_ids": [
+              "2861a292-151b-4408-9098-3b4482bcb92a"
+            ],
+            "owner_ids": [
+              "g4-owner-a",
+              "g4-owner-team"
+            ],
+            "portion_id": "465e34fe-8c16-4a3b-b30c-562df70a317b",
+            "revision": 1
+          }
+        ],
+        "revision": 41,
+        "routing": {
+          "evaluated_policy_revision": 1,
+          "evidence": [],
+          "override": null,
+          "owner_ids": [],
+          "status": "unresolved"
+        }
+      },
+      "audit": {
+        "next_cursor": null
+      },
+      "episodes": [
+        {
+          "episode_id": "20000000-0000-4000-8000-000000000001",
+          "episode_number": 2,
+          "exposure_id": "2713736d-ef1d-4c03-84fc-ac0412f66d76",
+          "members": [
+            {
+              "confirmed_at": null,
+              "confirmed_by_decision_id": null,
+              "coverage_reason": "outstanding",
+              "membership_id": "2861a292-151b-4408-9098-3b4482bcb92a",
+              "original_confirmation_at": "2026-10-01T08:00:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000001",
+              "status": "outstanding"
+            },
+            {
+              "confirmed_at": "2026-10-01T09:00:00Z",
+              "confirmed_by_decision_id": "10000000-0000-4000-8000-000000000002",
+              "coverage_reason": "verified_continuity",
+              "membership_id": "73d569b8-636d-44b5-ab28-8cbc0d63492d",
+              "original_confirmation_at": "2026-10-01T09:00:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000002",
+              "status": "continuity_covered"
+            }
+          ],
+          "recurrence": {
+            "count": 1,
+            "last_event_at": "2026-10-02T10:00:00Z",
+            "reason_codes": [
+              "newer_positive_observation"
+            ]
+          },
+          "review_reasons": [],
+          "state": "partially_remediated",
+          "state_revision": 1
+        },
+        {
+          "episode_id": "cc1de263-c146-4bae-a693-bcff0c836cca",
+          "episode_number": 1,
+          "exposure_id": "bcabf5f2-99e1-4ea0-aede-1d34e0f0cd7d",
+          "members": [
+            {
+              "confirmed_at": "2026-10-01T09:30:00Z",
+              "confirmed_by_decision_id": "10000000-0000-4000-8000-000000000003",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "73927571-0a36-42dc-b05d-991286c130d5",
+              "original_confirmation_at": "2026-10-01T09:30:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000003",
+              "status": "confirmed"
+            },
+            {
+              "confirmed_at": "2026-10-01T09:30:00Z",
+              "confirmed_by_decision_id": "10000000-0000-4000-8000-000000000003",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "7be01b76-9989-4d9f-a8d6-8014e47fb398",
+              "original_confirmation_at": "2026-10-01T09:30:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000003",
+              "status": "confirmed"
+            },
+            {
+              "confirmed_at": "2026-10-01T09:30:00Z",
+              "confirmed_by_decision_id": "10000000-0000-4000-8000-000000000003",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "d439e2c7-9e32-406b-8bce-5b43f603d3b7",
+              "original_confirmation_at": "2026-10-01T09:30:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000003",
+              "status": "confirmed"
+            }
+          ],
+          "recurrence": {
+            "count": 0,
+            "last_event_at": null,
+            "reason_codes": []
+          },
+          "review_reasons": [],
+          "state": "remediated",
+          "state_revision": 8
+        }
+      ],
+      "github": {
+        "applied_revision": 40,
+        "desired_revision": 41,
+        "discrepancy_codes": [],
+        "issue_number": 101,
+        "issue_url": "https://github.example.invalid/volt-fixture/repository/issues/101",
+        "last_reconciled_at": "2026-10-03T04:53:15.817052Z",
+        "repository_id": "900000002",
+        "state": "pending"
+      },
+      "github_identity": {
+        "account_id": "900000001",
+        "link_revision": 1,
+        "link_state": "linked",
+        "principal_id": "g4-engineer",
+        "repository_id": "900000002"
+      },
+      "group": {
+        "group_id": "adcdd3c3-5c58-4777-b68c-3577995ee302",
+        "identity_revision": 1,
+        "native_id_authority": "synthetic-g4",
+        "native_id_scheme": "plugin",
+        "native_id_value": "GH-live20261003T1210Z",
+        "source_family": "sysdig"
+      },
+      "schema_version": 1
+    },
+    "a_reconfirmed_b_continuity": {
+      "assessment": {
+        "acceptances": [],
+        "assessed_severity": null,
+        "clocks": [
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "2861a292-151b-4408-9098-3b4482bcb92a",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "73927571-0a36-42dc-b05d-991286c130d5",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "73d569b8-636d-44b5-ab28-8cbc0d63492d",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "7be01b76-9989-4d9f-a8d6-8014e47fb398",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "d439e2c7-9e32-406b-8bce-5b43f603d3b7",
+            "policy_ref": null
+          }
+        ],
+        "latest_receipt": null,
+        "membership": {
+          "actionable_ids": [],
+          "completed_ids": [
+            "2861a292-151b-4408-9098-3b4482bcb92a",
+            "73d569b8-636d-44b5-ab28-8cbc0d63492d",
+            "73927571-0a36-42dc-b05d-991286c130d5",
+            "7be01b76-9989-4d9f-a8d6-8014e47fb398",
+            "d439e2c7-9e32-406b-8bce-5b43f603d3b7"
+          ],
+          "outstanding_ids": [],
+          "reconciliation_pending_ids": [],
+          "review_ids": [],
+          "revision": 1541608437
+        },
+        "native_severity": {
+          "observed_at": "2026-10-03T05:53:10.824043+01:00",
+          "source": "sysdig",
+          "value": "high"
+        },
+        "owner_revision": 3,
+        "owners": [
+          {
+            "display_name": "Synthetic Owner A",
+            "owner_id": "g4-owner-a",
+            "owner_type": "person"
+          },
+          {
+            "display_name": "Synthetic Owner Team",
+            "owner_id": "g4-owner-team",
+            "owner_type": "team"
+          }
+        ],
+        "pending_projection_intents": [],
+        "policy_revision": 1,
+        "portions": [
+          {
+            "active": true,
+            "completed_membership_ids": [
+              "2861a292-151b-4408-9098-3b4482bcb92a",
+              "73d569b8-636d-44b5-ab28-8cbc0d63492d"
+            ],
+            "created_at": "2026-10-03T04:53:16.575346Z",
+            "membership_ids": [
+              "2861a292-151b-4408-9098-3b4482bcb92a",
+              "73d569b8-636d-44b5-ab28-8cbc0d63492d"
+            ],
+            "outstanding_membership_ids": [],
+            "owner_ids": [
+              "g4-owner-a",
+              "g4-owner-team"
+            ],
+            "portion_id": "465e34fe-8c16-4a3b-b30c-562df70a317b",
+            "revision": 1
+          }
+        ],
+        "revision": 42,
+        "routing": {
+          "evaluated_policy_revision": 1,
+          "evidence": [],
+          "override": null,
+          "owner_ids": [],
+          "status": "unresolved"
+        }
+      },
+      "audit": {
+        "next_cursor": null
+      },
+      "episodes": [
+        {
+          "episode_id": "20000000-0000-4000-8000-000000000001",
+          "episode_number": 2,
+          "exposure_id": "2713736d-ef1d-4c03-84fc-ac0412f66d76",
+          "members": [
+            {
+              "confirmed_at": "2026-10-02T10:05:00Z",
+              "confirmed_by_decision_id": "30000000-0000-4000-8000-000000000001",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "2861a292-151b-4408-9098-3b4482bcb92a",
+              "original_confirmation_at": "2026-10-01T08:00:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000001",
+              "status": "confirmed"
+            },
+            {
+              "confirmed_at": "2026-10-01T09:00:00Z",
+              "confirmed_by_decision_id": "10000000-0000-4000-8000-000000000002",
+              "coverage_reason": "verified_continuity",
+              "membership_id": "73d569b8-636d-44b5-ab28-8cbc0d63492d",
+              "original_confirmation_at": "2026-10-01T09:00:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000002",
+              "status": "continuity_covered"
+            }
+          ],
+          "recurrence": {
+            "count": 1,
+            "last_event_at": "2026-10-02T10:00:00Z",
+            "reason_codes": [
+              "newer_positive_observation"
+            ]
+          },
+          "review_reasons": [],
+          "state": "remediated",
+          "state_revision": 2
+        },
+        {
+          "episode_id": "cc1de263-c146-4bae-a693-bcff0c836cca",
+          "episode_number": 1,
+          "exposure_id": "bcabf5f2-99e1-4ea0-aede-1d34e0f0cd7d",
+          "members": [
+            {
+              "confirmed_at": "2026-10-01T09:30:00Z",
+              "confirmed_by_decision_id": "10000000-0000-4000-8000-000000000003",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "73927571-0a36-42dc-b05d-991286c130d5",
+              "original_confirmation_at": "2026-10-01T09:30:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000003",
+              "status": "confirmed"
+            },
+            {
+              "confirmed_at": "2026-10-01T09:30:00Z",
+              "confirmed_by_decision_id": "10000000-0000-4000-8000-000000000003",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "7be01b76-9989-4d9f-a8d6-8014e47fb398",
+              "original_confirmation_at": "2026-10-01T09:30:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000003",
+              "status": "confirmed"
+            },
+            {
+              "confirmed_at": "2026-10-01T09:30:00Z",
+              "confirmed_by_decision_id": "10000000-0000-4000-8000-000000000003",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "d439e2c7-9e32-406b-8bce-5b43f603d3b7",
+              "original_confirmation_at": "2026-10-01T09:30:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000003",
+              "status": "confirmed"
+            }
+          ],
+          "recurrence": {
+            "count": 0,
+            "last_event_at": null,
+            "reason_codes": []
+          },
+          "review_reasons": [],
+          "state": "remediated",
+          "state_revision": 8
+        }
+      ],
+      "github": {
+        "applied_revision": 40,
+        "desired_revision": 42,
+        "discrepancy_codes": [],
+        "issue_number": 101,
+        "issue_url": "https://github.example.invalid/volt-fixture/repository/issues/101",
+        "last_reconciled_at": "2026-10-03T04:53:15.817052Z",
+        "repository_id": "900000002",
+        "state": "pending"
+      },
+      "github_identity": {
+        "account_id": "900000001",
+        "link_revision": 1,
+        "link_state": "linked",
+        "principal_id": "g4-engineer",
+        "repository_id": "900000002"
+      },
+      "group": {
+        "group_id": "adcdd3c3-5c58-4777-b68c-3577995ee302",
+        "identity_revision": 1,
+        "native_id_authority": "synthetic-g4",
+        "native_id_scheme": "plugin",
+        "native_id_value": "GH-live20261003T1210Z",
+        "source_family": "sysdig"
+      },
+      "schema_version": 1
+    },
+    "fresh_b_same_successor": {
+      "assessment": {
+        "acceptances": [],
+        "assessed_severity": null,
+        "clocks": [
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "2861a292-151b-4408-9098-3b4482bcb92a",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "73927571-0a36-42dc-b05d-991286c130d5",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "73d569b8-636d-44b5-ab28-8cbc0d63492d",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "7be01b76-9989-4d9f-a8d6-8014e47fb398",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "d439e2c7-9e32-406b-8bce-5b43f603d3b7",
+            "policy_ref": null
+          }
+        ],
+        "latest_receipt": null,
+        "membership": {
+          "actionable_ids": [
+            "2861a292-151b-4408-9098-3b4482bcb92a",
+            "73d569b8-636d-44b5-ab28-8cbc0d63492d"
+          ],
+          "completed_ids": [
+            "73927571-0a36-42dc-b05d-991286c130d5",
+            "7be01b76-9989-4d9f-a8d6-8014e47fb398",
+            "d439e2c7-9e32-406b-8bce-5b43f603d3b7"
+          ],
+          "outstanding_ids": [
+            "2861a292-151b-4408-9098-3b4482bcb92a",
+            "73d569b8-636d-44b5-ab28-8cbc0d63492d"
+          ],
+          "reconciliation_pending_ids": [],
+          "review_ids": [],
+          "revision": 1541608437
+        },
+        "native_severity": {
+          "observed_at": "2026-10-03T05:53:10.824043+01:00",
+          "source": "sysdig",
+          "value": "high"
+        },
+        "owner_revision": 3,
+        "owners": [
+          {
+            "display_name": "Synthetic Owner A",
+            "owner_id": "g4-owner-a",
+            "owner_type": "person"
+          },
+          {
+            "display_name": "Synthetic Owner Team",
+            "owner_id": "g4-owner-team",
+            "owner_type": "team"
+          }
+        ],
+        "pending_projection_intents": [],
+        "policy_revision": 1,
+        "portions": [
+          {
+            "active": true,
+            "completed_membership_ids": [],
+            "created_at": "2026-10-03T04:53:16.575346Z",
+            "membership_ids": [
+              "2861a292-151b-4408-9098-3b4482bcb92a",
+              "73d569b8-636d-44b5-ab28-8cbc0d63492d"
+            ],
+            "outstanding_membership_ids": [
+              "2861a292-151b-4408-9098-3b4482bcb92a",
+              "73d569b8-636d-44b5-ab28-8cbc0d63492d"
+            ],
+            "owner_ids": [
+              "g4-owner-a",
+              "g4-owner-team"
+            ],
+            "portion_id": "465e34fe-8c16-4a3b-b30c-562df70a317b",
+            "revision": 1
+          }
+        ],
+        "revision": 42,
+        "routing": {
+          "evaluated_policy_revision": 1,
+          "evidence": [],
+          "override": null,
+          "owner_ids": [],
+          "status": "unresolved"
+        }
+      },
+      "audit": {
+        "next_cursor": null
+      },
+      "episodes": [
+        {
+          "episode_id": "20000000-0000-4000-8000-000000000001",
+          "episode_number": 2,
+          "exposure_id": "2713736d-ef1d-4c03-84fc-ac0412f66d76",
+          "members": [
+            {
+              "confirmed_at": null,
+              "confirmed_by_decision_id": null,
+              "coverage_reason": "outstanding",
+              "membership_id": "2861a292-151b-4408-9098-3b4482bcb92a",
+              "original_confirmation_at": "2026-10-01T08:00:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000001",
+              "status": "outstanding"
+            },
+            {
+              "confirmed_at": null,
+              "confirmed_by_decision_id": null,
+              "coverage_reason": "outstanding",
+              "membership_id": "73d569b8-636d-44b5-ab28-8cbc0d63492d",
+              "original_confirmation_at": "2026-10-01T09:00:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000002",
+              "status": "outstanding"
+            }
+          ],
+          "recurrence": {
+            "count": 1,
+            "last_event_at": "2026-10-02T10:00:00Z",
+            "reason_codes": [
+              "newer_positive_observation"
+            ]
+          },
+          "review_reasons": [],
+          "state": "open",
+          "state_revision": 2
+        },
+        {
+          "episode_id": "cc1de263-c146-4bae-a693-bcff0c836cca",
+          "episode_number": 1,
+          "exposure_id": "bcabf5f2-99e1-4ea0-aede-1d34e0f0cd7d",
+          "members": [
+            {
+              "confirmed_at": "2026-10-01T09:30:00Z",
+              "confirmed_by_decision_id": "10000000-0000-4000-8000-000000000003",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "73927571-0a36-42dc-b05d-991286c130d5",
+              "original_confirmation_at": "2026-10-01T09:30:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000003",
+              "status": "confirmed"
+            },
+            {
+              "confirmed_at": "2026-10-01T09:30:00Z",
+              "confirmed_by_decision_id": "10000000-0000-4000-8000-000000000003",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "7be01b76-9989-4d9f-a8d6-8014e47fb398",
+              "original_confirmation_at": "2026-10-01T09:30:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000003",
+              "status": "confirmed"
+            },
+            {
+              "confirmed_at": "2026-10-01T09:30:00Z",
+              "confirmed_by_decision_id": "10000000-0000-4000-8000-000000000003",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "d439e2c7-9e32-406b-8bce-5b43f603d3b7",
+              "original_confirmation_at": "2026-10-01T09:30:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000003",
+              "status": "confirmed"
+            }
+          ],
+          "recurrence": {
+            "count": 0,
+            "last_event_at": null,
+            "reason_codes": []
+          },
+          "review_reasons": [],
+          "state": "remediated",
+          "state_revision": 8
+        }
+      ],
+      "github": {
+        "applied_revision": 40,
+        "desired_revision": 42,
+        "discrepancy_codes": [],
+        "issue_number": 101,
+        "issue_url": "https://github.example.invalid/volt-fixture/repository/issues/101",
+        "last_reconciled_at": "2026-10-03T04:53:15.817052Z",
+        "repository_id": "900000002",
+        "state": "pending"
+      },
+      "github_identity": {
+        "account_id": "900000001",
+        "link_revision": 1,
+        "link_state": "linked",
+        "principal_id": "g4-engineer",
+        "repository_id": "900000002"
+      },
+      "group": {
+        "group_id": "adcdd3c3-5c58-4777-b68c-3577995ee302",
+        "identity_revision": 1,
+        "native_id_authority": "synthetic-g4",
+        "native_id_scheme": "plugin",
+        "native_id_value": "GH-live20261003T1210Z",
+        "source_family": "sysdig"
+      },
+      "schema_version": 1
+    },
+    "both_reconfirmed": {
+      "assessment": {
+        "acceptances": [],
+        "assessed_severity": null,
+        "clocks": [
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "2861a292-151b-4408-9098-3b4482bcb92a",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "73927571-0a36-42dc-b05d-991286c130d5",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "73d569b8-636d-44b5-ab28-8cbc0d63492d",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "7be01b76-9989-4d9f-a8d6-8014e47fb398",
+            "policy_ref": null
+          },
+          {
+            "deadline_at": null,
+            "deadline_reference": null,
+            "deadline_reference_revision": 0,
+            "deadline_status": "unknown",
+            "first_observed_at": "2026-09-01T08:00:00Z",
+            "occurrence_id": "d439e2c7-9e32-406b-8bce-5b43f603d3b7",
+            "policy_ref": null
+          }
+        ],
+        "latest_receipt": null,
+        "membership": {
+          "actionable_ids": [],
+          "completed_ids": [
+            "2861a292-151b-4408-9098-3b4482bcb92a",
+            "73d569b8-636d-44b5-ab28-8cbc0d63492d",
+            "73927571-0a36-42dc-b05d-991286c130d5",
+            "7be01b76-9989-4d9f-a8d6-8014e47fb398",
+            "d439e2c7-9e32-406b-8bce-5b43f603d3b7"
+          ],
+          "outstanding_ids": [],
+          "reconciliation_pending_ids": [],
+          "review_ids": [],
+          "revision": 1541608437
+        },
+        "native_severity": {
+          "observed_at": "2026-10-03T05:53:10.824043+01:00",
+          "source": "sysdig",
+          "value": "high"
+        },
+        "owner_revision": 3,
+        "owners": [
+          {
+            "display_name": "Synthetic Owner A",
+            "owner_id": "g4-owner-a",
+            "owner_type": "person"
+          },
+          {
+            "display_name": "Synthetic Owner Team",
+            "owner_id": "g4-owner-team",
+            "owner_type": "team"
+          }
+        ],
+        "pending_projection_intents": [],
+        "policy_revision": 1,
+        "portions": [
+          {
+            "active": true,
+            "completed_membership_ids": [
+              "2861a292-151b-4408-9098-3b4482bcb92a",
+              "73d569b8-636d-44b5-ab28-8cbc0d63492d"
+            ],
+            "created_at": "2026-10-03T04:53:16.575346Z",
+            "membership_ids": [
+              "2861a292-151b-4408-9098-3b4482bcb92a",
+              "73d569b8-636d-44b5-ab28-8cbc0d63492d"
+            ],
+            "outstanding_membership_ids": [],
+            "owner_ids": [
+              "g4-owner-a",
+              "g4-owner-team"
+            ],
+            "portion_id": "465e34fe-8c16-4a3b-b30c-562df70a317b",
+            "revision": 1
+          }
+        ],
+        "revision": 43,
+        "routing": {
+          "evaluated_policy_revision": 1,
+          "evidence": [],
+          "override": null,
+          "owner_ids": [],
+          "status": "unresolved"
+        }
+      },
+      "audit": {
+        "next_cursor": null
+      },
+      "episodes": [
+        {
+          "episode_id": "20000000-0000-4000-8000-000000000001",
+          "episode_number": 2,
+          "exposure_id": "2713736d-ef1d-4c03-84fc-ac0412f66d76",
+          "members": [
+            {
+              "confirmed_at": "2026-10-02T10:10:00Z",
+              "confirmed_by_decision_id": "30000000-0000-4000-8000-000000000002",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "2861a292-151b-4408-9098-3b4482bcb92a",
+              "original_confirmation_at": "2026-10-01T08:00:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000001",
+              "status": "confirmed"
+            },
+            {
+              "confirmed_at": "2026-10-02T10:10:00Z",
+              "confirmed_by_decision_id": "30000000-0000-4000-8000-000000000002",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "73d569b8-636d-44b5-ab28-8cbc0d63492d",
+              "original_confirmation_at": "2026-10-01T09:00:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000002",
+              "status": "confirmed"
+            }
+          ],
+          "recurrence": {
+            "count": 1,
+            "last_event_at": "2026-10-02T10:00:00Z",
+            "reason_codes": [
+              "newer_positive_observation"
+            ]
+          },
+          "review_reasons": [],
+          "state": "remediated",
+          "state_revision": 3
+        },
+        {
+          "episode_id": "cc1de263-c146-4bae-a693-bcff0c836cca",
+          "episode_number": 1,
+          "exposure_id": "bcabf5f2-99e1-4ea0-aede-1d34e0f0cd7d",
+          "members": [
+            {
+              "confirmed_at": "2026-10-01T09:30:00Z",
+              "confirmed_by_decision_id": "10000000-0000-4000-8000-000000000003",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "73927571-0a36-42dc-b05d-991286c130d5",
+              "original_confirmation_at": "2026-10-01T09:30:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000003",
+              "status": "confirmed"
+            },
+            {
+              "confirmed_at": "2026-10-01T09:30:00Z",
+              "confirmed_by_decision_id": "10000000-0000-4000-8000-000000000003",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "7be01b76-9989-4d9f-a8d6-8014e47fb398",
+              "original_confirmation_at": "2026-10-01T09:30:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000003",
+              "status": "confirmed"
+            },
+            {
+              "confirmed_at": "2026-10-01T09:30:00Z",
+              "confirmed_by_decision_id": "10000000-0000-4000-8000-000000000003",
+              "coverage_reason": "direct_confirmation",
+              "membership_id": "d439e2c7-9e32-406b-8bce-5b43f603d3b7",
+              "original_confirmation_at": "2026-10-01T09:30:00Z",
+              "original_confirmation_decision_id": "10000000-0000-4000-8000-000000000003",
+              "status": "confirmed"
+            }
+          ],
+          "recurrence": {
+            "count": 0,
+            "last_event_at": null,
+            "reason_codes": []
+          },
+          "review_reasons": [],
+          "state": "remediated",
+          "state_revision": 8
+        }
+      ],
+      "github": {
+        "applied_revision": 40,
+        "desired_revision": 43,
+        "discrepancy_codes": [],
+        "issue_number": 101,
+        "issue_url": "https://github.example.invalid/volt-fixture/repository/issues/101",
+        "last_reconciled_at": "2026-10-03T04:53:15.817052Z",
+        "repository_id": "900000002",
+        "state": "pending"
+      },
+      "github_identity": {
+        "account_id": "900000001",
+        "link_revision": 1,
+        "link_state": "linked",
+        "principal_id": "g4-engineer",
+        "repository_id": "900000002"
+      },
+      "group": {
+        "group_id": "adcdd3c3-5c58-4777-b68c-3577995ee302",
+        "identity_revision": 1,
+        "native_id_authority": "synthetic-g4",
+        "native_id_scheme": "plugin",
+        "native_id_value": "GH-live20261003T1210Z",
+        "source_family": "sysdig"
+      },
+      "schema_version": 1
+    }
+  }
+}

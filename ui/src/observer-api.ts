@@ -1,0 +1,51 @@
+import {sessionFetch} from './session';
+export const timingFields = [
+  ['observation_interval_seconds','Observation interval'], ['request_deadline_seconds','Request deadline'],
+  ['heartbeat_freshness_seconds','Heartbeat freshness'], ['maximum_future_skew_seconds','Maximum future skew'],
+  ['anchor_export_lag_seconds','Anchor export lag'], ['incident_projection_deadline_seconds','Incident projection deadline'],
+  ['scheduler_progress_freshness_seconds','Scheduler progress freshness'],
+] as const;
+export type TimingKey = typeof timingFields[number][0];
+export type Values = Record<TimingKey,number>;
+export type Revisions = {configuration:number;policy:number;authority:number;host_policy:number};
+export type Command = {schema_version:1;command_id:string;action:'observer.timing.publish'|'observer.timing.rollback';expected_revisions:Revisions;rationale:string;evidence_ref?:string;values?:Values;rollback_revision?:number};
+export type Receipt = {schema_version:1;command_id:string;deployment_id:string;action:Command['action'];effect:'desired_committed';request_digest:string;configuration_revision:number;configuration_digest:string;evaluated_revisions:Omit<Revisions,'configuration'>;audit_id:string;intent_id:string;committed_at:string};
+export type Historical = {schema_version:1;deployment_id:string;revision:number;digest:string;values:Values;action:Command['action'];command_id:string;actor_id:string;rationale:string;evidence_ref:string|null;committed_at:string;copied_from_revision:number|null};
+export type Settings = {schema_version:1;deployment_id:string;revisions:Revisions;desired:{revision:number;digest:string;values:Values;command_id:string;committed_at:string}|null;effective:{revision:number;digest:string;verified_at:string}|null;application:{status:'pending'|'applied'|'failed'|'uncertain';operation_id:string;latest_report_id:string|null;failure_code:string|null}|null;host_policy:{revision:number;digest:string;bounds:Record<TimingKey,{min:number;max:number}>;observed_at:string;fresh_until:string;freshness:'fresh'|'stale'|'unknown'}|null;can_configure:boolean};
+export type Deployment = {deployment_id:string;label:string;can_configure:boolean};
+const messages:Record<string,string> = {revision_conflict:'Settings or permissions changed. Refresh and review the current revision before saving again.',command_conflict:'This command identity conflicts with retained content. Keep the original operation and check its receipt.',dependency_unavailable:'The host or a required service is unavailable. No successful application is established.',invalid_values:'One or more timing values were rejected. Review the host bounds.',forbidden:'Current permissions do not allow this operation.',not_found:'No disclosable record was found. An unknown command remains unresolved.',invalid_response:'The server response could not be verified. No successful outcome is inferred.',unavailable:'The request could not be confirmed. Check the retained command receipt before trying a new change.'};
+export class ObserverError extends Error {constructor(public code:string,public status=0,public unknown=false){super(messages[code]??(status===409?messages.revision_conflict:status===403?'Current permissions do not allow this operation.':status===404?messages.not_found:messages.unavailable));}}
+const root='/api/v1/operations/observer-settings';
+const obj=(v:unknown):Record<string,unknown>=>{if(!v||typeof v!=='object'||Array.isArray(v))throw new ObserverError('invalid_response');return v as Record<string,unknown>;};
+function requireValue(ok:unknown):asserts ok {if(!ok)throw new ObserverError('invalid_response');}
+const int=(v:unknown,min=0)=>typeof v==='number'&&Number.isSafeInteger(v)&&v>=min;
+const str=(v:unknown)=>typeof v==='string'&&v.length>0;
+const uuid=(v:unknown)=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+const digest=(v:unknown)=>typeof v==='string'&&/^sha256:[0-9a-f]{64}$/.test(v);
+const time=(v:unknown)=>typeof v==='string'&&/(?:Z|\+00:00)$/.test(v)&&Number.isFinite(Date.parse(v));
+const action=(v:unknown)=>v==='observer.timing.publish'||v==='observer.timing.rollback';
+function revisions(v:unknown,configuration=true){const r=obj(v);for(const key of configuration?['configuration','policy','authority','host_policy']:['policy','authority','host_policy'])requireValue(int(r[key]));}
+function values(v:unknown){const r=obj(v);requireValue(Object.keys(r).length===7);for(const [key] of timingFields)requireValue(int(r[key],key==='maximum_future_skew_seconds'?0:1));}
+function envelope(v:unknown,deployment?:string){const r=obj(v);requireValue(r.schema_version===1&&(deployment===undefined||r.deployment_id===deployment));return r;}
+export function parseSettings(raw:unknown,deployment:string):Settings {
+ const r=envelope(raw,deployment);revisions(r.revisions);const tokens=obj(r.revisions);requireValue(typeof r.can_configure==='boolean');
+ if(r.desired!==null){const d=obj(r.desired);requireValue(int(d.revision,1)&&d.revision===tokens.configuration&&digest(d.digest)&&uuid(d.command_id)&&time(d.committed_at));values(d.values);}else requireValue(tokens.configuration===0);
+ if(r.effective!==null){const e=obj(r.effective);requireValue(int(e.revision,1)&&Number(e.revision)<=Number(tokens.configuration)&&digest(e.digest)&&time(e.verified_at));}
+ if(r.host_policy!==null){const p=obj(r.host_policy);requireValue(int(p.revision,1)&&p.revision===tokens.host_policy&&digest(p.digest)&&time(p.observed_at)&&time(p.fresh_until)&&Date.parse(p.fresh_until as string)>=Date.parse(p.observed_at as string)&&['fresh','stale','unknown'].includes(p.freshness as string));const b=obj(p.bounds);requireValue(Object.keys(b).length===7);for(const [key] of timingFields){const x=obj(b[key]);requireValue(int(x.min,key==='maximum_future_skew_seconds'?0:1)&&int(x.max)&&Number(x.min)<=Number(x.max));}}else requireValue(tokens.host_policy===0);
+ if(r.application!==null){const a=obj(r.application);requireValue(['pending','applied','failed','uncertain'].includes(a.status as string)&&uuid(a.operation_id)&&(a.latest_report_id===null||uuid(a.latest_report_id))&&(a.failure_code===null||typeof a.failure_code==='string'&&/^[a-z][a-z0-9_]{0,99}$/.test(a.failure_code)));requireValue(r.desired!==null);if(a.status==='applied'){requireValue(r.effective!==null&&a.latest_report_id!==null);const d=obj(r.desired),e=obj(r.effective);requireValue(d.revision===e.revision&&d.digest===e.digest);}}
+ return r as unknown as Settings;
+}
+export function parseCommand(raw:unknown):Command {const c=envelope(raw);requireValue(uuid(c.command_id)&&action(c.action)&&str(c.rationale)&&(c.evidence_ref===undefined||typeof c.evidence_ref==='string'));revisions(c.expected_revisions);if(c.action==='observer.timing.publish'){values(c.values);requireValue(c.rollback_revision===undefined);}else requireValue(int(c.rollback_revision,1)&&c.values===undefined);return c as unknown as Command;}
+function parseReceipt(raw:unknown,deployment:string,command:Command):Receipt {const r=envelope(raw,deployment);requireValue(r.command_id===command.command_id&&r.action===command.action&&r.effect==='desired_committed'&&digest(r.request_digest)&&digest(r.configuration_digest)&&int(r.configuration_revision,1)&&r.configuration_revision===command.expected_revisions.configuration+1&&uuid(r.audit_id)&&uuid(r.intent_id)&&time(r.committed_at));revisions(r.evaluated_revisions,false);const evaluated=obj(r.evaluated_revisions);for(const k of ['policy','authority','host_policy'] as const)requireValue(evaluated[k]===command.expected_revisions[k]);return r as unknown as Receipt;}
+async function request(path:string,body?:Command):Promise<unknown>{
+ let response:Response;try{response=await sessionFetch(root+path,{method:body?'POST':'GET',headers:{Accept:'application/json',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(15000)});}catch{throw new ObserverError('unavailable',0,!!body);}
+ let raw:unknown;try{raw=await response.json();}catch{throw new ObserverError('invalid_response',response.status,!!body);}
+ if(!response.ok){let code='unavailable',unknown=!!body;try{const e=obj(envelope(raw).error),d=obj(e.details);requireValue(typeof e.code==='string'&&['unknown','not_committed'].includes(d.outcome as string));code=e.code;unknown=d.outcome==='unknown';}catch{/* Untrusted errors never establish a definite result. */}throw new ObserverError(code,response.status,unknown);}
+ return raw;
+}
+const path=(deployment:string)=>'/'+encodeURIComponent(deployment);
+export async function listDeployments(cursor?:string){const r=envelope(await request(cursor?'?cursor='+encodeURIComponent(cursor):''));requireValue(Array.isArray(r.deployments)&&(r.next_cursor===null||str(r.next_cursor)));const seen=new Set();for(const raw of r.deployments){const d=obj(raw);requireValue(str(d.deployment_id)&&str(d.label)&&typeof d.can_configure==='boolean'&&!seen.has(d.deployment_id));seen.add(d.deployment_id);}return r as unknown as {deployments:Deployment[];next_cursor:string|null};}
+export async function readSettings(deployment:string){return parseSettings(await request(path(deployment)),deployment);}
+export async function readHistory(deployment:string,revision:number):Promise<Historical>{const r=envelope(await request(path(deployment)+'/revisions/'+revision),deployment);requireValue(r.revision===revision&&int(r.revision,1)&&digest(r.digest)&&action(r.action)&&uuid(r.command_id)&&str(r.actor_id)&&str(r.rationale)&&(r.evidence_ref===null||typeof r.evidence_ref==='string')&&time(r.committed_at));values(r.values);requireValue(r.action==='observer.timing.publish'?r.copied_from_revision===null:int(r.copied_from_revision,1)&&Number(r.copied_from_revision)<revision);return r as unknown as Historical;}
+export async function save(deployment:string,command:Command){const raw=await request(path(deployment)+'/commands',command);try{return parseReceipt(raw,deployment,command);}catch{throw new ObserverError('invalid_response',200,true);}}
+export async function receipt(deployment:string,command:Command){return parseReceipt(await request(path(deployment)+'/receipts/'+encodeURIComponent(command.command_id)),deployment,command);}

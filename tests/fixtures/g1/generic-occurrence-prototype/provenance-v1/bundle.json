@@ -1,0 +1,1344 @@
+{
+  "account": "qualys-offline-account",
+  "phases": {
+    "import": {
+      "manifest": {
+        "bound_test_id": null,
+        "context_key": "offline:qualys/prototype",
+        "dispositions": [
+          {
+            "blocked_reason": null,
+            "disposition": "included",
+            "exclusion_actor": null,
+            "exclusion_evidence_ref": null,
+            "exclusion_reason": null,
+            "exclusion_rule_id": null,
+            "exclusion_rule_version": null,
+            "observation_id": "a482171a-6839-5e24-b570-da5d3d92c300",
+            "occurrence_id": "e84b4736-b3a5-4f4e-9bf1-85ed9c4e77e0",
+            "raw_evidence_sha256": "fdb812f2e51114dc3a3b4451d233b76052b6e9b5cb08bfc929f30f999210499a",
+            "resolution_id": "0cc6da0e-dde5-4aec-94c0-b724e5cabccc",
+            "resolution_revision": 1,
+            "schema_version": 1,
+            "source_record_ordinal": 1
+          },
+          {
+            "blocked_reason": null,
+            "disposition": "included",
+            "exclusion_actor": null,
+            "exclusion_evidence_ref": null,
+            "exclusion_reason": null,
+            "exclusion_rule_id": null,
+            "exclusion_rule_version": null,
+            "observation_id": "ac68a034-8386-50ba-9b2c-0afd666e977b",
+            "occurrence_id": "3af0d16e-42fa-4c9e-9ce7-85105ceaca6c",
+            "raw_evidence_sha256": "fdb812f2e51114dc3a3b4451d233b76052b6e9b5cb08bfc929f30f999210499a",
+            "resolution_id": "2adc053b-9873-4f0a-b04d-df7d75a451ad",
+            "resolution_revision": 1,
+            "schema_version": 1,
+            "source_record_ordinal": 2
+          },
+          {
+            "blocked_reason": null,
+            "disposition": "included",
+            "exclusion_actor": null,
+            "exclusion_evidence_ref": null,
+            "exclusion_reason": null,
+            "exclusion_rule_id": null,
+            "exclusion_rule_version": null,
+            "observation_id": "0351314e-fc54-5b6d-9542-9d21636e19ae",
+            "occurrence_id": "d1fb8a0c-2111-433e-a671-2665bd8e5cea",
+            "raw_evidence_sha256": "fdb812f2e51114dc3a3b4451d233b76052b6e9b5cb08bfc929f30f999210499a",
+            "resolution_id": "11a38b0b-e602-4e9b-be35-d9c958b84cf8",
+            "resolution_revision": 1,
+            "schema_version": 1,
+            "source_record_ordinal": 3
+          },
+          {
+            "blocked_reason": null,
+            "disposition": "included",
+            "exclusion_actor": null,
+            "exclusion_evidence_ref": null,
+            "exclusion_reason": null,
+            "exclusion_rule_id": null,
+            "exclusion_rule_version": null,
+            "observation_id": "716123f2-8eaa-59af-947e-3bf841cbb057",
+            "occurrence_id": "f7e41821-263a-4649-9b3a-48c0633c5389",
+            "raw_evidence_sha256": "fdb812f2e51114dc3a3b4451d233b76052b6e9b5cb08bfc929f30f999210499a",
+            "resolution_id": "f49d1c31-20f0-40bd-9527-3d0a9b331750",
+            "resolution_revision": 1,
+            "schema_version": 1,
+            "source_record_ordinal": 4
+          },
+          {
+            "blocked_reason": null,
+            "disposition": "included",
+            "exclusion_actor": null,
+            "exclusion_evidence_ref": null,
+            "exclusion_reason": null,
+            "exclusion_rule_id": null,
+            "exclusion_rule_version": null,
+            "observation_id": "af90e812-e8b9-536d-8f4c-a11512997f8c",
+            "occurrence_id": "3efd3e81-d046-4ae3-b629-aee119c228d3",
+            "raw_evidence_sha256": "fdb812f2e51114dc3a3b4451d233b76052b6e9b5cb08bfc929f30f999210499a",
+            "resolution_id": "9ea11962-1bfe-4b90-b94a-0708be0c8be0",
+            "resolution_revision": 1,
+            "schema_version": 1,
+            "source_record_ordinal": 5
+          },
+          {
+            "blocked_reason": null,
+            "disposition": "included",
+            "exclusion_actor": null,
+            "exclusion_evidence_ref": null,
+            "exclusion_reason": null,
+            "exclusion_rule_id": null,
+            "exclusion_rule_version": null,
+            "observation_id": "2117d72d-6aea-59ed-a02e-e62335f8f0be",
+            "occurrence_id": "7ad66ce6-1d41-41b9-908a-48609b8c0251",
+            "raw_evidence_sha256": "fdb812f2e51114dc3a3b4451d233b76052b6e9b5cb08bfc929f30f999210499a",
+            "resolution_id": "362a1da8-3ad9-4bd1-9e0d-bd7fb84c8b21",
+            "resolution_revision": 1,
+            "schema_version": 1,
+            "source_record_ordinal": 6
+          }
+        ],
+        "inventory_seal": {
+          "conflict_holder_count": 0,
+          "retained_row_count": 6,
+          "retention_high_watermark": 5,
+          "run_id": "qualys-run-20260929",
+          "schema_version": 1,
+          "seal_ref": "bundle://import-seal",
+          "source_account_id": "qualys-offline-account",
+          "source_family": "qualys"
+        },
+        "manifest_id": "80076b76-2a5b-552e-8022-9104fd3a2b82",
+        "manifest_sha256": "b95a2e5713e6f6ad8e71dfbc7565821bea9ae5272ce2ecc67d74e4e58be5d6fb",
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "payload_membership_status": "pending",
+        "payload_records": [
+          {
+            "payload_record_id": "1",
+            "schema_version": 1,
+            "source_observation_ids": [
+              "a482171a-6839-5e24-b570-da5d3d92c300"
+            ],
+            "transformation_version": 1
+          },
+          {
+            "payload_record_id": "2",
+            "schema_version": 1,
+            "source_observation_ids": [
+              "ac68a034-8386-50ba-9b2c-0afd666e977b"
+            ],
+            "transformation_version": 1
+          },
+          {
+            "payload_record_id": "3",
+            "schema_version": 1,
+            "source_observation_ids": [
+              "0351314e-fc54-5b6d-9542-9d21636e19ae"
+            ],
+            "transformation_version": 1
+          },
+          {
+            "payload_record_id": "4",
+            "schema_version": 1,
+            "source_observation_ids": [
+              "716123f2-8eaa-59af-947e-3bf841cbb057"
+            ],
+            "transformation_version": 1
+          },
+          {
+            "payload_record_id": "5",
+            "schema_version": 1,
+            "source_observation_ids": [
+              "af90e812-e8b9-536d-8f4c-a11512997f8c"
+            ],
+            "transformation_version": 1
+          },
+          {
+            "payload_record_id": "6",
+            "schema_version": 1,
+            "source_observation_ids": [
+              "2117d72d-6aea-59ed-a02e-e62335f8f0be"
+            ],
+            "transformation_version": 1
+          }
+        ],
+        "payload_sha256": "d2b7e8f97a6a84b7ca3f74e6826b55a9e69bc839e060654c97be2bf66a70e923",
+        "run_completeness_status": "unverified",
+        "run_coverage_status": "none",
+        "run_currency_status": "unverified",
+        "run_id": "qualys-run-20260929",
+        "schema_version": 1,
+        "source_account_id": "qualys-offline-account",
+        "source_family": "qualys"
+      },
+      "observations": [
+        {
+          "asset_locator": "proto-c.internal",
+          "collected_at": "2026-09-29T01:00:00Z",
+          "collection_status": "success",
+          "component_locator": "openssl:443:3.0.1",
+          "coverage_scope": "synthetic-complete",
+          "missing_fields": [
+            {
+              "field": "vulnerability_refs",
+              "reason": "not_supplied"
+            },
+            {
+              "field": "source_first_seen_at",
+              "reason": "not_supplied"
+            },
+            {
+              "field": "observed_at",
+              "reason": "not_supplied"
+            }
+          ],
+          "native_id_authority": "qualys",
+          "native_id_scheme": "qid",
+          "native_id_value": "1001",
+          "observation_id": "a482171a-6839-5e24-b570-da5d3d92c300",
+          "observed_at": null,
+          "occurrence_id": null,
+          "raw_evidence_ref": "bundle://import.xml",
+          "raw_evidence_sha256": "fdb812f2e51114dc3a3b4451d233b76052b6e9b5cb08bfc929f30f999210499a",
+          "report_id": "bundle://import.xml",
+          "revision": 1,
+          "run_id": "qualys-run-20260929",
+          "schema_version": 1,
+          "source_account_id": "qualys-offline-account",
+          "source_family": "qualys",
+          "source_first_seen_at": null,
+          "source_rating": "High",
+          "source_record_locator": "qualys-row-1",
+          "source_record_ordinal": 1,
+          "vulnerability_refs": null
+        },
+        {
+          "asset_locator": "proto-b.internal",
+          "collected_at": "2026-09-29T01:00:00Z",
+          "collection_status": "success",
+          "component_locator": "openssl:443:3.0.1",
+          "coverage_scope": "synthetic-complete",
+          "missing_fields": [
+            {
+              "field": "vulnerability_refs",
+              "reason": "not_supplied"
+            },
+            {
+              "field": "source_first_seen_at",
+              "reason": "not_supplied"
+            },
+            {
+              "field": "observed_at",
+              "reason": "not_supplied"
+            }
+          ],
+          "native_id_authority": "qualys",
+          "native_id_scheme": "qid",
+          "native_id_value": "1001",
+          "observation_id": "ac68a034-8386-50ba-9b2c-0afd666e977b",
+          "observed_at": null,
+          "occurrence_id": null,
+          "raw_evidence_ref": "bundle://import.xml",
+          "raw_evidence_sha256": "fdb812f2e51114dc3a3b4451d233b76052b6e9b5cb08bfc929f30f999210499a",
+          "report_id": "bundle://import.xml",
+          "revision": 1,
+          "run_id": "qualys-run-20260929",
+          "schema_version": 1,
+          "source_account_id": "qualys-offline-account",
+          "source_family": "qualys",
+          "source_first_seen_at": null,
+          "source_rating": "High",
+          "source_record_locator": "qualys-row-2",
+          "source_record_ordinal": 2,
+          "vulnerability_refs": null
+        },
+        {
+          "asset_locator": "proto-a.internal",
+          "collected_at": "2026-09-29T01:00:00Z",
+          "collection_status": "success",
+          "component_locator": "openssl:8443:3.0.0",
+          "coverage_scope": "synthetic-complete",
+          "missing_fields": [
+            {
+              "field": "vulnerability_refs",
+              "reason": "not_supplied"
+            },
+            {
+              "field": "source_first_seen_at",
+              "reason": "not_supplied"
+            },
+            {
+              "field": "observed_at",
+              "reason": "not_supplied"
+            }
+          ],
+          "native_id_authority": "qualys",
+          "native_id_scheme": "qid",
+          "native_id_value": "1001",
+          "observation_id": "0351314e-fc54-5b6d-9542-9d21636e19ae",
+          "observed_at": null,
+          "occurrence_id": null,
+          "raw_evidence_ref": "bundle://import.xml",
+          "raw_evidence_sha256": "fdb812f2e51114dc3a3b4451d233b76052b6e9b5cb08bfc929f30f999210499a",
+          "report_id": "bundle://import.xml",
+          "revision": 1,
+          "run_id": "qualys-run-20260929",
+          "schema_version": 1,
+          "source_account_id": "qualys-offline-account",
+          "source_family": "qualys",
+          "source_first_seen_at": null,
+          "source_rating": "High",
+          "source_record_locator": "qualys-row-3",
+          "source_record_ordinal": 3,
+          "vulnerability_refs": null
+        },
+        {
+          "asset_locator": "proto-a.internal",
+          "collected_at": "2026-09-29T01:00:00Z",
+          "collection_status": "success",
+          "component_locator": "openssl:443:3.0.1",
+          "coverage_scope": "synthetic-complete",
+          "missing_fields": [
+            {
+              "field": "vulnerability_refs",
+              "reason": "not_supplied"
+            },
+            {
+              "field": "source_first_seen_at",
+              "reason": "not_supplied"
+            },
+            {
+              "field": "observed_at",
+              "reason": "not_supplied"
+            }
+          ],
+          "native_id_authority": "qualys",
+          "native_id_scheme": "qid",
+          "native_id_value": "1001",
+          "observation_id": "716123f2-8eaa-59af-947e-3bf841cbb057",
+          "observed_at": null,
+          "occurrence_id": null,
+          "raw_evidence_ref": "bundle://import.xml",
+          "raw_evidence_sha256": "fdb812f2e51114dc3a3b4451d233b76052b6e9b5cb08bfc929f30f999210499a",
+          "report_id": "bundle://import.xml",
+          "revision": 1,
+          "run_id": "qualys-run-20260929",
+          "schema_version": 1,
+          "source_account_id": "qualys-offline-account",
+          "source_family": "qualys",
+          "source_first_seen_at": null,
+          "source_rating": "High",
+          "source_record_locator": "qualys-row-4",
+          "source_record_ordinal": 4,
+          "vulnerability_refs": null
+        },
+        {
+          "asset_locator": "proto-b.internal",
+          "collected_at": "2026-09-29T01:00:00Z",
+          "collection_status": "success",
+          "component_locator": "openssl:8443:3.0.0",
+          "coverage_scope": "synthetic-complete",
+          "missing_fields": [
+            {
+              "field": "vulnerability_refs",
+              "reason": "not_supplied"
+            },
+            {
+              "field": "source_first_seen_at",
+              "reason": "not_supplied"
+            },
+            {
+              "field": "observed_at",
+              "reason": "not_supplied"
+            }
+          ],
+          "native_id_authority": "qualys",
+          "native_id_scheme": "qid",
+          "native_id_value": "1001",
+          "observation_id": "af90e812-e8b9-536d-8f4c-a11512997f8c",
+          "observed_at": null,
+          "occurrence_id": null,
+          "raw_evidence_ref": "bundle://import.xml",
+          "raw_evidence_sha256": "fdb812f2e51114dc3a3b4451d233b76052b6e9b5cb08bfc929f30f999210499a",
+          "report_id": "bundle://import.xml",
+          "revision": 1,
+          "run_id": "qualys-run-20260929",
+          "schema_version": 1,
+          "source_account_id": "qualys-offline-account",
+          "source_family": "qualys",
+          "source_first_seen_at": null,
+          "source_rating": "High",
+          "source_record_locator": "qualys-row-5",
+          "source_record_ordinal": 5,
+          "vulnerability_refs": null
+        },
+        {
+          "asset_locator": "proto-c.internal",
+          "collected_at": "2026-09-29T01:00:00Z",
+          "collection_status": "success",
+          "component_locator": "openssl:8443:3.0.0",
+          "coverage_scope": "synthetic-complete",
+          "missing_fields": [
+            {
+              "field": "vulnerability_refs",
+              "reason": "not_supplied"
+            },
+            {
+              "field": "source_first_seen_at",
+              "reason": "not_supplied"
+            },
+            {
+              "field": "observed_at",
+              "reason": "not_supplied"
+            }
+          ],
+          "native_id_authority": "qualys",
+          "native_id_scheme": "qid",
+          "native_id_value": "1001",
+          "observation_id": "2117d72d-6aea-59ed-a02e-e62335f8f0be",
+          "observed_at": null,
+          "occurrence_id": null,
+          "raw_evidence_ref": "bundle://import.xml",
+          "raw_evidence_sha256": "fdb812f2e51114dc3a3b4451d233b76052b6e9b5cb08bfc929f30f999210499a",
+          "report_id": "bundle://import.xml",
+          "revision": 1,
+          "run_id": "qualys-run-20260929",
+          "schema_version": 1,
+          "source_account_id": "qualys-offline-account",
+          "source_family": "qualys",
+          "source_first_seen_at": null,
+          "source_rating": "High",
+          "source_record_locator": "qualys-row-6",
+          "source_record_ordinal": 6,
+          "vulnerability_refs": null
+        }
+      ],
+      "occurrences": [
+        "e84b4736-b3a5-4f4e-9bf1-85ed9c4e77e0",
+        "3af0d16e-42fa-4c9e-9ce7-85105ceaca6c",
+        "d1fb8a0c-2111-433e-a671-2665bd8e5cea",
+        "f7e41821-263a-4649-9b3a-48c0633c5389",
+        "3efd3e81-d046-4ae3-b629-aee119c228d3",
+        "7ad66ce6-1d41-41b9-908a-48609b8c0251"
+      ],
+      "operation": {
+        "bound_test_id": null,
+        "close_old_findings": false,
+        "context_key": "offline:qualys/prototype",
+        "deduplication_complete": null,
+        "deduplication_evidence_ref": null,
+        "endpoint_ids": [],
+        "engine_release": "CE-offline-unverified",
+        "error_code": null,
+        "error_detail_ref": null,
+        "finding_ids": [],
+        "first_import_baseline_ref": null,
+        "mapping_revision": null,
+        "operation_id": "11111111-1111-4111-8111-111111111111",
+        "parser_config_version": "uvm-qualys-generic-v1",
+        "payload_sha256": "d2b7e8f97a6a84b7ca3f74e6826b55a9e69bc839e060654c97be2bf66a70e923",
+        "post_issued": false,
+        "prior_mapping_revision": null,
+        "reconciled": false,
+        "reconciliation_evidence_ref": null,
+        "request_kind": "import",
+        "requested_at": "2026-09-29T01:00:00Z",
+        "response_deduplication_complete": null,
+        "response_ref": null,
+        "response_test_id": null,
+        "revision": 1,
+        "scan_type": "Generic Findings Import",
+        "schema_version": 1,
+        "settle_readback_ref": null,
+        "source_run_id": "qualys-run-20260929",
+        "status": "pending",
+        "supersedes_operation_id": null,
+        "test_id": null
+      },
+      "payload": "import-payload.json",
+      "payload_records": [
+        {
+          "payload_record_id": "1",
+          "schema_version": 1,
+          "source_observation_ids": [
+            "a482171a-6839-5e24-b570-da5d3d92c300"
+          ],
+          "transformation_version": 1
+        },
+        {
+          "payload_record_id": "2",
+          "schema_version": 1,
+          "source_observation_ids": [
+            "ac68a034-8386-50ba-9b2c-0afd666e977b"
+          ],
+          "transformation_version": 1
+        },
+        {
+          "payload_record_id": "3",
+          "schema_version": 1,
+          "source_observation_ids": [
+            "0351314e-fc54-5b6d-9542-9d21636e19ae"
+          ],
+          "transformation_version": 1
+        },
+        {
+          "payload_record_id": "4",
+          "schema_version": 1,
+          "source_observation_ids": [
+            "716123f2-8eaa-59af-947e-3bf841cbb057"
+          ],
+          "transformation_version": 1
+        },
+        {
+          "payload_record_id": "5",
+          "schema_version": 1,
+          "source_observation_ids": [
+            "af90e812-e8b9-536d-8f4c-a11512997f8c"
+          ],
+          "transformation_version": 1
+        },
+        {
+          "payload_record_id": "6",
+          "schema_version": 1,
+          "source_observation_ids": [
+            "2117d72d-6aea-59ed-a02e-e62335f8f0be"
+          ],
+          "transformation_version": 1
+        }
+      ],
+      "payload_sha256": "d2b7e8f97a6a84b7ca3f74e6826b55a9e69bc839e060654c97be2bf66a70e923",
+      "resolutions": [
+        {
+          "candidate_explanations": [],
+          "candidate_workload_ids": [
+            "ab23dba6-a69f-4db4-91e8-25d5b2d6d6d6"
+          ],
+          "evaluated_at": "2026-09-29T01:00:00Z",
+          "exposure_id": "77b67d07-da9f-4d51-96ea-2e4ea604d957",
+          "group_id": "8267568e-2ece-4073-814f-f3b8995cbb78",
+          "incarnation_id": "668897ff-0040-4bf3-9363-a1b8d5540037",
+          "matching_inputs": {
+            "provisioning_key": "pk:proto-c.internal"
+          },
+          "observation_id": "a482171a-6839-5e24-b570-da5d3d92c300",
+          "occurrence_id": "e84b4736-b3a5-4f4e-9bf1-85ed9c4e77e0",
+          "outcome": "new",
+          "reason": "new identity created",
+          "resolution_id": "0cc6da0e-dde5-4aec-94c0-b724e5cabccc",
+          "revision": 1,
+          "rule_id": "qualys-offline-rule",
+          "rule_version": 1,
+          "schema_version": 1,
+          "supersedes_resolution_id": null,
+          "workload_id": "ab23dba6-a69f-4db4-91e8-25d5b2d6d6d6"
+        },
+        {
+          "candidate_explanations": [],
+          "candidate_workload_ids": [
+            "ac1ebb19-0407-4038-9383-b4cd830102cf"
+          ],
+          "evaluated_at": "2026-09-29T01:00:00Z",
+          "exposure_id": "23804428-0873-4e72-bf62-bf660de84bc5",
+          "group_id": "8267568e-2ece-4073-814f-f3b8995cbb78",
+          "incarnation_id": "838f6e99-b682-488f-a48f-447b0fa55abe",
+          "matching_inputs": {
+            "provisioning_key": "pk:proto-b.internal"
+          },
+          "observation_id": "ac68a034-8386-50ba-9b2c-0afd666e977b",
+          "occurrence_id": "3af0d16e-42fa-4c9e-9ce7-85105ceaca6c",
+          "outcome": "new",
+          "reason": "new identity created",
+          "resolution_id": "2adc053b-9873-4f0a-b04d-df7d75a451ad",
+          "revision": 1,
+          "rule_id": "qualys-offline-rule",
+          "rule_version": 1,
+          "schema_version": 1,
+          "supersedes_resolution_id": null,
+          "workload_id": "ac1ebb19-0407-4038-9383-b4cd830102cf"
+        },
+        {
+          "candidate_explanations": [],
+          "candidate_workload_ids": [
+            "56befe81-930d-483d-b16c-74177ea27d2f"
+          ],
+          "evaluated_at": "2026-09-29T01:00:00Z",
+          "exposure_id": "2c391aeb-32bc-43f8-b34c-845f3f8a07cf",
+          "group_id": "8267568e-2ece-4073-814f-f3b8995cbb78",
+          "incarnation_id": "ac213735-cf08-400a-b1e7-1540eeb6c771",
+          "matching_inputs": {
+            "provisioning_key": "pk:proto-a.internal"
+          },
+          "observation_id": "0351314e-fc54-5b6d-9542-9d21636e19ae",
+          "occurrence_id": "d1fb8a0c-2111-433e-a671-2665bd8e5cea",
+          "outcome": "new",
+          "reason": "new identity created",
+          "resolution_id": "11a38b0b-e602-4e9b-be35-d9c958b84cf8",
+          "revision": 1,
+          "rule_id": "qualys-offline-rule",
+          "rule_version": 1,
+          "schema_version": 1,
+          "supersedes_resolution_id": null,
+          "workload_id": "56befe81-930d-483d-b16c-74177ea27d2f"
+        },
+        {
+          "candidate_explanations": [
+            {
+              "field": "provisioning_key",
+              "reason": "stable attribute match",
+              "value": "pk:proto-a.internal",
+              "workload_id": "56befe81-930d-483d-b16c-74177ea27d2f"
+            }
+          ],
+          "candidate_workload_ids": [
+            "56befe81-930d-483d-b16c-74177ea27d2f"
+          ],
+          "evaluated_at": "2026-09-29T01:00:00Z",
+          "exposure_id": "2c391aeb-32bc-43f8-b34c-845f3f8a07cf",
+          "group_id": "8267568e-2ece-4073-814f-f3b8995cbb78",
+          "incarnation_id": "ac213735-cf08-400a-b1e7-1540eeb6c771",
+          "matching_inputs": {
+            "provisioning_key": "pk:proto-a.internal"
+          },
+          "observation_id": "716123f2-8eaa-59af-947e-3bf841cbb057",
+          "occurrence_id": "f7e41821-263a-4649-9b3a-48c0633c5389",
+          "outcome": "matched",
+          "reason": "matched existing identity",
+          "resolution_id": "f49d1c31-20f0-40bd-9527-3d0a9b331750",
+          "revision": 1,
+          "rule_id": "qualys-offline-rule",
+          "rule_version": 1,
+          "schema_version": 1,
+          "supersedes_resolution_id": null,
+          "workload_id": "56befe81-930d-483d-b16c-74177ea27d2f"
+        },
+        {
+          "candidate_explanations": [
+            {
+              "field": "provisioning_key",
+              "reason": "stable attribute match",
+              "value": "pk:proto-b.internal",
+              "workload_id": "ac1ebb19-0407-4038-9383-b4cd830102cf"
+            }
+          ],
+          "candidate_workload_ids": [
+            "ac1ebb19-0407-4038-9383-b4cd830102cf"
+          ],
+          "evaluated_at": "2026-09-29T01:00:00Z",
+          "exposure_id": "23804428-0873-4e72-bf62-bf660de84bc5",
+          "group_id": "8267568e-2ece-4073-814f-f3b8995cbb78",
+          "incarnation_id": "838f6e99-b682-488f-a48f-447b0fa55abe",
+          "matching_inputs": {
+            "provisioning_key": "pk:proto-b.internal"
+          },
+          "observation_id": "af90e812-e8b9-536d-8f4c-a11512997f8c",
+          "occurrence_id": "3efd3e81-d046-4ae3-b629-aee119c228d3",
+          "outcome": "matched",
+          "reason": "matched existing identity",
+          "resolution_id": "9ea11962-1bfe-4b90-b94a-0708be0c8be0",
+          "revision": 1,
+          "rule_id": "qualys-offline-rule",
+          "rule_version": 1,
+          "schema_version": 1,
+          "supersedes_resolution_id": null,
+          "workload_id": "ac1ebb19-0407-4038-9383-b4cd830102cf"
+        },
+        {
+          "candidate_explanations": [
+            {
+              "field": "provisioning_key",
+              "reason": "stable attribute match",
+              "value": "pk:proto-c.internal",
+              "workload_id": "ab23dba6-a69f-4db4-91e8-25d5b2d6d6d6"
+            }
+          ],
+          "candidate_workload_ids": [
+            "ab23dba6-a69f-4db4-91e8-25d5b2d6d6d6"
+          ],
+          "evaluated_at": "2026-09-29T01:00:00Z",
+          "exposure_id": "77b67d07-da9f-4d51-96ea-2e4ea604d957",
+          "group_id": "8267568e-2ece-4073-814f-f3b8995cbb78",
+          "incarnation_id": "668897ff-0040-4bf3-9363-a1b8d5540037",
+          "matching_inputs": {
+            "provisioning_key": "pk:proto-c.internal"
+          },
+          "observation_id": "2117d72d-6aea-59ed-a02e-e62335f8f0be",
+          "occurrence_id": "7ad66ce6-1d41-41b9-908a-48609b8c0251",
+          "outcome": "matched",
+          "reason": "matched existing identity",
+          "resolution_id": "362a1da8-3ad9-4bd1-9e0d-bd7fb84c8b21",
+          "revision": 1,
+          "rule_id": "qualys-offline-rule",
+          "rule_version": 1,
+          "schema_version": 1,
+          "supersedes_resolution_id": null,
+          "workload_id": "ab23dba6-a69f-4db4-91e8-25d5b2d6d6d6"
+        }
+      ],
+      "run_id": "qualys-run-20260929",
+      "xml": "import.xml",
+      "xml_sha256": "fdb812f2e51114dc3a3b4451d233b76052b6e9b5cb08bfc929f30f999210499a"
+    },
+    "reimport": {
+      "manifest": {
+        "bound_test_id": "offline-test-uvm-g1",
+        "context_key": "offline:qualys/prototype",
+        "dispositions": [
+          {
+            "blocked_reason": null,
+            "disposition": "included",
+            "exclusion_actor": null,
+            "exclusion_evidence_ref": null,
+            "exclusion_reason": null,
+            "exclusion_rule_id": null,
+            "exclusion_rule_version": null,
+            "observation_id": "41d0c530-e259-5f3f-8bcd-1eabdb183610",
+            "occurrence_id": "e84b4736-b3a5-4f4e-9bf1-85ed9c4e77e0",
+            "raw_evidence_sha256": "41a15207167f4479400bcf98dc2c857f2ca7df0a4bbc752a3932a23fb06a9035",
+            "resolution_id": "860c4e79-e271-42a0-9290-173961ef5cd2",
+            "resolution_revision": 1,
+            "schema_version": 1,
+            "source_record_ordinal": 1
+          },
+          {
+            "blocked_reason": null,
+            "disposition": "included",
+            "exclusion_actor": null,
+            "exclusion_evidence_ref": null,
+            "exclusion_reason": null,
+            "exclusion_rule_id": null,
+            "exclusion_rule_version": null,
+            "observation_id": "2bad46a1-9aa0-5399-9ab6-ccb2a305dafa",
+            "occurrence_id": "3af0d16e-42fa-4c9e-9ce7-85105ceaca6c",
+            "raw_evidence_sha256": "41a15207167f4479400bcf98dc2c857f2ca7df0a4bbc752a3932a23fb06a9035",
+            "resolution_id": "471e60a9-d5e9-487b-b0db-317508e777f5",
+            "resolution_revision": 1,
+            "schema_version": 1,
+            "source_record_ordinal": 2
+          },
+          {
+            "blocked_reason": null,
+            "disposition": "included",
+            "exclusion_actor": null,
+            "exclusion_evidence_ref": null,
+            "exclusion_reason": null,
+            "exclusion_rule_id": null,
+            "exclusion_rule_version": null,
+            "observation_id": "08a64e35-d139-5262-8ee8-77d5649cf5b7",
+            "occurrence_id": "d1fb8a0c-2111-433e-a671-2665bd8e5cea",
+            "raw_evidence_sha256": "41a15207167f4479400bcf98dc2c857f2ca7df0a4bbc752a3932a23fb06a9035",
+            "resolution_id": "be62cd05-2d50-469a-9ac5-3f0b11d5e2ce",
+            "resolution_revision": 1,
+            "schema_version": 1,
+            "source_record_ordinal": 3
+          },
+          {
+            "blocked_reason": null,
+            "disposition": "included",
+            "exclusion_actor": null,
+            "exclusion_evidence_ref": null,
+            "exclusion_reason": null,
+            "exclusion_rule_id": null,
+            "exclusion_rule_version": null,
+            "observation_id": "cfdfaefb-f114-5e8b-a7de-1b21ea50748d",
+            "occurrence_id": "f7e41821-263a-4649-9b3a-48c0633c5389",
+            "raw_evidence_sha256": "41a15207167f4479400bcf98dc2c857f2ca7df0a4bbc752a3932a23fb06a9035",
+            "resolution_id": "a5741b91-1145-45a7-b786-cdd362fd5147",
+            "resolution_revision": 1,
+            "schema_version": 1,
+            "source_record_ordinal": 4
+          },
+          {
+            "blocked_reason": null,
+            "disposition": "included",
+            "exclusion_actor": null,
+            "exclusion_evidence_ref": null,
+            "exclusion_reason": null,
+            "exclusion_rule_id": null,
+            "exclusion_rule_version": null,
+            "observation_id": "b327d6bd-fdad-5a33-a5c6-7652e47e66b3",
+            "occurrence_id": "3efd3e81-d046-4ae3-b629-aee119c228d3",
+            "raw_evidence_sha256": "41a15207167f4479400bcf98dc2c857f2ca7df0a4bbc752a3932a23fb06a9035",
+            "resolution_id": "12b1f128-602f-45c0-8a6a-5d4ef9f3c5b3",
+            "resolution_revision": 1,
+            "schema_version": 1,
+            "source_record_ordinal": 5
+          },
+          {
+            "blocked_reason": null,
+            "disposition": "included",
+            "exclusion_actor": null,
+            "exclusion_evidence_ref": null,
+            "exclusion_reason": null,
+            "exclusion_rule_id": null,
+            "exclusion_rule_version": null,
+            "observation_id": "b48c33f7-7018-525b-aa85-1b0296101e5a",
+            "occurrence_id": "7ad66ce6-1d41-41b9-908a-48609b8c0251",
+            "raw_evidence_sha256": "41a15207167f4479400bcf98dc2c857f2ca7df0a4bbc752a3932a23fb06a9035",
+            "resolution_id": "928846de-ceb0-4383-bb57-c83e22a58125",
+            "resolution_revision": 1,
+            "schema_version": 1,
+            "source_record_ordinal": 6
+          }
+        ],
+        "inventory_seal": {
+          "conflict_holder_count": 0,
+          "retained_row_count": 6,
+          "retention_high_watermark": 11,
+          "run_id": "qualys-run-20260930",
+          "schema_version": 1,
+          "seal_ref": "bundle://reimport-seal",
+          "source_account_id": "qualys-offline-account",
+          "source_family": "qualys"
+        },
+        "manifest_id": "5c48f206-242a-5d59-b8f8-21b70d991e97",
+        "manifest_sha256": "eef3e77696a81d0b75e339bcde78ba9bb917935cbe29f77faec6cebb3869cb83",
+        "operation_id": "22222222-2222-4222-8222-222222222222",
+        "payload_membership_status": "pending",
+        "payload_records": [
+          {
+            "payload_record_id": "1",
+            "schema_version": 1,
+            "source_observation_ids": [
+              "41d0c530-e259-5f3f-8bcd-1eabdb183610"
+            ],
+            "transformation_version": 1
+          },
+          {
+            "payload_record_id": "2",
+            "schema_version": 1,
+            "source_observation_ids": [
+              "2bad46a1-9aa0-5399-9ab6-ccb2a305dafa"
+            ],
+            "transformation_version": 1
+          },
+          {
+            "payload_record_id": "3",
+            "schema_version": 1,
+            "source_observation_ids": [
+              "08a64e35-d139-5262-8ee8-77d5649cf5b7"
+            ],
+            "transformation_version": 1
+          },
+          {
+            "payload_record_id": "4",
+            "schema_version": 1,
+            "source_observation_ids": [
+              "cfdfaefb-f114-5e8b-a7de-1b21ea50748d"
+            ],
+            "transformation_version": 1
+          },
+          {
+            "payload_record_id": "5",
+            "schema_version": 1,
+            "source_observation_ids": [
+              "b327d6bd-fdad-5a33-a5c6-7652e47e66b3"
+            ],
+            "transformation_version": 1
+          },
+          {
+            "payload_record_id": "6",
+            "schema_version": 1,
+            "source_observation_ids": [
+              "b48c33f7-7018-525b-aa85-1b0296101e5a"
+            ],
+            "transformation_version": 1
+          }
+        ],
+        "payload_sha256": "7ebe94556bf37e5c4b05d8af79d609532bde7ad7bd8046e609bbabc42d6ed155",
+        "run_completeness_status": "unverified",
+        "run_coverage_status": "none",
+        "run_currency_status": "unverified",
+        "run_id": "qualys-run-20260930",
+        "schema_version": 1,
+        "source_account_id": "qualys-offline-account",
+        "source_family": "qualys"
+      },
+      "observations": [
+        {
+          "asset_locator": "proto-c.internal",
+          "collected_at": "2026-09-30T01:00:00Z",
+          "collection_status": "success",
+          "component_locator": "openssl:443:3.0.1",
+          "coverage_scope": "synthetic-complete",
+          "missing_fields": [
+            {
+              "field": "vulnerability_refs",
+              "reason": "not_supplied"
+            }
+          ],
+          "native_id_authority": "qualys",
+          "native_id_scheme": "qid",
+          "native_id_value": "1001",
+          "observation_id": "41d0c530-e259-5f3f-8bcd-1eabdb183610",
+          "observed_at": "2026-09-29T00:00:00Z",
+          "occurrence_id": null,
+          "raw_evidence_ref": "bundle://reimport.xml",
+          "raw_evidence_sha256": "41a15207167f4479400bcf98dc2c857f2ca7df0a4bbc752a3932a23fb06a9035",
+          "report_id": "bundle://reimport.xml",
+          "revision": 1,
+          "run_id": "qualys-run-20260930",
+          "schema_version": 1,
+          "source_account_id": "qualys-offline-account",
+          "source_family": "qualys",
+          "source_first_seen_at": "2026-08-01T00:00:00Z",
+          "source_rating": "Critical",
+          "source_record_locator": "qualys-row-1",
+          "source_record_ordinal": 1,
+          "vulnerability_refs": null
+        },
+        {
+          "asset_locator": "proto-b.internal",
+          "collected_at": "2026-09-30T01:00:00Z",
+          "collection_status": "success",
+          "component_locator": "openssl:443:3.0.1",
+          "coverage_scope": "synthetic-complete",
+          "missing_fields": [
+            {
+              "field": "vulnerability_refs",
+              "reason": "not_supplied"
+            }
+          ],
+          "native_id_authority": "qualys",
+          "native_id_scheme": "qid",
+          "native_id_value": "1001",
+          "observation_id": "2bad46a1-9aa0-5399-9ab6-ccb2a305dafa",
+          "observed_at": "2026-09-29T00:00:00Z",
+          "occurrence_id": null,
+          "raw_evidence_ref": "bundle://reimport.xml",
+          "raw_evidence_sha256": "41a15207167f4479400bcf98dc2c857f2ca7df0a4bbc752a3932a23fb06a9035",
+          "report_id": "bundle://reimport.xml",
+          "revision": 1,
+          "run_id": "qualys-run-20260930",
+          "schema_version": 1,
+          "source_account_id": "qualys-offline-account",
+          "source_family": "qualys",
+          "source_first_seen_at": "2026-08-01T00:00:00Z",
+          "source_rating": "Low",
+          "source_record_locator": "qualys-row-2",
+          "source_record_ordinal": 2,
+          "vulnerability_refs": null
+        },
+        {
+          "asset_locator": "proto-a.internal",
+          "collected_at": "2026-09-30T01:00:00Z",
+          "collection_status": "success",
+          "component_locator": "openssl:8443:3.0.0",
+          "coverage_scope": "synthetic-complete",
+          "missing_fields": [
+            {
+              "field": "vulnerability_refs",
+              "reason": "not_supplied"
+            }
+          ],
+          "native_id_authority": "qualys",
+          "native_id_scheme": "qid",
+          "native_id_value": "1001",
+          "observation_id": "08a64e35-d139-5262-8ee8-77d5649cf5b7",
+          "observed_at": "2026-09-29T00:00:00Z",
+          "occurrence_id": null,
+          "raw_evidence_ref": "bundle://reimport.xml",
+          "raw_evidence_sha256": "41a15207167f4479400bcf98dc2c857f2ca7df0a4bbc752a3932a23fb06a9035",
+          "report_id": "bundle://reimport.xml",
+          "revision": 1,
+          "run_id": "qualys-run-20260930",
+          "schema_version": 1,
+          "source_account_id": "qualys-offline-account",
+          "source_family": "qualys",
+          "source_first_seen_at": "2026-08-01T00:00:00Z",
+          "source_rating": "Low",
+          "source_record_locator": "qualys-row-3",
+          "source_record_ordinal": 3,
+          "vulnerability_refs": null
+        },
+        {
+          "asset_locator": "proto-a.internal",
+          "collected_at": "2026-09-30T01:00:00Z",
+          "collection_status": "success",
+          "component_locator": "openssl:443:3.0.1",
+          "coverage_scope": "synthetic-complete",
+          "missing_fields": [
+            {
+              "field": "vulnerability_refs",
+              "reason": "not_supplied"
+            }
+          ],
+          "native_id_authority": "qualys",
+          "native_id_scheme": "qid",
+          "native_id_value": "1001",
+          "observation_id": "cfdfaefb-f114-5e8b-a7de-1b21ea50748d",
+          "observed_at": "2026-09-29T00:00:00Z",
+          "occurrence_id": null,
+          "raw_evidence_ref": "bundle://reimport.xml",
+          "raw_evidence_sha256": "41a15207167f4479400bcf98dc2c857f2ca7df0a4bbc752a3932a23fb06a9035",
+          "report_id": "bundle://reimport.xml",
+          "revision": 1,
+          "run_id": "qualys-run-20260930",
+          "schema_version": 1,
+          "source_account_id": "qualys-offline-account",
+          "source_family": "qualys",
+          "source_first_seen_at": "2026-08-01T00:00:00Z",
+          "source_rating": "Low",
+          "source_record_locator": "qualys-row-4",
+          "source_record_ordinal": 4,
+          "vulnerability_refs": null
+        },
+        {
+          "asset_locator": "proto-b.internal",
+          "collected_at": "2026-09-30T01:00:00Z",
+          "collection_status": "success",
+          "component_locator": "openssl:8443:3.0.0",
+          "coverage_scope": "synthetic-complete",
+          "missing_fields": [
+            {
+              "field": "vulnerability_refs",
+              "reason": "not_supplied"
+            }
+          ],
+          "native_id_authority": "qualys",
+          "native_id_scheme": "qid",
+          "native_id_value": "1001",
+          "observation_id": "b327d6bd-fdad-5a33-a5c6-7652e47e66b3",
+          "observed_at": "2026-09-29T00:00:00Z",
+          "occurrence_id": null,
+          "raw_evidence_ref": "bundle://reimport.xml",
+          "raw_evidence_sha256": "41a15207167f4479400bcf98dc2c857f2ca7df0a4bbc752a3932a23fb06a9035",
+          "report_id": "bundle://reimport.xml",
+          "revision": 1,
+          "run_id": "qualys-run-20260930",
+          "schema_version": 1,
+          "source_account_id": "qualys-offline-account",
+          "source_family": "qualys",
+          "source_first_seen_at": "2026-08-01T00:00:00Z",
+          "source_rating": "Low",
+          "source_record_locator": "qualys-row-5",
+          "source_record_ordinal": 5,
+          "vulnerability_refs": null
+        },
+        {
+          "asset_locator": "proto-c.internal",
+          "collected_at": "2026-09-30T01:00:00Z",
+          "collection_status": "success",
+          "component_locator": "openssl:8443:3.0.0",
+          "coverage_scope": "synthetic-complete",
+          "missing_fields": [
+            {
+              "field": "vulnerability_refs",
+              "reason": "not_supplied"
+            }
+          ],
+          "native_id_authority": "qualys",
+          "native_id_scheme": "qid",
+          "native_id_value": "1001",
+          "observation_id": "b48c33f7-7018-525b-aa85-1b0296101e5a",
+          "observed_at": "2026-09-29T00:00:00Z",
+          "occurrence_id": null,
+          "raw_evidence_ref": "bundle://reimport.xml",
+          "raw_evidence_sha256": "41a15207167f4479400bcf98dc2c857f2ca7df0a4bbc752a3932a23fb06a9035",
+          "report_id": "bundle://reimport.xml",
+          "revision": 1,
+          "run_id": "qualys-run-20260930",
+          "schema_version": 1,
+          "source_account_id": "qualys-offline-account",
+          "source_family": "qualys",
+          "source_first_seen_at": "2026-08-01T00:00:00Z",
+          "source_rating": "Low",
+          "source_record_locator": "qualys-row-6",
+          "source_record_ordinal": 6,
+          "vulnerability_refs": null
+        }
+      ],
+      "occurrences": [
+        "e84b4736-b3a5-4f4e-9bf1-85ed9c4e77e0",
+        "3af0d16e-42fa-4c9e-9ce7-85105ceaca6c",
+        "d1fb8a0c-2111-433e-a671-2665bd8e5cea",
+        "f7e41821-263a-4649-9b3a-48c0633c5389",
+        "3efd3e81-d046-4ae3-b629-aee119c228d3",
+        "7ad66ce6-1d41-41b9-908a-48609b8c0251"
+      ],
+      "operation": {
+        "bound_test_id": null,
+        "close_old_findings": false,
+        "context_key": "offline:qualys/prototype",
+        "deduplication_complete": null,
+        "deduplication_evidence_ref": null,
+        "endpoint_ids": [],
+        "engine_release": "CE-offline-unverified",
+        "error_code": null,
+        "error_detail_ref": null,
+        "finding_ids": [],
+        "first_import_baseline_ref": null,
+        "mapping_revision": null,
+        "operation_id": "22222222-2222-4222-8222-222222222222",
+        "parser_config_version": "uvm-qualys-generic-v1",
+        "payload_sha256": "7ebe94556bf37e5c4b05d8af79d609532bde7ad7bd8046e609bbabc42d6ed155",
+        "post_issued": false,
+        "prior_mapping_revision": null,
+        "reconciled": false,
+        "reconciliation_evidence_ref": null,
+        "request_kind": "reimport",
+        "requested_at": "2026-09-30T01:00:00Z",
+        "response_deduplication_complete": null,
+        "response_ref": null,
+        "response_test_id": null,
+        "revision": 1,
+        "scan_type": "Generic Findings Import",
+        "schema_version": 1,
+        "settle_readback_ref": null,
+        "source_run_id": "qualys-run-20260930",
+        "status": "pending",
+        "supersedes_operation_id": null,
+        "test_id": "offline-test-uvm-g1"
+      },
+      "payload": "reimport-payload.json",
+      "payload_records": [
+        {
+          "payload_record_id": "1",
+          "schema_version": 1,
+          "source_observation_ids": [
+            "41d0c530-e259-5f3f-8bcd-1eabdb183610"
+          ],
+          "transformation_version": 1
+        },
+        {
+          "payload_record_id": "2",
+          "schema_version": 1,
+          "source_observation_ids": [
+            "2bad46a1-9aa0-5399-9ab6-ccb2a305dafa"
+          ],
+          "transformation_version": 1
+        },
+        {
+          "payload_record_id": "3",
+          "schema_version": 1,
+          "source_observation_ids": [
+            "08a64e35-d139-5262-8ee8-77d5649cf5b7"
+          ],
+          "transformation_version": 1
+        },
+        {
+          "payload_record_id": "4",
+          "schema_version": 1,
+          "source_observation_ids": [
+            "cfdfaefb-f114-5e8b-a7de-1b21ea50748d"
+          ],
+          "transformation_version": 1
+        },
+        {
+          "payload_record_id": "5",
+          "schema_version": 1,
+          "source_observation_ids": [
+            "b327d6bd-fdad-5a33-a5c6-7652e47e66b3"
+          ],
+          "transformation_version": 1
+        },
+        {
+          "payload_record_id": "6",
+          "schema_version": 1,
+          "source_observation_ids": [
+            "b48c33f7-7018-525b-aa85-1b0296101e5a"
+          ],
+          "transformation_version": 1
+        }
+      ],
+      "payload_sha256": "7ebe94556bf37e5c4b05d8af79d609532bde7ad7bd8046e609bbabc42d6ed155",
+      "resolutions": [
+        {
+          "candidate_explanations": [
+            {
+              "field": "provisioning_key",
+              "reason": "stable attribute match",
+              "value": "pk:proto-c.internal",
+              "workload_id": "ab23dba6-a69f-4db4-91e8-25d5b2d6d6d6"
+            }
+          ],
+          "candidate_workload_ids": [
+            "ab23dba6-a69f-4db4-91e8-25d5b2d6d6d6"
+          ],
+          "evaluated_at": "2026-09-30T01:00:00Z",
+          "exposure_id": "77b67d07-da9f-4d51-96ea-2e4ea604d957",
+          "group_id": "8267568e-2ece-4073-814f-f3b8995cbb78",
+          "incarnation_id": "668897ff-0040-4bf3-9363-a1b8d5540037",
+          "matching_inputs": {
+            "provisioning_key": "pk:proto-c.internal"
+          },
+          "observation_id": "41d0c530-e259-5f3f-8bcd-1eabdb183610",
+          "occurrence_id": "e84b4736-b3a5-4f4e-9bf1-85ed9c4e77e0",
+          "outcome": "matched",
+          "reason": "matched existing identity",
+          "resolution_id": "860c4e79-e271-42a0-9290-173961ef5cd2",
+          "revision": 1,
+          "rule_id": "qualys-offline-rule",
+          "rule_version": 1,
+          "schema_version": 1,
+          "supersedes_resolution_id": null,
+          "workload_id": "ab23dba6-a69f-4db4-91e8-25d5b2d6d6d6"
+        },
+        {
+          "candidate_explanations": [
+            {
+              "field": "provisioning_key",
+              "reason": "stable attribute match",
+              "value": "pk:proto-b.internal",
+              "workload_id": "ac1ebb19-0407-4038-9383-b4cd830102cf"
+            }
+          ],
+          "candidate_workload_ids": [
+            "ac1ebb19-0407-4038-9383-b4cd830102cf"
+          ],
+          "evaluated_at": "2026-09-30T01:00:00Z",
+          "exposure_id": "23804428-0873-4e72-bf62-bf660de84bc5",
+          "group_id": "8267568e-2ece-4073-814f-f3b8995cbb78",
+          "incarnation_id": "838f6e99-b682-488f-a48f-447b0fa55abe",
+          "matching_inputs": {
+            "provisioning_key": "pk:proto-b.internal"
+          },
+          "observation_id": "2bad46a1-9aa0-5399-9ab6-ccb2a305dafa",
+          "occurrence_id": "3af0d16e-42fa-4c9e-9ce7-85105ceaca6c",
+          "outcome": "matched",
+          "reason": "matched existing identity",
+          "resolution_id": "471e60a9-d5e9-487b-b0db-317508e777f5",
+          "revision": 1,
+          "rule_id": "qualys-offline-rule",
+          "rule_version": 1,
+          "schema_version": 1,
+          "supersedes_resolution_id": null,
+          "workload_id": "ac1ebb19-0407-4038-9383-b4cd830102cf"
+        },
+        {
+          "candidate_explanations": [
+            {
+              "field": "provisioning_key",
+              "reason": "stable attribute match",
+              "value": "pk:proto-a.internal",
+              "workload_id": "56befe81-930d-483d-b16c-74177ea27d2f"
+            }
+          ],
+          "candidate_workload_ids": [
+            "56befe81-930d-483d-b16c-74177ea27d2f"
+          ],
+          "evaluated_at": "2026-09-30T01:00:00Z",
+          "exposure_id": "2c391aeb-32bc-43f8-b34c-845f3f8a07cf",
+          "group_id": "8267568e-2ece-4073-814f-f3b8995cbb78",
+          "incarnation_id": "ac213735-cf08-400a-b1e7-1540eeb6c771",
+          "matching_inputs": {
+            "provisioning_key": "pk:proto-a.internal"
+          },
+          "observation_id": "08a64e35-d139-5262-8ee8-77d5649cf5b7",
+          "occurrence_id": "d1fb8a0c-2111-433e-a671-2665bd8e5cea",
+          "outcome": "matched",
+          "reason": "matched existing identity",
+          "resolution_id": "be62cd05-2d50-469a-9ac5-3f0b11d5e2ce",
+          "revision": 1,
+          "rule_id": "qualys-offline-rule",
+          "rule_version": 1,
+          "schema_version": 1,
+          "supersedes_resolution_id": null,
+          "workload_id": "56befe81-930d-483d-b16c-74177ea27d2f"
+        },
+        {
+          "candidate_explanations": [
+            {
+              "field": "provisioning_key",
+              "reason": "stable attribute match",
+              "value": "pk:proto-a.internal",
+              "workload_id": "56befe81-930d-483d-b16c-74177ea27d2f"
+            }
+          ],
+          "candidate_workload_ids": [
+            "56befe81-930d-483d-b16c-74177ea27d2f"
+          ],
+          "evaluated_at": "2026-09-30T01:00:00Z",
+          "exposure_id": "2c391aeb-32bc-43f8-b34c-845f3f8a07cf",
+          "group_id": "8267568e-2ece-4073-814f-f3b8995cbb78",
+          "incarnation_id": "ac213735-cf08-400a-b1e7-1540eeb6c771",
+          "matching_inputs": {
+            "provisioning_key": "pk:proto-a.internal"
+          },
+          "observation_id": "cfdfaefb-f114-5e8b-a7de-1b21ea50748d",
+          "occurrence_id": "f7e41821-263a-4649-9b3a-48c0633c5389",
+          "outcome": "matched",
+          "reason": "matched existing identity",
+          "resolution_id": "a5741b91-1145-45a7-b786-cdd362fd5147",
+          "revision": 1,
+          "rule_id": "qualys-offline-rule",
+          "rule_version": 1,
+          "schema_version": 1,
+          "supersedes_resolution_id": null,
+          "workload_id": "56befe81-930d-483d-b16c-74177ea27d2f"
+        },
+        {
+          "candidate_explanations": [
+            {
+              "field": "provisioning_key",
+              "reason": "stable attribute match",
+              "value": "pk:proto-b.internal",
+              "workload_id": "ac1ebb19-0407-4038-9383-b4cd830102cf"
+            }
+          ],
+          "candidate_workload_ids": [
+            "ac1ebb19-0407-4038-9383-b4cd830102cf"
+          ],
+          "evaluated_at": "2026-09-30T01:00:00Z",
+          "exposure_id": "23804428-0873-4e72-bf62-bf660de84bc5",
+          "group_id": "8267568e-2ece-4073-814f-f3b8995cbb78",
+          "incarnation_id": "838f6e99-b682-488f-a48f-447b0fa55abe",
+          "matching_inputs": {
+            "provisioning_key": "pk:proto-b.internal"
+          },
+          "observation_id": "b327d6bd-fdad-5a33-a5c6-7652e47e66b3",
+          "occurrence_id": "3efd3e81-d046-4ae3-b629-aee119c228d3",
+          "outcome": "matched",
+          "reason": "matched existing identity",
+          "resolution_id": "12b1f128-602f-45c0-8a6a-5d4ef9f3c5b3",
+          "revision": 1,
+          "rule_id": "qualys-offline-rule",
+          "rule_version": 1,
+          "schema_version": 1,
+          "supersedes_resolution_id": null,
+          "workload_id": "ac1ebb19-0407-4038-9383-b4cd830102cf"
+        },
+        {
+          "candidate_explanations": [
+            {
+              "field": "provisioning_key",
+              "reason": "stable attribute match",
+              "value": "pk:proto-c.internal",
+              "workload_id": "ab23dba6-a69f-4db4-91e8-25d5b2d6d6d6"
+            }
+          ],
+          "candidate_workload_ids": [
+            "ab23dba6-a69f-4db4-91e8-25d5b2d6d6d6"
+          ],
+          "evaluated_at": "2026-09-30T01:00:00Z",
+          "exposure_id": "77b67d07-da9f-4d51-96ea-2e4ea604d957",
+          "group_id": "8267568e-2ece-4073-814f-f3b8995cbb78",
+          "incarnation_id": "668897ff-0040-4bf3-9363-a1b8d5540037",
+          "matching_inputs": {
+            "provisioning_key": "pk:proto-c.internal"
+          },
+          "observation_id": "b48c33f7-7018-525b-aa85-1b0296101e5a",
+          "occurrence_id": "7ad66ce6-1d41-41b9-908a-48609b8c0251",
+          "outcome": "matched",
+          "reason": "matched existing identity",
+          "resolution_id": "928846de-ceb0-4383-bb57-c83e22a58125",
+          "revision": 1,
+          "rule_id": "qualys-offline-rule",
+          "rule_version": 1,
+          "schema_version": 1,
+          "supersedes_resolution_id": null,
+          "workload_id": "ab23dba6-a69f-4db4-91e8-25d5b2d6d6d6"
+        }
+      ],
+      "run_id": "qualys-run-20260930",
+      "xml": "reimport.xml",
+      "xml_sha256": "41a15207167f4479400bcf98dc2c857f2ca7df0a4bbc752a3932a23fb06a9035"
+    }
+  },
+  "schema_version": 1,
+  "status": "offline-only; CE integration-unverified"
+}

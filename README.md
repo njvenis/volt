@@ -8,7 +8,7 @@ DefectDojo CE remains the finding engine. VOLT is intended to add lifecycle and 
 
 This repository is under active development. It contains Python services, a React/TypeScript UI, database migrations, local fixtures and an evolving container packaging target. Current verification is limited to the commands and environments described below. G7 deployment and operations scenarios are proposed acceptance goals; their presence in OpenSpec does not mean they have been implemented or verified.
 
-The design uses namespaced, source-native vulnerability identifiers as the primary grouping key. A shared CVE alone should not merge separate groups. The intended lifecycle preserves finding lineage and assessment history across rebuilds and scanner refreshes, and distinguishes incomplete data or accepted risk from remediation. These are project invariants and targets; each capability still needs its relevant scenario and environment-specific evidence.
+The design uses namespaced, source-native vulnerability identifiers as the primary grouping key. A shared CVE alone should not merge separate groups. Synthetic local suites currently exercise distinct source-native groups despite shared CVEs, retained identity and detection history across rebuilds, and ingestion completeness and freshness checks with replay and conflict handling. These suites do not establish live scanner, DefectDojo or deployment integration.
 
 The current checkout does not provide an end-user installer or a documented checkout-to-running-application path. `Dockerfile.g7` is a development packaging target, not a supported deployment recipe. Do not treat DefectDojo's own installation instructions as a VOLT installation method.
 
@@ -19,13 +19,11 @@ The current checkout does not provide an end-user installer or a documented chec
 - **Web UI** is in `ui/` and is built with React, TypeScript and Vite.
 - **Development specification** uses OpenSpec changes and scenarios in `openspec/`; requirements and verification boundaries are in [REQUIREMENTS.md](REQUIREMENTS.md), [GATES.md](GATES.md) and [RUNBOOK.md](RUNBOOK.md).
 
-VOLT is not a forked DefectDojo installation guide. Other security tools, such as [OWASP Dependency-Track](https://github.com/DependencyTrack/dependency-track), also separate user-facing project documentation from developer setup; their commands and deployment instructions do not apply to VOLT.
-
 ## Development setup
 
 These steps install development dependencies, build the UI and validate local specifications. They do not install or start a complete VOLT and DefectDojo service.
 
-Prerequisites: Python 3.13.15 or later, [`uv`](https://docs.astral.sh/uv/), Node.js and npm. Run from the repository root:
+Prerequisites: Python 3.13.15 or later, [`uv`](https://docs.astral.sh/uv/) (CI pins 0.12.18), Node.js 24.21.0 and npm. Run from the repository root:
 
 ```sh
 uv sync --locked

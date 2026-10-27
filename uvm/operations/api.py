@@ -669,10 +669,12 @@ def install_observer_settings_routes(app: FastAPI) -> None:
             now = app.state.utc_now().astimezone(_UTC)
             consumer_stamps = [datetime.fromisoformat(item["observed_at"].replace("Z", "+00:00")).astimezone(_UTC)
                 for item in consumers.values()]
+            applied_consumers_stale = (body["outcome"] == "applied" and any(
+                now - stamp > timedelta(seconds=policy["freshness_seconds"])
+                    or stamp > now + timedelta(seconds=1) for stamp in consumer_stamps))
             if (now - observed_at > timedelta(seconds=policy["freshness_seconds"])
                     or observed_at > now + timedelta(seconds=1)
-                    or any(now - stamp > timedelta(seconds=policy["freshness_seconds"])
-                        or stamp > now + timedelta(seconds=1) for stamp in consumer_stamps)):
+                    or applied_consumers_stale):
                 raise HTTPException(400, {"code": "report_expired",
                     "message": "Host report was not admitted before its freshness deadline"})
             latest_sequence = int(status["latest_report_sequence"] or 0) if status else 0

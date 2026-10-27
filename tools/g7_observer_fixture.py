@@ -56,7 +56,9 @@ def run(args: argparse.Namespace) -> None:
         public.chmod(0o644)
         (secrets_dir / "registry.json").write_text(json.dumps([{
             "deployment_id": "g7-local", "label": "Disposable G7 local",
-            "host_principal_id": "g7-host", "verification_key_file": "/run/uvm-g7-host-pub.pem"}],
+            "host_principal_id": "g7-host", "verification_key_file": "/run/uvm-g7-host-pub.pem"}, {
+            "deployment_id": "g7-other", "label": "Disposable G7 B (registered, ungranted)",
+            "host_principal_id": "g7-host-b", "verification_key_file": "/run/uvm-g7-host-pub.pem"}],
             separators=(",", ":")), encoding="utf-8")
         (secrets_dir / "registry.json").chmod(0o644)
         oidc = "http://127.0.0.1:9000"
@@ -181,6 +183,14 @@ def run(args: argparse.Namespace) -> None:
         print("host_processes=observer,supervisor,controller")
         return
 
+    if args.command == "host-once":
+        completed = subprocess.run([sys.executable, "tools/g7_host_observer.py",
+            "controller", "--policy", str(host_dir / "policy.json"), "--once"],
+            cwd=Path(__file__).resolve().parents[1], check=True,
+            capture_output=True, text=True)
+        print(completed.stdout.strip())
+        return
+
     if args.command == "host-control":
         if args.role not in {"observer", "supervisor", "controller"}:
             raise SystemExit("invalid host role")
@@ -192,6 +202,21 @@ def run(args: argparse.Namespace) -> None:
             os.killpg(pid, signal.SIGSTOP)
         elif args.action == "resume":
             os.killpg(pid, signal.SIGCONT)
+        elif args.action == "terminate":
+            try:
+                os.killpg(pid, signal.SIGTERM)
+                os.killpg(pid, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+            time.sleep(0.5)
+            pid_file.write_text("0", encoding="ascii")
+        elif args.action == "start":
+            output = (host_dir / f"{args.role}.log").open("ab", buffering=0)
+            process = subprocess.Popen(["uv", "run", "python", "tools/g7_host_observer.py",
+                args.role, "--policy", str(host_dir / "policy.json")],
+                cwd=Path(__file__).resolve().parents[1], stdin=subprocess.DEVNULL,
+                stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+            pid_file.write_text(str(process.pid), encoding="ascii")
         elif args.action == "restart":
             try:
                 os.killpg(pid, signal.SIGTERM)
@@ -300,9 +325,9 @@ def run(args: argparse.Namespace) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("create", "anchor-init", "link-actor", "host-config", "host-control", "host-report-attacks", "host-telemetry-count"))
+    parser.add_argument("command", choices=("create", "anchor-init", "link-actor", "host-config", "host-control", "host-once", "host-report-attacks", "host-telemetry-count"))
     parser.add_argument("--role", choices=("observer", "supervisor", "controller"))
-    parser.add_argument("--action", choices=("stop", "resume", "restart", "tighten-policy", "restore-policy"))
+    parser.add_argument("--action", choices=("stop", "resume", "restart", "start", "terminate", "tighten-policy", "restore-policy"))
     parser.add_argument("--report-id")
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--image", default="")

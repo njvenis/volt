@@ -170,42 +170,92 @@ class HostObserverTests(unittest.TestCase):
         journal = host.read_json(Path(self.policy["state_dir"]) / "journal.json")
         self.assertNotIn("last_good", journal)
 
-    def test_expired_pending_report_is_refreshed_and_superseded_report_reconciles(self):
+    def test_expired_applied_report_never_refreshes_stale_consumer_timestamps(self):
+        desired = self._desired()
+        stale_stamp = "2020-01-01T00:00:00Z"
+        for role in ("observer", "supervisor"):
+            host.atomic_json(Path(self.policy[role + "_readback"]), {
+                "revision": desired["revision"], "digest": desired["digest"],
+                "observed_at": stale_stamp})
+        prior = host._report(self.policy, {"sequence": 1, "last_good": None},
+            desired, "applied", None)
+        self.assertEqual(prior["outcome"], "uncertain")
+        # Exercise an expired report that claimed applied in its original
+        # record: its stale consumer timestamps must stay stale on retry.
+        prior["outcome"] = "applied"
+        prior["active_revision"] = desired["revision"]
+        prior["active_digest"] = desired["digest"]
+        prior = host.signed_report(self.policy,
+            {key: value for key, value in prior.items() if key != "signature"})
+        host.atomic_json(Path(self.policy["token_file"]), "test-token\n")
+
+        def expired():
+            return urllib.error.HTTPError("https://host.invalid/reports", 400,
+                "rejected", {}, io.BytesIO(json.dumps({"detail": {"code": "report_expired"}}).encode()))
+
+        host.atomic_json(Path(self.policy["state_dir"]) / "journal.json", {
+            "sequence": 1, "pending_report": prior})
+        posts = []
+
+        def stale_request(_url, _token, _timeout, body=None):
+            if body is None:
+                return {"schema_version": 1, "deployment_id": "deploy-a", "desired": None}
+            posts.append(body)
+            raise expired()
+
+        with patch.object(host, "request_json", side_effect=stale_request):
+            result = host.controller_once(self.policy)
+        self.assertEqual(result, {"status": "uncertain", "failure_code": "consumer_readback_stale"})
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0]["consumers"]["observer"]["observed_at"], stale_stamp)
+        self.assertEqual(posts[0]["consumers"]["supervisor"]["observed_at"], stale_stamp)
+        journal = host.read_json(Path(self.policy["state_dir"]) / "journal.json")
+        self.assertEqual(journal["pending_report"]["consumers"]["observer"]["observed_at"], stale_stamp)
+
+        for role in ("observer", "supervisor"):
+            host.atomic_json(Path(self.policy[role + "_readback"]), {
+                "revision": desired["revision"], "digest": desired["digest"],
+                "observed_at": host.utc_now()})
+
+        def accept_fresh(_url, _token, _timeout, body=None):
+            if body is None:
+                return {"schema_version": 1, "deployment_id": "deploy-a", "desired": None}
+            if not host._consumer_readbacks_fresh(body["consumers"], self.policy["freshness_seconds"]):
+                raise expired()
+            return {"schema_version": 1, "report_id": body["report_id"],
+                "sequence": body["sequence"], "accepted": True, "duplicate": False}
+
+        with patch.object(host, "request_json", side_effect=accept_fresh):
+            host.controller_once(self.policy)
+        journal = host.read_json(Path(self.policy["state_dir"]) / "journal.json")
+        self.assertTrue(journal["last_acknowledgement"]["accepted"])
+
+    def test_missing_readback_uses_parseable_stale_sentinel(self):
+        item = host.readback(Path(self.policy["observer_readback"]))
+        self.assertIsNone(item["revision"])
+        self.assertIsNone(item["digest"])
+        self.assertEqual(item["observed_at"], "1970-01-01T00:00:00Z")
+        self.assertFalse(host._consumer_readbacks_fresh({"observer": item},
+            self.policy["freshness_seconds"]))
+
+    def test_superseded_pending_report_reconciles(self):
         desired = self._desired()
         prior = host._report(self.policy, {"sequence": 1, "last_good": None},
             desired, "failed", "host_policy_rejected")
+        host.atomic_json(Path(self.policy["token_file"]), "test-token\n")
+        host.atomic_json(Path(self.policy["state_dir"]) / "journal.json", {
+            "sequence": 1, "pending_report": prior})
 
-        def http_error(status, code):
-            return urllib.error.HTTPError("https://host.invalid/reports", status,
-                "rejected", {}, io.BytesIO(json.dumps({"detail": {"code": code}}).encode()))
+        def superseded(_url, _token, _timeout, body=None):
+            if body is None:
+                return {"schema_version": 1, "deployment_id": "deploy-a", "desired": None}
+            raise urllib.error.HTTPError("https://host.invalid/reports", 409, "rejected", {},
+                io.BytesIO(json.dumps({"detail": {"code": "report_superseded"}}).encode()))
 
-        for status, code, expected in (
-                (400, "report_expired", "last_acknowledgement"),
-                (409, "report_superseded", "superseded_report")):
-            with self.subTest(code=code):
-                # Each case starts with a fresh host journal and exercises the
-                # retained-report recovery before fetching the current desired.
-                host.atomic_json(Path(self.policy["state_dir"]) / "journal.json", {
-                    "sequence": 1, "pending_report": prior})
-                posts = []
-
-                def fake_request(_url, _token, _timeout, body=None):
-                    if body is None:
-                        return {"schema_version": 1, "deployment_id": "deploy-a", "desired": None}
-                    posts.append(body)
-                    if len(posts) == 1:
-                        raise http_error(status, code)
-                    return {"schema_version": 1, "report_id": body["report_id"],
-                        "sequence": body["sequence"], "accepted": True, "duplicate": False}
-
-                with patch.object(host, "request_json", side_effect=fake_request):
-                    self.assertEqual(host.controller_once(self.policy)["status"], "uncertain")
-                journal = host.read_json(Path(self.policy["state_dir"]) / "journal.json")
-                self.assertIn(expected, journal)
-                self.assertEqual(posts[0]["report_id"], prior["report_id"])
-                if code == "report_expired":
-                    self.assertEqual(posts[1]["report_id"], prior["report_id"])
-                    self.assertNotEqual(posts[1]["observed_at"], prior["observed_at"])
+        with patch.object(host, "request_json", side_effect=superseded):
+            self.assertEqual(host.controller_once(self.policy)["status"], "uncertain")
+        journal = host.read_json(Path(self.policy["state_dir"]) / "journal.json")
+        self.assertEqual(journal["superseded_report"]["report_id"], prior["report_id"])
 
     def test_observer_runs_http_request_with_selected_deadline_and_scheduler_check(self):
         desired = self._desired()
@@ -250,10 +300,16 @@ class HostObserverTests(unittest.TestCase):
             host.consumer_once("observer", self.policy)
             state_before = host.read_json(Path(self.policy["observer_state"]))
             host.consumer_once("observer", self.policy)
+            state_repeat = host.read_json(Path(self.policy["observer_state"]))
+            with patch.object(host.time, "monotonic_ns",
+                    return_value=time.monotonic_ns() + 16_000_000_000):
+                host.consumer_once("observer", self.policy)
         state_after = host.read_json(Path(self.policy["observer_state"]))
         self.assertEqual(state_before["scheduler"]["status"], "healthy")
+        self.assertEqual(state_repeat["scheduler"]["status"], "healthy")
+        self.assertLess(state_repeat["scheduler"]["age_seconds"], 15)
         self.assertEqual(state_after["scheduler"]["status"], "stale_or_nonprogressing")
-        self.assertEqual(state_after["loop_sequence"], state_before["loop_sequence"] + 1)
+        self.assertEqual(state_after["loop_sequence"], state_before["loop_sequence"] + 2)
 
     def test_supervisor_uses_selected_future_skew_and_preserves_work_across_revision(self):
         first = self._desired()
@@ -327,6 +383,21 @@ class HostObserverTests(unittest.TestCase):
         result = host.measure_lag(telemetry, anchors, VALUES, now)
         self.assertEqual(result["anchor_export"]["status"], "unknown")
         self.assertEqual(result["anchor_export"]["timestamp_anomaly_count"], 1)
+
+    def test_missing_anchor_receipt_persists_finite_unknown_measurement(self):
+        now = datetime(2026, 10, 27, 16, 0, tzinfo=UTC)
+        telemetry = {"audit_complete": True, "incidents_complete": True,
+            "audit_events": [{"event_id": "event-missing-receipt", "event_digest": "a" * 64,
+                "sink_receipt": None, "received_at": "2026-10-27T15:59:30Z"}],
+            "incidents": []}
+        result = host.measure_lag(telemetry, {}, VALUES, now)
+        encoded = json.dumps(result, allow_nan=False)
+        path = Path(self.policy["state_dir"]) / "measurement.json"
+        host.atomic_json(path, result)
+        self.assertEqual(json.loads(encoded), host.read_json(path))
+        self.assertEqual(result["anchor_export"]["status"], "unknown")
+        self.assertEqual(result["anchor_export"]["missing_receipt_count"], 1)
+        self.assertEqual(result["anchor_export"]["maximum_pending_lag_seconds"], 30)
 
 
 if __name__ == "__main__":

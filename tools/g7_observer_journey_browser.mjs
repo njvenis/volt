@@ -66,6 +66,12 @@ async function hostTelemetryCount() {
     {cwd:repoRoot,encoding:'utf8',stdio:['ignore','pipe','pipe']});
   return JSON.parse(output.trim());
 }
+function hostOnce() {
+  const output=execFileSync('uv',['run','python','tools/g7_observer_fixture.py',
+    'host-once','--root',fixtureRoot],
+    {cwd:repoRoot,encoding:'utf8',stdio:['ignore','pipe','pipe']});
+  return JSON.parse(output.trim());
+}
 async function failAtomicWrite(target,values) {
   const before=await api('/api/v1/operations/observer-settings/g7-local');
   const auditBefore=await hostTelemetryCount();
@@ -119,6 +125,14 @@ async function waitForJson(pathname,predicate,timeoutMs=20000) {
     await page.waitForTimeout(250);
   }
   throw new Error(`expected host state was not observed: ${pathname}`);
+}
+async function waitForHostLog(pathname,needle,timeoutMs=15000) {
+  const until=Date.now()+timeoutMs;let latest='';
+  while(Date.now()<until){
+    try { latest=await readFile(pathname,'utf8'); if(latest.includes(needle))return latest; } catch {}
+    await page.waitForTimeout(250);
+  }
+  throw new Error(`host log did not contain expected status ${needle}`);
 }
 
 try {
@@ -178,8 +192,11 @@ try {
   await page.waitForTimeout(5500);
 
   const cross=await api('/api/v1/operations/observer-settings/g7-other');
-  if(cross.status!==404)throw new Error(`cross-deployment access returned ${cross.status}: ${JSON.stringify(cross.body)}`);
+  if(cross.status!==404)throw new Error(`registered deployment B read returned ${cross.status}: ${JSON.stringify(cross.body)}`);
   counts.crossDeploymentDenied=cross.status;
+  const absent=await api('/api/v1/operations/observer-settings/g7-unregistered');
+  if(absent.status!==404)throw new Error(`absent deployment read returned ${absent.status}`);
+  counts.absentRegistryDirectRead=absent.status;
   const csrf=await page.evaluate(async()=>{
     const response=await fetch('/api/v1/assessment/commands',{method:'POST',credentials:'same-origin',
       headers:{'Content-Type':'application/json'},body:JSON.stringify({})});return response.status;
@@ -201,8 +218,9 @@ try {
   const discovery=await api('/api/v1/operations/observer-settings?limit=100');
   if(discovery.status!==200||discovery.body.deployments?.length!==1
       ||discovery.body.deployments[0]?.deployment_id!=='g7-local'||discovery.body.next_cursor!==null)
-    throw new Error('bounded deployment discovery did not disclose only the authorized registry entry');
+    throw new Error('bounded discovery exposed registered deployment B without an actor grant');
   counts.authorizedDiscovery=discovery.body.deployments.length;
+  counts.registeredMatchingDenyDiscovery=discovery.body.deployments.some(item=>item.deployment_id==='g7-other')?1:0;
   const discoveryOverbound=await api('/api/v1/operations/observer-settings?limit=1000');
   if(discoveryOverbound.status!==400)throw new Error(`deployment discovery accepted overbound limit ${discoveryOverbound.status}`);
   counts.discoveryOverboundDenied=discoveryOverbound.status;
@@ -494,6 +512,48 @@ try {
   counts.containerOutage=1;
   counts.containerRestart=1;
 
+  // Create an admitted-but-unacknowledged applied report, then leave the
+  // consumers stopped beyond the report freshness window. A controller-only
+  // restart must not turn their old readbacks into fresh applied evidence.
+  await page.goto(origin+'/#administration?section=observer-timing&deployment_id=g7-local',{waitUntil:'domcontentloaded'});
+  await page.getByRole('heading',{name:'Observer timing'}).waitFor({timeout:20000});
+  await page.getByLabel('Deployment').selectOption('g7-local');
+  const values8={...values1,request_deadline_seconds:11,incident_projection_deadline_seconds:13};
+  await fillValues(values8);
+  // Stop the background controller before Save, so no unobserved loop can
+  // report revision 8 before the deliberate one-shot/replay sequence.
+  hostControl('controller','terminate');
+  const rev8ResponsePromise=page.waitForResponse(response=>response.url().includes('/observer-settings/g7-local/commands')
+    &&response.request().method()==='POST');
+  await page.getByRole('button',{name:'Save timing settings'}).click();
+  const rev8Response=await rev8ResponsePromise;
+  if(rev8Response.status()!==201)throw new Error(`rev8 UI Save returned ${rev8Response.status()}`);
+  await page.getByText(/Desired revision 8 recorded/).waitFor({timeout:15000});
+  const pending8=await api('/api/v1/operations/observer-settings/g7-local');
+  if(pending8.body.desired?.revision!==8||pending8.body.application?.status!=='pending'
+      ||pending8.body.effective?.revision!==7)
+    throw new Error('rev8 did not remain pending before stale-readback expiry check');
+  const once=hostOnce();
+  if(once.status!=='applied'||once.revision!==8)
+    throw new Error(`one-shot controller did not create the pending applied report: ${JSON.stringify(once)}`);
+  hostControl('observer','stop');
+  hostControl('supervisor','stop');
+  await page.waitForTimeout(61000);
+  hostControl('controller','start');
+  const controllerLog=path.join(fixtureRoot,'host','controller.log');
+  await waitForHostLog(controllerLog,'consumer_readback_stale',20000);
+  const staleApplied=await api('/api/v1/operations/observer-settings/g7-local');
+  if(staleApplied.body.desired?.revision!==8||staleApplied.body.application?.status==='applied'
+      ||staleApplied.body.effective?.revision!==7)
+    throw new Error(`expired report falsely advanced applied revision: ${JSON.stringify({
+      desired:staleApplied.body.desired,application:staleApplied.body.application,effective:staleApplied.body.effective})}`);
+  counts.expiredReportNoFalseApplied=1;
+  hostControl('observer','resume');
+  hostControl('supervisor','resume');
+  const after8=await waitForAppliedRevision(8);
+  counts.expiredReportFreshRecovery=1;
+  if(after8.body.effective?.revision!==8)throw new Error('fresh consumer work did not reconcile expired report revision 8');
+
   // Exercise keyboard reachability, WCAG 2.1 A/AA and responsive reflow at
   // the three required widths. Reports intentionally retain only counts and
   // violation rule IDs, never page text or credentials.
@@ -532,8 +592,8 @@ try {
 
   const hostState=await Promise.all(['observer-readback.json','supervisor-readback.json'].map(async name=>
     JSON.parse(await readFile(path.join(fixtureRoot,'host','state',name),'utf8'))));
-  if(hostState.some(item=>item.revision!==7||item.digest!==after7.body.desired.digest))
-    throw new Error('independent host consumer readbacks do not match revision 7');
+  if(hostState.some(item=>item.revision!==8||item.digest!==after8.body.desired.digest))
+    throw new Error('independent host consumer readbacks do not match fresh revision 8');
   counts.hostReadbacks=hostState.map(item=>({revision:item.revision,digest:item.digest}));
   const fixtureRows=await api('/api/v1/operations/observer-settings/g7-local/host/telemetry?limit=1000&sink_id=g7-local-fixture');
   if(fixtureRows.status!==403) counts.hostTelemetryStatus=fixtureRows.status; // User sessions cannot cross the host boundary.

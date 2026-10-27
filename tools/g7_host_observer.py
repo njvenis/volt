@@ -191,9 +191,23 @@ def signed_report(policy: dict, unsigned: dict) -> dict:
 def readback(path: Path) -> dict:
     value = read_json(path)
     if not isinstance(value, dict):
-        return {"revision": None, "digest": None, "observed_at": utc_now()}
+        # The API requires a parseable timestamp even for a missing consumer
+        # observation. This fixed stale sentinel never implies a current read.
+        return {"revision": None, "digest": None,
+            "observed_at": "1970-01-01T00:00:00Z"}
     return {"revision": value.get("revision"), "digest": value.get("digest"),
-        "observed_at": value.get("observed_at", utc_now())}
+        "observed_at": value.get("observed_at") or "1970-01-01T00:00:00Z"}
+
+
+def _consumer_readbacks_fresh(consumers: dict, freshness_seconds: int,
+                              now: datetime | None = None) -> bool:
+    now = now or datetime.now(UTC)
+    for item in consumers.values():
+        stamp = _timestamp(item.get("observed_at"))
+        if (stamp is None or (now - stamp).total_seconds() > freshness_seconds
+                or (stamp - now).total_seconds() > 1):
+            return False
+    return True
 
 
 def _root(policy: dict) -> str:
@@ -215,6 +229,9 @@ def _report(policy: dict, journal: dict, requested: dict | None,
         expected = (requested_revision, requested_digest)
         if any((item["revision"], item["digest"]) != expected for item in (observer, supervisor)):
             outcome, failure = "uncertain", "consumer_readback_mismatch"
+        elif not _consumer_readbacks_fresh({"observer": observer, "supervisor": supervisor},
+                policy["freshness_seconds"]):
+            outcome, failure = "uncertain", "consumer_readback_stale"
         else:
             active_revision, active_digest = expected
     sequence = int(journal.get("sequence", 0)) + 1
@@ -261,20 +278,28 @@ def _controller_once_unlocked(policy: dict) -> dict:
                 atomic_json(journal_path, journal)
                 superseded = True
             elif error.code == 400 and error_code == "report_expired":
-                # A report that was definitely rejected as stale is not an
-                # acknowledgement-unknown case. Keep its durable identity and
-                # sequence, refresh only observation timestamps, and retry.
+                # Refresh the controller timestamp, but retain the consumers'
+                # real timestamps. New consumer work is required before an
+                # applied report can become fresh enough for admission.
                 unsigned = {key: value for key, value in pending.items()
                     if key != "signature"}
                 unsigned["observed_at"] = utc_now()
-                consumer_stamps = {name: {**item, "observed_at": utc_now()}
-                    for name, item in unsigned["consumers"].items()}
+                consumer_stamps = {name: readback(Path(policy[name + "_readback"]))
+                    for name in ("observer", "supervisor")}
                 unsigned["consumers"] = consumer_stamps
                 pending = signed_report(policy, unsigned)
                 journal["pending_report"] = pending
                 atomic_json(journal_path, journal)
+                if (pending.get("outcome") == "applied"
+                        and not _consumer_readbacks_fresh(consumer_stamps,
+                            policy["freshness_seconds"])):
+                    return {"status": "uncertain", "failure_code": "consumer_readback_stale"}
                 try:
                     acknowledgement = request_json(root + "/host/reports", token, timeout, pending)
+                except urllib.error.HTTPError as retry_error:
+                    if retry_error.code == 400 and _http_error_code(retry_error) == "report_expired":
+                        return {"status": "uncertain", "failure_code": "consumer_readback_stale"}
+                    raise
                 except (urllib.error.URLError, TimeoutError, OSError):
                     return {"status": "uncertain", "failure_code": "report_acknowledgement_lost"}
             else:
@@ -342,9 +367,10 @@ def _controller_once_unlocked(policy: dict) -> dict:
         expected = (candidate["revision"], candidate["digest"])
         matching = all((item["revision"], item["digest"]) == expected
             for item in (observer, supervisor))
-        current = already_verified or all(
-            (_timestamp(item.get("observed_at")) or datetime.min.replace(tzinfo=UTC))
-                >= apply_started_at for item in (observer, supervisor))
+        current = (already_verified and _consumer_readbacks_fresh(
+            {"observer": observer, "supervisor": supervisor}, policy["freshness_seconds"])) or all(
+                (_timestamp(item.get("observed_at")) or datetime.min.replace(tzinfo=UTC))
+                    >= apply_started_at for item in (observer, supervisor))
         if matching and current:
             journal["last_good"] = candidate
             journal.pop("candidate", None)
@@ -444,6 +470,8 @@ def measure_lag(telemetry: dict, anchors: dict[str, dict], values: dict,
     anchor_export_lags: list[float] = []
     anchor_mismatch_count = 0
     anchor_timestamp_anomalies = 0
+    anchor_missing_receipt_count = 0
+    anchor_pending_count = 0
     audit_events = telemetry.get("audit_events")
     audit_complete = telemetry.get("audit_complete") is True
     if not isinstance(audit_events, list):
@@ -456,6 +484,8 @@ def measure_lag(telemetry: dict, anchors: dict[str, dict], values: dict,
         event_id = event.get("event_id")
         anchor = anchors.get(event_id) if isinstance(event_id, str) else None
         receipt = event.get("sink_receipt")
+        if not isinstance(receipt, str) or not receipt:
+            anchor_missing_receipt_count += 1
         valid_anchor = bool(anchor and receipt and anchor.get("sink_receipt") == receipt
             and anchor.get("payload_sha256") == event.get("event_digest"))
         received = _timestamp(event.get("received_at"))
@@ -472,9 +502,9 @@ def measure_lag(telemetry: dict, anchors: dict[str, dict], values: dict,
             else:
                 anchor_export_lags.append(max(0.0, (anchored - received).total_seconds()))
         else:
+            anchor_pending_count += 1
             if received is None or received > now + __import__("datetime").timedelta(
                     seconds=values["maximum_future_skew_seconds"]):
-                anchor_pending_ages.append(float("inf"))
                 anchor_timestamp_anomalies += 1
             else:
                 anchor_pending_ages.append(max(0.0, (now - received).total_seconds()))
@@ -485,7 +515,7 @@ def measure_lag(telemetry: dict, anchors: dict[str, dict], values: dict,
     anchor_export_lag = (max(anchor_export_lags, default=0.0)
         if audit_complete and anchor_timestamp_anomalies == 0 else None)
     anchor_state = ("unknown" if not audit_complete else
-        "unknown" if anchor_timestamp_anomalies else
+        "unknown" if anchor_timestamp_anomalies or anchor_missing_receipt_count else
         "late" if anchor_pending_lag is None or anchor_export_lag is None
             or anchor_pending_lag > values["anchor_export_lag_seconds"]
             or anchor_export_lag > values["anchor_export_lag_seconds"] else "healthy")
@@ -527,7 +557,9 @@ def measure_lag(telemetry: dict, anchors: dict[str, dict], values: dict,
     return {"anchor_export": {"status": anchor_state,
             "maximum_pending_lag_seconds": anchor_pending_lag,
             "maximum_export_lag_seconds": anchor_export_lag,
-            "pending_or_unanchored_count": len(anchor_pending_ages),
+            "pending_or_unanchored_count": anchor_pending_count,
+            "missing_receipt_count": anchor_missing_receipt_count,
+            "timestamp_anomaly_count": anchor_timestamp_anomalies,
             "receipt_or_digest_mismatch_count": anchor_mismatch_count,
             "timestamp_anomaly_count": anchor_timestamp_anomalies,
             "limit_seconds": values["anchor_export_lag_seconds"]},
@@ -592,15 +624,23 @@ def consumer_once(role: str, policy: dict) -> dict:
             host_boot_id = None
         valid_progress = (isinstance(progress, dict) and type(progress.get("loop_sequence")) is int
             and isinstance(progress.get("boot_id"), str) and type(progress.get("monotonic_ns")) is int)
-        age = (now_mono - progress["monotonic_ns"]) / 1e9 if valid_progress else None
+        sample_age = (now_mono - progress["monotonic_ns"]) / 1e9 if valid_progress else None
         progressed = valid_progress and (prior_seq is None or progress["loop_sequence"] > prior_seq)
+        last_progress_ns = state.get("scheduler_last_progress_monotonic_ns")
+        if progressed:
+            last_progress_ns = progress["monotonic_ns"]
+            state["scheduler_last_progress_monotonic_ns"] = last_progress_ns
+        progress_age = ((now_mono - last_progress_ns) / 1e9
+            if type(last_progress_ns) is int else None)
+        sequence_valid = prior_seq is None or progress["loop_sequence"] >= prior_seq if valid_progress else False
         progress_ok = bool(valid_progress and progress.get("boot_id") == host_boot_id
-            and age is not None and 0 <= age <= values["scheduler_progress_freshness_seconds"]
-            and progressed)
+            and sample_age is not None and sample_age >= 0 and sequence_valid
+            and progress_age is not None and 0 <= progress_age <= values["scheduler_progress_freshness_seconds"])
         state["scheduler"] = {"status": "healthy" if progress_ok else "stale_or_nonprogressing",
             "loop_sequence": progress.get("loop_sequence") if valid_progress else None,
-            "age_seconds": age, "freshness_seconds": values["scheduler_progress_freshness_seconds"]}
-        if valid_progress:
+            "age_seconds": progress_age, "sample_age_seconds": sample_age,
+            "freshness_seconds": values["scheduler_progress_freshness_seconds"]}
+        if valid_progress and (prior_seq is None or progress["loop_sequence"] >= prior_seq):
             state["scheduler_loop_sequence"] = progress["loop_sequence"]
         state["last_completed_loop_at"] = utc_now()
         state["loop_sequence"] = int(state.get("loop_sequence", 0)) + 1

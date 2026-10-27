@@ -37,9 +37,12 @@ STARTED_CONTAINER=0
 STARTED_ANCHOR=0
 CREATED_IMAGE=0
 EXIT_STATUS=0
+CONTAINER_ID=''
+ANCHOR_ID=''
 
 cleanup() {
   local rc=$?
+  local cleanup_rc=0 container_removed=0 anchor_removed=0 container_rm_exit=not_started anchor_rm_exit=not_started
   trap - EXIT
   set +e
   for process_file in "$RUN_ROOT"/host/*.pid; do
@@ -67,16 +70,51 @@ cleanup() {
         "$RUN_ROOT/api.log" >"$EVIDENCE/api-service-redacted.log"
     fi
   fi
-  if (( STARTED_CONTAINER )); then
-    docker exec -u 0 "$CONTAINER" chmod -R a+rwX /run/uvm-g7-scheduler >/dev/null 2>&1 || true
-    docker rm -fv "$CONTAINER" >/dev/null 2>&1
+  if (( STARTED_CONTAINER )) && [[ -n $CONTAINER_ID ]]; then
+    docker exec -u 0 "$CONTAINER_ID" chmod -R a+rwX /run/uvm-g7-scheduler >/dev/null 2>&1 || true
+    docker rm -fv "$CONTAINER_ID" >/dev/null 2>&1
+    container_rm_exit=$?
+    if (( container_rm_exit == 0 )); then
+      container_removed=1
+    elif docker inspect "$CONTAINER_ID" >/dev/null 2>&1; then
+      container_removed=0
+      cleanup_rc=1
+    elif docker info >/dev/null 2>&1; then
+      container_removed=1
+    else
+      container_removed=0
+      cleanup_rc=1
+    fi
+  elif (( STARTED_CONTAINER )); then
+    container_rm_exit=missing_owned_id
+    cleanup_rc=1
   fi
-  if (( STARTED_ANCHOR )); then docker rm -fv "$ANCHOR_CONTAINER" >/dev/null 2>&1; fi
+  if (( STARTED_ANCHOR )) && [[ -n $ANCHOR_ID ]]; then
+    docker rm -fv "$ANCHOR_ID" >/dev/null 2>&1
+    anchor_rm_exit=$?
+    if (( anchor_rm_exit == 0 )); then
+      anchor_removed=1
+    elif docker inspect "$ANCHOR_ID" >/dev/null 2>&1; then
+      anchor_removed=0
+      cleanup_rc=1
+    elif docker info >/dev/null 2>&1; then
+      anchor_removed=1
+    else
+      anchor_removed=0
+      cleanup_rc=1
+    fi
+  elif (( STARTED_ANCHOR )); then
+    anchor_rm_exit=missing_owned_id
+    cleanup_rc=1
+  fi
   if (( CREATED_IMAGE )); then docker image rm "$IMAGE" >/dev/null 2>&1; fi
-  printf 'container_removed=%s\nanchor_removed=%s\nrunner_exit=%s\n' \
-    "$STARTED_CONTAINER" "$STARTED_ANCHOR" "$rc" >"$EVIDENCE/owned-resource-cleanup.txt"
+  printf 'container_id=%s\ncontainer_remove_exit=%s\ncontainer_absence_verified=%s\nanchor_id=%s\nanchor_remove_exit=%s\nanchor_absence_verified=%s\nrunner_exit=%s\ncleanup_exit=%s\n' \
+    "${CONTAINER_ID:-unknown}" "$container_rm_exit" "$container_removed" \
+    "${ANCHOR_ID:-unknown}" "$anchor_rm_exit" "$anchor_removed" "$rc" "$cleanup_rc" \
+    >"$EVIDENCE/owned-resource-cleanup.txt"
   chmod -R u+rwX "$RUN_ROOT" 2>/dev/null || true
   rm -rf "$RUN_ROOT"
+  if (( cleanup_rc != 0 && rc == 0 )); then rc=70; fi
   exit "$rc"
 }
 trap cleanup EXIT
@@ -126,6 +164,7 @@ docker run -d --name "$ANCHOR_CONTAINER" --label uvm.g7.observer-journey=true \
   --user postgres --entrypoint /bin/bash "$IMAGE" -lc \
   'if [[ ! -s /var/lib/postgresql/data/PG_VERSION ]]; then /usr/lib/postgresql/18/bin/initdb -D /var/lib/postgresql/data --auth-local=trust --auth-host=scram-sha-256 --pwfile=/run/secrets/anchor-password >/dev/null; fi; exec /usr/lib/postgresql/18/bin/postgres -D /var/lib/postgresql/data -h 0.0.0.0 -p 5432' \
   >"$EVIDENCE/anchor-container-id.txt"
+ANCHOR_ID=$(cat "$EVIDENCE/anchor-container-id.txt")
 for _ in $(seq 1 60); do
   [[ $(docker inspect "$ANCHOR_CONTAINER" --format '{{.State.Status}}' 2>/dev/null) == running ]] && break
   sleep 1
@@ -157,6 +196,7 @@ docker run -d --name "$CONTAINER" --label uvm.g7.observer-journey=true \
   --mount "type=bind,src=$RUN_ROOT/secrets/host-pub.pem,dst=/run/uvm-g7-host-pub.pem,readonly" \
   --mount "type=bind,src=$RUN_ROOT/scheduler,dst=/run/uvm-g7-scheduler" \
   --env-file "$RUN_ROOT/container.env" "$IMAGE" >"$EVIDENCE/app-container-id.txt"
+CONTAINER_ID=$(cat "$EVIDENCE/app-container-id.txt")
 
 ready=0
 for _ in $(seq 1 300); do

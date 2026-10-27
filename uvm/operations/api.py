@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -54,6 +55,50 @@ def _digest(value: str | None) -> str | None:
     return "sha256:" + value if value else None
 
 
+def _cursor_part(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _discovery_cursor(secret: bytes, *, principal: str, authority_revision: int,
+        registry_digest: str, visible_digest: str, after: int, limit: int,
+        expires_at: int) -> str:
+    payload = {"version": 1, "principal": principal,
+        "authority_revision": authority_revision, "registry_digest": registry_digest,
+        "visible_digest": visible_digest, "after": after, "limit": limit,
+        "expires_at": expires_at}
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False, allow_nan=False).encode("utf-8")
+    return _cursor_part(body) + "." + _cursor_part(hmac.new(secret, body, hashlib.sha256).digest())
+
+
+def _read_discovery_cursor(secret: bytes, token: str, *, principal: str,
+        authority_revision: int, registry_digest: str, visible_digest: str,
+        limit: int, now_epoch: int) -> int:
+    try:
+        if not isinstance(token, str) or len(token) > 4096 or token.count(".") != 1:
+            raise ValueError
+        body_part, signature_part = token.split(".", 1)
+        body = base64.b64decode(body_part + "=" * (-len(body_part) % 4),
+            altchars=b"-_", validate=True)
+        signature = base64.b64decode(signature_part + "=" * (-len(signature_part) % 4),
+            altchars=b"-_", validate=True)
+        if not hmac.compare_digest(signature, hmac.new(secret, body, hashlib.sha256).digest()):
+            raise ValueError
+        payload = json.loads(body)
+        expected = {"version": 1, "principal": principal,
+            "authority_revision": authority_revision, "registry_digest": registry_digest,
+            "visible_digest": visible_digest, "limit": limit}
+        if any(payload.get(key) != value for key, value in expected.items()):
+            raise ValueError
+        if (type(payload.get("after")) is not int or payload["after"] < 0
+                or type(payload.get("expires_at")) is not int or payload["expires_at"] < now_epoch):
+            raise ValueError
+        return payload["after"]
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        raise HTTPException(400, {"code": "invalid_cursor",
+            "message": "Deployment discovery cursor is invalid or stale"}) from None
+
+
 def _registry() -> dict[str, dict]:
     path = os.environ.get("UVM_OBSERVER_DEPLOYMENT_REGISTRY_FILE")
     if not path:
@@ -64,6 +109,8 @@ def _registry() -> dict[str, dict]:
         raise RuntimeError("observer deployment registry is unavailable") from exc
     if not isinstance(parsed, list):
         raise RuntimeError("observer deployment registry must be a list")
+    if len(parsed) > 10000:
+        raise RuntimeError("observer deployment registry exceeds its configured bound")
     result = {}
     for item in parsed:
         if (not isinstance(item, dict)
@@ -198,7 +245,11 @@ def install_observer_settings_routes(app: FastAPI) -> None:
         return principal, candidates[0]
 
     @app.get("/api/v1/operations/observer-settings")
-    def discover_observer_deployments(request: Request, principal: str = Depends(authenticate)):
+    def discover_observer_deployments(request: Request, limit: int = 50,
+            cursor: str | None = None, principal: str = Depends(authenticate)):
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise HTTPException(400, {"code": "invalid_request",
+                "message": "Deployment discovery limit must be between 1 and 100"})
         context = getattr(request.state, "authority_context", None)
         registry = _registry()
         with engine.begin() as connection:
@@ -206,6 +257,8 @@ def install_observer_settings_routes(app: FastAPI) -> None:
             lock_policy(connection, shared=True)
             policy_row = _policy(connection)
             native = policy_row["document"]
+            from uvm.auth.native_authority import native_state
+            authority_revision = int(native_state(native).get("revision", 0))
             deployments = []
             for deployment, item in sorted(registry.items()):
                 grants = deployment_grants(native, principal, "observer.timing.read", deployment, context)
@@ -213,7 +266,31 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                     deployments.append({"deployment_id": deployment, "label": item["label"],
                         "can_configure": bool(deployment_grants(native, principal,
                             "observer.timing.configure", deployment, context))})
-        return {"schema_version": 1, "deployments": deployments, "next_cursor": None}
+            registry_state = []
+            for deployment, item in sorted(registry.items()):
+                key_digest = hashlib.sha256(Path(item["verification_key_file"]).read_bytes()).hexdigest()
+                registry_state.append({"deployment_id": deployment, "label": item["label"],
+                    "host_principal_id": item["host_principal_id"],
+                    "verification_key_digest": key_digest})
+            registry_digest = hashlib.sha256(json.dumps(registry_state, sort_keys=True,
+                separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+            visible_digest = hashlib.sha256(json.dumps(deployments, sort_keys=True,
+                separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+            offset = 0
+            if cursor is not None:
+                offset = _read_discovery_cursor(app.state.cursor_secret, cursor,
+                    principal=principal, authority_revision=authority_revision,
+                    registry_digest=registry_digest, visible_digest=visible_digest,
+                    limit=limit, now_epoch=int(app.state.utc_now().timestamp()))
+        page = deployments[offset:offset + limit]
+        next_cursor = None
+        if offset + len(page) < len(deployments):
+            next_cursor = _discovery_cursor(app.state.cursor_secret,
+                principal=principal, authority_revision=authority_revision,
+                registry_digest=registry_digest, visible_digest=visible_digest,
+                after=offset + len(page), limit=limit,
+                expires_at=int(app.state.utc_now().timestamp()) + 300)
+        return {"schema_version": 1, "deployments": page, "next_cursor": next_cursor}
 
     @app.get("/api/v1/operations/observer-settings/{deployment_id}")
     def read_observer_settings(deployment_id: str, request: Request,
@@ -393,6 +470,72 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                     "values": row["values"], "command_id": row["command_id"],
                     "intent_id": intent["intent_id"], "expected_host_policy_revision": revisions["host_policy"]}
         return {"schema_version": 1, "deployment_id": deployment_id, "desired": desired}
+
+    @app.get("/api/v1/operations/observer-settings/{deployment_id}/host/telemetry")
+    def host_telemetry(deployment_id: str, request: Request,
+                       limit: int = 250, sink_id: str = "g7-siem",
+                       identity=Depends(host_auth)):
+        """Return a bounded read-only lag summary to the registered host observer.
+
+        Audit entries are restricted to this deployment's observer-settings
+        target and reduced to digests, receipts and timestamps. Incident rows
+        are filtered by their exact deployment key. No audit body or finding
+        data crosses this private service boundary.
+        """
+        _principal, entry = identity
+        if entry["deployment_id"] != deployment_id:
+            raise HTTPException(404, {"code": "not_found", "message": "Deployment not found"})
+        if (type(limit) is not int or not 1 <= limit <= 1000
+                or not isinstance(sink_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", sink_id)):
+            raise HTTPException(400, {"code": "invalid_request", "message": "Telemetry bounds are invalid"})
+        from uvm.audit_export.exporter import EVENT_FIELDS, _event_payload
+        from uvm.audit_export.integrity import event_digest
+        from uvm.persistence.assessment_schema import (
+            assessment_audit_events, assessment_sink_export_receipts,
+        )
+        from uvm.persistence.incident_schema import (
+            g7_incident_projection_receipts, g7_incident_transitions,
+        )
+        target_id = deployment_audit_id(deployment_id)
+        with engine.connect() as connection:
+            event_query = (sa.select(assessment_audit_events,
+                assessment_sink_export_receipts.c.sink_id,
+                assessment_sink_export_receipts.c.sink_receipt,
+                assessment_sink_export_receipts.c.acknowledged_at)
+                .select_from(assessment_audit_events.outerjoin(
+                    assessment_sink_export_receipts, sa.and_(
+                        assessment_sink_export_receipts.c.event_id == assessment_audit_events.c.event_id,
+                        assessment_sink_export_receipts.c.sink_id == sink_id)))
+                .where(assessment_audit_events.c.target_id == target_id)
+                .order_by(assessment_audit_events.c.event_sequence.desc()).limit(limit + 1))
+            event_rows = connection.execute(event_query).mappings().all()
+            incident_query = (sa.select(g7_incident_transitions.c.observed_at,
+                g7_incident_projection_receipts.c.received_at.label("projected_at"))
+                .select_from(g7_incident_transitions.outerjoin(
+                    g7_incident_projection_receipts,
+                    g7_incident_projection_receipts.c.transition_id ==
+                        g7_incident_transitions.c.transition_id))
+                .where(g7_incident_transitions.c.deployment_id == deployment_id)
+                .order_by(g7_incident_transitions.c.observed_at.desc()).limit(limit + 1))
+            incident_rows = connection.execute(incident_query).mappings().all()
+        event_complete = len(event_rows) <= limit
+        incident_complete = len(incident_rows) <= limit
+        events = []
+        for row in event_rows[:limit]:
+            event = _event_payload({key: row[key] for key in EVENT_FIELDS})
+            events.append({"event_id": str(event["event_id"]),
+                "event_sequence": int(event["event_sequence"]),
+                "event_digest": event_digest(event),
+                "received_at": _now_text(row["received_at"]),
+                "sink_receipt": row["sink_receipt"],
+                "acknowledged_at": _now_text(row["acknowledged_at"])})
+        incidents = [{"observed_at": _now_text(row["observed_at"]),
+            "projected_at": _now_text(row["projected_at"])}
+            for row in incident_rows[:limit]]
+        return {"schema_version": 1, "deployment_id": deployment_id,
+            "sink_id": sink_id, "audit_events": events,
+            "audit_complete": event_complete, "incidents": incidents,
+            "incidents_complete": incident_complete}
 
     @app.post("/api/v1/operations/observer-settings/{deployment_id}/host/reports")
     def host_report(deployment_id: str, body: dict, request: Request, identity=Depends(host_auth)):

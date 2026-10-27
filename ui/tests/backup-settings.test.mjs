@@ -8,6 +8,7 @@ import {mkdtemp,readFile,rm,mkdir,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {randomUUID} from 'node:crypto';
+import {runBackupBrowserStep} from './backup-recovery-browser.mjs';
 const root='/api/v1/operations/backup-settings';
 const deployment='backup-ui-fixture';
 const keys=['interval_seconds','timeout_seconds','maximum_backup_age_seconds','restore_verification_timeout_seconds'];
@@ -22,20 +23,26 @@ function settings(application='failed') {
   status:{settings_application:{state:application,requested_revision:4,requested_digest:digest,intent_id:randomUUID(),host_policy_revision:3,active_revision:application==='applied'?4:3,active_digest:application==='applied'?digest:oldDigest,reported_at:now,failure_code:application==='failed'?'host_policy_rejected':null},completed_archive:{archive_id:null,completed_at:null,manifest_digest:null,outcome:null},freshness:{state:'unknown',evaluated_at:null,age_seconds:null,basis_completed_at:null,maximum_backup_age_seconds:null},restore_verification:{state:'unknown',archive_id:null,recovery_epoch:0,verified_at:null,failure_code:null}},
   host_policy:{revision:3,digest,bounds:Object.fromEntries(keys.map(key=>[key,{min:1,max:key==='timeout_seconds'?800:100000}])),archive_target_refs:['archive-a','archive-b'],recovery_profile_refs:['recovery-a','recovery-b'],maximum_report_age_seconds:300,maximum_future_skew_seconds:30,observed_at:now,fresh_until:new Date(Date.now()+60000).toISOString(),freshness:'fresh'},can_configure:true};
 }
-let directory,server,browser,origin;
+let directory,server,browser,origin,httpApi;
 before(async()=>{
  directory=await mkdtemp(join(tmpdir(),'volt-backup-ui-'));
  await build({stdin:{contents:`import {createRoot} from 'react-dom/client';
  import BackupSettings from './BackupSettings';
+ import App from './App';
+ function BackupFixture(){const [deployment,setDeployment]=useState(location.search.includes('discovery')?null:'${deployment}');return <BackupSettings actorId="fixture-actor" refresh={0} deploymentId={deployment} onDeployment={setDeployment}/>;}
  import {useState} from 'react';
  import NativePermissionEditor from './NativePermissionEditor';
  import {permissionWithin} from './native-admin-validation';
  function Permissions(){const [value,setValue]=useState([]);return <><NativePermissionEditor catalogue={window.fixtureCatalogue} value={value} onChange={setValue}/><output id="permissions-state">{JSON.stringify({value,valid:value.every(p=>permissionWithin(p,window.fixtureCatalogue))})}</output></>;}
- import './tokens.css';import './styles.css';
- createRoot(document.getElementById('root')).render(location.pathname==='/permissions'?<Permissions/>:<BackupSettings actorId="fixture-actor" refresh={0} deploymentId="${deployment}"/>);`,resolveDir:resolve(import.meta.dirname,'../src'),loader:'tsx'},jsx:'automatic',bundle:true,format:'esm',outfile:join(directory,'app.js'),logLevel:'silent'});
+ import './tokens.css';import './styles.css';import './v2-workspace.css';
+ createRoot(document.getElementById('root')).render(location.pathname==='/permissions'?<Permissions/>:(location.pathname==='/application'||window.backupHandoffApp)?<App/>:<BackupFixture/>);`,resolveDir:resolve(import.meta.dirname,'../src'),loader:'tsx'},jsx:'automatic',bundle:true,format:'esm',outfile:join(directory,'app.js'),logLevel:'silent'});
  server=createServer(async(req,res)=>{
+  if(httpApi&&req.url.startsWith('/api/')){
+   let raw='';for await(const chunk of req)raw+=chunk;
+   await httpApi({request:()=>({url:()=>origin+req.url,method:()=>req.method,postDataJSON:()=>JSON.parse(raw)}),fulfill:async({status,json})=>{res.statusCode=status;res.setHeader('Content-Type','application/json');res.end(JSON.stringify(json));},abort:async()=>res.destroy()});return;
+  }
   if(req.url==='/app.js'||req.url==='/app.css'){res.setHeader('Content-Type',req.url.endsWith('css')?'text/css':'text/javascript');res.end(await readFile(join(directory,req.url)));return;}
-  res.setHeader('Content-Type','text/html');res.end('<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Backup UI fixture</title><link rel="stylesheet" href="/app.css"></head><body><main><h1>Administration</h1><div id="root"></div></main><script type="module" src="/app.js"></script></body></html>');
+  res.setHeader('Content-Type','text/html');if(req.url.startsWith('/application')){res.end('<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Backup App fixture</title><link rel="stylesheet" href="/app.css"></head><body><div id="root"></div><script type="module" src="/app.js"></script></body></html>');return;}res.end('<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Backup UI fixture</title><link rel="stylesheet" href="/app.css"></head><body><main><h1>Administration</h1><div id="root"></div></main><script type="module" src="/app.js"></script></body></html>');
  });
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));origin=`http://127.0.0.1:${server.address().port}`;
  browser=await chromium.launch({...(process.env.CHROMIUM_EXECUTABLE_PATH?{executablePath:process.env.CHROMIUM_EXECUTABLE_PATH}:{}),headless:true});
@@ -45,12 +52,19 @@ async function fixture(t,state=settings(),retained=null,options={}) {
  const context=await browser.newContext({viewport:{width:1440,height:1000}});t.after(()=>context.close());
  if(retained)await context.addInitScript(({key,command})=>sessionStorage.setItem(key,JSON.stringify(command)),{key:'volt.backup.command:'+JSON.stringify(['fixture-actor',deployment]),command:retained});
  const page=await context.newPage();page.setDefaultTimeout(5000);const errors=[];page.on('pageerror',e=>errors.push(e.message));t.after(()=>assert.deepEqual(errors,[]));
- const commands=[];let receipt;
+ const commands=[],requests=[];let receipt;
  const history={schema_version:1,deployment_id:deployment,revision:2,digest:oldDigest,values:{...values,timeout_seconds:700},publication_revisions:options.historyTokens??{configuration:2,policy:4,authority:6,host_policy:2},command_id:randomUUID(),actor_id:'historical-actor',rationale:'Previous immutable settings',evidence_ref:null,committed_at:new Date().toISOString(),audit_id:randomUUID()};
- await page.route('**/api/**',async route=>{
-  const url=new URL(route.request().url());let body,status=200;
+ const apiHandler=async route=>{
+  const url=new URL(route.request().url());requests.push(url.pathname+url.search);let body,status=200;
   const error=(code,outcome='not_committed')=>({schema_version:1,error:{code,message:code,details:{outcome}}});
-  if(url.pathname===root+'/'+deployment){if(options.readDenied){status=403;body=error('forbidden');}else body=state;}
+  if(url.pathname==='/api/v1/auth/session')body={schema_version:1,authenticated:true,credential_mode:'oidc_session',principal_id:'fixture-actor',csrf_token:'synthetic-csrf'};
+  else if(url.pathname==='/api/v1/operations/observer-settings')body={schema_version:1,deployments:[],next_cursor:null};
+  else if(url.pathname===root){
+   const cursor=url.searchParams.get('cursor');
+   if(options.discoveryError&&(!options.continuationOnly||cursor!==null)){status=options.discoveryError;body=error(status===409?'revision_conflict':'forbidden');}
+   else body=options.discoveryPages?(options.discoveryPages[cursor??'first']):{schema_version:1,deployments:[{deployment_id:deployment,label:'Synthetic backup fixture',can_configure:true}],next_cursor:null};
+  }
+  else if(url.pathname===root+'/'+deployment){if(options.readDenied){status=403;body=error('forbidden');}else body=state;}
   else if(url.pathname===root+'/'+deployment+'/revisions/2')body=history;
   else if(url.pathname.includes('/receipts/')){if(receipt)body={...receipt,actor_id:options.receiptActor??receipt.actor_id};else{status=404;body=error('not_found');}}
   else if(url.pathname===root+'/'+deployment+'/commands'){
@@ -73,12 +87,15 @@ async function fixture(t,state=settings(),retained=null,options={}) {
    }
   }else throw new Error('Unexpected synthetic route '+url.pathname);
   await route.fulfill({status,json:body});
- });
- await page.goto(origin);await page.getByRole('button',{name:'Refresh backup state',exact:true}).waitFor();
+ };
+ if(options.realHttp){httpApi=apiHandler;t.after(()=>{httpApi=null;});}else await page.route('**/api/**',apiHandler);
+ await page.goto(origin+(options.pagePath??''));
+ if(options.discoveryOnly){await page.getByRole('heading',{name:'Backups & recovery',exact:true}).waitFor();await page.getByRole('button',{name:'Refresh deployments',exact:true}).waitFor();return {page,state,commands,options,requests};}
+ await page.getByRole('button',{name:'Refresh backup state',exact:true}).waitFor();
  if(options.readDenied)await page.getByText('Current permissions do not allow this operation.',{exact:true}).waitFor();
  else if(options.invalidRead)await page.getByText('The server response could not be verified. No successful outcome is inferred.',{exact:true}).waitFor();
  else await page.locator('.observer-state').waitFor();
- return {page,state,commands,options};
+ return {page,state,commands,options,requests};
 }
 async function correction(page){await page.getByLabel('Backup timeout',{exact:true}).fill('800');await page.getByLabel('Reason for change',{exact:true}).fill('Correct rejected backup settings');}
 const saveButton=page=>page.getByRole('button',{name:'Save backup settings',exact:true});
@@ -157,3 +174,51 @@ for(const [name,mutate] of [
 ])test('contradictory fresh readback is hidden: '+name,async t=>{const state=freshArchiveState();mutate(state);const {page}=await fixture(t,state,null,{invalidRead:true});assert.equal(await page.locator('.backup-state').count(),0);assert.equal(await saveButton(page).count(),0);assert.equal(await page.locator('.observer-summary').count(),0);});
 test('valid complete archive displays server freshness while restore remains unknown',async t=>{const {page}=await fixture(t,freshArchiveState());assert.deepEqual(await page.locator('.backup-state').allTextContents(),['complete','fresh','unknown']);});
 test('history revision token labels are independent of JSON member order',async t=>{const {page}=await fixture(t,settings(),null,{historyTokens:{authority:17,host_policy:19,policy:13,configuration:2}});await page.getByLabel('Historical revision',{exact:true}).fill('2');await page.getByRole('button',{name:'Read historical revision',exact:true}).click();await page.getByText('Previous immutable settings',{exact:true}).waitFor();const tokens=page.locator('dl > div').filter({has:page.getByText('Publication tokens (configuration / policy / authority / host policy)',{exact:true})});assert.equal(await tokens.locator('dd').textContent(),'2 / 13 / 17 / 19');});
+
+const discoveryPage=(deployments,next_cursor=null)=>({schema_version:1,deployments,next_cursor});
+const discoveryRow=(id=deployment,can_configure=true)=>({deployment_id:id,label:'Registry '+id,can_configure});
+test('rendered discovery selects a deployment only after its authorized page is loaded',async t=>{
+ const opaque='opaque+/cursor=not-an-offset',first=Array.from({length:50},(_,i)=>discoveryRow('a-'+String(i).padStart(2,'0')));
+ const {page,requests}=await fixture(t,settings(),null,{discoveryOnly:true,pagePath:'/?discovery',discoveryPages:{first:discoveryPage(first,opaque),[opaque]:discoveryPage([discoveryRow()])}});
+ await page.getByRole('button',{name:'Load more deployments',exact:true}).click();await page.getByRole('option',{name:'Registry '+deployment+' · '+deployment,exact:true}).waitFor({state:'attached'});
+ assert.equal(requests.filter(x=>x===root+'/'+deployment).length,0);assert.ok(requests.includes(root+'?cursor='+encodeURIComponent(opaque)));
+ await page.getByLabel('Deployment',{exact:true}).selectOption(deployment);await page.locator('.observer-state').waitFor();assert.equal(requests.filter(x=>x===root+'/'+deployment).length,1);assert.equal(await page.getByRole('button',{name:'Load more deployments',exact:true}).count(),0);
+});
+test('409 continuation clears former deployments and detail; refresh starts with no cursor under new authority',async t=>{
+ const {page,options,requests}=await fixture(t,settings(),null,{discoveryPages:{first:discoveryPage([discoveryRow()],'context-bound')},discoveryError:409,continuationOnly:true});
+ await page.getByRole('button',{name:'Load more deployments',exact:true}).click();await page.getByText('Deployment list changed',{exact:true}).waitFor();assert.equal(await page.locator('.observer-summary').count(),0);assert.equal(await page.getByLabel('Deployment',{exact:true}).count(),0);assert.equal(await page.getByText('Registry '+deployment+' · '+deployment,{exact:true}).count(),0);
+ options.discoveryError=null;options.discoveryPages.first=discoveryPage([]);await page.getByRole('button',{name:'Refresh deployments',exact:true}).click();await page.getByText('No visible deployments',{exact:true}).waitFor();assert.equal(requests.at(-1),root);assert.equal(await page.locator('.observer-summary').count(),0);
+});
+test('discovery grant does not override current read-only settings authority',async t=>{const state=settings();state.can_configure=false;const {page}=await fixture(t,state);assert.equal(await saveButton(page).isDisabled(),true);assert.equal(await page.getByText('Settings are read-only',{exact:true}).count(),1);});
+test('unauthorized URL deployment is not read or synthesized into discovery',async t=>{const {page,requests}=await fixture(t,settings(),null,{discoveryOnly:true,discoveryPages:{first:discoveryPage([discoveryRow('another-deployment')])}});await page.getByText('Deployment not in this page',{exact:true}).waitFor();assert.equal(requests.filter(x=>x===root+'/'+deployment).length,0);assert.equal(await page.locator('.observer-summary').count(),0);});
+test('forbidden discovery and malformed continuation do not keep former options',async t=>{
+ const denied=await fixture(t,settings(),null,{discoveryOnly:true,discoveryError:403});await denied.page.getByText('Deployments unavailable',{exact:true}).waitFor();assert.equal(await denied.page.getByLabel('Deployment',{exact:true}).count(),0);
+ const duplicate=await fixture(t,settings(),null,{discoveryPages:{first:discoveryPage([discoveryRow()],'more'),more:discoveryPage([discoveryRow()])}});await duplicate.page.getByRole('button',{name:'Load more deployments',exact:true}).click();await duplicate.page.getByText('Deployments unavailable',{exact:true}).waitFor();assert.equal(await duplicate.page.locator('.observer-summary').count(),0);
+});
+test('App navigation opens discovery and selection updates the deployment URL',async t=>{
+ const {page}=await fixture(t,settings(),null,{discoveryOnly:true,pagePath:'/application#administration?section=backup-settings'});
+ const tab=page.getByRole('navigation',{name:'Administration areas'}).getByRole('link',{name:'Backups & recovery',exact:true});assert.equal(await tab.getAttribute('aria-current'),'page');
+ await page.getByLabel('Deployment',{exact:true}).selectOption(deployment);await page.locator('.observer-state').waitFor();assert.ok(new URLSearchParams(new URL(page.url()).hash.split('?')[1]).get('deployment_id')===deployment);
+ await page.getByRole('link',{name:'Observer timing',exact:true}).click();await page.getByRole('heading',{name:'Observer timing',exact:true}).waitFor();await page.getByRole('link',{name:'Backups & recovery',exact:true}).click();await page.getByLabel('Deployment',{exact:true}).waitFor();assert.equal(await page.getByLabel('Deployment',{exact:true}).inputValue(),'');assert.equal(await page.locator('.observer-summary').count(),0);
+});
+
+test('browser handoff drives App publish, change with lost receipt recovery, and rollback over local HTTP',async t=>{
+ const {page,state}=await fixture(t,settings(),null,{realHttp:true,discoveryOnly:true,pagePath:'/application#administration?section=backup-settings'});
+ // This test supplies real HTTP transport to a synthetic local API fixture. No host/database integration is implied.
+ const directory=process.env.BACKUP_UI_EVIDENCE_DIR?join(process.env.BACKUP_UI_EVIDENCE_DIR,'synthetic-handoff'):await mkdtemp(join(tmpdir(),'volt-backup-handoff-test-'));if(!process.env.BACKUP_UI_EVIDENCE_DIR)t.after(()=>rm(directory,{recursive:true,force:true}));
+ await page.context().addInitScript(()=>window.backupHandoffApp=true);
+ const handoffOrigin=origin+'/application';
+ // The real product is served at /. Route the handoff document to the App fixture.
+ await page.route(url=>url.pathname==='/'&&url.search==='',async route=>{const response=await page.request.get(origin+'/application');await route.fulfill({response});});
+ const expectation={schema_version:1,id:'publish',deployment_id:deployment,action:'publish',rationale:'Browser handoff fixture',evidence_ref:null,values:{...values,timeout_seconds:800},expect:{desired_revision:5,effective_revision:3,application:'pending',archive:'unknown',freshness:'unknown',restore:'unknown'},timeout_ms:10000};
+ await mkdir(directory,{recursive:true});await writeFile(join(directory,'publish-expectations.json'),JSON.stringify(expectation,null,2)+'\n');
+ const publish=await runBackupBrowserStep({page,origin:handoffOrigin,expectations:expectation,evidenceDirectory:directory});assert.equal(publish.passed,true);assert.equal(publish.commands.length,1);
+ state.status.settings_application.state='failed';state.status.settings_application.failure_code='synthetic_correction';
+ await writeFile(join(directory,'change-receipt-recovery-expectations.json'),JSON.stringify({...expectation,id:'change-receipt-recovery',lose_acknowledgement:true,values:{...expectation.values,archive_target_ref:'archive-b'},expect:{...expectation.expect,desired_revision:6}},null,2)+'\n');
+ const change=await runBackupBrowserStep({page,origin:handoffOrigin,expectations:{...expectation,id:'change-receipt-recovery',lose_acknowledgement:true,values:{...expectation.values,archive_target_ref:'archive-b'},expect:{...expectation.expect,desired_revision:6}},evidenceDirectory:directory});assert.equal(change.passed,true);assert.equal(change.lost_acknowledgements,1);assert.equal(change.receipt_reads,1);assert.equal(change.commands.length,1);
+ state.status.settings_application.state='failed';state.status.settings_application.failure_code='synthetic_correction';
+ await writeFile(join(directory,'rollback-expectations.json'),JSON.stringify({...expectation,id:'rollback',action:'rollback',rollback_revision:2,expect:{...expectation.expect,desired_revision:7}},null,2)+'\n');
+ const rollback=await runBackupBrowserStep({page,origin:handoffOrigin,expectations:{...expectation,id:'rollback',action:'rollback',rollback_revision:2,expect:{...expectation.expect,desired_revision:7}},evidenceDirectory:directory});assert.equal(rollback.passed,true);assert.equal(rollback.commands[0].action,'backup.settings.rollback');
+});
+
+test('deployment selection works with keyboard and visible focus',async t=>{const {page}=await fixture(t,settings(),null,{discoveryOnly:true,pagePath:'/?discovery'});const select=page.getByLabel('Deployment',{exact:true});await page.getByRole('option',{name:'Synthetic backup fixture · '+deployment,exact:true}).waitFor({state:'attached'});await select.focus();const focus=await select.evaluate(el=>({active:el===document.activeElement,style:getComputedStyle(el).outlineStyle,width:getComputedStyle(el).outlineWidth}));assert.equal(focus.active,true);assert.notEqual(focus.style,'none');assert.notEqual(focus.width,'0px');await page.keyboard.press('ArrowDown');await page.keyboard.press('Enter');await page.locator('.observer-state').waitFor();assert.equal(await select.inputValue(),deployment);});

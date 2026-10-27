@@ -1,6 +1,6 @@
 import {useEffect,useRef,useState} from 'react';
 import * as api from './backup-api';
-import type {Command,Historical,Receipt,Settings,DurationKey,ReferenceKey,Values} from './backup-api';
+import type {Command,Deployment,Historical,Receipt,Settings,DurationKey,ReferenceKey,Values} from './backup-api';
 import './observer-settings.css';
 import './backup-settings.css';
 type Draft=Record<DurationKey|ReferenceKey,string>;
@@ -9,8 +9,42 @@ const draftOf=(values:Values|null)=>values?Object.fromEntries([...api.durationFi
 function Notice({title,children,alert=false}:{title:string;children:React.ReactNode;alert?:boolean}){return <div className={'observer-notice'+(alert?' attention':'')} role={alert?'alert':'status'}><strong>{title}</strong><div>{children}</div></div>;}
 function Time({value}:{value:string|null}){return value?<time dateTime={value}>{new Date(value).toLocaleString('en-GB',{timeZone:'UTC'})} UTC</time>:<>Not recorded</>;}
 const statusCopy={pending:'Desired settings are recorded. Matching host confirmation is still pending.',applied:'The host confirmed the exact desired revision and digest. Applied settings do not establish a usable backup.',failed:'The host rejected or failed the application. The last verified effective configuration is shown separately. Review the failure and correct the six settings below. Refresh if the host policy has changed.',uncertain:'Host application could not be established. Keep the current intent until its result is reconciled.',unknown:'No verified application result is available.'};
-export default function BackupSettings({actorId,refresh,deploymentId}:{actorId:string;refresh:number;deploymentId:string|null}){
- return <section className="observer-settings backup-settings" aria-label="Backup settings"><header className="observer-heading"><div><div className="eyebrow">INDEPENDENT RECOVERY</div><h2>Backups & recovery</h2><p>Versioned backup settings with independent host application and recovery evidence.</p></div></header>{deploymentId?<BackupDetail key={actorId+':'+deploymentId} actorId={actorId} deployment={deploymentId} refresh={refresh}/>:<Notice title="Deployment selection unavailable">Open an authorised deployment to review its backup settings.</Notice>}</section>;
+export default function BackupSettings({actorId,refresh,deploymentId,onDeployment}:{actorId:string;refresh:number;deploymentId:string|null;onDeployment:(id:string|null)=>void}){
+ const [items,setItems]=useState<Deployment[]>([]),[next,setNext]=useState<string|null>(null);
+ const [loading,setLoading]=useState(true),[error,setError]=useState<Error|null>(null),[reload,setReload]=useState(0);
+ const generation=useRef(0),busy=useRef(false),seenCursors=useRef(new Set<string>());
+ async function load(cursor?:string){
+  if(cursor!==undefined&&busy.current)return;
+  const epoch=++generation.current;busy.current=true;setLoading(true);setError(null);
+  if(cursor===undefined){setItems([]);setNext(null);seenCursors.current.clear();}
+  try{
+   const page=await api.listDeployments(cursor);
+   if(epoch!==generation.current)return;
+   if(page.next_cursor!==null&&(page.next_cursor===cursor||seenCursors.current.has(page.next_cursor)))throw new api.BackupError('invalid_response');
+   if(cursor!==undefined&&page.deployments.some(d=>items.some(old=>old.deployment_id===d.deployment_id)))throw new api.BackupError('invalid_response');
+   if(cursor!==undefined)seenCursors.current.add(cursor);
+   setItems(previous=>cursor===undefined?page.deployments:[...previous,...page.deployments]);setNext(page.next_cursor);
+  }catch(e){
+   if(epoch!==generation.current)return;
+   // Never retain entries or detail from a rejected pagination context.
+   setItems([]);setNext(null);seenCursors.current.clear();setError(e instanceof Error?e:new api.BackupError('unavailable'));
+  }finally{if(epoch===generation.current){busy.current=false;setLoading(false);}}
+ }
+ useEffect(()=>{void load();return()=>{generation.current++;busy.current=false;};},[actorId,refresh,reload]);
+ const selected=items.find(d=>d.deployment_id===deploymentId);
+ const conflict=error instanceof api.BackupError&&error.status===409;
+ return <section className="observer-settings backup-settings" aria-label="Backup settings">
+  <header className="observer-heading"><div><div className="eyebrow">INDEPENDENT RECOVERY</div><h2>Backups & recovery</h2><p>Versioned backup settings with independent host application and recovery evidence.</p></div><button disabled={loading} onClick={()=>setReload(x=>x+1)}>Refresh deployments</button></header>
+  {loading&&<p role="status">Loading authorised deployments…</p>}
+  {error?<Notice title={conflict?'Deployment list changed':'Deployments unavailable'} alert>{conflict?'Permissions or the deployment registry changed, or this page expired. Refresh deployments to start a new list. Previous entries have been cleared.':error.message}</Notice>:<>
+   <label className="observer-deployment">Deployment<select aria-label="Deployment" disabled={loading} value={selected?deploymentId!:''} onChange={e=>onDeployment(e.target.value||null)}><option value="">Select a deployment</option>{items.map(d=><option key={d.deployment_id} value={d.deployment_id}>{d.label} · {d.deployment_id}</option>)}</select></label>
+   {next&&<button disabled={loading} onClick={()=>void load(next)}>Load more deployments</button>}
+   {!loading&&!items.length&&<Notice title="No visible deployments">Your current read grants do not include any registered deployments.</Notice>}
+   {!loading&&deploymentId&&!selected&&<Notice title="Deployment not in this page">Load more deployments or select an authorised deployment. A URL does not grant access.</Notice>}
+   {!loading&&!deploymentId&&items.length>0&&<p>Select a deployment to read its current backup settings and permissions.</p>}
+   {selected&&<BackupDetail key={actorId+':'+deploymentId} actorId={actorId} deployment={deploymentId!} refresh={refresh+reload}/>}
+  </>}
+ </section>;
 }
 export function BackupDetail({actorId,deployment,refresh}:{actorId:string;deployment:string;refresh:number}){
  const [view,setView]=useState<Settings|null>(null),[loading,setLoading]=useState(true),[busy,setBusy]=useState(false),[error,setError]=useState<Error|null>(null),[conflict,setConflict]=useState(false);

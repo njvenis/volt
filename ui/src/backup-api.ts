@@ -31,6 +31,8 @@ export type Settings = {
   host_policy: {revision: number; digest: string; bounds: Record<DurationKey, {min: number; max: number}>; archive_target_refs: string[]; recovery_profile_refs: string[]; maximum_report_age_seconds: number; maximum_future_skew_seconds: number; observed_at: string; fresh_until: string; freshness: 'fresh' | 'stale' | 'unknown'} | null;
   can_configure: boolean;
 };
+export type Deployment = {deployment_id: string; label: string; can_configure: boolean};
+export type Deployments = {schema_version: 1; deployments: Deployment[]; next_cursor: string | null};
 const messages: Record<string,string> = {
   revision_conflict: 'Settings or permissions changed. Refresh and review the current revision before saving again.',
   command_conflict: 'This command conflicts with retained content. Check the original command receipt.',
@@ -102,3 +104,13 @@ export async function readHistory(deployment: string, revision: number): Promise
 }
 export async function save(deployment: string, command: Command, expectedActorId: string){parseCommand(command);const raw=await request(path(deployment)+'/commands',command);try{return parseReceipt(raw,deployment,command,expectedActorId);}catch{throw new BackupError('invalid_response',200,true);}}
 export async function receipt(deployment: string, command: Command, expectedActorId: string){const raw=await request(path(deployment)+'/receipts/'+encodeURIComponent(command.command_id));try{return parseReceipt(raw,deployment,command,expectedActorId);}catch{throw new BackupError('invalid_response',200,true);}}
+
+export function parseDeployments(raw: unknown): Deployments {
+  const r=envelope(raw);exact(r,['schema_version','deployments','next_cursor']);
+  requireValue(Array.isArray(r.deployments)&&r.deployments.length<=50&&nullable(r.next_cursor,text));
+  const seen=new Set<string>();
+  for(const row of r.deployments){const d=exact(row,['deployment_id','label','can_configure']);requireValue(text(d.deployment_id)&&text(d.label)&&typeof d.can_configure==='boolean'&&!seen.has(String(d.deployment_id)));seen.add(String(d.deployment_id));}
+  requireValue(r.deployments.length>0||r.next_cursor===null);
+  return r as unknown as Deployments;
+}
+export async function listDeployments(cursor?: string){return parseDeployments(await request(cursor===undefined?'':'?cursor='+encodeURIComponent(cursor)));}

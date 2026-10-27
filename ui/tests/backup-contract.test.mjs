@@ -46,3 +46,13 @@ for(const [name,mutate] of [
  ['uncertain archive outcome',s=>s.status.completed_archive.outcome='uncertain'],
  ['nonmatching completion basis',s=>s.status.freshness.basis_completed_at='2026-10-27T11:59:59Z'],
 ])test('freshness fails closed for '+name,()=>{const state=freshSettings();mutate(state);assert.throws(()=>api.parseSettings(state,'fixture'),{code:'invalid_response'});});
+
+test('discovery accepts only the exact reviewed page DTO',()=>{const page={schema_version:1,deployments:[{deployment_id:'opaque/deployment',label:'Registry label',can_configure:false}],next_cursor:'opaque+/cursor='};assert.deepEqual(api.parseDeployments(page),page);assert.deepEqual(api.parseDeployments({schema_version:1,deployments:[],next_cursor:null}),{schema_version:1,deployments:[],next_cursor:null});});
+for(const [name,raw] of [
+ ['unknown top-level field',{schema_version:1,deployments:[],next_cursor:null,total:0}],
+ ['unknown row field',{schema_version:1,deployments:[{deployment_id:'a',label:'A',can_configure:true,offset:0}],next_cursor:null}],
+ ['nonboolean configure',{schema_version:1,deployments:[{deployment_id:'a',label:'A',can_configure:1}],next_cursor:null}],
+ ['duplicate deployments',{schema_version:1,deployments:Array(2).fill({deployment_id:'a',label:'A',can_configure:true}),next_cursor:null}],
+ ['oversized page',{schema_version:1,deployments:Array.from({length:51},(_,i)=>({deployment_id:String(i),label:String(i),can_configure:false})),next_cursor:null}],
+ ['empty page with continuation',{schema_version:1,deployments:[],next_cursor:'more'}],
+])test('discovery rejects '+name,()=>assert.throws(()=>api.parseDeployments(raw),{code:'invalid_response'}));

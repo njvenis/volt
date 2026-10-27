@@ -52,7 +52,7 @@ async function fixture(t,state=settings(),retained=null,options={}) {
  const context=await browser.newContext({viewport:{width:1440,height:1000}});t.after(()=>context.close());
  if(retained)await context.addInitScript(({key,command})=>sessionStorage.setItem(key,JSON.stringify(command)),{key:'volt.backup.command:'+JSON.stringify(['fixture-actor',deployment]),command:retained});
  const page=await context.newPage();page.setDefaultTimeout(5000);const errors=[];page.on('pageerror',e=>errors.push(e.message));t.after(()=>assert.deepEqual(errors,[]));
- const commands=[],requests=[];let receipt;
+ const commands=[],requests=[];let receipt,settingsReads=0;
  const history={schema_version:1,deployment_id:deployment,revision:2,digest:oldDigest,values:{...values,timeout_seconds:700},publication_revisions:options.historyTokens??{configuration:2,policy:4,authority:6,host_policy:2},command_id:randomUUID(),actor_id:'historical-actor',rationale:'Previous immutable settings',evidence_ref:null,committed_at:new Date().toISOString(),audit_id:randomUUID()};
  const apiHandler=async route=>{
   const url=new URL(route.request().url());requests.push(url.pathname+url.search);let body,status=200;
@@ -64,7 +64,7 @@ async function fixture(t,state=settings(),retained=null,options={}) {
    if(options.discoveryError&&(!options.continuationOnly||cursor!==null)){status=options.discoveryError;body=error(status===409?'revision_conflict':'forbidden');}
    else body=options.discoveryPages?(options.discoveryPages[cursor??'first']):{schema_version:1,deployments:[{deployment_id:deployment,label:'Synthetic backup fixture',can_configure:true}],next_cursor:null};
   }
-  else if(url.pathname===root+'/'+deployment){if(options.readDenied){status=403;body=error('forbidden');}else body=state;}
+  else if(url.pathname===root+'/'+deployment){settingsReads++;options.onSettingsRead?.(state,settingsReads);if(options.readDenied){status=403;body=error('forbidden');}else body=state;}
   else if(url.pathname===root+'/'+deployment+'/revisions/2')body=history;
   else if(url.pathname.includes('/receipts/')){if(receipt)body={...receipt,actor_id:options.receiptActor??receipt.actor_id};else{status=404;body=error('not_found');}}
   else if(url.pathname===root+'/'+deployment+'/commands'){
@@ -222,3 +222,39 @@ test('browser handoff drives App publish, change with lost receipt recovery, and
 });
 
 test('deployment selection works with keyboard and visible focus',async t=>{const {page}=await fixture(t,settings(),null,{discoveryOnly:true,pagePath:'/?discovery'});const select=page.getByLabel('Deployment',{exact:true});await page.getByRole('option',{name:'Synthetic backup fixture · '+deployment,exact:true}).waitFor({state:'attached'});await select.focus();const focus=await select.evaluate(el=>({active:el===document.activeElement,style:getComputedStyle(el).outlineStyle,width:getComputedStyle(el).outlineWidth}));assert.equal(focus.active,true);assert.notEqual(focus.style,'none');assert.notEqual(focus.width,'0px');await page.keyboard.press('ArrowDown');await page.keyboard.press('Enter');await page.locator('.observer-state').waitFor();assert.equal(await select.inputValue(),deployment);});
+
+async function handoffFixture(t,id,options={}){
+ const result=await fixture(t,settings(),null,{realHttp:true,discoveryOnly:true,pagePath:'/application#administration?section=backup-settings',...options});
+ await result.page.context().addInitScript(()=>window.backupHandoffApp=true);
+ await result.page.route(url=>url.pathname==='/'&&url.search==='',async route=>{const response=await result.page.request.get(origin+'/application');await route.fulfill({response});});
+ const evidenceDirectory=process.env.BACKUP_UI_EVIDENCE_DIR?join(process.env.BACKUP_UI_EVIDENCE_DIR,'synthetic-handoff-negative'):await mkdtemp(join(tmpdir(),'volt-backup-handoff-negative-'));if(!process.env.BACKUP_UI_EVIDENCE_DIR)t.after(()=>rm(evidenceDirectory,{recursive:true,force:true}));
+ const expectations={schema_version:1,id,deployment_id:deployment,action:'publish',rationale:'Expected handoff rationale',evidence_ref:'expected-evidence',values:{...values,timeout_seconds:800},expect:{desired_revision:5,effective_revision:3,application:'pending',archive:'unknown',freshness:'unknown',restore:'unknown'},timeout_ms:10000};
+ return {...result,evidenceDirectory,expectations};
+}
+for(const [name,path,replacement] of [
+ ['interval',['values','interval_seconds'],3599],
+ ['timeout',['values','timeout_seconds'],700],
+ ['maximum-age',['values','maximum_backup_age_seconds'],89999],
+ ['restore-timeout',['values','restore_verification_timeout_seconds'],1799],
+ ['archive-ref',['values','archive_target_ref'],'archive-b'],
+ ['recovery-ref',['values','recovery_profile_ref'],'recovery-b'],
+ ['rationale',['rationale'],'Different rationale'],
+ ['evidence',['evidence_ref'],'different-evidence'],
+ ['rollback',['rollback_revision'],1],
+])test('handoff rejects successful readback after outgoing '+name+' mismatch',async t=>{
+ const {page,evidenceDirectory,expectations}=await handoffFixture(t,'mismatch-'+name);
+ if(name==='rollback'){expectations.action='rollback';expectations.rollback_revision=2;delete expectations.values;}
+ // Simulate a UI serialization regression before network dispatch. The HTTP fixture
+ // returns a matching receipt and desired revision, so state/count-only checks pass.
+ await page.context().addInitScript(({commandPath,path,replacement})=>{const original=window.fetch.bind(window);window.fetch=(input,init)=>{if(new URL(typeof input==='string'?input:input.url,location.origin).pathname===commandPath&&init?.method==='POST'){const command=JSON.parse(init.body);if(path.length===2)command[path[0]][path[1]]=replacement;else command[path[0]]=replacement;init={...init,body:JSON.stringify(command)};}return original(input,init);};},{commandPath:root+'/'+deployment+'/commands',path,replacement});
+ await assert.rejects(runBackupBrowserStep({page,origin,expectations,evidenceDirectory}),/Observed backup command payload differs/);
+ const report=JSON.parse(await readFile(join(evidenceDirectory,expectations.id+'-browser.json'),'utf8'));assert.equal(report.passed,false);assert.equal(report.commands.length,1);assert.equal(report.commands[0].expected_revisions.configuration,4);assert.match(await page.locator('.observer-summary').innerText(),/Revision 5/);
+});
+for(const phase of ['navigation','refresh'])test('read handoff rejects backup-command POST during '+phase,async t=>{
+ const options={commandError:403,...(phase==='refresh'?{onSettingsRead:(state,count)=>{if(count>=2){state.effective={revision:4,digest,verified_at:new Date().toISOString()};Object.assign(state.status.settings_application,{state:'applied',active_revision:4,active_digest:digest,failure_code:null});}}}:{})};
+ const {page,evidenceDirectory,expectations}=await handoffFixture(t,'read-write-'+phase,options);expectations.action='read';expectations.expect={desired_revision:4,effective_revision:phase==='refresh'?4:3,application:phase==='refresh'?'applied':'failed',archive:'unknown',freshness:'unknown',restore:'unknown'};
+ await page.context().addInitScript(({root,deployment,phase})=>{const original=window.fetch.bind(window);let reads=0,injected=false;window.fetch=async(input,init)=>{const path=new URL(typeof input==='string'?input:input.url,location.origin).pathname;if(path===root+'/'+deployment)reads++;if(!injected&&(phase==='navigation'&&path===root||phase==='refresh'&&path===root+'/'+deployment&&reads===2)){injected=true;await original(root+'/'+deployment+'/commands',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({schema_version:1,command_id:crypto.randomUUID(),action:'backup.settings.publish',expected_revisions:{configuration:4,policy:5,authority:7,host_policy:3},rationale:'Unexpected write',evidence_ref:null,values:{}})});}return original(input,init);};},{root,deployment,phase});
+ await assert.rejects(runBackupBrowserStep({page,origin,expectations,evidenceDirectory}),/Read-only browser step sent a backup-command POST/);
+ const report=JSON.parse(await readFile(join(evidenceDirectory,expectations.id+'-browser.json'),'utf8'));assert.equal(report.passed,false);assert.equal(report.commands.length,1);
+});
+test('read handoff observes independent state without sending commands',async t=>{const {page,evidenceDirectory,expectations}=await handoffFixture(t,'read-no-writes');expectations.action='read';expectations.expect={desired_revision:4,effective_revision:3,application:'failed',archive:'unknown',freshness:'unknown',restore:'unknown'};const report=await runBackupBrowserStep({page,origin,expectations,evidenceDirectory});assert.equal(report.passed,true);assert.deepEqual(report.commands,[]);});

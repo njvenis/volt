@@ -18,6 +18,16 @@ function validate(e){
  if(e.action==='rollback')assert.ok(Number.isSafeInteger(e.rollback_revision)&&e.rollback_revision>=1);
  assert.ok(e.lose_acknowledgement===undefined||typeof e.lose_acknowledgement==='boolean');assert.ok(!e.lose_acknowledgement||e.action!=='read');
 }
+function assertCommand(command,e,expectedRevisions){
+ assert.ok(command&&typeof command==='object','Expected a JSON backup command');
+ assert.match(command.command_id,/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+ assert.deepEqual(Object.keys(command.expected_revisions).sort(),['authority','configuration','host_policy','policy']);
+ for(const value of Object.values(command.expected_revisions))assert.ok(Number.isSafeInteger(value)&&value>=0);
+ assert.equal(command.expected_revisions.configuration,e.expect.desired_revision-1);
+ const expected={schema_version:1,command_id:command.command_id,action:'backup.settings.'+(e.action==='rollback'?'rollback':'publish'),expected_revisions:expectedRevisions,rationale:e.rationale,evidence_ref:e.evidence_ref,...(e.action==='publish'?{values:e.values}:{rollback_revision:e.rollback_revision})};
+ assert.deepEqual(command,expected,'Observed backup command payload differs from the expected command');
+ return expected;
+}
 async function enabled(locator,timeout){await locator.waitFor();await locator.evaluate((el,timeout)=>new Promise((resolve,reject)=>{const start=Date.now();const check=()=>{if(!el.isConnected)return reject(new Error('Control was replaced'));if(!el.disabled)return resolve();if(Date.now()-start>=timeout)return reject(new Error('Control remains disabled'));setTimeout(check,50);};check();}),timeout);}
 async function snapshot(page){
  const summaries=page.locator('.backup-settings .observer-summary section');
@@ -28,9 +38,10 @@ async function snapshot(page){
 export async function runBackupBrowserStep({page,origin,expectations:e,evidenceDirectory}){
  validate(e);await mkdir(evidenceDirectory,{recursive:true,mode:0o700});
  const timeout=e.timeout_ms??90000;assert.ok(Number.isSafeInteger(timeout)&&timeout>=1000&&timeout<=180000);page.setDefaultTimeout(timeout);
- const report={schema_version:1,id:e.id,deployment_id:e.deployment_id,action:e.action,environment:'Caller-provided authenticated product endpoint; this browser handoff does not validate host/container provenance',origin,discovery_pages:0,commands:[],receipt_reads:0,lost_acknowledgements:0,expected:e.expect,observed:null,accessibility:[],passed:false};
+ const report={schema_version:1,id:e.id,deployment_id:e.deployment_id,action:e.action,environment:'Caller-provided authenticated product endpoint; this browser handoff does not validate host/container provenance',origin,discovery_pages:0,commands:[],command_paths:[],receipt_reads:0,lost_acknowledgements:0,expected:e.expect,observed:null,accessibility:[],passed:false};
  const commandPath='/api/v1/operations/backup-settings/'+encodeURIComponent(e.deployment_id)+'/commands';
- const observe=request=>{const url=new URL(request.url());if(url.pathname===commandPath&&request.method()==='POST'){const c=request.postDataJSON();report.commands.push({command_id:c.command_id,action:c.action,expected_revisions:c.expected_revisions});}if(url.pathname.startsWith(commandPath.replace(/\/commands$/,'/receipts/')))report.receipt_reads++;};
+ const observe=request=>{const url=new URL(request.url());if(/^\/api\/v1\/operations\/backup-settings\/[^/]+\/commands\/?$/.test(url.pathname)&&request.method()==='POST'){let command;try{command=request.postDataJSON();}catch{command=null;}report.commands.push(command);report.command_paths.push(url.pathname);}if(url.pathname.startsWith(commandPath.replace(/\/commands$/,'/receipts/')))report.receipt_reads++;};
+ const assertReadOnly=()=>{if(e.action==='read')assert.equal(report.commands.length,0,'Read-only browser step sent a backup-command POST');};
  page.on('request',observe);const commandRoute=url=>url.pathname===commandPath;let interceptor,intercepted,interceptionFailure;
  try{
   await page.goto(new URL('/#administration?section=backup-settings',origin).href);
@@ -38,7 +49,9 @@ export async function runBackupBrowserStep({page,origin,expectations:e,evidenceD
   while(!await selection.locator('option').evaluateAll((options,id)=>options.some(option=>option.value===id),e.deployment_id)){
    const more=page.getByRole('button',{name:'Load more deployments',exact:true});assert.ok(await more.count(),'Expected deployment absent from authorized discovery');await enabled(more,timeout);await more.click();await enabled(selection,timeout);report.discovery_pages++;assert.ok(report.discovery_pages<=100,'Discovery exceeded bounded page count');
   }
-  await selection.selectOption(e.deployment_id);await page.locator('.backup-settings .observer-summary').waitFor();
+  const readbackResponse=page.waitForResponse(response=>new URL(response.url()).pathname===commandPath.replace(/\/commands$/,'')&&response.request().method()==='GET'&&response.status()===200);
+  await selection.selectOption(e.deployment_id);const readback=await (await readbackResponse).json();await page.locator('.backup-settings .observer-summary').waitFor();assertReadOnly();
+  const {configuration,policy,authority,host_policy}=readback.revisions;const expectedRevisions={configuration,policy,authority,host_policy};
   if(e.action!=='read'){
    if(e.action==='publish'){
     for(const [key,label] of Object.entries(durations))await page.getByLabel(label,{exact:true}).fill(String(e.values[key]));
@@ -59,12 +72,13 @@ export async function runBackupBrowserStep({page,origin,expectations:e,evidenceD
    }
    await page.getByText('Desired revision '+e.expect.desired_revision+' recorded. Host application is checked independently below.',{exact:true}).waitFor();
    assert.equal(report.commands.length,1,'Each browser write step must send exactly one original command');
-   assert.equal(report.commands[0].action,'backup.settings.'+(e.action==='rollback'?'rollback':'publish'));
+   assert.equal(report.command_paths[0],commandPath);
+   report.expected_command=assertCommand(report.commands[0],e,expectedRevisions);
    if(e.lose_acknowledgement){assert.equal(report.lost_acknowledgements,1);assert.equal(report.receipt_reads,1);}
   }
   const until=Date.now()+timeout;
   do{
-   await page.locator('.backup-settings .observer-summary').waitFor();report.observed=await snapshot(page);
+   await page.locator('.backup-settings .observer-summary').waitFor();assertReadOnly();report.observed=await snapshot(page);
    if(statusKeys.every(key=>report.observed[key]===e.expect[key]))break;
    assert.ok(Date.now()<until,'Readback did not match expected independent states: '+JSON.stringify(report.observed));
    await page.waitForTimeout(500);const refresh=page.getByRole('button',{name:'Refresh backup state',exact:true});await enabled(refresh,timeout);await refresh.click();await enabled(refresh,timeout);
@@ -78,7 +92,7 @@ export async function runBackupBrowserStep({page,origin,expectations:e,evidenceD
    assert.deepEqual(violations,[],'Accessibility violations at '+width);report.accessibility.push({width,overflow,violations});
    await page.screenshot({path:join(evidenceDirectory,e.id+'-'+width+'.png'),fullPage:true});
   }
-  report.passed=true;return report;
+  assertReadOnly();if(e.action!=='read')assert.equal(report.commands.length,1,'Each browser write step must send exactly one original command');report.passed=true;return report;
  }catch(error){report.failure=error.message;throw error;}
  finally{page.off('request',observe);if(interceptor)await page.unroute(commandRoute,interceptor);await writeFile(join(evidenceDirectory,e.id+'-browser.json'),JSON.stringify(report,null,2)+'\n');}
 }

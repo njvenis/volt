@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import io
 import tempfile
 import time
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -167,6 +169,43 @@ class HostObserverTests(unittest.TestCase):
         self.assertIsNone(host.read_json(Path(self.policy["active_file"])))
         journal = host.read_json(Path(self.policy["state_dir"]) / "journal.json")
         self.assertNotIn("last_good", journal)
+
+    def test_expired_pending_report_is_refreshed_and_superseded_report_reconciles(self):
+        desired = self._desired()
+        prior = host._report(self.policy, {"sequence": 1, "last_good": None},
+            desired, "failed", "host_policy_rejected")
+
+        def http_error(status, code):
+            return urllib.error.HTTPError("https://host.invalid/reports", status,
+                "rejected", {}, io.BytesIO(json.dumps({"detail": {"code": code}}).encode()))
+
+        for status, code, expected in (
+                (400, "report_expired", "last_acknowledgement"),
+                (409, "report_superseded", "superseded_report")):
+            with self.subTest(code=code):
+                # Each case starts with a fresh host journal and exercises the
+                # retained-report recovery before fetching the current desired.
+                host.atomic_json(Path(self.policy["state_dir"]) / "journal.json", {
+                    "sequence": 1, "pending_report": prior})
+                posts = []
+
+                def fake_request(_url, _token, _timeout, body=None):
+                    if body is None:
+                        return {"schema_version": 1, "deployment_id": "deploy-a", "desired": None}
+                    posts.append(body)
+                    if len(posts) == 1:
+                        raise http_error(status, code)
+                    return {"schema_version": 1, "report_id": body["report_id"],
+                        "sequence": body["sequence"], "accepted": True, "duplicate": False}
+
+                with patch.object(host, "request_json", side_effect=fake_request):
+                    self.assertEqual(host.controller_once(self.policy)["status"], "uncertain")
+                journal = host.read_json(Path(self.policy["state_dir"]) / "journal.json")
+                self.assertIn(expected, journal)
+                self.assertEqual(posts[0]["report_id"], prior["report_id"])
+                if code == "report_expired":
+                    self.assertEqual(posts[1]["report_id"], prior["report_id"])
+                    self.assertNotEqual(posts[1]["observed_at"], prior["observed_at"])
 
     def test_observer_runs_http_request_with_selected_deadline_and_scheduler_check(self):
         desired = self._desired()

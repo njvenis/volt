@@ -160,6 +160,15 @@ def request_json(url: str, token: str, timeout: float, body: dict | None = None)
     return value
 
 
+def _http_error_code(error: urllib.error.HTTPError) -> str | None:
+    try:
+        payload = json.loads(error.read())
+    except (OSError, ValueError):
+        return None
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    return detail.get("code") if isinstance(detail, dict) and isinstance(detail.get("code"), str) else None
+
+
 def signed_report(policy: dict, unsigned: dict) -> dict:
     signature = load_private_key(Path(policy["signing_key_file"])).sign(canonical(unsigned))
     return {**unsigned, "signature": base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")}
@@ -224,10 +233,20 @@ def _controller_once_unlocked(policy: dict) -> dict:
 
     pending = journal.get("pending_report")
     if pending:
+        superseded = False
         try:
             acknowledgement = request_json(root + "/host/reports", token, timeout, pending)
         except urllib.error.HTTPError as error:
-            if error.code == 400:
+            error_code = _http_error_code(error)
+            if error.code == 409 and error_code == "report_superseded":
+                # A newer desired revision overtook a report that was never
+                # admitted. An accepted report would have taken the exact
+                # idempotency path before this stale-revision check.
+                journal.pop("pending_report", None)
+                journal["superseded_report"] = pending
+                atomic_json(journal_path, journal)
+                superseded = True
+            elif error.code == 400 and error_code == "report_expired":
                 # A report that was definitely rejected as stale is not an
                 # acknowledgement-unknown case. Keep its durable identity and
                 # sequence, refresh only observation timestamps, and retry.
@@ -244,11 +263,14 @@ def _controller_once_unlocked(policy: dict) -> dict:
                     acknowledgement = request_json(root + "/host/reports", token, timeout, pending)
                 except (urllib.error.URLError, TimeoutError, OSError):
                     return {"status": "uncertain", "failure_code": "report_acknowledgement_lost"}
+            else:
+                return {"status": "uncertain", "failure_code": "host_report_rejected"}
         except (urllib.error.URLError, TimeoutError, OSError):
             return {"status": "uncertain", "failure_code": "report_acknowledgement_lost"}
-        journal.pop("pending_report", None)
-        journal["last_acknowledgement"] = acknowledgement
-        atomic_json(journal_path, journal)
+        if not superseded:
+            journal.pop("pending_report", None)
+            journal["last_acknowledgement"] = acknowledgement
+            atomic_json(journal_path, journal)
 
     desired_response = request_json(root + "/host/desired", token, timeout)
     if desired_response.get("deployment_id") != policy["deployment_id"]:

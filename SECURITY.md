@@ -2,7 +2,9 @@
 
 VOLT is an early development project and is not yet intended for production deployment.
 
-Please report suspected vulnerabilities privately using **Security → Report a vulnerability** on the GitHub repository. Private vulnerability reporting must be enabled in repository settings before the repository is made public. Do not open a public issue containing exploit details, credentials, raw vulnerability data, or other sensitive information. If the private reporting route is unavailable, contact the repository maintainers through a private channel before sharing technical details.
+Once the repository is public and private vulnerability reporting is enabled, use **Security → Report a vulnerability** on GitHub. Repository owners and administrators can enable this feature for public repositories; it is not available while the repository is private. The repository owner should enable it when or after making the repository public, before inviting vulnerability reports or announcing the reporting route. See [GitHub's setup instructions](https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/configure-vulnerability-reporting/configure-for-a-repository).
+
+Until that route is enabled, do not send sensitive vulnerability details through public issues, pull requests, or discussions. Ask the repository owner through an already-established private channel to arrange a secure reporting route. No private reporting route is active until it has been configured and enabled.
 
 Include the affected revision, impact, and a minimal reproduction that uses synthetic data where possible. Do not attach secrets or production records.
 

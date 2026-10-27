@@ -311,6 +311,59 @@ class HostObserverTests(unittest.TestCase):
         self.assertEqual(state_after["scheduler"]["status"], "stale_or_nonprogressing")
         self.assertEqual(state_after["loop_sequence"], state_before["loop_sequence"] + 2)
 
+    def test_observer_resets_retained_scheduler_progress_only_for_current_new_boot(self):
+        desired = self._desired()
+        host.atomic_json(Path(self.policy["active_file"]), {"schema_version": 1,
+            "revision": 1, "digest": desired["digest"], "values": VALUES})
+        state_path = Path(self.policy["observer_state"])
+        host.atomic_json(state_path, {"scheduler_progress_boot_id": "old-boot",
+            "scheduler_loop_sequence": 100000000000,
+            "scheduler_last_progress_monotonic_ns": 100000000000})
+        response = (200, {"schema_version": 1, "deployment_id": "deploy-a",
+            "audit_events": [], "audit_complete": True,
+            "incidents": [], "incidents_complete": True}, None)
+        with patch.object(host, "_host_boot_id", return_value="new-boot"), \
+             patch.object(host, "_request", return_value=response), \
+             patch.object(host, "read_anchor_inventory", return_value={}):
+            for sequence, tick in ((2, 2_000_000_000), (3, 3_000_000_000)):
+                host.atomic_json(Path(self.policy["scheduler_file"]), {
+                    "loop_sequence": sequence, "monotonic_ns": tick, "boot_id": "new-boot"})
+                with patch.object(host.time, "monotonic_ns", return_value=tick):
+                    host.consumer_once("observer", self.policy)
+                state = host.read_json(state_path)
+                self.assertEqual(state["scheduler"]["status"], "healthy")
+                self.assertEqual(state["scheduler_loop_sequence"], sequence)
+                self.assertEqual(state["scheduler_progress_boot_id"], "new-boot")
+
+    def test_stale_or_malformed_new_boot_samples_do_not_reset_retained_baseline(self):
+        desired = self._desired()
+        host.atomic_json(Path(self.policy["active_file"]), {"schema_version": 1,
+            "revision": 1, "digest": desired["digest"], "values": VALUES})
+        state_path = Path(self.policy["observer_state"])
+        initial = {"scheduler_progress_boot_id": "old-boot",
+            "scheduler_loop_sequence": 100000000000,
+            "scheduler_last_progress_monotonic_ns": 100000000000}
+        host.atomic_json(state_path, initial)
+        response = (200, {"schema_version": 1, "deployment_id": "deploy-a",
+            "audit_events": [], "audit_complete": True,
+            "incidents": [], "incidents_complete": True}, None)
+        samples = [
+            {"loop_sequence": 1, "monotonic_ns": 1, "boot_id": "new-boot"},
+            {"loop_sequence": "2", "monotonic_ns": 2_000_000_000, "boot_id": "new-boot"},
+            {"loop_sequence": 2, "monotonic_ns": 2_000_000_000, "boot_id": "other-boot"},
+        ]
+        with patch.object(host, "_host_boot_id", return_value="new-boot"), \
+             patch.object(host, "_request", return_value=response), \
+             patch.object(host, "read_anchor_inventory", return_value={}):
+            for sample in samples:
+                host.atomic_json(Path(self.policy["scheduler_file"]), sample)
+                with patch.object(host.time, "monotonic_ns", return_value=20_000_000_000):
+                    host.consumer_once("observer", self.policy)
+                state = host.read_json(state_path)
+                self.assertEqual(state["scheduler_progress_boot_id"], "old-boot")
+                self.assertEqual(state["scheduler_loop_sequence"], 100000000000)
+                self.assertEqual(state["scheduler_last_progress_monotonic_ns"], 100000000000)
+
     def test_supervisor_uses_selected_future_skew_and_preserves_work_across_revision(self):
         first = self._desired()
         state_path = Path(self.policy["observer_state"])

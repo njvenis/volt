@@ -214,6 +214,13 @@ def _root(policy: dict) -> str:
     return policy["endpoint"].rstrip("/") + "/api/v1/operations/observer-settings/" + urllib.parse.quote(policy["deployment_id"], safe="")
 
 
+def _host_boot_id() -> str | None:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return None
+
+
 def _report(policy: dict, journal: dict, requested: dict | None,
             outcome: str, failure: str | None) -> dict:
     observer = readback(Path(policy["observer_readback"]))
@@ -618,14 +625,22 @@ def consumer_once(role: str, policy: dict) -> dict:
         progress = read_json(Path(policy["scheduler_file"]))
         now_mono = time.monotonic_ns()
         prior_seq = state.get("scheduler_loop_sequence")
-        try:
-            host_boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-        except OSError:
-            host_boot_id = None
+        host_boot_id = _host_boot_id()
         valid_progress = (isinstance(progress, dict) and type(progress.get("loop_sequence")) is int
             and isinstance(progress.get("boot_id"), str) and type(progress.get("monotonic_ns")) is int)
         sample_age = (now_mono - progress["monotonic_ns"]) / 1e9 if valid_progress else None
-        progressed = valid_progress and (prior_seq is None or progress["loop_sequence"] > prior_seq)
+        sample_current = bool(valid_progress and progress.get("boot_id") == host_boot_id
+            and sample_age is not None and 0 <= sample_age
+            <= values["scheduler_progress_freshness_seconds"])
+        prior_boot_id = state.get("scheduler_progress_boot_id")
+        new_current_boot = bool(sample_current and prior_boot_id != progress["boot_id"])
+        # Monotonic clocks restart at boot. Only a fresh sample for the actual
+        # current host boot can reset retained sequence and progress time.
+        if new_current_boot:
+            prior_seq = None
+            state["scheduler_progress_boot_id"] = progress["boot_id"]
+            state.pop("scheduler_last_progress_monotonic_ns", None)
+        progressed = sample_current and (prior_seq is None or progress["loop_sequence"] > prior_seq)
         last_progress_ns = state.get("scheduler_last_progress_monotonic_ns")
         if progressed:
             last_progress_ns = progress["monotonic_ns"]
@@ -640,8 +655,9 @@ def consumer_once(role: str, policy: dict) -> dict:
             "loop_sequence": progress.get("loop_sequence") if valid_progress else None,
             "age_seconds": progress_age, "sample_age_seconds": sample_age,
             "freshness_seconds": values["scheduler_progress_freshness_seconds"]}
-        if valid_progress and (prior_seq is None or progress["loop_sequence"] >= prior_seq):
+        if sample_current and (prior_seq is None or progress["loop_sequence"] >= prior_seq):
             state["scheduler_loop_sequence"] = progress["loop_sequence"]
+            state["scheduler_progress_boot_id"] = progress["boot_id"]
         state["last_completed_loop_at"] = utc_now()
         state["loop_sequence"] = int(state.get("loop_sequence", 0)) + 1
     else:

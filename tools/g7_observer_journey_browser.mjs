@@ -143,7 +143,9 @@ try {
   },null,{timeout:30000});
 
   const bootstrap = await api('/api/v1/assessment/bootstrap-policy',{method:'POST',write:true,
-    body:JSON.stringify({policy:{grants:[],denies:[],acceptance_material_changes:{},exception_warning_routes:[]}})});
+    body:JSON.stringify({policy:{grants:[],denies:[{deny_id:'g7-deny-b-observer',principal_id:'g7-actor',
+      actions:['observer.timing.read','observer.timing.configure'],target_ids:['g7-other']}],
+      acceptance_material_changes:{},exception_warning_routes:[]}})});
   if (![200,409].includes(bootstrap.status)) throw new Error(`bootstrap policy failed with ${bootstrap.status}`);
   counts.bootstrap = bootstrap.status;
 
@@ -170,7 +172,7 @@ try {
   const actions=['observer.timing.read','observer.timing.configure','audit.read'];
   const permissions=actions.map(action=>({permission_id:crypto.randomUUID(),role_id:crypto.randomUUID(),action,
     target_scope:scope,limits,separation_of_duties:duties,
-    ...(action.startsWith('observer.timing.')?{deployment_scopes:['g7-local']}: {})}));
+    ...(action.startsWith('observer.timing.')?{deployment_scopes:['g7-local','g7-other']}: {})}));
   const policyRevision=catalogue.body.policy_revision, authorityRevision=catalogue.body.authority_revision;
   const create=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
     command_id:crypto.randomUUID(),target_id:zero,action:'access_group.create',membership_ids:[],
@@ -215,12 +217,16 @@ try {
   if(!refreshedSession.body.access_groups?.includes(groupId))
     throw new Error('fresh OIDC session did not resolve the newly granted access group');
   counts.sessionRefreshed=1;
+  const explicitlyDeniedB=await api('/api/v1/operations/observer-settings/g7-other');
+  if(explicitlyDeniedB.status!==404)
+    throw new Error(`registered B with a matching explicit deny returned ${explicitlyDeniedB.status}`);
+  counts.registeredMatchingDenyDirectRead=explicitlyDeniedB.status;
   const discovery=await api('/api/v1/operations/observer-settings?limit=100');
   if(discovery.status!==200||discovery.body.deployments?.length!==1
       ||discovery.body.deployments[0]?.deployment_id!=='g7-local'||discovery.body.next_cursor!==null)
-    throw new Error('bounded discovery exposed registered deployment B without an actor grant');
+    throw new Error('bounded discovery exposed registered deployment B despite a matching explicit deny');
   counts.authorizedDiscovery=discovery.body.deployments.length;
-  counts.registeredMatchingDenyDiscovery=discovery.body.deployments.some(item=>item.deployment_id==='g7-other')?1:0;
+  counts.registeredMatchingDenyDiscovery=discovery.body.deployments.some(item=>item.deployment_id==='g7-other')?0:1;
   const discoveryOverbound=await api('/api/v1/operations/observer-settings?limit=1000');
   if(discoveryOverbound.status!==400)throw new Error(`deployment discovery accepted overbound limit ${discoveryOverbound.status}`);
   counts.discoveryOverboundDenied=discoveryOverbound.status;
@@ -377,7 +383,7 @@ try {
     docker(['exec','-u','0','volt-g7-observer-journey','cp','/tmp/progress.future.json','/run/uvm-g7-scheduler/progress.json']);
     docker(['exec','-u','0','volt-g7-observer-journey','chmod','0644','/run/uvm-g7-scheduler/progress.json']);
     await unlink(futurePath);
-    const futureState=await waitForJson(observerStatePath,state=>state.scheduler?.age_seconds<0);
+    const futureState=await waitForJson(observerStatePath,state=>state.scheduler?.sample_age_seconds<0);
     if(futureState.scheduler.status!=='stale_or_nonprogressing')throw new Error('future scheduler heartbeat was accepted');
     counts.healthFaults.push('future_scheduler_progress');
   } finally { docker(['exec','volt-g7-observer-journey','rm','-f',stallMarker]); }

@@ -3,6 +3,7 @@ import type {AdminCatalogue,Grantable,NativeLimits,NativePermission,SourceScope}
 
 // Form validation of the server's explicit ceilings. This does not grant authority:
 // the command endpoint still authorises the actor and rechecks current revisions.
+export const isDeploymentSettingsAction=(action:string)=>['observer.timing.read','observer.timing.configure','backup.settings.read','backup.settings.configure'].includes(action);
 export const isObserverTimingAction=(action:string)=>['observer.timing.read','observer.timing.configure'].includes(action);
 // Deployment IDs are opaque exact matches. Even "*" is not a wildcard here.
 export function validDeploymentScopes(value:unknown):value is string[] {
@@ -60,7 +61,7 @@ export function permissionWithin(value:NativePermission,catalogue:AdminCatalogue
   const action=catalogue.selectable_actions.find(a=>a.action===value.action);
   return hasGrantable(envelope)&&!!action&&
     (envelope.actions.includes('*')||envelope.actions.includes(value.action))&&
-    (isObserverTimingAction(value.action)?
+    (isDeploymentSettingsAction(value.action)?
       deploymentScopesWithin(value.deployment_scopes,action.deployment_scopes)&&deploymentScopesWithin(value.deployment_scopes,envelope.deployment_scopes):
       value.deployment_scopes===undefined)&&
     scopeWithin(value.target_scope,action.target_scope)&&scopeWithin(value.target_scope,envelope.target_scope)&&
@@ -76,6 +77,6 @@ export function accessDraftErrors(catalogue:AdminCatalogue,scopes:string[],permi
     errors.push('Choose distinct exact source scopes from the current envelope.');
   if(new Set(permissions.map(p=>p.permission_id)).size!==permissions.length)
     errors.push('Each permission must have a distinct stable ID.');
-  permissions.forEach(p=>{if(isObserverTimingAction(p.action)&&(!deploymentScopesWithin(p.deployment_scopes,envelope.deployment_scopes)||!deploymentScopesWithin(p.deployment_scopes,catalogue.selectable_actions.find(a=>a.action===p.action)?.deployment_scopes)))errors.push(p.action+': choose at least one exact deployment from the current server ceiling.');if(!permissionWithin(p,catalogue))errors.push(p.action+': review its scope, limits and separation of duties against the current ceiling.');});
+  permissions.forEach(p=>{if(isDeploymentSettingsAction(p.action)&&(!deploymentScopesWithin(p.deployment_scopes,envelope.deployment_scopes)||!deploymentScopesWithin(p.deployment_scopes,catalogue.selectable_actions.find(a=>a.action===p.action)?.deployment_scopes)))errors.push(p.action+': choose at least one exact deployment from the current server ceiling.');if(!permissionWithin(p,catalogue))errors.push(p.action+': review its scope, limits and separation of duties against the current ceiling.');});
   return errors;
 }

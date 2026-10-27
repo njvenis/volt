@@ -46,13 +46,13 @@ async function fixture(t,state=settings(),retained=null,options={}) {
  if(retained)await context.addInitScript(({key,command})=>sessionStorage.setItem(key,JSON.stringify(command)),{key:'volt.backup.command:'+JSON.stringify(['fixture-actor',deployment]),command:retained});
  const page=await context.newPage();page.setDefaultTimeout(5000);const errors=[];page.on('pageerror',e=>errors.push(e.message));t.after(()=>assert.deepEqual(errors,[]));
  const commands=[];let receipt;
- const history={schema_version:1,deployment_id:deployment,revision:2,digest:oldDigest,values:{...values,timeout_seconds:700},publication_revisions:{configuration:2,policy:4,authority:6,host_policy:2},command_id:randomUUID(),actor_id:'historical-actor',rationale:'Previous immutable settings',evidence_ref:null,committed_at:new Date().toISOString(),audit_id:randomUUID()};
+ const history={schema_version:1,deployment_id:deployment,revision:2,digest:oldDigest,values:{...values,timeout_seconds:700},publication_revisions:options.historyTokens??{configuration:2,policy:4,authority:6,host_policy:2},command_id:randomUUID(),actor_id:'historical-actor',rationale:'Previous immutable settings',evidence_ref:null,committed_at:new Date().toISOString(),audit_id:randomUUID()};
  await page.route('**/api/**',async route=>{
   const url=new URL(route.request().url());let body,status=200;
   const error=(code,outcome='not_committed')=>({schema_version:1,error:{code,message:code,details:{outcome}}});
   if(url.pathname===root+'/'+deployment){if(options.readDenied){status=403;body=error('forbidden');}else body=state;}
   else if(url.pathname===root+'/'+deployment+'/revisions/2')body=history;
-  else if(url.pathname.includes('/receipts/')){if(receipt)body=receipt;else{status=404;body=error('not_found');}}
+  else if(url.pathname.includes('/receipts/')){if(receipt)body={...receipt,actor_id:options.receiptActor??receipt.actor_id};else{status=404;body=error('not_found');}}
   else if(url.pathname===root+'/'+deployment+'/commands'){
    const command=route.request().postDataJSON();commands.push(command);
    if(options.commandError){status=options.commandError;body=error(status===409?'revision_conflict':'forbidden');}
@@ -69,13 +69,14 @@ async function fixture(t,state=settings(),retained=null,options={}) {
     state.desired={revision:state.revisions.configuration,digest,values:appliedValues,command_id:command.command_id,committed_at:new Date().toISOString()};
     const intent=randomUUID();state.status.settings_application={state:'pending',requested_revision:state.revisions.configuration,requested_digest:digest,intent_id:intent,host_policy_revision:3,active_revision:state.effective?.revision??null,active_digest:state.effective?.digest??null,reported_at:null,failure_code:null};
     receipt={schema_version:1,deployment_id:deployment,command_id:command.command_id,actor_id:'fixture-actor',action:command.action,request_digest:digest,settings_digest:digest,desired_revision:state.revisions.configuration,evaluated_revisions:command.expected_revisions,audit_id:randomUUID(),intent_id:intent,committed_at:new Date().toISOString(),outcome:'desired_committed'};
-    if(options.dropResponse){await route.abort('failed');return;}body=options.invalidReceipt?{...receipt,outcome:'applied'}:receipt;status=201;
+    if(options.dropResponse){await route.abort('failed');return;}body=options.invalidReceipt?{...receipt,outcome:'applied'}:{...receipt,actor_id:options.saveActor??receipt.actor_id};status=201;
    }
   }else throw new Error('Unexpected synthetic route '+url.pathname);
   await route.fulfill({status,json:body});
  });
  await page.goto(origin);await page.getByRole('button',{name:'Refresh backup state',exact:true}).waitFor();
  if(options.readDenied)await page.getByText('Current permissions do not allow this operation.',{exact:true}).waitFor();
+ else if(options.invalidRead)await page.getByText('The server response could not be verified. No successful outcome is inferred.',{exact:true}).waitFor();
  else await page.locator('.observer-state').waitFor();
  return {page,state,commands,options};
 }
@@ -138,3 +139,21 @@ test('native permission editor selects separate backup read/configure grants and
  let result=await current();assert.deepEqual(result.value[0].deployment_scopes,['deployment-a']);assert.deepEqual(result.value[1].deployment_scopes,['deployment-b']);assert.deepEqual(result.value[2],prior.value[2]);assert.equal(result.valid,true);
  await configure.getByRole('checkbox',{name:'deployment-b',exact:true}).uncheck();result=await current();assert.equal(result.valid,false);assert.equal(await page.getByText('Select a deployment',{exact:true}).count(),1);
 });
+
+test('Save and receipt recovery reject another actor and preserve the exact retained command',async t=>{
+ const {page,commands,options}=await fixture(t,settings(),null,{saveActor:'different-actor',receiptActor:'different-actor'});
+ await correction(page);await saveButton(page).click();await page.getByText('Command outcome needs recovery',{exact:true}).waitFor();
+ const stored=()=>page.evaluate(key=>JSON.parse(sessionStorage.getItem(key)),'volt.backup.command:'+JSON.stringify(['fixture-actor',deployment]));
+ assert.deepEqual(await stored(),commands[0]);assert.equal(await page.getByText(/Desired revision 5 recorded/).count(),0);
+ await page.getByRole('button',{name:'Check command receipt',exact:true}).click();await page.getByText('The server response could not be verified. No successful outcome is inferred.',{exact:true}).waitFor();
+ assert.deepEqual(await stored(),commands[0]);assert.equal(await page.getByText('Command outcome needs recovery',{exact:true}).count(),1);assert.equal(await page.getByText(/Desired revision 5 recorded/).count(),0);assert.equal(await saveButton(page).isDisabled(),true);
+ options.receiptActor='fixture-actor';await page.getByRole('button',{name:'Check command receipt',exact:true}).click();await page.getByText(/Desired revision 5 recorded/).waitFor();assert.equal(await stored(),null);assert.equal(commands.length,1);
+});
+function freshArchiveState(){const state=settings('applied'),completed=new Date(Date.now()-10000).toISOString();state.status.completed_archive={archive_id:randomUUID(),completed_at:completed,manifest_digest:digest,outcome:'complete'};state.status.freshness={state:'fresh',evaluated_at:new Date().toISOString(),age_seconds:10,basis_completed_at:completed,maximum_backup_age_seconds:90000};return state;}
+for(const [name,mutate] of [
+ ['incomplete archive',s=>s.status.completed_archive={archive_id:null,completed_at:null,manifest_digest:null,outcome:null}],
+ ['failed archive',s=>s.status.completed_archive.outcome='failed'],
+ ['nonmatching archive time',s=>s.status.freshness.basis_completed_at=new Date(Date.now()-20000).toISOString()],
+])test('contradictory fresh readback is hidden: '+name,async t=>{const state=freshArchiveState();mutate(state);const {page}=await fixture(t,state,null,{invalidRead:true});assert.equal(await page.locator('.backup-state').count(),0);assert.equal(await saveButton(page).count(),0);assert.equal(await page.locator('.observer-summary').count(),0);});
+test('valid complete archive displays server freshness while restore remains unknown',async t=>{const {page}=await fixture(t,freshArchiveState());assert.deepEqual(await page.locator('.backup-state').allTextContents(),['complete','fresh','unknown']);});
+test('history revision token labels are independent of JSON member order',async t=>{const {page}=await fixture(t,settings(),null,{historyTokens:{authority:17,host_policy:19,policy:13,configuration:2}});await page.getByLabel('Historical revision',{exact:true}).fill('2');await page.getByRole('button',{name:'Read historical revision',exact:true}).click();await page.getByText('Previous immutable settings',{exact:true}).waitFor();const tokens=page.locator('dl > div').filter({has:page.getByText('Publication tokens (configuration / policy / authority / host policy)',{exact:true})});assert.equal(await tokens.locator('dd').textContent(),'2 / 13 / 17 / 19');});

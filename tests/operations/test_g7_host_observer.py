@@ -236,6 +236,25 @@ class HostObserverTests(unittest.TestCase):
         self.assertIn("/host/telemetry?limit=1000&sink_id=fixture-sink", observed[0][0])
         self.assertEqual(host.read_json(Path(self.policy["observer_readback"]))["digest"], desired["digest"])
 
+    def test_observer_marks_a_stalled_scheduler_nonprogressing(self):
+        desired = self._desired()
+        host.atomic_json(Path(self.policy["active_file"]), {"schema_version": 1,
+            "revision": 1, "digest": desired["digest"], "values": VALUES})
+        host.atomic_json(Path(self.policy["scheduler_file"]), {"loop_sequence": 7,
+            "monotonic_ns": time.monotonic_ns(), "boot_id":
+                Path("/proc/sys/kernel/random/boot_id").read_text().strip()})
+        with patch.object(host, "_request", return_value=(200, {
+                "schema_version": 1, "deployment_id": "deploy-a", "audit_events": [],
+                "audit_complete": True, "incidents": [], "incidents_complete": True}, None)), \
+             patch.object(host, "read_anchor_inventory", return_value={}):
+            host.consumer_once("observer", self.policy)
+            state_before = host.read_json(Path(self.policy["observer_state"]))
+            host.consumer_once("observer", self.policy)
+        state_after = host.read_json(Path(self.policy["observer_state"]))
+        self.assertEqual(state_before["scheduler"]["status"], "healthy")
+        self.assertEqual(state_after["scheduler"]["status"], "stale_or_nonprogressing")
+        self.assertEqual(state_after["loop_sequence"], state_before["loop_sequence"] + 1)
+
     def test_supervisor_uses_selected_future_skew_and_preserves_work_across_revision(self):
         first = self._desired()
         state_path = Path(self.policy["observer_state"])
@@ -254,6 +273,15 @@ class HostObserverTests(unittest.TestCase):
         observer_state = host.read_json(state_path)
         self.assertEqual(observer_state["incidents"], ["open-event"])
         self.assertEqual(observer_state["pending_work"], ["host-reconcile"])
+
+        observer_state["last_completed_loop_at"] = (
+            datetime.fromtimestamp(datetime.now(UTC).timestamp() + 20, UTC)
+            .isoformat().replace("+00:00", "Z"))
+        host.atomic_json(state_path, observer_state)
+        result = host.consumer_once("supervisor", self.policy)
+        self.assertEqual(result["status"], "completed")
+        state = host.read_json(Path(self.policy["supervisor_state"]))
+        self.assertEqual(state["supervision"]["status"], "stale_or_future")
 
     def test_lag_measurement_detects_unanchored_and_late_incident_projection(self):
         now = datetime(2026, 10, 27, 16, 0, tzinfo=UTC)

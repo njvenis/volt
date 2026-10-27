@@ -263,17 +263,24 @@ class HostObserverTests(unittest.TestCase):
             "incidents": [{"observed_at": "2026-10-27T15:59:40Z",
                 "projected_at": "2026-10-27T15:59:48Z"}]}
         anchors = {"event-1": {"payload_sha256": "b" * 64,
-            "sink_receipt": "receipt-a"}}
+            "sink_receipt": "receipt-a", "anchored_at": "2026-10-27T15:59:55Z"}}
         result = host.measure_lag(telemetry, anchors, VALUES, now)
         self.assertEqual(result["anchor_export"]["status"], "late")
         self.assertEqual(result["anchor_export"]["receipt_or_digest_mismatch_count"], 1)
         self.assertEqual(result["anchor_export"]["maximum_pending_lag_seconds"], 40)
+        self.assertEqual(result["anchor_export"]["maximum_export_lag_seconds"], 0)
         self.assertEqual(result["incident_projection"]["status"], "healthy")
         self.assertEqual(result["incident_projection"]["maximum_projection_lag_seconds"], 8)
 
         telemetry["incidents"][0]["projected_at"] = "2026-10-27T16:00:00Z"
         result = host.measure_lag(telemetry, anchors, VALUES, now)
         self.assertEqual(result["incident_projection"]["status"], "late")
+
+        anchors["event-1"]["payload_sha256"] = "a" * 64
+        result = host.measure_lag(telemetry, anchors, VALUES, now)
+        self.assertEqual(result["anchor_export"]["status"], "late")
+        self.assertEqual(result["anchor_export"]["pending_or_unanchored_count"], 0)
+        self.assertEqual(result["anchor_export"]["maximum_export_lag_seconds"], 35)
 
     def test_missing_or_future_telemetry_fails_closed(self):
         now = datetime(2026, 10, 27, 16, 0, tzinfo=UTC)
@@ -284,6 +291,14 @@ class HostObserverTests(unittest.TestCase):
         self.assertEqual(result["anchor_export"]["status"], "unknown")
         self.assertEqual(result["incident_projection"]["timestamp_anomaly_count"], 1)
         self.assertEqual(result["incident_projection"]["status"], "unknown")
+        telemetry["audit_complete"] = True
+        telemetry["audit_events"] = [{"event_id": "event-future", "event_digest": "f" * 64,
+            "sink_receipt": "receipt-future", "received_at": "2026-10-27T15:59:00Z"}]
+        anchors = {"event-future": {"payload_sha256": "f" * 64,
+            "sink_receipt": "receipt-future", "anchored_at": "2026-10-27T16:00:10Z"}}
+        result = host.measure_lag(telemetry, anchors, VALUES, now)
+        self.assertEqual(result["anchor_export"]["status"], "unknown")
+        self.assertEqual(result["anchor_export"]["timestamp_anomaly_count"], 1)
 
 
 if __name__ == "__main__":

@@ -407,6 +407,10 @@ def read_anchor_inventory(dsn: str, deployment_id: str, sink_id: str,
 
 
 def _timestamp(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return None
+        return value.astimezone(UTC)
     if not isinstance(value, str):
         return None
     try:
@@ -421,7 +425,9 @@ def measure_lag(telemetry: dict, anchors: dict[str, dict], values: dict,
     """Measure pending/slow anchor and incident projections without payloads."""
     now = (now or datetime.now(UTC)).astimezone(UTC)
     anchor_pending_ages: list[float] = []
+    anchor_export_lags: list[float] = []
     anchor_mismatch_count = 0
+    anchor_timestamp_anomalies = 0
     audit_events = telemetry.get("audit_events")
     audit_complete = telemetry.get("audit_complete") is True
     if not isinstance(audit_events, list):
@@ -436,20 +442,37 @@ def measure_lag(telemetry: dict, anchors: dict[str, dict], values: dict,
         receipt = event.get("sink_receipt")
         valid_anchor = bool(anchor and receipt and anchor.get("sink_receipt") == receipt
             and anchor.get("payload_sha256") == event.get("event_digest"))
-        if not valid_anchor:
-            received = _timestamp(event.get("received_at"))
+        received = _timestamp(event.get("received_at"))
+        if valid_anchor:
+            anchored = _timestamp(anchor.get("anchored_at"))
+            if (received is None or anchored is None
+                    or received > now + __import__("datetime").timedelta(
+                        seconds=values["maximum_future_skew_seconds"])
+                    or anchored > now + __import__("datetime").timedelta(
+                        seconds=values["maximum_future_skew_seconds"])
+                    or anchored < received - __import__("datetime").timedelta(
+                        seconds=values["maximum_future_skew_seconds"])):
+                anchor_timestamp_anomalies += 1
+            else:
+                anchor_export_lags.append(max(0.0, (anchored - received).total_seconds()))
+        else:
             if received is None or received > now + __import__("datetime").timedelta(
                     seconds=values["maximum_future_skew_seconds"]):
                 anchor_pending_ages.append(float("inf"))
+                anchor_timestamp_anomalies += 1
             else:
                 anchor_pending_ages.append(max(0.0, (now - received).total_seconds()))
             if anchor and (receipt is None or anchor.get("sink_receipt") != receipt
                     or anchor.get("payload_sha256") != event.get("event_digest")):
                 anchor_mismatch_count += 1
-    anchor_lag = max(anchor_pending_ages, default=0.0) if audit_complete else None
+    anchor_pending_lag = max(anchor_pending_ages, default=0.0) if audit_complete else None
+    anchor_export_lag = (max(anchor_export_lags, default=0.0)
+        if audit_complete and anchor_timestamp_anomalies == 0 else None)
     anchor_state = ("unknown" if not audit_complete else
-        "healthy" if anchor_lag is not None and anchor_lag <= values["anchor_export_lag_seconds"]
-        else "late")
+        "unknown" if anchor_timestamp_anomalies else
+        "late" if anchor_pending_lag is None or anchor_export_lag is None
+            or anchor_pending_lag > values["anchor_export_lag_seconds"]
+            or anchor_export_lag > values["anchor_export_lag_seconds"] else "healthy")
 
     incidents = telemetry.get("incidents")
     incidents_complete = telemetry.get("incidents_complete") is True
@@ -472,8 +495,10 @@ def measure_lag(telemetry: dict, anchors: dict[str, dict], values: dict,
         if projected is None:
             pending_projections += 1
             projection_ages.append(max(0.0, (now - observed).total_seconds()))
-        elif projected < observed - __import__("datetime").timedelta(
-                seconds=values["maximum_future_skew_seconds"]):
+        elif (projected < observed - __import__("datetime").timedelta(
+                seconds=values["maximum_future_skew_seconds"])
+                or projected > now + __import__("datetime").timedelta(
+                    seconds=values["maximum_future_skew_seconds"])):
             projection_anomalies += 1
         else:
             projection_ages.append(max(0.0, (projected - observed).total_seconds()))
@@ -484,9 +509,11 @@ def measure_lag(telemetry: dict, anchors: dict[str, dict], values: dict,
         "healthy" if projection_lag is not None
             and projection_lag <= values["incident_projection_deadline_seconds"] else "late")
     return {"anchor_export": {"status": anchor_state,
-            "maximum_pending_lag_seconds": anchor_lag,
+            "maximum_pending_lag_seconds": anchor_pending_lag,
+            "maximum_export_lag_seconds": anchor_export_lag,
             "pending_or_unanchored_count": len(anchor_pending_ages),
             "receipt_or_digest_mismatch_count": anchor_mismatch_count,
+            "timestamp_anomaly_count": anchor_timestamp_anomalies,
             "limit_seconds": values["anchor_export_lag_seconds"]},
         "incident_projection": {"status": projection_state,
             "maximum_projection_lag_seconds": projection_lag,

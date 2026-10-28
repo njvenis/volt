@@ -893,12 +893,26 @@ def install_connector_routes(app):
             snapshot_policy=_policy(snapshot_connection)
             snapshot_row=snapshot_connection.execute(sa.select(connectors).where(
                 connectors.c.connector_id==connector_id)).mappings().first()
-            from uvm.operations.backup_settings import intent_quarantined
-            if intent_quarantined(snapshot_connection, intent_id):
-                _fail(409, "restore_uncertain_effect", "Intent is held for recovery reconciliation")
             snapshot_intent=snapshot_connection.execute(sa.select(connector_intents).where(
                 connector_intents.c.connector_id==connector_id,
                 connector_intents.c.intent_id==intent_id)).mappings().first()
+            if not _grants(snapshot_policy["document"], actor, "connector.read", binding) and not (
+                    snapshot_intent is not None and snapshot_intent["actor_id"] == actor and
+                    _grants(snapshot_policy["document"], actor, "connector.configure", binding)):
+                _fail(403, "forbidden", "Current connector permission is required")
+            if snapshot_row is None or snapshot_intent is None:
+                _fail(404, "not_found", "Intent does not exist")
+            if (snapshot_intent["status"] == "pending" and (
+                    snapshot_intent["kind"] == "connector.validate" or
+                    (snapshot_intent["kind"] == "connector.reconcile" and
+                        (snapshot_intent["payload"] or {}).get("reason") == "configuration_rollback"))):
+                if snapshot_intent["actor_id"] != actor:
+                    _fail(403, "forbidden", "Only the initiating connector operator may complete this intent")
+                _require(snapshot_policy["document"], actor, "connector.configure", binding)
+                _require(snapshot_policy["document"], actor, "connector.secret.manage", binding)
+            from uvm.operations.backup_settings import intent_quarantined
+            if intent_quarantined(snapshot_connection, intent_id, connector_id):
+                _fail(409, "restore_uncertain_effect", "Intent is held for recovery reconciliation")
             if (snapshot_row is not None and snapshot_intent is not None
                     and snapshot_intent["kind"]=="connector.validate"
                     and snapshot_intent["status"]=="pending"):
@@ -976,6 +990,8 @@ def install_connector_routes(app):
                         ).with_for_update()).mappings().first()
                     _require(current_policy["document"], actor, "connector.configure", binding)
                     _require(current_policy["document"], actor, "connector.secret.manage", binding)
+                    if current_intent is not None and intent_quarantined(fence_connection, intent_id, connector_id):
+                        _fail(409, "restore_uncertain_effect", "Intent is held for recovery reconciliation")
                     unchanged = (current_row is not None and current_intent is not None
                         and current_intent["status"] == "pending"
                         and current_intent["actor_id"] == actor
@@ -1019,6 +1035,8 @@ def install_connector_routes(app):
             intent=c.execute(sa.select(connector_intents).where(connector_intents.c.connector_id==connector_id,connector_intents.c.intent_id==intent_id)).mappings().first()
             if intent is None:_fail(404,"not_found","Intent does not exist")
             if not _grants(policy["document"],actor,"connector.read",binding) and not (intent["actor_id"]==actor and _grants(policy["document"],actor,"connector.configure",binding)):_fail(403,"forbidden","Current connector permission is required")
+            if intent_quarantined(c, intent_id, connector_id):
+                _fail(409, "restore_uncertain_effect", "Intent is held for recovery reconciliation")
             disable_connector=False
             if intent["kind"]=="connector.validate" and intent["status"]=="pending":
                 if intent["actor_id"] != actor:

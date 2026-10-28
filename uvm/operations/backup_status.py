@@ -150,8 +150,31 @@ def admit_status(engine, deployment_id, body, entry, now):
                 if (application['requested_revision'] != state['requested_revision'] or
                         application['requested_digest'] != current_desired['digest'] or
                         application['intent_id'] != state['application_intent_id'] or
-                        application['host_policy_revision'] != policy['revision']):
+                        (application['host_policy_revision'] != policy['revision'] and
+                            (application['state'] != state['application_status'] or
+                                application['active_revision'] != state['effective_revision'] or
+                                application['active_digest'] != ('sha256:' + state['effective_digest'] if state['effective_digest'] else None)))):
                     raise HTTPException(409, {'code': 'revision_conflict', 'message': 'Application intent differs'})
+                if application['host_policy_revision'] != policy['revision']:
+                    old_acks = connection.execute(sa.select(g7_backup_host_records.c.document).where(
+                        g7_backup_host_records.c.deployment_id == deployment_id,
+                        g7_backup_host_records.c.record_kind == 'ack')).scalars()
+                    if not any(ack['intent_id'] == application['intent_id'] and
+                            ack['host_policy_revision'] == application['host_policy_revision'] and
+                            ack['observed_at'] == application['reported_at'] and
+                            ack['outcome'] == application['state'] and
+                            ack['active_revision'] == application['active_revision'] and
+                            ack['active_digest'] == application['active_digest'] for ack in old_acks):
+                        raise HTTPException(409, {'code': 'revision_conflict', 'message': 'Historical application policy lacks its exact acknowledgement'})
+                reported_at = parse_utc(application['reported_at']) if application['reported_at'] else None
+                if (reported_at is None or reported_at > now + timedelta(seconds=policy['maximum_future_skew_seconds']) or
+                        now - reported_at > timedelta(seconds=policy['maximum_report_age_seconds'])):
+                    # A fresh archive report may carry old application evidence;
+                    # it cannot newly apply settings from stale evidence.
+                    if (application['state'] != state['application_status'] or
+                            application['active_revision'] != state['effective_revision'] or
+                            application['active_digest'] != ('sha256:' + state['effective_digest'] if state['effective_digest'] else None)):
+                        raise HTTPException(409, {'code': 'revision_conflict', 'message': 'Application evidence expired before first delivery'})
                 if application['state'] == 'applied':
                     if (application['active_revision'] != application['requested_revision'] or
                             application['active_digest'] != application['requested_digest']):
@@ -169,6 +192,7 @@ def admit_status(engine, deployment_id, body, entry, now):
                 age = int((evaluated - completed).total_seconds()) if evaluated and completed else None
                 if (maximum is None or age is None or age < 0 or
                         evaluated > now + timedelta(seconds=policy['maximum_future_skew_seconds']) or
+                        evaluated != observed or
                         freshness['maximum_backup_age_seconds'] != maximum or
                         freshness['age_seconds'] != age or
                         freshness['basis_completed_at'] != archive['completed_at'] or

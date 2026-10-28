@@ -343,3 +343,306 @@ class RecoverySafetyTests(unittest.TestCase):
         self.assertEqual(result['state'],'failed')
         self.assertEqual(controller.state['last_effective']['revision'],1)
         self.assertNotIn('pending_ack',controller.state)
+
+    def make_controller(self):
+        from tools.g7_backup_controller import Controller
+        root = Path(self.root.name)
+        private = root/'private.pem'
+        private.write_bytes(self.key.private_bytes(serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+        c = Controller.__new__(Controller)
+        c.config = {'deployment_id': 'local', 'controller_instance_id': self.instance,
+            'host_policy': self.policy.copy(), 'signing_key_file': str(private), 'signing_key_id': 'test-key',
+            'journal_file': str(root/'controller.json'), 'active_settings_file': str(root/'active.json'),
+            'scheduler_readback_file': str(root/'consumer.json'), 'capture_request_file': str(root/'capture.json')}
+        c.deployment, c.journal, c.active_file = 'local', root/'controller.json', root/'active.json'
+        c.state = {'schema_version': 1, 'deployment_id': 'local', 'controller_instance_id': self.instance,
+            'last_sequence': 1, 'recovery_epoch_floor': 0, 'last_intent': None, 'last_ack': None}
+        return c
+
+    def publish_backup(self, revision=0, host_policy=1):
+        with self.engine.begin() as connection:
+            connection.execute(g7_backup_state.update().values(host_policy_observed_at=self.now))
+        values = {'interval_seconds': 300, 'timeout_seconds': 7,
+            'maximum_backup_age_seconds': 7200, 'restore_verification_timeout_seconds': 83,
+            'archive_target_ref': 'archive-a', 'recovery_profile_ref': 'profile-a'}
+        body = {'schema_version': 1, 'command_id': str(uuid.uuid4()), 'action': 'backup.settings.publish',
+            'expected_revisions': {'configuration': revision, 'policy': 1, 'authority': 0, 'host_policy': host_policy},
+            'values': values, 'rationale': 'local regression', 'evidence_ref': None}
+        with patch('uvm.operations.api._registry', return_value={'local': {}}), \
+                patch('uvm.operations.api.deployment_grants', return_value=True):
+            return self.endpoint('/commands')('local', body, SimpleNamespace(state=SimpleNamespace(), headers={}), 'admin')
+
+    def test_capture_nondefault_timeout_bounds_actual_subprocess_and_removes_partial_archive(self):
+        import subprocess, sys, time
+        from tools.g7_backup_recovery import create_archive, _run
+        destination = Path(self.root.name)/'archive'
+        def staging(**kwargs):
+            kwargs['archive_dir'].mkdir()
+            _run([sys.executable, '-c', 'import time; time.sleep(5)'])
+        started = time.monotonic()
+        with patch('tools.g7_backup_recovery._create_archive_staging', side_effect=staging):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                create_archive(archive_dir=destination, stop_timeout=1)
+        self.assertLess(time.monotonic()-started, 3)
+        self.assertFalse(destination.exists())
+        self.assertEqual(list(destination.parent.glob('archive.incomplete-*')), [])
+
+    def test_new_policy_rejects_desired_with_signed_failure_and_keeps_last_good_running(self):
+        from tools.g7_backup_scheduler import consume
+        from tools.g7_backup_controller import atomic_json
+        c = self.make_controller()
+        values = {'interval_seconds': 300, 'timeout_seconds': 7, 'maximum_backup_age_seconds': 7200,
+            'restore_verification_timeout_seconds': 83, 'archive_target_ref': 'archive-a', 'recovery_profile_ref': 'profile-a'}
+        prior = {'deployment_id': 'local', 'revision': 1, 'intent_id': str(uuid.uuid4()),
+            'digest': 'sha256:'+digest(values), 'values': values}
+        atomic_json(c.journal, c.state)
+        atomic_json(c.active_file, prior)
+        consume(c.config, self.now)
+        c.state['last_effective'] = {'revision': 1, 'digest': prior['digest']}
+        policy = json.loads(json.dumps(self.policy)); policy['revision'] = 2
+        policy['bounds']['timeout_seconds']['min'] = 10
+        policy['digest'] = 'sha256:'+digest({k:v for k,v in policy.items() if k!='digest'})
+        c.config['host_policy'] = policy
+        desired = {**prior, 'revision': 2, 'command_id': str(uuid.uuid4()), 'issued_at': self.now.isoformat()}
+        desired.pop('deployment_id')
+        sent = []
+        def request(path, body=None):
+            if path == 'desired': return {'schema_version':1,'deployment_id':'local','revisions':{'host_policy':2},'desired':desired}
+            self.assertEqual(json.loads(c.journal.read_text())['pending_ack'], body)
+            sent.append(body); return {'accepted':True,'ack_id':body['ack_id']}
+        c._request = request
+        self.assertEqual(c.reconcile_desired()['state'], 'failed')
+        self.assertEqual(sent[0]['failure_code'], 'host_policy_rejected')
+        self.assertEqual(sent[0]['active_revision'], 1)
+        self.assertEqual(json.loads(c.active_file.read_text()), prior)
+        self.assertEqual(consume(c.config, self.now+timedelta(seconds=301))['revision'], 1)
+        self.assertEqual(json.loads(Path(c.config['capture_request_file']).read_text())['capture_timeout_seconds'], 7)
+
+    def test_actual_restore_command_renews_expired_policy_and_reconciles_revision_namespace(self):
+        from tools.g7_backup_recovery import submit_restore_events
+        from tools.g7_backup_controller import atomic_json
+        from tools.g7_backup_scheduler import consume
+        from uvm.persistence.connector_schema import connectors
+        connectors.create(self.engine)
+        self.publish_backup()
+        with self.engine.begin() as connection:
+            connection.execute(g7_backup_state.update().values(host_policy_observed_at=self.now-timedelta(hours=1)))
+        c = self.make_controller(); c.state['recovery_epoch_floor'] = 1
+        c.state['last_intent'] = {'revision':9,'digest':'sha256:'+'d'*64,'status':'applied'}
+        c.state['last_effective'] = {'revision':9,'digest':'sha256:'+'d'*64}
+        atomic_json(c.journal,c.state)
+        requests=[]
+        def request(path, body=None):
+            requests.append(path)
+            if path == 'desired': return self.endpoint('/desired')('local',None,self.identity)
+            if path in ('reports','acks','sequence-resync'):
+                return self.endpoint('/'+path)('local',body,None,self.identity)
+            return self.endpoint('/'+path)('local',body,self.identity)
+        c._request=request
+        root=Path(self.root.name); config=root/'config.json'; atomic_json(config,c.config)
+        manifest={'recovery_epoch':0,'controller_sequence':1,'archive_id':str(uuid.uuid4()),
+            'image_digest':'sha256:'+'b'*64,'queue_inventory_digest':'sha256:'+'c'*64}
+        atomic_json(root/'manifest.json',manifest)
+        volumes={'postgres_cluster':'pg-new','ce_media':'media-new','uvm_state':'state-new'}
+        atomic_json(root/'volumes.json',volumes)
+        proof=self.signed({'queue_inventory_digest':manifest['queue_inventory_digest'],
+            'queue_inventory':{'intent_inventory':{'held_intents':[]}}})
+        atomic_json(root/'proof.json',proof)
+        with patch('tools.g7_backup_controller.Controller',return_value=c), \
+                patch('tools.g7_backup_controller.load_config',return_value=c.config):
+            result=submit_restore_events(config_path=config,manifest_path=root/'manifest.json',
+                volume_ids_path=root/'volumes.json',recovery_epoch=1,connector_recovery_id=str(uuid.uuid4()),
+                drain_proof_path=root/'proof.json',public_key=self.public)
+            again=submit_restore_events(config_path=config,manifest_path=root/'manifest.json',
+                volume_ids_path=root/'volumes.json',recovery_epoch=1,
+                connector_recovery_id=c.state['last_recovery_event']['event']['connector_recovery_id'],
+                drain_proof_path=root/'proof.json',public_key=self.public)
+        self.assertEqual(result,again)
+        self.assertNotEqual(result['events'][0]['event_id'],result['events'][1]['event_id'])
+        self.assertEqual(requests[:4],['sequence-resync','reports','recovery-events','recovery-events'])
+        self.assertEqual(result['events'][-1]['current_state'],'restored')
+        self.assertEqual(c.state['namespace_history'][0]['last_intent']['revision'],9)
+        self.assertEqual(c.state['last_effective']['revision'],9)
+        original_atomic=atomic_json
+        def consumer(path,value):
+            original_atomic(path,value)
+            if path == c.active_file: consume(c.config)
+        with patch('tools.g7_backup_controller.atomic_json',side_effect=consumer):
+            self.assertEqual(c.reconcile_desired()['state'],'applied')
+        self.assertEqual(c.state['last_intent']['revision'],1)
+        self.assertEqual(c.state['last_intent']['recovery_epoch'],1)
+        self.publish_backup(revision=1,host_policy=2)
+        with patch('tools.g7_backup_controller.atomic_json',side_effect=consumer):
+            self.assertEqual(c.reconcile_desired()['revision'],2)
+
+    def test_cached_recovery_ack_requires_full_context_and_stage_identity(self):
+        c=self.make_controller()
+        event={'deployment_id':'local','recovery_epoch':1,'connector_recovery_id':str(uuid.uuid4()),
+            'archive_id':str(uuid.uuid4()),'manifest_digest':'sha256:'+'a'*64,'source_image_digest':'sha256:'+'b'*64,
+            'queue_inventory_digest':'sha256:'+'c'*64,'target_image_digest':'sha256:'+'b'*64,
+            'new_volume_ids':{'postgres_cluster':'pg','ce_media':'media','uvm_state':'state'},
+            'event_type':'volumes_restored','previous_epoch':1,'verification':{},'public_readback_digest':None,'failure_code':None}
+        c.state['last_recovery_event']={'event':event,'response':{'accepted':True}}
+        self.assertEqual(c.retained_recovery_ack(event),{'accepted':True})
+        for key,value in [('archive_id',str(uuid.uuid4())),('connector_recovery_id',str(uuid.uuid4())),
+                ('manifest_digest','sha256:'+'d'*64),('new_volume_ids',{'postgres_cluster':'other'}),
+                ('verification',{'uvm_public_api':'passed'})]:
+            with self.subTest(key=key),self.assertRaises(RecoveryError):
+                c.retained_recovery_ack({**event,key:value})
+
+    def test_control_startup_resumes_verified_and_released_exact_context(self):
+        from uvm.operations.startup_fence import startup_admitted
+        token={'deployment_id':'local','recovery_epoch':1,'issued_at':self.now.isoformat(),
+            'connector_recovery_id':str(uuid.uuid4()),'archive_digest':'sha256:'+'a'*64,
+            'target_image_digest':'sha256:'+'b'*64,'volume_ids':{'postgres_cluster':'pg','ce_media':'media','uvm_state':'state'}}
+        with self.engine.begin() as connection:
+            connection.execute(g7_backup_state.update().values(recovery_epoch=1,restore_state='verified'))
+            for kind,doc in [('resync',{'checkpoint_epoch_floor':1,'issued_at':self.now.isoformat()}),
+                ('recovery',{'event_type':'volumes_restored','connector_recovery_id':token['connector_recovery_id'],
+                    'manifest_digest':token['archive_digest'],'target_image_digest':token['target_image_digest'],'new_volume_ids':token['volume_ids']})]:
+                connection.execute(g7_backup_host_records.insert().values(record_id=str(uuid.uuid4()),deployment_id='local',
+                    record_kind=kind,recovery_epoch=1,record_digest='a'*64,document=doc,received_at=self.now))
+        self.assertTrue(startup_admitted(self.engine,token))
+        self.assertFalse(startup_admitted(self.engine,token,released=True))
+        with self.engine.begin() as connection: connection.execute(g7_backup_state.update().values(restore_state='released'))
+        self.assertTrue(startup_admitted(self.engine,token))
+        self.assertTrue(startup_admitted(self.engine,token,released=True))
+        self.assertFalse(startup_admitted(self.engine,{**token,'connector_recovery_id':str(uuid.uuid4())}))
+
+    def test_stale_first_delivery_ack_rejected_and_public_application_time_does_not_move(self):
+        self.publish_backup()
+        with self.engine.connect() as connection: state=connection.execute(sa.select(g7_backup_state)).mappings().one()
+        body={'schema_version':1,'deployment_id':'local','ack_id':str(uuid.uuid4()),'sequence':2,
+            'controller_instance_id':self.instance,'intent_id':state['application_intent_id'],
+            'requested_revision':1,'requested_digest':'sha256:'+state['requested_digest'],
+            'active_revision':1,'active_digest':'sha256:'+state['requested_digest'],'host_policy_revision':1,
+            'outcome':'applied','failure_code':None,'observed_at':(self.now-timedelta(hours=1)).isoformat()}
+        with self.assertRaises(HTTPException): self.endpoint('/acks')('local',self.signed(body),None,self.identity)
+        body['observed_at']=self.now.isoformat()
+        self.endpoint('/acks')('local',self.signed(body),None,self.identity)
+        self.app.state.utc_now=lambda:self.now+timedelta(seconds=100)
+        with self.engine.begin() as connection:
+            connection.execute(g7_backup_state.update().values(latest_report_at=self.now+timedelta(seconds=80),
+                archive_id=str(uuid.uuid4()),archive_completed_at=self.now-timedelta(seconds=10),archive_outcome='complete'))
+        request=SimpleNamespace(state=SimpleNamespace())
+        with patch('uvm.operations.api._registry',return_value={'local':{}}),patch('uvm.operations.api.deployment_grants',return_value=True):
+            dto=self.endpoint('/backup-settings/{deployment_id}')('local',request,'admin')
+        self.assertEqual(dto['effective']['verified_at'],self.now.isoformat().replace('+00:00','Z'))
+        self.assertEqual(dto['status']['settings_application']['reported_at'],dto['effective']['verified_at'])
+        self.assertEqual(dto['status']['freshness']['age_seconds'],110)
+        self.assertEqual(dto['status']['freshness']['evaluated_at'],(self.now+timedelta(seconds=100)).isoformat().replace('+00:00','Z'))
+
+    def test_connector_hold_is_non_disclosing_until_authorized_and_bound_to_connector(self):
+        from uvm.connectors.api import install_connector_routes
+        from uvm.persistence.connector_schema import connectors, connector_intents
+        from uvm.operations.backup_settings import intent_quarantined
+        from contextlib import ExitStack
+        for table in (connectors, connector_intents): table.create(self.engine)
+        connector_id, other_id, intent_id, source_id = [str(uuid.uuid4()) for _ in range(4)]
+        with self.engine.begin() as connection:
+            connection.execute(connectors.insert().values(connector_id=connector_id,source_id=source_id,
+                source_family='local',source_account_id='local',scope_key='all',configuration_revision=1,
+                lifecycle='disabled',validation={},recovery={},environment_label='synthetic-local',updated_at=self.now))
+            connection.execute(connector_intents.insert().values(connector_id=other_id,intent_id=intent_id,
+                kind='connector.validate',status='pending',actor_id='operator',payload={},created_at=self.now,updated_at=self.now))
+            connection.execute(g7_backup_connector_quarantine.insert().values(deployment_id='local',intent_id=intent_id,
+                connector_id=other_id,recovery_epoch=1,connector_recovery_id=str(uuid.uuid4()),event_id=str(uuid.uuid4()),
+                reason_code='restore_uncertain_effect',created_at=self.now))
+        app=FastAPI();app.state.engine=self.engine;install_connector_routes(app)
+        endpoint=next(r.endpoint for r in app.routes if r.path.endswith('/intents/{intent_id}'))
+        binding={'source_id':source_id}
+        with ExitStack() as stack:
+            stack.enter_context(patch('uvm.connectors.api._authenticate',return_value='reader'))
+            stack.enter_context(patch('uvm.connectors.api._ensure',return_value=binding))
+            stack.enter_context(patch('uvm.connectors.api._auth_context',return_value=None))
+            stack.enter_context(patch('uvm.connectors.api._policy',return_value={'document':{},'revision':1}))
+            grants=stack.enter_context(patch('uvm.connectors.api._grants',return_value=False))
+            hold=stack.enter_context(patch('uvm.operations.backup_settings.intent_quarantined',wraps=intent_quarantined))
+            with self.assertRaises(HTTPException) as caught: endpoint(connector_id,intent_id,None,source_id)
+            self.assertEqual(caught.exception.status_code,403);hold.assert_not_called()
+            grants.return_value=True
+            with self.assertRaises(HTTPException) as caught: endpoint(connector_id,intent_id,None,source_id)
+            self.assertEqual(caught.exception.status_code,404);hold.assert_not_called()
+        with self.engine.connect() as connection:
+            self.assertTrue(intent_quarantined(connection,intent_id,other_id))
+            self.assertFalse(intent_quarantined(connection,intent_id,connector_id))
+        with self.engine.begin() as connection:
+            connection.execute(g7_backup_connector_quarantine.update().values(connector_id='g7_connector_intents'))
+        with self.engine.connect() as connection:
+            self.assertTrue(intent_quarantined(connection,intent_id,other_id))
+            self.assertFalse(intent_quarantined(connection,intent_id,connector_id))
+
+    def test_verification_budget_is_durable_and_expires_before_a_late_probe_can_reset_it(self):
+        import subprocess,sys,time
+        root=Path(self.root.name);request=root/'request.json';journal=root/'deadline.json'
+        request.write_text(json.dumps({'revision':3,'digest':'sha256:'+'a'*64,'verification_timeout_seconds':1}))
+        # A disposable sleeping child stands in for the outer operation process.
+        child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(10)'])
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        result=subprocess.run([sys.executable,'tools/g7_backup_deadline.py','--request',str(request),
+            '--kind','verification','--journal',str(journal),'--parent-pid',str(child.pid)],timeout=3)
+        self.assertEqual(result.returncode,0);self.assertEqual(child.wait(timeout=2),-15)
+        value=json.loads(journal.read_text());self.assertEqual(value['outcome'],'timed_out')
+        from tools.g7_backup_deadline import remaining
+        self.assertLessEqual(remaining(journal),0)
+        complete=subprocess.run([sys.executable,'tools/g7_backup_deadline.py','--journal',str(journal),'--complete'])
+        self.assertEqual(complete.returncode,124)
+
+    def test_host_release_requires_explicit_exact_context_marker(self):
+        from uvm.operations.startup_fence import host_release_authorized
+        marker=Path(self.root.name)/'release.json';token={'deployment_id':'local','recovery_epoch':1,'archive_digest':'a'}
+        marker.write_text(json.dumps(token));marker.chmod(0o600)
+        with patch.object(Path,'stat',return_value=SimpleNamespace(st_uid=0,st_mode=0o100600)):
+            self.assertTrue(host_release_authorized(token,str(marker)))
+            self.assertFalse(host_release_authorized({**token,'recovery_epoch':2},str(marker)))
+        marker.unlink();self.assertFalse(host_release_authorized(token,str(marker)))
+
+    def test_blocking_operation_command_is_killed_at_remaining_durable_deadline(self):
+        import subprocess,sys,time
+        root=Path(self.root.name);journal=root/'deadline.json';sentinel=root/'late-effect'
+        journal.write_text(json.dumps({'deadline_at':(datetime.now(timezone.utc)+timedelta(seconds=1)).isoformat(),'outcome':'running'}))
+        started=time.monotonic()
+        result=subprocess.run([sys.executable,'tools/g7_backup_deadline.py','--journal',str(journal),'--run',
+            sys.executable,'-c','import time,pathlib,sys; time.sleep(5); pathlib.Path(sys.argv[1]).write_text("late")',str(sentinel)],timeout=4)
+        self.assertEqual(result.returncode,124)
+        self.assertLess(time.monotonic()-started,3)
+        self.assertFalse(sentinel.exists())
+        self.assertEqual(json.loads(journal.read_text())['outcome'],'timed_out')
+
+    def test_public_verification_event_cannot_succeed_after_operation_budget(self):
+        self.publish_backup()
+        with self.engine.begin() as c:
+            c.execute(g7_backup_state.update().values(recovery_epoch=1,restore_state='restored',effective_revision=1))
+        common={'schema_version':1,'deployment_id':'local','controller_instance_id':self.instance,
+            'recovery_epoch':1,'connector_recovery_id':str(uuid.uuid4()),'previous_epoch':1,
+            'archive_id':str(uuid.uuid4()),'manifest_digest':'sha256:'+'a'*64,'source_image_digest':'sha256:'+'b'*64,
+            'target_image_digest':'sha256:'+'b'*64,'new_volume_ids':{'postgres_cluster':'pg','ce_media':'media','uvm_state':'state'},
+            'queue_inventory_digest':'sha256:'+'c'*64,'public_readback_digest':'sha256:'+'d'*64,'failure_code':None,
+            'verification':{**{k:'passed' for k in ('uvm_public_api','ce_public_api','media_readback','queue_reconciliation','migration')},
+                'details_digest':'sha256:'+'d'*64},'observed_at':self.now.isoformat()}
+        with self.engine.begin() as c:
+            for stage in ('restore_started','volumes_restored'):
+                c.execute(g7_backup_host_records.insert().values(record_id=str(uuid.uuid4()),deployment_id='local',
+                    record_kind='recovery',recovery_epoch=1,record_digest='f'*64,
+                    document={**common,'event_type':stage,'observed_at':(self.now-timedelta(seconds=100)).isoformat()},received_at=self.now-timedelta(seconds=100)))
+        body=self.signed({**common,'event_id':str(uuid.uuid4()),'event_type':'verification_passed','sequence':2})
+        with self.assertRaises(HTTPException) as caught:
+            self.endpoint('/recovery-events')('local',body,self.identity)
+        self.assertEqual(caught.exception.status_code,409)
+        self.assertIn('deadline expired',caught.exception.detail['message'])
+
+    def test_restore_namespace_cannot_regress_below_authenticated_restored_configuration(self):
+        c=self.make_controller();c.state['desired_namespace']={'epoch':1,'configuration':5}
+        c.state['last_intent']={'revision':9,'status':'applied'}
+        values={'interval_seconds':300,'timeout_seconds':7,'maximum_backup_age_seconds':7200,
+            'restore_verification_timeout_seconds':83,'archive_target_ref':'archive-a','recovery_profile_ref':'profile-a'}
+        desired={'revision':3,'digest':'sha256:'+digest(values),'values':values,
+            'command_id':str(uuid.uuid4()),'intent_id':str(uuid.uuid4()),'issued_at':self.now.isoformat()}
+        def request(path,body=None):
+            self.assertEqual(path,'desired','regressed namespace must not send an acknowledgement')
+            return {'schema_version':1,'deployment_id':'local','revisions':{'host_policy':1},'desired':desired}
+        c._request=request
+        with self.assertRaises(RecoveryError): c.reconcile_desired()
+        self.assertFalse(c.active_file.exists())
+        self.assertEqual(c.state['last_intent']['revision'],9)

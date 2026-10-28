@@ -17,7 +17,8 @@ def main():
     release = json.loads((root/'host-fence-release-journal.json').read_text())
     released_at = datetime.fromisoformat(release['observed_at'])
     config = json.loads((root/'backup-capture-request.json').read_text())
-    deadline = time.monotonic() + config['verification_timeout_seconds']
+    from tools.g7_backup_deadline import remaining
+    deadline = time.monotonic() + remaining(root/'verification-deadline.json')
     container_id = subprocess.check_output(['docker', 'inspect', args.container, '--format', '{{.Id}}'], text=True).strip()
     expected_worker = 'celery@' + container_id[:12]
     first_progress = None

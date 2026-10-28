@@ -25,10 +25,14 @@ def consume(config, now=None):
         candidate = json.loads(Path(config['active_settings_file']).read_text())
         rejected = candidate
         values = validate_backup_values(candidate['values'], config['host_policy'])
+        namespace_epoch = json.loads(Path(config['journal_file']).read_text()).get('desired_namespace', {}).get('epoch', 0) if config.get('journal_file') else 0
+        candidate_epoch = candidate.get('recovery_epoch', 0)
+        if candidate_epoch != namespace_epoch:
+            raise ValueError('candidate is outside the authenticated recovery namespace')
         if (candidate['deployment_id'] != config['deployment_id'] or
                 candidate['digest'] != 'sha256:' + digest(values) or
                 type(candidate['revision']) is not int or candidate['revision'] < 1 or
-                (prior and (candidate['revision'] < prior['revision'] or
+                (prior and candidate_epoch <= prior.get('recovery_epoch', 0) and (candidate['revision'] < prior['revision'] or
                     (candidate['revision'] == prior['revision'] and
                         (candidate['digest'] != prior['digest'] or candidate['intent_id'] != prior['intent_id']))))):
             raise ValueError('candidate settings identity regressed or changed')
@@ -37,7 +41,9 @@ def consume(config, now=None):
         if prior is None:
             raise
         candidate = prior
-        values = validate_backup_values(prior['values'], config['host_policy'])
+        # Last-good was independently validated when consumed. A narrower new
+        # policy rejects new application but must not silently stop that schedule.
+        values = prior['values']
     failure_path = readback_path.with_suffix('.failure.json')
     if not accepted and isinstance(rejected, dict):
         atomic_json(failure_path, {'revision': rejected.get('revision'), 'digest': rejected.get('digest'),
@@ -45,7 +51,7 @@ def consume(config, now=None):
             'observed_at': now.isoformat().replace('+00:00', 'Z')})
     elif accepted:
         failure_path.unlink(missing_ok=True)
-    same = prior and prior['revision'] == candidate['revision']
+    same = prior and prior['revision'] == candidate['revision'] and prior.get('recovery_epoch', 0) == candidate.get('recovery_epoch', 0)
     due = prior['next_capture_at'] if same else now.timestamp()
     # These are host-owned work requests. The capture driver independently
     # fences/drains/stops the deployment before reading the named volumes.
@@ -53,7 +59,7 @@ def consume(config, now=None):
         atomic_json(Path(config['capture_request_file']), {
             'schema_version': 1, 'deployment_id': config['deployment_id'],
             'revision': candidate['revision'], 'digest': candidate['digest'],
-            'intent_id': candidate['intent_id'], 'values': values,
+            'intent_id': candidate['intent_id'], 'values': values, 'recovery_epoch': candidate.get('recovery_epoch', 0),
             'requested_at': now.isoformat().replace('+00:00', 'Z'),
             'capture_timeout_seconds': values['timeout_seconds'],
             'verification_timeout_seconds': values['restore_verification_timeout_seconds'],
@@ -62,7 +68,7 @@ def consume(config, now=None):
         due = int(now.timestamp()) + values['interval_seconds']
     result = {'schema_version': 1, 'deployment_id': config['deployment_id'],
         'revision': candidate['revision'], 'digest': candidate['digest'],
-        'intent_id': candidate['intent_id'], 'values': values,
+        'intent_id': candidate['intent_id'], 'values': values, 'recovery_epoch': candidate.get('recovery_epoch', 0),
         'observed_at': now.isoformat().replace('+00:00', 'Z'),
         'next_capture_at': due}
     atomic_json(readback_path, result)

@@ -104,7 +104,7 @@ class BackupSettingsValidationTests(unittest.TestCase):
                 self.assertEqual(path, "sequence-resync")
                 return {"schema_version": 1, "deployment_id": "g7-local",
                     "resync_id": body["resync_id"], "recovery_epoch_floor": 3,
-                    "next_sequence": 9, "accepted": True}
+                    "next_sequence": 9, "accepted": True, "revisions": {"configuration": 2, "host_policy": 1}}
             controller._request = request
             response = controller.resynchronize(database_epoch_seen=2,
                 database_sequence_seen=8, checkpoint_epoch_floor=3)

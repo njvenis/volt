@@ -411,7 +411,7 @@ if [[ ${UVM_G7_RECOVERY_STAGE:-} == control-only || ${UVM_G7_RECOVERY_STAGE:-} =
 fi
 
 if [[ ${UVM_G7_RECOVERY_STAGE:-} == released ]]; then
-  PYTHONPATH=/opt/uvm/app /opt/uvm/venv/bin/python -m uvm.operations.startup_fence --check-release || {
+  PYTHONPATH=/opt/uvm/app /opt/uvm/venv/bin/python -m uvm.operations.startup_fence --check-host-release || {
     echo 'G7_RECOVERY_ERROR released startup lacks its signed durable admission' >&2; exit 70;
   }
 fi
@@ -661,7 +661,7 @@ if [[ ${UVM_G7_RECOVERY_STAGE:-} == control-only ]]; then
     for pid in "${CHILD_PIDS[@]}"; do kill -0 "$pid" || exit 70; done
     sleep 0.2
   done
-  PYTHONPATH=/opt/uvm/app /opt/uvm/venv/bin/python -m uvm.operations.startup_fence --check-release || exit 70
+  PYTHONPATH=/opt/uvm/app /opt/uvm/venv/bin/python -m uvm.operations.startup_fence --check-host-release || exit 70
   cleanup_running=1
   stop_all || exit 71
   exec env UVM_G7_RECOVERY_STAGE=released UVM_G7_VERIFICATION_ONLY=0 "$0"

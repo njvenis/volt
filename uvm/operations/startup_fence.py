@@ -70,7 +70,7 @@ def startup_admitted(engine, token: dict, *, released: bool = False) -> bool:
     with engine.connect() as connection:
         state = connection.execute(sa.select(g7_backup_state).where(
             g7_backup_state.c.deployment_id == token["deployment_id"])).mappings().first()
-        if (not state or state["restore_state"] != ("released" if released else "restored") or
+        if (not state or state["restore_state"] not in ({"released"} if released else {"restored", "verified", "released"}) or
                 state["recovery_epoch"] != token["recovery_epoch"]):
             return False
         records = connection.execute(sa.select(g7_backup_host_records).where(
@@ -90,6 +90,15 @@ def startup_admitted(engine, token: dict, *, released: bool = False) -> bool:
             restored["new_volume_ids"] == token["volume_ids"])
 
 
+def host_release_authorized(token: dict, path="/run/uvm-g7/host-release") -> bool:
+    try:
+        marker = Path(path)
+        stat = marker.stat()
+        return stat.st_uid == 0 and stat.st_mode & 0o022 == 0 and json.loads(marker.read_text()) == token
+    except (OSError, ValueError):
+        return False
+
+
 def main() -> int:
     try:
         raw_volumes = json.loads(os.environ["UVM_G7_RECOVERY_VOLUME_IDS"])
@@ -106,11 +115,24 @@ def main() -> int:
             recovery_epoch=int(os.environ["UVM_G7_RECOVERY_EPOCH"]),
             connector_recovery_id=os.environ["UVM_G7_CONNECTOR_RECOVERY_ID"],
             key_id=os.environ["UVM_G7_HOST_KEY_ID"])
-        if "--check-admission" in sys.argv or "--check-release" in sys.argv:
+        if any(flag in sys.argv for flag in ("--check-admission", "--check-release", "--check-host-release", "--authorize-host-release")):
             import sqlalchemy as sa
             if not startup_admitted(sa.create_engine(os.environ["UVM_DB_URL"]), token,
-                    released="--check-release" in sys.argv):
+                    released=any(flag in sys.argv for flag in ("--check-release", "--check-host-release", "--authorize-host-release"))):
                 return 1
+        if "--authorize-host-release" in sys.argv:
+            from uvm.operations.backup_host import canonical_json
+            marker = Path("/run/uvm-g7/host-release")
+            temporary = marker.with_suffix(".tmp")
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(canonical_json(token)); stream.flush(); os.fsync(stream.fileno())
+            os.replace(temporary, marker)
+            directory = os.open(marker.parent, os.O_RDONLY)
+            try: os.fsync(directory)
+            finally: os.close(directory)
+        if "--check-host-release" in sys.argv and not host_release_authorized(token):
+            return 1
         print(json.dumps({"verified": True, "deployment_id": token["deployment_id"],
             "recovery_epoch": token["recovery_epoch"]}, separators=(",", ":")))
         return 0

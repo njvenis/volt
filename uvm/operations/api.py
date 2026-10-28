@@ -15,6 +15,7 @@ import sqlalchemy as sa
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from uvm.operations.backup_host import parse_utc
 from uvm.auth.schema import AUTHORITY_CONTEXT
 from uvm.persistence.assessment_schema import (
     assessment_command_receipts, assessment_policy,
@@ -297,19 +298,46 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                     fresh_until=stamp(observed + timedelta(seconds=max_age)) if observed else None,
                     freshness=("fresh" if age is not None and 0 <= age <= max_age
                         else "stale" if age is not None and age > max_age else "unknown"))
+            # Application evidence has its own signed timestamp. Policy and
+            # archive/status traffic cannot retime an existing application.
+            application_at = effective_at = application_policy = None
+            if state:
+                from uvm.persistence.backup_settings_schema import g7_backup_host_records
+                history = connection.execute(sa.select(g7_backup_host_records).where(
+                    g7_backup_host_records.c.deployment_id == deployment_id,
+                    g7_backup_host_records.c.record_kind.in_(["ack", "status"])
+                    ).order_by(g7_backup_host_records.c.sequence.desc())).mappings()
+                for record in history:
+                    doc = record["document"]
+                    evidence = ({"state": doc["outcome"], "requested_revision": doc["requested_revision"],
+                        "intent_id": doc["intent_id"], "host_policy_revision": doc["host_policy_revision"], "active_revision": doc["active_revision"],
+                        "active_digest": doc["active_digest"], "reported_at": doc["observed_at"]}
+                        if record["record_kind"] == "ack" else doc.get("settings_application"))
+                    if not evidence or not evidence.get("reported_at"):
+                        continue
+                    if (application_at is None and evidence["requested_revision"] == state["requested_revision"] and
+                            evidence["intent_id"] == state["application_intent_id"] and
+                            evidence["state"] == state["application_status"]):
+                        application_at = parse_utc(evidence["reported_at"])
+                        application_policy = evidence["host_policy_revision"]
+                    if (effective_at is None and evidence["state"] == "applied" and
+                            evidence["active_revision"] == state["effective_revision"] and
+                            evidence["active_digest"] == digest(state["effective_digest"])):
+                        effective_at = parse_utc(evidence["reported_at"])
+            evaluated_at = app.state.utc_now()
             active = None if not state or state["effective_revision"] is None else {
                 "revision": state["effective_revision"], "digest": digest(state["effective_digest"]),
-                "verified_at": stamp(state["latest_report_at"])}
+                "verified_at": stamp(effective_at)}
             application = None
             if state and state["requested_revision"] is not None:
                 application = {"state": state["application_status"] or "unknown",
                     "requested_revision": state["requested_revision"],
                     "requested_digest": digest(state["requested_digest"]),
                     "intent_id": state["application_intent_id"],
-                    "host_policy_revision": state["host_policy_revision"],
+                    "host_policy_revision": application_policy or state["host_policy_revision"],
                     "active_revision": active["revision"] if active else None,
                     "active_digest": active["digest"] if active else None,
-                    "reported_at": stamp(state["latest_report_at"]),
+                    "reported_at": stamp(application_at),
                     "failure_code": state["latest_failure_code"]}
             policy_observed = state["host_policy_observed_at"] if state else None
             if policy_observed is not None and policy_observed.tzinfo is None:
@@ -325,7 +353,7 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                 completed = state["archive_completed_at"]
                 if completed.tzinfo is None:
                     completed = completed.replace(tzinfo=timezone.utc)
-                age = int((app.state.utc_now() - completed).total_seconds())
+                age = int((evaluated_at - completed).total_seconds())
                 if effective_settings and age >= 0:
                     archive_age, archive_maximum = age, effective_settings["maximum_backup_age_seconds"]
                     archive_freshness = "fresh" if age <= archive_maximum else "stale"
@@ -340,7 +368,7 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                         "manifest_digest": digest(state["archive_manifest_digest"]) if state else None,
                         "outcome": state["archive_outcome"] if state else None},
                     "freshness": {"state": archive_freshness,
-                        "evaluated_at": stamp(state["latest_report_at"]) if state else None,
+                        "evaluated_at": stamp(evaluated_at) if archive_age is not None else None,
                         "age_seconds": archive_age,
                         "basis_completed_at": stamp(state["archive_completed_at"]) if state else None,
                         "maximum_backup_age_seconds": archive_maximum},
@@ -549,7 +577,7 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                 desired = {"revision": int(row["revision"]), "digest": "sha256:" + row["digest"],
                     "values": row["values"], "command_id": row["command_id"],
                     "intent_id": state["application_intent_id"] if state else None,
-                    "issued_at": row["created_at"].isoformat().replace("+00:00", "Z")}
+                    "issued_at": (row["created_at"] if row["created_at"].tzinfo else row["created_at"].replace(tzinfo=timezone.utc)).isoformat().replace("+00:00", "Z")}
             return {"schema_version": 1, "deployment_id": deployment_id,
                 "revisions": {"configuration": int(revision), "policy": int(policy_row["revision"]),
                     "authority": authority,
@@ -746,6 +774,8 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                         seconds=int(hp["maximum_report_age_seconds"]))
                         or observed > now + timedelta(seconds=int(hp["maximum_future_skew_seconds"]))):
                     raise HTTPException(503, {"code": "host_policy_unavailable", "message": "Trusted host policy is stale"})
+                if now - observed > timedelta(seconds=int(hp["maximum_report_age_seconds"])):
+                    raise HTTPException(409, {"code": "revision_conflict", "message": "Application acknowledgement expired before first delivery"})
                 desired = connection.execute(sa.select(g7_backup_settings_revisions).where(
                     g7_backup_settings_revisions.c.deployment_id == deployment_id,
                     g7_backup_settings_revisions.c.revision == body["requested_revision"])).mappings().one_or_none()
@@ -1115,6 +1145,14 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                                 for key in ("target_image_digest", "new_volume_ids")))):
                         raise HTTPException(409, {"code": "revision_conflict",
                             "message": "Recovery event changes the admitted restore identity"})
+                if event in {"verification_passed", "fence_released"}:
+                    from uvm.persistence.backup_settings_schema import g7_backup_settings_revisions
+                    effective_values = connection.execute(sa.select(g7_backup_settings_revisions.c["values"]).where(
+                        g7_backup_settings_revisions.c.deployment_id == deployment_id,
+                        g7_backup_settings_revisions.c.revision == state["effective_revision"])).scalar_one_or_none()
+                    if (not effective_values or now > parse_utc(started["observed_at"]) + timedelta(
+                            seconds=effective_values["restore_verification_timeout_seconds"])):
+                        raise HTTPException(409, {"code": "revision_conflict", "message": "Restore verification operation deadline expired"})
                 if event == "volumes_restored" and (body["new_volume_ids"] is None
                         or body["target_image_digest"] is None):
                     raise HTTPException(400, {"code": "invalid_request", "message": "Restored volumes and target image are required"})

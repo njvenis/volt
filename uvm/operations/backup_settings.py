@@ -151,8 +151,20 @@ def commit_backup_settings(connection, *, deployment_id: str, principal: str,
     return result, False
 
 
-def intent_quarantined(connection, intent_id: str) -> bool:
+def intent_quarantined(connection, intent_id: str, connector_id: str | None = None) -> bool:
     """The durable restore hold remains authoritative at dispatch admission."""
     from uvm.persistence.backup_settings_schema import g7_backup_connector_quarantine
+    conditions = [g7_backup_connector_quarantine.c.intent_id == intent_id]
+    if connector_id is not None:
+        from uvm.persistence.connector_schema import connector_intents
+        # The signed queue inventory uses a table namespace for connector
+        # intents; direct host holds may use the concrete connector UUID.
+        # Both require the exact authorized connector/intent membership.
+        conditions.extend([
+            sa.exists(sa.select(connector_intents.c.intent_id).where(
+                connector_intents.c.intent_id == intent_id,
+                connector_intents.c.connector_id == connector_id)),
+            g7_backup_connector_quarantine.c.connector_id.in_([
+                connector_id, connector_intents.name])])
     return connection.execute(sa.select(g7_backup_connector_quarantine.c.intent_id).where(
-        g7_backup_connector_quarantine.c.intent_id == intent_id).limit(1)).first() is not None
+        *conditions).limit(1)).first() is not None

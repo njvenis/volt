@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -103,7 +103,7 @@ class Controller:
         required = {"schema_version", "deployment_id", "controller_instance_id",
             "last_sequence", "recovery_epoch_floor", "last_intent", "last_ack"}
         if (not isinstance(value, dict) or set(value) - required - {"pending_ack", "pending_resync",
-                "last_resync", "pending_recovery_event", "last_recovery_event", "last_effective", "pending_quarantine", "quarantine_receipts", "pending_status", "last_status"}
+                "last_resync", "pending_recovery_event", "last_recovery_event", "last_effective", "pending_quarantine", "quarantine_receipts", "pending_status", "last_status", "pending_policy", "last_policy", "desired_namespace", "namespace_history", "recovery_receipts"}
                 or not required.issubset(value)
                 or type(value.get("schema_version")) is not int or value.get("schema_version") != 1
                 or value.get("deployment_id") != self.deployment
@@ -152,10 +152,92 @@ class Controller:
             raise RecoveryError("UVM sequence-resync acknowledgement does not match the journaled request")
         self.state["recovery_epoch_floor"] = response["recovery_epoch_floor"]
         self.state["last_sequence"] = request["checkpoint_last_sequence"]
+        # Only a fresh authenticated newer epoch may open a restored revision
+        # namespace. Preserve every superseded local record and last-good pair.
+        namespace = self.state.get("desired_namespace", {"epoch": 0})
+        if response["recovery_epoch_floor"] > namespace["epoch"]:
+            self.state.setdefault("namespace_history", []).append({
+                "namespace": namespace, **{key: self.state.get(key) for key in
+                    ("last_intent", "last_ack", "last_effective", "pending_ack")}})
+            self.state["desired_namespace"] = {"epoch": response["recovery_epoch_floor"],
+                "configuration": response["revisions"]["configuration"]}
+            self.state.pop("pending_ack", None)
         self.state["last_resync"] = {"request": request, "response": response}
         self.state.pop("pending_resync", None)
         atomic_json(self.journal, self.state)
         return response
+
+    def renew_policy(self, config_path: Path, restored_revision: int) -> dict:
+        """Journal a fresh signed policy after resync, before recovery events."""
+        now = datetime.now(timezone.utc)
+        last = self.state.get("last_policy") or {}
+        if (last.get("epoch") == self.state["recovery_epoch_floor"] and
+                last.get("request", {}).get("host_policy", {}).get("revision", 0) >= restored_revision and
+                last["request"]["host_policy"] == self.config["host_policy"] and
+                now <= parse_utc(last["request"]["fresh_until"])):
+            self.config["host_policy"] = last["request"]["host_policy"]
+            atomic_json(config_path, self.config)
+            return last["response"]
+        event = self.state.get("pending_policy")
+        if event is None:
+            policy = {**self.config["host_policy"]}
+            policy["revision"] = max(policy["revision"], restored_revision) + 1
+            policy["digest"] = "sha256:" + digest({k: v for k, v in policy.items() if k != "digest"})
+            event = {"schema_version": 1, "deployment_id": self.deployment,
+                "report_id": str(uuid.uuid4()), "sequence": self.state["last_sequence"] + 1,
+                "controller_instance_id": self.config["controller_instance_id"],
+                "report_kind": "policy", "host_policy": policy,
+                **{k: None for k in ("desired", "settings_application", "completed_archive",
+                    "freshness", "restore_verification", "recovery_epoch")},
+                "observed_at": now.isoformat().replace("+00:00", "Z"),
+                "fresh_until": (now + timedelta(seconds=policy["maximum_report_age_seconds"])).isoformat().replace("+00:00", "Z")}
+            event["signature"] = {"algorithm": "Ed25519", "key_id": self.config["signing_key_id"],
+                "value": __import__("base64").urlsafe_b64encode(_sign(canonical_json(event),
+                    Path(self.config["signing_key_file"]))).decode().rstrip("=")}
+            self.state["pending_policy"] = event
+            atomic_json(self.journal, self.state)
+        response = self._request("reports", event)
+        if (response.get("accepted") is not True or response.get("report_id") != event["report_id"] or
+                response.get("sequence") != event["sequence"] or
+                response.get("host_policy_revision") != event["host_policy"]["revision"]):
+            raise RecoveryError("policy acknowledgement differs from the journaled request")
+        self.state["last_sequence"] = event["sequence"]
+        self.state["last_policy"] = {"epoch": self.state["recovery_epoch_floor"], "request": event, "response": response}
+        self.state.pop("pending_policy", None)
+        atomic_json(self.journal, self.state)
+        self.config["host_policy"] = event["host_policy"]
+        atomic_json(config_path, self.config)
+        return response
+
+    @staticmethod
+    def recovery_context(event: dict, *, replacement: bool = True) -> dict:
+        keys = ("deployment_id", "recovery_epoch", "connector_recovery_id", "archive_id",
+            "manifest_digest", "source_image_digest", "queue_inventory_digest")
+        if replacement:
+            keys += ("target_image_digest", "new_volume_ids")
+        return {key: event.get(key) for key in keys}
+
+    def retained_recovery_ack(self, requested: dict) -> dict | None:
+        """Reuse a stage only after comparing its full immutable context."""
+        records = list(self.state.get("recovery_receipts", {}).values())
+        if self.state.get("last_recovery_event"):
+            records.append(self.state["last_recovery_event"])
+        for record in records:
+            event = record["event"]
+            if event["recovery_epoch"] != requested["recovery_epoch"]:
+                continue
+            replacement = requested["event_type"] != "restore_started"
+            if self.recovery_context(event, replacement=replacement) != self.recovery_context(requested, replacement=replacement):
+                # A restore_started record has not yet bound replacement IDs.
+                if not (replacement and event["event_type"] == "restore_started" and
+                        self.recovery_context(event, replacement=False) == self.recovery_context(requested, replacement=False)):
+                    raise RecoveryError("same-epoch recovery context conflicts with durable receipt")
+            if event["event_type"] == requested["event_type"]:
+                stage_keys = ("previous_epoch", "verification", "public_readback_digest", "failure_code")
+                if any(event.get(k) != requested.get(k) for k in stage_keys):
+                    raise RecoveryError("cached recovery stage identity conflicts")
+                return record["response"]
+        return None
 
     def submit_recovery_event(self, unsigned_event: dict) -> dict:
         """Journal the exact signed event before its at-least-once submission."""
@@ -166,6 +248,9 @@ class Controller:
             "public_readback_digest", "failure_code", "observed_at"}
         if not isinstance(unsigned_event, dict) or set(unsigned_event) != required:
             raise RecoveryError("recovery event fixture has an invalid exact shape")
+        retained = self.retained_recovery_ack(unsigned_event)
+        if retained is not None:
+            return retained
         pending = self.state.get("pending_recovery_event")
         if pending is None:
             event = {**unsigned_event, "sequence": self.state["last_sequence"] + 1,
@@ -179,6 +264,10 @@ class Controller:
             atomic_json(self.journal, self.state)
         else:
             event = pending
+            if (self.recovery_context(event) != self.recovery_context(unsigned_event) or
+                    any(event.get(k) != unsigned_event.get(k) for k in
+                        ("event_type", "previous_epoch", "verification", "public_readback_digest", "failure_code"))):
+                raise RecoveryError("different recovery stage remains pending")
         response = self._request("recovery-events", event)
         if (response.get("accepted") is not True
                 or response.get("event_id") != event.get("event_id")
@@ -188,6 +277,7 @@ class Controller:
         self.state["last_sequence"] = event["sequence"]
         self.state["recovery_epoch_floor"] = event["recovery_epoch"]
         self.state["last_recovery_event"] = {"event": event, "response": response}
+        self.state.setdefault("recovery_receipts", {})[str(event["recovery_epoch"]) + ":" + event["event_type"]] = self.state["last_recovery_event"]
         self.state.pop("pending_recovery_event", None)
         atomic_json(self.journal, self.state)
         return response
@@ -215,7 +305,10 @@ class Controller:
     def submit_quarantine(self, unsigned: dict) -> dict:
         identity = unsigned["connector_id"] + ":" + ",".join(unsigned["intent_ids"]) + ":" + str(unsigned["recovery_epoch"])
         receipts = self.state.setdefault("quarantine_receipts", {})
+        stable = ("deployment_id", "recovery_epoch", "connector_recovery_id", "connector_id", "intent_ids", "reason_code")
         if identity in receipts:
+            if any(receipts[identity]["request"].get(key) != unsigned.get(key) for key in stable):
+                raise RecoveryError("cached quarantine acknowledgement conflicts with restore identity")
             return receipts[identity]["response"]
         event = self.state.get("pending_quarantine")
         if event is None:
@@ -225,8 +318,7 @@ class Controller:
                     Path(self.config["signing_key_file"]))).decode().rstrip("=")}
             self.state["pending_quarantine"] = event
             atomic_json(self.journal, self.state)
-        if (event["connector_id"] != unsigned["connector_id"] or event["intent_ids"] != unsigned["intent_ids"]
-                or event["recovery_epoch"] != unsigned["recovery_epoch"]):
+        if any(event.get(key) != unsigned.get(key) for key in stable):
             raise RecoveryError("a different quarantine acknowledgement remains pending")
         response = self._request("connector-quarantine", event)
         if (response.get("accepted") is not True or response.get("event_id") != event["event_id"]
@@ -287,27 +379,36 @@ class Controller:
         except (ValueError, TypeError, KeyError):
             raise RecoveryError("UVM desired identity or issue time is malformed") from None
         prior = self.state.get("last_intent") or {}
+        namespace = self.state.get("desired_namespace", {"epoch": 0})
+        prior_in_namespace = prior.get("recovery_epoch", 0) == namespace["epoch"]
         if (type(desired["revision"]) is not int or desired["revision"] < 1
                 or digest(desired["values"]) != desired["digest"].removeprefix("sha256:")
-                or desired["revision"] < _last_intent_revision(self.state)):
+                or desired["revision"] < namespace.get("configuration", 0)
+                or (prior_in_namespace and desired["revision"] < _last_intent_revision(self.state))):
             raise RecoveryError("UVM desired revision is malformed or regressed")
         policy = self.config["host_policy"]
         if (dto["revisions"].get("host_policy") != policy.get("revision")
                 or policy.get("digest") != "sha256:" + digest({key: value for key, value in policy.items()
                     if key != "digest"})):
             raise RecoveryError("UVM and independently configured host policy revisions differ")
-        values = validate_backup_values(desired["values"], policy)
+        rejected = False
+        try:
+            values = validate_backup_values(desired["values"], policy)
+        except ValueError:
+            # This desired document was admitted under an earlier policy.
+            # Report a bounded failure without replacing the running schedule.
+            values, rejected = desired["values"], True
         if desired["digest"] != "sha256:" + digest(values):
             raise RecoveryError("UVM desired digest does not match canonical values")
-        if prior and prior.get("revision") == desired["revision"]:
+        if prior_in_namespace and prior and prior.get("revision") == desired["revision"]:
             if prior.get("digest") != desired["digest"] or prior.get("intent_id") != desired["intent_id"]:
                 raise RecoveryError("same settings revision changed its digest or intent")
         else:
             self.state["last_intent"] = {"revision": desired["revision"],
                 "digest": desired["digest"], "intent_id": desired["intent_id"],
-                "command_id": desired["command_id"], "status": "received"}
+                "command_id": desired["command_id"], "status": "received", "recovery_epoch": namespace["epoch"]}
             atomic_json(self.journal, self.state)
-        if self.state["last_intent"].get("status") == "applied":
+        if not rejected and self.state["last_intent"].get("status") == "applied":
             try:
                 readback = json.loads(Path(self.config["scheduler_readback_file"]).read_text())
                 if (readback.get("revision") == desired["revision"] and
@@ -323,10 +424,14 @@ class Controller:
             "revision": desired["revision"], "digest": desired["digest"],
             "intent_id": desired["intent_id"], "values": values,
             "applied_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
-        atomic_json(self.active_file, active)
+        active["recovery_epoch"] = namespace["epoch"]
+        if not rejected:
+            atomic_json(self.active_file, active)
         outcome, failure_code, consumed = "uncertain", "consumer_readback_unavailable", None
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
+        if rejected:
+            outcome, failure_code = "failed", "host_policy_rejected"
+        while not rejected and time.monotonic() < deadline:
             try:
                 candidate = json.loads(Path(self.config["scheduler_readback_file"]).read_text())
                 observed = parse_utc(candidate["observed_at"])

@@ -8,6 +8,10 @@ queue-drain record proves that workers and effects are quiescent.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+from contextvars import ContextVar
+import time
+import signal
 import base64
 from datetime import datetime, timezone
 import hashlib
@@ -43,8 +47,38 @@ class RecoveryError(RuntimeError):
     pass
 
 
+_operation_deadline = ContextVar("g7_operation_deadline", default=None)
+
+
+def _remaining() -> float | None:
+    deadline = _operation_deadline.get()
+    if deadline is None:
+        return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RecoveryError("host operation deadline expired")
+    return remaining
+
+
+@contextmanager
+def operation_deadline(seconds):
+    if type(seconds) is not int or seconds < 1:
+        raise RecoveryError("invalid host operation timeout")
+    token = _operation_deadline.set(time.monotonic() + seconds)
+    previous = signal.getsignal(signal.SIGTERM)
+    def terminated(_signum, _frame):
+        raise RecoveryError("host operation was interrupted before completion")
+    signal.signal(signal.SIGTERM, terminated)
+    try:
+        yield
+        _remaining()
+    finally:
+        _operation_deadline.reset(token)
+        signal.signal(signal.SIGTERM, previous)
+
+
 def _run(argv: list[str], *, capture: bool = True) -> str:
-    result = subprocess.run(argv, check=True, text=True,
+    result = subprocess.run(argv, check=True, text=True, timeout=_remaining(),
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None)
     return result.stdout.strip() if capture else ""
@@ -54,6 +88,7 @@ def _sha(path: Path) -> tuple[str, int]:
     hasher, size = hashlib.sha256(), 0
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            _remaining()
             size += len(chunk)
             hasher.update(chunk)
     return hasher.hexdigest(), size
@@ -71,7 +106,8 @@ def _validate_tar(path: Path) -> None:
     try:
         with tarfile.open(path, "r:gz") as archive:
             seen: set[str] = set()
-            for item in archive.getmembers():
+            for item in archive:
+                _remaining()
                 member_path = Path(item.name)
                 if (member_path.is_absolute() or ".." in member_path.parts
                         or not (item.isdir() or item.isfile())):
@@ -481,7 +517,7 @@ def _create_archive_staging(*, container: str, deployment_id: str, archive_dir: 
             or type(settings_revision) is not int or settings_revision < 1
             or type(host_policy_revision) is not int or host_policy_revision < 1
             or type(controller_sequence) is not int or controller_sequence < 1
-            or type(stop_timeout) is not int or not 1 <= stop_timeout <= 3600):
+            or type(stop_timeout) is not int or stop_timeout < 1):
         raise RecoveryError("archive generation or epoch is invalid")
     try:
         if str(uuid.UUID(controller_instance_id)) != controller_instance_id:
@@ -518,9 +554,14 @@ def _create_archive_staging(*, container: str, deployment_id: str, archive_dir: 
     for name, target in VOLUMES.items():
         member = archive_dir / f"{name}.tar.gz"
         source = mounts[target]
-        _run(["docker", "run", "--rm", "--mount", f"type=volume,src={source},dst=/member,readonly",
+        helper_name = "g7-capture-" + uuid.uuid4().hex
+        try:
+            _run(["docker", "run", "--rm", "--name", helper_name, "--mount", f"type=volume,src={source},dst=/member,readonly",
             "--mount", f"type=bind,src={archive_dir},dst=/archive", "--entrypoint", "/bin/bash",
-            helper_image, "-lc", f"tar --numeric-owner --xattrs -czf /archive/{member.name} -C /member ."])
+                            helper_image, "-lc", f"tar --numeric-owner --xattrs -czf /archive/{member.name} -C /member ."])
+        finally:
+            subprocess.run(["docker", "rm", "-f", helper_name], timeout=15, check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         _fsync_path(member)
         _validate_tar(member)
         digest, size = _sha(member)
@@ -554,15 +595,21 @@ def _create_archive_staging(*, container: str, deployment_id: str, archive_dir: 
 
 def create_archive(**kwargs) -> Path:
     """Publish only a fully signed archive directory; remove partial staging."""
+    deadline_file = kwargs.pop("deadline_file", None)
     destination = kwargs["archive_dir"]
     staging = destination.with_name(destination.name + ".incomplete-" + uuid.uuid4().hex)
     if destination.exists():
         raise RecoveryError("archive destination already exists")
     kwargs["archive_dir"] = staging
     try:
-        staged_manifest = _create_archive_staging(**kwargs)
-        os.replace(staging, destination)
-        _fsync_path(destination.parent)
+        with operation_deadline(kwargs.get("stop_timeout", 120)):
+            if deadline_file:
+                from tools.g7_backup_deadline import remaining
+                _operation_deadline.set(min(_operation_deadline.get(), time.monotonic() + remaining(deadline_file)))
+            staged_manifest = _create_archive_staging(**kwargs)
+            _remaining()
+            os.replace(staging, destination)
+            _fsync_path(destination.parent)
         return destination / staged_manifest.name
     finally:
         if staging.exists():
@@ -733,6 +780,7 @@ def submit_restore_events(*, config_path: Path, manifest_path: Path,
     response = controller.resynchronize(database_epoch_seen=manifest["recovery_epoch"],
         database_sequence_seen=manifest["controller_sequence"],
         checkpoint_epoch_floor=controller.state["recovery_epoch_floor"])
+    policy_ack = controller.renew_policy(config_path, response["revisions"]["host_policy"])
     proof = _load_signed(drain_proof_path, public_key, controller.config["signing_key_id"])
     if proof["queue_inventory_digest"] != manifest["queue_inventory_digest"]:
         raise RecoveryError("restore inventory does not match the signed archive")
@@ -748,6 +796,16 @@ def submit_restore_events(*, config_path: Path, manifest_path: Path,
             "migration": "not_run", "details_digest": None},
         "queue_inventory_digest": manifest["queue_inventory_digest"],
         "public_readback_digest": None, "failure_code": None}
+    expected = {**common, "target_image_digest": manifest["image_digest"], "new_volume_ids": volumes}
+    records = list(controller.state.get("recovery_receipts", {}).values())
+    if controller.state.get("last_recovery_event"):
+        records.append(controller.state["last_recovery_event"])
+    for record in records:
+        old = record["event"]
+        if old["recovery_epoch"] == recovery_epoch and controller.recovery_context(
+                old, replacement=old["event_type"] != "restore_started") != controller.recovery_context(
+                expected, replacement=old["event_type"] != "restore_started"):
+            raise RecoveryError("restore command conflicts with retained recovery context")
     responses = []
     # Reuse the exact event/ack pair after interruption. Controller journals
     # each signed request before I/O, including the event UUID and timestamp.
@@ -760,13 +818,6 @@ def submit_restore_events(*, config_path: Path, manifest_path: Path,
                     "connector_id": item["connector_id"], "intent_ids": [item["intent_id"]],
                     "reason_code": "restore_uncertain_effect",
                     "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")})
-        last = controller.state.get("last_recovery_event") or {}
-        last_event = last.get("event") or {}
-        if (last_event.get("recovery_epoch") == recovery_epoch and
-                last_event.get("event_type") in ({"restore_started", "volumes_restored"}
-                    if event_type == "restore_started" else {"volumes_restored"})):
-            responses.append(last["response"])
-            continue
         body = {**common, "event_id": str(uuid.uuid4()), "event_type": event_type,
             "previous_epoch": recovery_epoch - 1 if event_type == "restore_started" else recovery_epoch,
             "target_image_digest": manifest["image_digest"] if event_type == "volumes_restored" else None,
@@ -774,7 +825,7 @@ def submit_restore_events(*, config_path: Path, manifest_path: Path,
             "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
         responses.append(controller.submit_recovery_event(body))
 
-    return {"resync": response, "events": responses}
+    return {"resync": response, "policy": policy_ack, "events": responses}
 
 
 def main() -> None:
@@ -782,6 +833,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     capture = sub.add_parser("capture")
     capture.add_argument("--container", required=True)
+    capture.add_argument("--deadline-file", type=Path)
     capture.add_argument("--deployment-id", required=True)
     capture.add_argument("--archive-dir", type=Path, required=True)
     capture.add_argument("--drain-proof", type=Path, required=True)
@@ -861,7 +913,7 @@ def main() -> None:
             controller_instance_id=args.controller_instance_id,
             controller_sequence=args.controller_sequence,
             package_manifest_digest=args.package_manifest_digest,
-            helper_image=args.helper_image, stop_timeout=args.stop_timeout,
+            helper_image=args.helper_image, stop_timeout=args.stop_timeout, deadline_file=args.deadline_file,
             consumer_state=args.consumer_state)
         print(json.dumps({"archive_manifest": str(manifest), "outcome": "complete"}, separators=(",", ":")))
     elif args.command == "observe-queue":

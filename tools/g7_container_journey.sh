@@ -44,6 +44,9 @@ STARTED_CONTAINER=0
 STARTED_ANCHOR=0
 CREATED_IMAGE=0
 EXIT_STATUS=0
+DEADLINE_PID=''
+ACTIVE_DEADLINE=''
+trap 'exit 124' TERM
 CONTAINER_ID=''
 ANCHOR_ID=''
 RESTORE_CONTAINER=volt-g7-backup-restored
@@ -54,8 +57,57 @@ RESTORE_IP=''
 RESTORE_FIREWALL_TABLE=''
 RESTORE_VOLUMES_JSON=''
 
+# Each blocking host command gets only the operation's remaining durable
+# budget. The watchdog also interrupts loops; cleanup runs outside the budget.
+budget_command() {
+  if [[ -n ${ACTIVE_DEADLINE:-} ]]; then
+    python3 "$ROOT/tools/g7_backup_deadline.py" --journal "$ACTIVE_DEADLINE" --run "$@"
+  else
+    command "$@"
+  fi
+}
+docker() { budget_command docker "$@"; }
+uv() { budget_command uv "$@"; }
+curl() { budget_command curl "$@"; }
+node() { budget_command node "$@"; }
+start_operation_deadline() {
+  local kind=$1
+  python3 "$ROOT/tools/g7_backup_deadline.py" --request "$RUN_ROOT/host/state/backup/capture-request.json" \
+    --kind "$kind" --journal "$EVIDENCE/$kind-deadline.json" --parent-pid "$$" &
+  DEADLINE_PID=$!
+  for _ in $(seq 1 100); do
+    [[ -s "$EVIDENCE/$kind-deadline.json" ]] && { ACTIVE_DEADLINE="$EVIDENCE/$kind-deadline.json"; return 0; }
+    kill -0 "$DEADLINE_PID" || return 1
+    sleep 0.05
+  done
+  return 1
+}
+finish_operation_deadline() {
+  python3 "$ROOT/tools/g7_backup_deadline.py" --journal "$EVIDENCE/$1-deadline.json" --complete
+  kill "$DEADLINE_PID" 2>/dev/null || true
+  wait "$DEADLINE_PID" 2>/dev/null || true
+  DEADLINE_PID=''
+  ACTIVE_DEADLINE=''
+}
+restart_recovery_checkpoint() {
+  local phase=$1 admitted=0
+  docker restart "$RESTORE_CONTAINER" >"$EVIDENCE/$phase-restart.stdout"
+  for _ in $(seq 1 90); do
+    if docker exec "$RESTORE_CONTAINER" test -f /run/uvm-g7/ready 2>/dev/null \
+        && [[ $(docker exec "$RESTORE_CONTAINER" cat /run/uvm-g7/runtime-mode) == verification ]] \
+        && curl --fail --silent --max-time 2 http://127.0.0.1:8000/openapi.json >/dev/null; then admitted=1; break; fi
+    sleep 1
+  done
+  (( admitted )) || { echo "recovery restart did not resume $phase" >&2; return 2; }
+  docker exec "$RESTORE_CONTAINER" test ! -f /run/uvm-g7/pid-ce-worker
+  docker exec "$RESTORE_CONTAINER" test ! -f /run/uvm-g7/pid-ce-beat
+  [[ $(docker exec "$RESTORE_CONTAINER" cat /run/uvm-g7/runtime-mode) == verification ]]
+  printf 'verification_listener_resumed=1\nruntime_workers_absent=1\n' >"$EVIDENCE/$phase-restart-proof.txt"
+}
 cleanup() {
   local rc=$?
+  ACTIVE_DEADLINE=''
+  if [[ -n $DEADLINE_PID ]]; then kill "$DEADLINE_PID" 2>/dev/null || true; wait "$DEADLINE_PID" 2>/dev/null || true; fi
   local cleanup_rc=0 container_removed=0 anchor_removed=0 container_rm_exit=not_started anchor_rm_exit=not_started
   trap - EXIT
   set +e
@@ -409,6 +461,7 @@ record={"schema_version":1,"network_name":os.environ["FENCE_NETWORK_NAME"],
 "fenced_at":datetime.now(timezone.utc).isoformat().replace("+00:00","Z")}
 Path(sys.argv[1]).write_text(json.dumps(record,sort_keys=True,separators=(",",":"))+"\n",encoding="utf-8")
 PYFENCE
+  start_operation_deadline capture
   ENTRYPOINT_PID=$(docker exec "$CONTAINER" cat /run/uvm-g7/entrypoint-pid)
   docker exec "$CONTAINER" kill -USR1 "$ENTRYPOINT_PID"
   writers_stopped=0
@@ -505,8 +558,11 @@ PYARCHIVE
     --host-policy-revision 1 --host-policy-digest "$POLICY_DIGEST" \
     --controller-instance-id 00000000-0000-4000-8000-000000000017 \
     --controller-sequence "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["last_sequence"])' "$RUN_ROOT/host/state/backup/controller-journal.json")" --package-manifest-digest "$PACKAGE_DIGEST" \
+    --deadline-file "$ACTIVE_DEADLINE" \
+    --stop-timeout "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["capture_timeout_seconds"])' "$RUN_ROOT/host/state/backup/capture-request.json")" \
     --consumer-state "$RUN_ROOT/host/state/backup/capture-request.json" \
     --helper-image "$IMAGE" >"$EVIDENCE/capture.stdout" 2>"$EVIDENCE/capture.stderr"
+  finish_operation_deadline capture
   cp "$RUN_ROOT/host/state/backup/scheduler-readback.json" "$EVIDENCE/backup-scheduler-readback.json"
   cp "$RUN_ROOT/host/state/backup/capture-request.json" "$EVIDENCE/backup-capture-request.json"
   cp -a "$ARCHIVE_DIR" "$EVIDENCE/archive"
@@ -545,6 +601,7 @@ PYTAMPER
       exit 1
     fi
   done
+  start_operation_deadline verification
   RESTORE_VOLUMES_RAW="$EVIDENCE/replacement-volumes.stdout.json"
   RECOVERY_EPOCH=1
   CONNECTOR_RECOVERY_ID=$(python3 -c 'import uuid; print(uuid.uuid4())')
@@ -650,6 +707,24 @@ PYFW
     --recovery-epoch "$RECOVERY_EPOCH" --connector-recovery-id "$CONNECTOR_RECOVERY_ID" \
     --drain-proof "$EVIDENCE/signed-drain-proof.json" --public-key "$RUN_ROOT/secrets/host-pub.pem" \
     >"$EVIDENCE/restore-event-acks.json" 2>"$EVIDENCE/restore-event-acks.stderr"
+  cp "$RUN_ROOT/host/state/backup/controller-journal.json" "$EVIDENCE/before-replay-controller-journal.json"
+  uv run python "$ROOT/tools/g7_backup_recovery.py" admit-restore \
+    --config "$RUN_ROOT/host/backup-controller.json" \
+    --manifest "$EVIDENCE/archive/manifest.json" --volume-ids "$RESTORE_VOLUMES_JSON" \
+    --recovery-epoch "$RECOVERY_EPOCH" --connector-recovery-id "$CONNECTOR_RECOVERY_ID" \
+    --drain-proof "$EVIDENCE/signed-drain-proof.json" --public-key "$RUN_ROOT/secrets/host-pub.pem" \
+    >"$EVIDENCE/restore-event-replay-acks.json" 2>"$EVIDENCE/restore-event-replay-acks.stderr"
+  python3 - "$EVIDENCE" "$RUN_ROOT/host/state/backup/controller-journal.json" <<'PYEXACTREPLAY'
+import json,sys
+from pathlib import Path
+root=Path(sys.argv[1]); original=json.loads((root/'restore-event-acks.json').read_text())
+replay=json.loads((root/'restore-event-replay-acks.json').read_text())
+assert original == replay, 'restore replay changed a retained stage acknowledgement'
+assert [event['current_state'] for event in replay['events']] == ['started','restored']
+assert replay['events'][0]['event_id'] != replay['events'][1]['event_id']
+assert (root/'before-replay-controller-journal.json').read_bytes() == Path(sys.argv[2]).read_bytes()
+(root/'exact-stage-replay-proof.json').write_text(json.dumps({'passed':True,'stage_ack_ids':[v['event_id'] for v in replay['events']],'journal_unchanged':True},sort_keys=True))
+PYEXACTREPLAY
   product_readers_ready=0
   for _ in $(seq 1 180); do
     if docker exec "$RESTORE_CONTAINER" test -f /run/uvm-g7/pid-api \
@@ -818,9 +893,20 @@ status={'schema_version':1,'deployment_id':controller.deployment,'report_id':str
  'observed_at':now.isoformat().replace('+00:00','Z'),'fresh_until':(now+timedelta(seconds=config['host_policy']['maximum_report_age_seconds'])).isoformat().replace('+00:00','Z')}
 status_ack=controller.submit_status(status)
 unsigned.update(event_id=str(uuid.uuid4()),event_type='fence_released',observed_at=datetime.now(timezone.utc).isoformat().replace('+00:00','Z'))
-released=controller.submit_recovery_event(unsigned)
-atomic_json(root/'signed-verification-release-acks.json',{'verification':verified,'status':status_ack,'release':released})
+atomic_json(root/'pending-release-event.json',unsigned)
+atomic_json(root/'signed-verification-release-acks.json',{'verification':verified,'status':status_ack})
 PYFINISH
+  restart_recovery_checkpoint verified
+  uv run python "$ROOT/tools/g7_backup_controller.py" --config "$RUN_ROOT/host/backup-controller.json" \
+    --recovery-event-json "$EVIDENCE/pending-release-event.json" >"$EVIDENCE/signed-release-ack.json"
+  restart_recovery_checkpoint released
+  python3 - "$EVIDENCE" <<'PYRELEASEACK'
+import json,sys
+from pathlib import Path
+root=Path(sys.argv[1]); path=root/'signed-verification-release-acks.json'
+value=json.loads(path.read_text()); value['release']=json.loads((root/'signed-release-ack.json').read_text())
+path.write_text(json.dumps(value,sort_keys=True))
+PYRELEASEACK
   sudo -n nft delete table inet "$RESTORE_FIREWALL_TABLE" >"$EVIDENCE/host-egress-release.stdout" 2>"$EVIDENCE/host-egress-release.stderr"
   RESTORE_FIREWALL_TABLE=''
   python3 - "$EVIDENCE/host-fence-release-journal.json" <<'PYRELEASE'
@@ -831,7 +917,9 @@ path=Path(sys.argv[1]); value={'signed_public_acknowledgement_retained':True,'in
 with path.open('x') as stream:
  json.dump(value,stream,sort_keys=True);stream.flush();os.fsync(stream.fileno())
 PYRELEASE
-  docker exec "$RESTORE_CONTAINER" touch /run/uvm-g7/host-release
+  docker exec "$RESTORE_CONTAINER" bash -lc \
+    'export UVM_DB_URL="postgresql+psycopg://uvm_app:$(cat /run/secrets/uvm_db_password)@127.0.0.1:5432/uvm"; cd /opt/uvm/app; exec /opt/uvm/venv/bin/python -m uvm.operations.startup_fence --authorize-host-release' \
+    >"$EVIDENCE/host-release-authorized.stdout" 2>"$EVIDENCE/host-release-authorized.stderr"
   released_runtime_ready=0
   for _ in $(seq 1 180); do
     if docker exec "$RESTORE_CONTAINER" test -f /run/uvm-g7/pid-ce-worker \
@@ -864,6 +952,7 @@ PYEXPECT
     --expectations "$EVIDENCE/restore-browser-expectations.json" \
     --evidence "$EVIDENCE/restore-public-browser" \
     >"$EVIDENCE/restore-public-browser.stdout" 2>"$EVIDENCE/restore-public-browser.stderr"
+  finish_operation_deadline verification
   echo 'G7 recovery-only signed archive restored into new volumes; UVM UI and CE public retained-state readback passed' | tee "$EVIDENCE/result.txt"
   exit 0
 fi

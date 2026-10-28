@@ -89,6 +89,8 @@ Authorised operational configuration SHALL retain immutable desired revisions, s
 - **THEN** UVM and DefectDojo mappings, decisions, media, audit history and queued intents reconcile through supported interfaces without fabricating remediation or history
 - **AND** actual restoration and outage measurements are retained without inventing an owner-approved availability, RPO or RTO target
 - **AND** a fenced, explicit 0058 to 0059 upgrade is verified on fresh volumes with candidate B, while rollback restores the original archive using its bound prior image A on another fresh volume set at a higher external recovery epoch
+- **AND** the rollback decision is bound to complete UVM and DefectDojo table/row-payload inventories and CE media digests, allowing only exact journaled migration and recovery-control deltas; same-count payload changes and unrelated table changes SHALL reject rollback
+- **AND** epoch-2 verification is signed over the current A UVM, CE and media readbacks and exact image/package/archive/volume/connector context
 - **AND** the image-owned startup compatibility guard rejects unknown, multiple and incompatible schema heads before effects or initialization, while retained post-backup product writes are zero and uncertain external effects remain held for reconciliation
 
 #### Scenario: G7-CUT-01 controlled legacy issue cutover

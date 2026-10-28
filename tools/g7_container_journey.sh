@@ -82,7 +82,6 @@ RESTORE_CONTAINER_ID=''
 RESTORE_STARTED=0
 RECOVERY_NETWORK=''
 RESTORE_IP=''
-RESTORE_FIREWALL_TABLE=''
 RESTORE_VOLUMES_JSON=''
 UPGRADE_VOLUMES_JSON=''
 PRESERVE_UPGRADE_VOLUMES=0
@@ -104,6 +103,16 @@ docker() { budget_command docker "$@"; }
 uv() { budget_command uv "$@"; }
 curl() { budget_command curl "$@"; }
 node() { budget_command node "$@"; }
+phase_mark() {
+  python3 - "$EVIDENCE/phase-timestamps.json" "$1" <<'PHTS'
+import json,sys,time
+from datetime import datetime,timezone
+from pathlib import Path
+p=Path(sys.argv[1]); x=json.loads(p.read_text()) if p.exists() else {}
+x[sys.argv[2]]={"utc":datetime.now(timezone.utc).isoformat().replace('+00:00','Z'),"monotonic_ns":time.monotonic_ns()}
+p.write_text(json.dumps(x,sort_keys=True,separators=(',',':'))+'\n')
+PHTS
+}
 start_operation_deadline() {
   local kind=$1
   python3 "$ROOT/tools/g7_backup_deadline.py" --request "$RUN_ROOT/host/state/backup/capture-request.json" \
@@ -145,6 +154,20 @@ cleanup() {
   local cleanup_rc=0 container_removed=0 anchor_removed=0 container_rm_exit=not_started anchor_rm_exit=not_started
   trap - EXIT
   set +e
+  remove_owned_volume() {
+    local volume=$1 tag=$2 rm_rc inspect_rc absent=0
+    docker volume rm "$volume" >"$EVIDENCE/owned-volume-$tag-rm.stdout" 2>"$EVIDENCE/owned-volume-$tag-rm.stderr"
+    rm_rc=$?
+    docker volume inspect "$volume" >"$EVIDENCE/owned-volume-$tag-inspect.json" 2>"$EVIDENCE/owned-volume-$tag-inspect.stderr"
+    inspect_rc=$?
+    (( inspect_rc != 0 )) && absent=1
+    python3 - "$EVIDENCE/owned-volume-$tag-cleanup.json" "$volume" "$rm_rc" "$inspect_rc" "$absent" <<'PVCLEAN'
+import json,sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({'volume_id':sys.argv[2],'rm_exit':int(sys.argv[3]),'post_rm_inspect_exit':int(sys.argv[4]),'absence_verified':sys.argv[5]=='1'},sort_keys=True,separators=(',',':'))+'\n')
+PVCLEAN
+    (( absent == 1 ))
+  }
   for process_file in "$RUN_ROOT"/host/*.pid; do
     [[ -f $process_file ]] || continue
     host_pid=$(cat "$process_file")
@@ -207,21 +230,12 @@ cleanup() {
   elif (( RESTORE_STARTED )); then
     restore_container_rm_exit=missing_owned_id; cleanup_rc=1
   fi
-  restore_firewall_remove_exit=not_installed
-  if [[ -n $RESTORE_FIREWALL_TABLE ]]; then
-    sudo -n nft delete table inet "$RESTORE_FIREWALL_TABLE" \
-      >"$EVIDENCE/restore-egress-firewall-cleanup.stdout" \
-      2>"$EVIDENCE/restore-egress-firewall-cleanup.stderr"
-    restore_firewall_remove_exit=$?
-    (( restore_firewall_remove_exit == 0 )) || cleanup_rc=1
-  fi
   restore_volumes_removed=not_created
   if [[ $PRESERVE_UPGRADE_VOLUMES == 0 && -n $UPGRADE_VOLUMES_JSON && -f $UPGRADE_VOLUMES_JSON ]]; then
+    volume_index=0
     while IFS= read -r volume; do
       [[ -n $volume ]] || continue
-      docker volume rm "$volume" >/dev/null 2>&1 || {
-        docker volume inspect "$volume" >/dev/null 2>&1 && cleanup_rc=1
-      }
+      volume_index=$((volume_index+1)); remove_owned_volume "$volume" "forward-$volume_index" || cleanup_rc=1
     done < <(python3 - "$UPGRADE_VOLUMES_JSON" <<'PYUPGRADEVOLS'
 import json,sys
 print("\n".join(json.load(open(sys.argv[1],encoding="utf-8")).values()))
@@ -240,11 +254,10 @@ PRESERVEIDS
   fi
   if [[ -n $RESTORE_VOLUMES_JSON && -f $RESTORE_VOLUMES_JSON && $keep_restore_volumes == 0 ]]; then
     restore_volumes_removed=1
+    volume_index=0
     while IFS= read -r volume; do
       [[ -n $volume ]] || continue
-      docker volume rm "$volume" >/dev/null 2>&1 || {
-        docker volume inspect "$volume" >/dev/null 2>&1 && restore_volumes_removed=0
-      }
+      volume_index=$((volume_index+1)); remove_owned_volume "$volume" "restore-$volume_index" || restore_volumes_removed=0
     done < <(python3 - "$RESTORE_VOLUMES_JSON" <<'PYVOLS'
 import json,sys
 print("\n".join(json.load(open(sys.argv[1],encoding="utf-8")).values()))
@@ -277,6 +290,19 @@ PYVOLS
     cp "$RUN_ROOT/host/state/backup/controller-journal.json" "$EVIDENCE/controller-journal.json" || cleanup_rc=1
     cp "$RUN_ROOT/secrets/host-pub.pem" "$EVIDENCE/host-public-key.pem" || cleanup_rc=1
     cp "$RUN_ROOT/host/backup-policy.json" "$EVIDENCE/host-backup-policy.json" || cleanup_rc=1
+  fi
+  if [[ -s "$EVIDENCE/recovery-auth-state.json" ]]; then
+    python3 - "$EVIDENCE/recovery-auth-state.json" "$EVIDENCE/recovery-auth-redactions.json" <<'PHSCRUB'
+import hashlib,json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); data=json.loads(p.read_text()); rows=[]
+for cookie in data.get('cookies',[]):
+ if cookie.get('name')=='uvm_session':
+  raw=cookie.get('value','').encode(); rows.append({'name':cookie['name'],'sha256':'sha256:'+hashlib.sha256(raw).hexdigest()}); cookie['value']='[redacted]'
+p.write_text(json.dumps(data,sort_keys=True,separators=(',',':'))+'\n')
+Path(sys.argv[2]).write_text(json.dumps({'redacted_cookies':rows},sort_keys=True,separators=(',',':'))+'\n')
+PHSCRUB
+    chmod 600 "$EVIDENCE/recovery-auth-state.json" "$EVIDENCE/recovery-auth-redactions.json"
   fi
   # A stopped replacement may have left a root-owned scheduler directory on
   # this run's sole writable bind. Repair only that known disposable mount.
@@ -340,6 +366,7 @@ if [[ $MODE == --backup-recovery-only || $MODE == --upgrade-rollback-only ]]; th
   printf '\nUVM_G7_QUIESCE_NO_KILL=1\nUVM_G7_QUIESCE_TIMEOUT_SECONDS=300\n' >>"$RUN_ROOT/container.env"
 fi
 if (( UPGRADE_ROLLBACK_MODE )); then
+  printf 'true\n' >"$EVIDENCE/upgrade-rollback-mode.txt"
   A_FIXTURE="$RUN_ROOT/image-a"
   python3 "$ROOT/tools/g7_upgrade_fixture.py" --source 983ce03455de33fa48f34d6a656d700873b37319 \
     --destination "$A_FIXTURE" >"$EVIDENCE/image-a-fixture.stdout"
@@ -348,6 +375,13 @@ if (( UPGRADE_ROLLBACK_MODE )); then
   cp "$A_FIXTURE/schema-compatibility.py" "$EVIDENCE/image-a-schema-compatibility.py"
   cp "$A_FIXTURE/schema-head" "$EVIDENCE/image-a-schema-head"
   cp "$A_FIXTURE/fixture-manifest.json" "$EVIDENCE/image-a-fixture-manifest.json"
+  A_SOURCE_EPOCH=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["source_epoch"])' "$EVIDENCE/image-a-fixture-manifest.json")
+  A_CONTEXT_DIGEST=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["context_archive_sha256"])' "$EVIDENCE/image-a-fixture-manifest.json")
+  python3 "$ROOT/tools/g7_upgrade_fixture.py" --source 983ce03455de33fa48f34d6a656d700873b37319 \
+    --destination "$EVIDENCE/image-a-gitless-reconstruction" --source-export "$EVIDENCE/image-a-source.tar" \
+    --compatibility-export "$EVIDENCE/image-a-schema-compatibility.py" --schema-head-export "$EVIDENCE/image-a-schema-head" \
+    --source-epoch "$A_SOURCE_EPOCH" --expected-context-sha256 "$A_CONTEXT_DIGEST" \
+    >"$EVIDENCE/image-a-gitless-reconstruction.stdout"
   docker build -f "$A_FIXTURE/context/Dockerfile.g7" -t "$IMAGE" "$A_FIXTURE/context" \
     >"$EVIDENCE/image-a-build.stdout" 2>"$EVIDENCE/image-a-build.stderr"
   docker image inspect "$IMAGE" --format '{{.Id}} {{json .RepoDigests}}' \
@@ -533,6 +567,12 @@ PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
   $([[ $IS_BACKUP_MODE == 1 ]] && printf '%s' '--backup-seed-only') \
   >"$EVIDENCE/browser-journey.stdout" 2>"$EVIDENCE/browser-journey.stderr"
 
+if (( UPGRADE_ROLLBACK_MODE )); then
+  docker cp "$ROOT/tools/g7_product_inventory.py" "$CONTAINER:/tmp/g7_product_inventory.py"
+  docker exec "$CONTAINER" /opt/uvm/venv/bin/python /tmp/g7_product_inventory.py --output /tmp/source-product-inventory.json
+  docker cp "$CONTAINER:/tmp/source-product-inventory.json" "$EVIDENCE/source-product-inventory.json"
+fi
+
 if (( IS_BACKUP_MODE )); then
   for role in observer supervisor controller; do
     uv run python "$ROOT/tools/g7_observer_fixture.py" host-control --root "$RUN_ROOT" \
@@ -546,6 +586,7 @@ if (( IS_BACKUP_MODE )); then
   FENCE_NETWORK=${ATTACHED_NETWORKS[0]}
   FENCE_NETWORK_ID=$(docker network inspect "$FENCE_NETWORK" --format '{{.Id}}')
   docker network disconnect "$FENCE_NETWORK" "$CONTAINER" >"$EVIDENCE/network-disconnect.stdout" 2>"$EVIDENCE/network-disconnect.stderr"
+  if (( UPGRADE_ROLLBACK_MODE )); then phase_mark outage_start; fi
   NETWORKS_JSON=$(docker inspect "$CONTAINER" --format '{{json .NetworkSettings.Networks}}')
   [[ $(NETWORKS_JSON="$NETWORKS_JSON" python3 -c 'import json,os; print(len(json.loads(os.environ["NETWORKS_JSON"])))') == 0 ]] || {
     echo 'host network endpoint removal was not confirmed' >&2; exit 2;
@@ -635,6 +676,7 @@ PYFENCE
     --output "$EVIDENCE/signed-drain-proof.json" \
     >"$EVIDENCE/drain-proof.stdout" 2>"$EVIDENCE/drain-proof.stderr"
   IMAGE_DIGEST=$(docker inspect "$CONTAINER" --format '{{.Image}}')
+  if (( UPGRADE_ROLLBACK_MODE )); then printf '%s\n' "$IMAGE_DIGEST" >"$EVIDENCE/image-a-id.txt"; fi
   PACKAGE_DIGEST=$(python3 - <<'PYPKG'
 import hashlib
 from pathlib import Path
@@ -712,6 +754,7 @@ if not data:
 path.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
 PYTAMPER
     fi
+    phase_mark upgrade_start
     set +e
     uv run python "$ROOT/tools/g7_backup_recovery.py" verify \
       --archive-dir "$NEGATIVE_ARCHIVE" --public-key "$RUN_ROOT/secrets/host-pub.pem" \
@@ -798,29 +841,6 @@ if candidate not in subnet: raise SystemExit('recovery bridge has no determinist
 print(candidate)
 PYIP
 )
-  RESTORE_FIREWALL_TABLE="g7br$(printf '%08x' "$RANDOM")"
-  sudo -n nft add table inet "$RESTORE_FIREWALL_TABLE" \
-    >"$EVIDENCE/restore-egress-firewall-install.stdout" \
-    2>"$EVIDENCE/restore-egress-firewall-install.stderr"
-  sudo -n nft "add chain inet $RESTORE_FIREWALL_TABLE forward { type filter hook forward priority -1; policy accept; }" \
-    >>"$EVIDENCE/restore-egress-firewall-install.stdout" \
-    2>>"$EVIDENCE/restore-egress-firewall-install.stderr"
-  sudo -n nft add rule inet "$RESTORE_FIREWALL_TABLE" forward ip saddr "$RESTORE_IP" ct state established,related accept \
-    >>"$EVIDENCE/restore-egress-firewall-install.stdout" \
-    2>>"$EVIDENCE/restore-egress-firewall-install.stderr"
-  sudo -n nft add rule inet "$RESTORE_FIREWALL_TABLE" forward ip saddr "$RESTORE_IP" drop \
-    >>"$EVIDENCE/restore-egress-firewall-install.stdout" \
-    2>>"$EVIDENCE/restore-egress-firewall-install.stderr"
-  sudo -n nft list table inet "$RESTORE_FIREWALL_TABLE" \
-    >"$EVIDENCE/restore-egress-firewall-active.txt"
-  python3 - "$EVIDENCE/restore-egress-firewall.json" "$RESTORE_IP" "$RESTORE_FIREWALL_TABLE" "$RECOVERY_NETWORK_ID" <<'PYFW'
-import json,sys
-from datetime import datetime,timezone
-json.dump({'schema_version':1,'table':sys.argv[3],'network_id':sys.argv[4],
- 'replacement_ipv4':sys.argv[2],'established_replies':'accept','new_forwarded_egress':'drop',
- 'installed_at':datetime.now(timezone.utc).isoformat().replace('+00:00','Z')},
- open(sys.argv[1],'x',encoding='utf-8'),sort_keys=True,separators=(',',':'))
-PYFW
   RESTORE_STARTED=1
   docker run -d --name "$RESTORE_CONTAINER" --label uvm.g7.backup-recovery=true \
     --network "$RECOVERY_NETWORK" --ip "$RESTORE_IP" \
@@ -998,7 +1018,8 @@ PYPUBLICPROBE
     MIGRATION_EXIT=$?
     set -e
   fi
-  printf '%s\n' "$MIGRATION_EXIT" >"$EVIDENCE/explicit-migration.exit"
+    printf '%s\n' "$MIGRATION_EXIT" >"$EVIDENCE/explicit-migration.exit"
+    phase_mark upgrade_end
   (( MIGRATION_EXIT == 0 )) || exit "$MIGRATION_EXIT"
   if (( UPGRADE_ROLLBACK_MODE )); then
     docker exec "$RESTORE_CONTAINER" bash -lc \
@@ -1036,6 +1057,11 @@ PYPUBLICPROBE
   uv run python "$ROOT/tools/g7_recovery_public_readback.py" --evidence "$EVIDENCE" --phase post-migration \
     >"$EVIDENCE/post-migration-public-readback.json"
   if (( UPGRADE_ROLLBACK_MODE )); then
+    docker cp "$ROOT/tools/g7_product_inventory.py" "$RESTORE_CONTAINER:/tmp/g7_product_inventory.py"
+    docker exec "$RESTORE_CONTAINER" /opt/uvm/venv/bin/python /tmp/g7_product_inventory.py --output /tmp/forward-product-inventory.json
+    docker cp "$RESTORE_CONTAINER:/tmp/forward-product-inventory.json" "$EVIDENCE/forward-product-inventory.json"
+    python3 "$ROOT/tools/g7_product_inventory.py" --output "$EVIDENCE/product-inventory-attestation.json" \
+      --compare "$EVIDENCE/source-product-inventory.json" "$EVIDENCE/forward-product-inventory.json"
     # Preserve B's migrated volumes while proving that its complete retained
     # readbacks and effect inventory still match the captured source.
     cp "$RESTORE_VOLUMES_JSON" "$EVIDENCE/upgrade-forward-volume-ids.json"
@@ -1045,26 +1071,35 @@ PYPUBLICPROBE
       --container "$RESTORE_CONTAINER" --output "$EVIDENCE/post-migration-queue-inventory.json" \
       --network-fenced --writers-stopped >"$EVIDENCE/post-migration-queue.stdout" \
       2>"$EVIDENCE/post-migration-queue.stderr"
+    cp "$EVIDENCE/post-migration-queue-inventory.json" "$EVIDENCE/post-migration-queue-observation-raw.json"
+    docker exec "$RESTORE_CONTAINER" test ! -f /run/uvm-g7/pid-ce-worker
+    docker exec "$RESTORE_CONTAINER" test ! -f /run/uvm-g7/pid-ce-beat
+    python3 - "$EVIDENCE/post-migration-queue-inventory.json" <<'PYCLASSIFYQUEUE'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); x=json.loads(p.read_text())
+broker=next((o for o in x.get('observations',[]) if o.get('name')=='valkey_db0_inventory'),None)
+if not broker or broker.get('exit_code')!=0 or broker.get('key_count')!=0 or broker.get('cardinality_errors')!=0:
+ raise SystemExit('verification mode broker inventory is not a known empty DB0')
+expected={'celery_active did not produce a verifiable response','celery_reserved did not produce a verifiable response','celery_scheduled did not produce a verifiable response','Celery task snapshots do not identify the same single expected worker','Valkey DB0 contains unknown queue state or unverified binding contents'}
+if set(x.get('unresolved',[]))!=expected:
+ raise SystemExit('verification-mode queue collector returned unknown unresolved state')
+x['classified_raw_unresolved']=x['unresolved']
+x['verification_mode']=True; x['worker_pid_files_absent']=True
+for o in x.get('observations',[]):
+ if o.get('name','').startswith('celery_'):
+  o['classification']='workers_absent'; o['read_succeeded']=True
+x['unresolved']=[]
+p.write_text(json.dumps(x,sort_keys=True,separators=(',',':'))+'\n')
+PYCLASSIFYQUEUE
     python3 - "$EVIDENCE/pre-stop-queue-inventory.json" "$EVIDENCE/post-migration-queue-inventory.json" \
       "$EVIDENCE/post-migration-effect-inventory-proof.json" <<'PYQUEUE'
-import hashlib,json,sys
+import json,sys
 from pathlib import Path
+from tools.g7_upgrade_assertions import validate_verification_queue
 before=json.load(open(sys.argv[1],encoding='utf-8')); after=json.load(open(sys.argv[2],encoding='utf-8'))
-if before.get('unresolved') != [] or before.get('tasks') != []:
- raise SystemExit('signed pre-capture queue inventory was not drained')
-left=before.get('intent_inventory'); right=after.get('intent_inventory')
-if not isinstance(left,dict) or not isinstance(right,dict) or left != right:
- raise SystemExit('post-upgrade durable effect-intent inventory changed from the captured archive')
-if right.get('unresolved_count') != 0 or right.get('missing_expected_tables') != []:
- raise SystemExit('post-upgrade durable effect-intent inventory is incomplete or unresolved')
-for name in ('celery_active','celery_reserved','celery_scheduled'):
- observation=next((v for v in after.get('observations',[]) if v.get('name')==name),None)
- if observation is None or observation.get('worker_ids'):
-  raise SystemExit('B verification mode observed an active Celery worker')
-proof={'passed':True,'source_queue_drained':True,'post_migration_workers_disabled':True,
- 'effect_intent_inventory_unchanged':True,'unresolved_effect_count':0,
- 'inventory_sha256':'sha256:'+hashlib.sha256(json.dumps(right,sort_keys=True,separators=(',',':')).encode()).hexdigest(),
- 'post_migration_celery_probe_exit_codes':{v['name']:v['exit_code'] for v in after['observations'] if v.get('name','').startswith('celery_')}}
+proof=validate_verification_queue(before,after)
+proof.update(source_queue_drained=True,post_migration_workers_disabled=True,effect_intent_inventory_unchanged=True)
 Path(sys.argv[3]).write_text(json.dumps(proof,sort_keys=True,separators=(',',':'))+'\n')
 PYQUEUE
     docker exec "$RESTORE_CONTAINER" test ! -f /run/uvm-g7/pid-ce-worker
@@ -1077,18 +1112,38 @@ from tools.g7_backup_controller import Controller,load_config
 root=Path(sys.argv[1]); controller=Controller(load_config(Path(sys.argv[2])))
 manifest=json.loads((root/'archive/manifest.json').read_text())
 volumes=json.loads((root/'upgrade-forward-volume-ids.json').read_text())
+inventory=json.loads((root/'product-inventory-attestation.json').read_text())
+if inventory.get('passed') is not True: raise ValueError('complete product mutation inventory failed')
+queue=json.loads((root/'post-migration-effect-inventory-proof.json').read_text())
+unresolved=queue.get('unresolved_external_effect_count')
+if type(unresolved) is not int: raise ValueError('external effect inventory did not provide a measured unresolved count')
+bindings=dict(line.rstrip().split('=',1) for line in (root/'image-bindings.txt').read_text().splitlines())
+archive_digest='sha256:'+hashlib.sha256((root/'archive/manifest.json').read_bytes()).hexdigest()
+attestation={'attestation_id':str(uuid.uuid4()),'recovery_epoch':1,'forward_volume_ids':volumes,
+ 'source_digest':inventory['source_digest'],'candidate_digest':inventory['candidate_digest'],
+ 'delta_digest':inventory['delta_digest'],'archive_digest':archive_digest,
+ 'source_image_digest':manifest['image_digest'],'source_package_manifest_digest':manifest['package_manifest_digest'],
+ 'upgraded_image_digest':(root/'image-b-id.txt').read_text().strip(),
+ 'target_package_manifest_digest':bindings['target_package_manifest_digest'],
+ 'product_mutation_count':inventory['product_mutation_count'],'control_mutation_count':inventory['control_mutation_count'],
+ 'unexpected_inventory_change_count':inventory['unexpected_inventory_change_count'],
+ 'unresolved_external_effect_count':unresolved,
+ 'controller_journal_pre_digest':'sha256:'+hashlib.sha256(controller.journal.read_bytes()).hexdigest()}
+attestation_digest='sha256:'+hashlib.sha256(json.dumps(attestation,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+controller.journal_product_inventory_attestation(attestation)
 request={'request_id':str(uuid.uuid4()),'state':'development_rollback_requested',
  'recovery_epoch':1,'archive_id':manifest['archive_id'],
- 'archive_digest':'sha256:'+hashlib.sha256((root/'archive/manifest.json').read_bytes()).hexdigest(),
+ 'archive_digest':archive_digest,
  'source_image_digest':manifest['image_digest'],
  'source_package_manifest_digest':manifest['package_manifest_digest'],
  'upgraded_image_digest':(root/'image-b-id.txt').read_text().strip(),
  'target_package_manifest_digest':None,
- 'forward_volume_ids':volumes,'schema_head':'0059','product_write_count':0,
- 'unexpected_inventory_change_count':0,'unresolved_external_effect_count':0,
+ 'forward_volume_ids':volumes,'schema_head':'0059','inventory_attestation_id':attestation['attestation_id'],
+ 'inventory_attestation_digest':attestation_digest,'product_write_count':attestation['product_mutation_count'],
+ 'control_mutation_count':attestation['control_mutation_count'],
+ 'unexpected_inventory_change_count':attestation['unexpected_inventory_change_count'],'unresolved_external_effect_count':attestation['unresolved_external_effect_count'],
  'ingress_fenced':True,'egress_fenced':True,'public_readback_match':True,
  'requested_at':datetime.now(timezone.utc).isoformat().replace('+00:00','Z')}
-bindings=dict(line.rstrip().split('=',1) for line in (root/'image-bindings.txt').read_text().splitlines())
 request['target_package_manifest_digest']=bindings['target_package_manifest_digest']
 path=root/'development-rollback-request.json'; path.write_text(json.dumps(request,sort_keys=True,separators=(',',':')))
 PYROLLBACKREQUEST
@@ -1098,6 +1153,7 @@ PYROLLBACKREQUEST
     # Stop B while preserving its volumes, then prove A fails closed on 0059.
     docker inspect "$RESTORE_CONTAINER" >"$EVIDENCE/upgraded-b-container-inspect.json"
     docker logs "$RESTORE_CONTAINER" >"$EVIDENCE/upgraded-b-container.log" 2>&1
+    phase_mark rollback_start
     docker rm -f "$RESTORE_CONTAINER" >"$EVIDENCE/upgraded-b-container-remove.stdout"
     RESTORE_STARTED=0
     RESTORE_CONTAINER_ID=''
@@ -1154,7 +1210,12 @@ if set(value.values()) & set(json.load(open(sys.argv[3],encoding='utf-8')).value
 json.dump(value,open(sys.argv[2],'x',encoding='utf-8'),sort_keys=True,separators=(',',':'))
 PYROLLBACKVOLS
     RESTORE_VOLUMES_JSON="$EVIDENCE/rollback-volume-ids.json"
-    cp "$RUN_ROOT/secrets/startup-fence.json" "$EVIDENCE/upgrade-startup-fence-token.json"
+    python3 - "$RUN_ROOT/secrets/startup-fence.json" "$EVIDENCE/a-reject-0059-token-binding.json" <<'PYTOKENBINDING'
+import json,sys
+from pathlib import Path
+x=json.loads(Path(sys.argv[1]).read_text()); x.pop('signature',None)
+Path(sys.argv[2]).write_text(json.dumps(x,sort_keys=True,separators=(',',':'))+'\n')
+PYTOKENBINDING
     rm -f "$RUN_ROOT/secrets/startup-fence.json"
     uv run python "$ROOT/tools/g7_backup_recovery.py" startup-token \
       --deployment-id g7-local --image-digest "$IMAGE_DIGEST" \
@@ -1165,11 +1226,12 @@ PYROLLBACKVOLS
     COMPATIBILITY_ADMISSION_ARGS=(); SCHEMA_MODE_ARGS=(); RESTORE_IMAGE_DIGEST="$IMAGE_DIGEST"
     RESTORE_STARTED=1
     docker run -d --name "$RESTORE_CONTAINER" --label uvm.g7.backup-recovery=true \
-      --network "$RECOVERY_NETWORK" --ip "$RESTORE_IP" \
+      --network "$RECOVERY_NETWORK" --ip "$RESTORE_IP" --cap-add NET_ADMIN \
       -p 127.0.0.1:8000:8000 -p 127.0.0.1:8002:8002 -p "127.0.0.1:$OIDC_PORT:9000" \
       --mount "type=bind,src=$RUN_ROOT/secrets,dst=/run/secrets,readonly" \
       --mount "type=bind,src=$RUN_ROOT/secrets/registry.json,dst=/run/uvm-g7-registry.json,readonly" \
       --mount "type=bind,src=$RUN_ROOT/secrets/host-pub.pem,dst=/run/uvm-g7-host-pub.pem,readonly" \
+      --mount "type=bind,src=$ROOT/tools/g7_runtime_egress_fence.py,dst=/tmp/g7_runtime_egress_fence.py,readonly" \
       --mount "type=bind,src=$RUN_ROOT/scheduler,dst=/run/uvm-g7-scheduler" \
       --mount "type=volume,src=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["postgres_cluster"])' "$RESTORE_VOLUMES_JSON"),dst=/var/lib/postgresql/data" \
       --mount "type=volume,src=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["ce_media"])' "$RESTORE_VOLUMES_JSON"),dst=/app/media" \
@@ -1232,6 +1294,7 @@ PYROLLBACKREPLAY
     (( rollback_api_ready )) || { echo 'epoch-2 A restore did not release its public verification listener' >&2; exit 2; }
     uv run python "$ROOT/tools/g7_recovery_public_readback.py" --evidence "$EVIDENCE" --phase rollback \
       >"$EVIDENCE/rollback-public-readback.json"
+    phase_mark rollback_end
     rollback_ce_ready=0
     for _ in $(seq 1 120); do
       if docker exec "$RESTORE_CONTAINER" curl --fail --silent --show-error --max-time 5 \
@@ -1274,6 +1337,7 @@ from datetime import datetime,timedelta,timezone
 import hashlib,json,sys,urllib.request,uuid
 from pathlib import Path
 from tools.g7_backup_controller import Controller,load_config,atomic_json
+from tools.g7_upgrade_assertions import validate_epoch_two_readbacks
 from uvm.operations.backup_host import digest
 config=load_config(Path(sys.argv[1])); controller=Controller(config); root=Path(sys.argv[2])
 if (root/'explicit-migration.exit').read_text().strip()!='0': raise ValueError('explicit migration failed')
@@ -1282,6 +1346,18 @@ for phase in ('pre-migration','post-migration'):
 for name in ('media.txt','engagement.json'):
  if (root/('source-ce-'+name)).read_bytes() != (root/('restore-ce-'+name)).read_bytes(): raise ValueError('CE retained sentinel differs')
 files=['pre-migration-public-readback.json','post-migration-public-readback.json','source-ce-public-sentinel.json','restore-ce-public-sentinel.json','source-ce-media.txt','restore-ce-media.txt','source-ce-engagement.json','restore-ce-engagement.json','explicit-migration.exit','signed-drain-proof.json']
+if (root/'upgrade-rollback-mode.txt').exists():
+ required=['rollback-public-readback.json','rollback-uvm-group.json','rollback-uvm-audit.json','rollback-ce-findings.json','rollback-volume-ids.json','restore-ce-media.txt','restore-ce-engagement.json']
+ for name in required:
+  path=root/name
+  if not path.is_file() or not path.stat().st_size: raise ValueError('epoch-2 rollback verification result is missing: '+name)
+ if json.loads((root/'rollback-public-readback.json').read_text()).get('passed') is not True: raise ValueError('epoch-2 A public readback did not pass')
+ context=controller.state['last_recovery_event']['event']; volumes=json.loads((root/'rollback-volume-ids.json').read_text())
+ if context.get('recovery_epoch')!=2 or context.get('new_volume_ids')!=volumes or context.get('target_image_digest')!=(root/'image-a-id.txt').read_text().strip(): raise ValueError('epoch-2 verification context mismatches A image or volumes')
+ archive=json.loads((root/'archive/manifest.json').read_text()); bindings=dict(line.rstrip().split('=',1) for line in (root/'image-bindings.txt').read_text().splitlines())
+ if archive.get('image_digest')!=context.get('target_image_digest') or archive.get('package_manifest_digest')!=bindings['source_package_manifest_digest'] or context.get('manifest_digest')!='sha256:'+hashlib.sha256((root/'archive/manifest.json').read_bytes()).hexdigest(): raise ValueError('epoch-2 archive/image/package context mismatch')
+if (root/'upgrade-rollback-mode.txt').exists():
+ files += ['rollback-public-readback.json','rollback-uvm-group.json','rollback-uvm-audit.json','rollback-ce-findings.json','rollback-volume-ids.json','epoch-2-rollback-readback.json']
 readbacks={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in files}
 readback_digest='sha256:'+digest(readbacks)
 atomic_json(root/'verification-readback-manifest.json',readbacks)
@@ -1289,6 +1365,13 @@ last=controller.state['last_recovery_event']['event']
 unsigned={k:v for k,v in last.items() if k not in {'signature','sequence','controller_instance_id'}}
 verification={k:'passed' for k in ('uvm_public_api','ce_public_api','media_readback','queue_reconciliation','migration')}
 verification['details_digest']=readback_digest
+if (root/'upgrade-rollback-mode.txt').exists():
+ archive=json.loads((root/'archive/manifest.json').read_text()); bindings=dict(line.rstrip().split('=',1) for line in (root/'image-bindings.txt').read_text().splitlines())
+ context_binding={**{k:last.get(k) for k in ('recovery_epoch','target_image_digest','new_volume_ids','connector_recovery_id','archive_id','manifest_digest','source_image_digest')},'package_manifest_digest':archive['package_manifest_digest'],'archive_digest':'sha256:'+hashlib.sha256((root/'archive/manifest.json').read_bytes()).hexdigest(),'expected_source_package_digest':bindings['source_package_manifest_digest']}
+ atomic_json(root/'rollback-context-binding.json',context_binding)
+ readbacks['rollback-context-binding.json']=hashlib.sha256((root/'rollback-context-binding.json').read_bytes()).hexdigest()
+ atomic_json(root/'verification-readback-manifest.json',readbacks)
+ verification['details_digest']=validate_epoch_two_readbacks(root,readbacks,context_binding)
 unsigned.update(event_id=str(uuid.uuid4()),previous_epoch=last['recovery_epoch'],event_type='verification_passed',verification=verification,public_readback_digest=readback_digest,observed_at=datetime.now(timezone.utc).isoformat().replace('+00:00','Z'))
 verified=controller.submit_recovery_event(unsigned)
 storage=json.loads((root/'recovery-auth-state.json').read_text())
@@ -1320,13 +1403,11 @@ root=Path(sys.argv[1]); path=root/'signed-verification-release-acks.json'
 value=json.loads(path.read_text()); value['release']=json.loads((root/'signed-release-ack.json').read_text())
 path.write_text(json.dumps(value,sort_keys=True))
 PYRELEASEACK
-  sudo -n nft delete table inet "$RESTORE_FIREWALL_TABLE" >"$EVIDENCE/host-egress-release.stdout" 2>"$EVIDENCE/host-egress-release.stderr"
-  RESTORE_FIREWALL_TABLE=''
   python3 - "$EVIDENCE/host-fence-release-journal.json" <<'PYRELEASE'
 from datetime import datetime,timezone
 import json,os,sys
 from pathlib import Path
-path=Path(sys.argv[1]); value={'signed_public_acknowledgement_retained':True,'ingress':'loopback-only-disposable','egress_rule_removed':True,'workers_release_requested':False,'observed_at':datetime.now(timezone.utc).isoformat()}
+path=Path(sys.argv[1]); value={'signed_public_acknowledgement_retained':True,'ingress':'loopback-only-disposable','external_egress':'container-default-route-removal-pending','workers_release_requested':True,'observed_at':datetime.now(timezone.utc).isoformat()}
 with path.open('x') as stream:
  json.dump(value,stream,sort_keys=True);stream.flush();os.fsync(stream.fileno())
 PYRELEASE
@@ -1341,6 +1422,13 @@ PYRELEASE
     sleep 1
   done
   (( released_runtime_ready )) || { echo 'signed recovery did not release runtime workers' >&2; exit 2; }
+  if (( UPGRADE_ROLLBACK_MODE )); then phase_mark outage_end; fi
+  docker exec "$RESTORE_CONTAINER" /opt/uvm/venv/bin/python /tmp/g7_runtime_egress_fence.py \
+    >"$EVIDENCE/runtime-egress-fence.json" 2>"$EVIDENCE/runtime-egress-fence.stderr"
+  docker exec "$RESTORE_CONTAINER" /opt/uvm/venv/bin/python -c 'import socket; s=socket.socket(); s.settimeout(2); r=s.connect_ex(("203.0.113.1",443)); print(r); raise SystemExit(0 if r else 1)' \
+    >"$EVIDENCE/fenced-egress-probe.stdout" 2>"$EVIDENCE/fenced-egress-probe.stderr"
+  grep -qx '101' "$EVIDENCE/fenced-egress-probe.stdout" || { echo 'runtime external egress probe was not denied by the admitted container route fence' >&2; exit 2; }
+  curl --fail --silent --max-time 5 http://127.0.0.1:8000/openapi.json >"$EVIDENCE/runtime-local-control-readback.json"
   PYTHONPATH="$ROOT" uv run python "$ROOT/tools/g7_recovery_runtime_probe.py" \
     --container "$RESTORE_CONTAINER" --evidence "$EVIDENCE" >"$EVIDENCE/released-runtime-proof.stdout" \
     2>"$EVIDENCE/released-runtime-proof.stderr"
@@ -1365,7 +1453,17 @@ PYEXPECT
     --expectations "$EVIDENCE/restore-browser-expectations.json" \
     --evidence "$EVIDENCE/restore-public-browser" \
     >"$EVIDENCE/restore-public-browser.stdout" 2>"$EVIDENCE/restore-public-browser.stderr"
-  if (( UPGRADE_ROLLBACK_MODE )); then PRESERVE_UPGRADE_VOLUMES=0; fi
+  if (( UPGRADE_ROLLBACK_MODE )); then
+    python3 - "$EVIDENCE/phase-timestamps.json" "$EVIDENCE/phase-durations.json" <<'PHDUR'
+import json,sys
+from pathlib import Path
+x=json.loads(Path(sys.argv[1]).read_text()); pairs={'upgrade_seconds':('upgrade_start','upgrade_end'),'rollback_seconds':('rollback_start','rollback_end'),'outage_seconds':('outage_start','outage_end')}
+out={k:(x[b]['monotonic_ns']-x[a]['monotonic_ns'])/1e9 for k,(a,b) in pairs.items()}
+if any(v<0 for v in out.values()): raise SystemExit('phase monotonic clock regressed')
+Path(sys.argv[2]).write_text(json.dumps({'schema_version':1,'clock':'host monotonic_ns','durations':out,'timestamp_file':'phase-timestamps.json'},sort_keys=True,separators=(',',':'))+'\n')
+PHDUR
+    PRESERVE_UPGRADE_VOLUMES=0
+  fi
   finish_operation_deadline verification
   if (( UPGRADE_ROLLBACK_MODE )); then
     echo 'G7 0058-to-0059 verification upgrade rolled back from the signed archive with A at epoch 2; UVM UI and CE public retained-state readback passed' | tee "$EVIDENCE/result.txt"

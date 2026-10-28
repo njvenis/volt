@@ -22,6 +22,8 @@ from uvm.operations.startup_fence import verify_startup_fence
 from uvm.operations.api import _discovery_cursor, _read_discovery_cursor
 from tools.g7_backup_recovery import RecoveryError, restore_new_volumes, verify_archive
 from tools.g7_backup_controller import Controller, _last_intent_revision
+from tools.g7_upgrade_assertions import validate_verification_queue, validate_epoch_two_readbacks
+from tools.g7_product_inventory import compare as compare_product_inventory
 from uvm.api.recovery_readonly import (recovery_control_request_decision,
     recovery_request_decision as uvm_recovery_request_decision)
 from docker.g7.verification_middleware import recovery_request_decision
@@ -151,7 +153,7 @@ class BackupSettingsValidationTests(unittest.TestCase):
                 controller.journal_schema_compatibility_admission(conflicting)
             self.assertEqual(saved, admission)
 
-    def test_development_rollback_request_requires_zero_writes_and_effects_under_fence(self):
+    def test_development_rollback_request_requires_journal_bound_measured_inventory(self):
         with tempfile.TemporaryDirectory() as temp:
             controller = Controller.__new__(Controller)
             controller.deployment = "g7-local"
@@ -166,16 +168,51 @@ class BackupSettingsValidationTests(unittest.TestCase):
                 "upgraded_image_digest": "sha256:" + "d" * 64,
                 "target_package_manifest_digest": "sha256:" + "e" * 64,
                 "forward_volume_ids": {"postgres_cluster": "pg", "ce_media": "media", "uvm_state": "uvm"},
-                "schema_head": "0059", "product_write_count": 0,
+                "schema_head": "0059", "inventory_attestation_id": str(uuid.uuid4()),
+                "inventory_attestation_digest": "sha256:" + "f" * 64, "product_write_count": 0,
+                "control_mutation_count": 4,
                 "unexpected_inventory_change_count": 0, "unresolved_external_effect_count": 0,
                 "ingress_fenced": True, "egress_fenced": True, "public_readback_match": True,
                 "requested_at": "2026-10-28T12:00:00Z"}
+            attestation={"attestation_id":request["inventory_attestation_id"],"recovery_epoch":1,
+                "forward_volume_ids":request["forward_volume_ids"],"source_digest":"sha256:"+"1"*64,
+                "candidate_digest":"sha256:"+"2"*64,"delta_digest":"sha256:"+"3"*64,
+                "archive_digest":request["archive_digest"],"source_image_digest":request["source_image_digest"],
+                "source_package_manifest_digest":request["source_package_manifest_digest"],
+                "upgraded_image_digest":request["upgraded_image_digest"],
+                "target_package_manifest_digest":request["target_package_manifest_digest"],
+                "product_mutation_count":0,"control_mutation_count":4,
+                "unexpected_inventory_change_count":0,
+                "unresolved_external_effect_count":0,"controller_journal_pre_digest":"sha256:"+"4"*64}
+            attestation["attestation_digest"]="sha256:"+hashlib.sha256(json.dumps(attestation,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+            controller.state["product_inventory_attestations"]={attestation["attestation_id"]:attestation}
+            request["inventory_attestation_digest"]=attestation["attestation_digest"]
             self.assertEqual(controller.journal_development_rollback_request(request), request)
             retained = json.loads(controller.journal.read_text())
             self.assertEqual(retained["development_rollback_requests"]["1"], request)
             with self.assertRaises(RecoveryError):
                 controller.journal_development_rollback_request({**request,
                     "product_write_count": 1, "request_id": str(uuid.uuid4())})
+
+    def test_full_inventory_detects_same_count_payload_and_unrelated_table_changes(self):
+        before={"uvm":{"product":{"columns":[],"schema_sha256":"a","rows":[{"key":[1],"payload_sha256":"old"}],"row_count":1}},"ce":{"findings":{"columns":[],"schema_sha256":"b","rows":[],"row_count":0}},"media":[]}
+        payload={"uvm":{"product":{"columns":[],"schema_sha256":"a","rows":[{"key":[1],"payload_sha256":"new"}],"row_count":1}},"ce":before["ce"],"media":[]}
+        unrelated={"uvm":{"product":before["uvm"]["product"],"new_unrelated":{"columns":[],"schema_sha256":"c","rows":[],"row_count":0}},"ce":before["ce"],"media":[]}
+        self.assertEqual(compare_product_inventory(before,payload)["unexpected_inventory_change_count"],1)
+        self.assertEqual(compare_product_inventory(before,unrelated)["unexpected_inventory_change_count"],1)
+
+    def test_verification_queue_validator_rejects_unknown_tasks_unresolved_and_failed_broker(self):
+        intent={"unresolved_count":0,"missing_expected_tables":[]}
+        obs=[{"name":n,"worker_ids":[],"classification":"workers_absent","read_succeeded":True} for n in ("celery_active","celery_reserved","celery_scheduled")]
+        obs.append({"name":"valkey_db0_inventory","exit_code":0,"cardinality_errors":0,"key_count":0,"keys_digest":hashlib.sha256(b"[]").hexdigest()})
+        before={"unresolved":[],"tasks":[],"intent_inventory":intent}
+        expected={"celery_active did not produce a verifiable response","celery_reserved did not produce a verifiable response","celery_scheduled did not produce a verifiable response","Celery task snapshots do not identify the same single expected worker","Valkey DB0 contains unknown queue state or unverified binding contents"}
+        after={"unresolved":[],"classified_raw_unresolved":list(expected),"tasks":[],"intent_inventory":intent,"verification_mode":True,"worker_pid_files_absent":True,"observations":obs}
+        self.assertTrue(validate_verification_queue(before,after)["passed"])
+        for changed in ({**after,"tasks":[{"id":"unexpected"}]},{**after,"unresolved":["unknown"]}):
+            with self.assertRaises(ValueError): validate_verification_queue(before,changed)
+        failed={**after,"observations":obs[:-1]+[{**obs[-1],"exit_code":1}]}
+        with self.assertRaises(ValueError): validate_verification_queue(before,failed)
 
     def test_external_controller_resync_persists_authenticated_ack_and_sequence_floor(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -236,6 +273,13 @@ class BackupSettingsValidationTests(unittest.TestCase):
                 "queue_inventory_digest": "sha256:" + "c" * 64,
                 "public_readback_digest": None, "failure_code": None,
                 "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+            invalid_verified = {**unsigned, "event_id": str(uuid.uuid4()),
+                "event_type": "verification_passed", "previous_epoch": 1,
+                "verification": {"uvm_public_api": "passed", "ce_public_api": "passed",
+                    "media_readback": "passed", "queue_reconciliation": "passed",
+                    "migration": "passed", "details_digest": None}}
+            with self.assertRaises(RecoveryError):
+                controller.submit_recovery_event(invalid_verified)
             def request(_path, body):
                 self.assertEqual(json.loads(journal.read_text())["pending_recovery_event"], body)
                 raw, _ = verify_signature(body, str(public_path), "test-key")
@@ -273,6 +317,32 @@ class BackupSettingsValidationTests(unittest.TestCase):
             "/api/v1/operations/backup-settings/g7-local/commands"), "method_not_allowed")
         self.assertEqual(uvm_recovery_request_decision("GET",
             "/api/v1/auth/login"), "not_found")
+
+    def test_epoch_two_readback_manifest_rejects_missing_or_mismatched_results(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            names=("rollback-public-readback.json", "rollback-uvm-group.json",
+                "rollback-uvm-audit.json", "rollback-ce-findings.json",
+                "rollback-volume-ids.json", "epoch-2-rollback-readback.json",
+                "restore-ce-media.txt", "restore-ce-engagement.json")
+            readbacks={}
+            for name in names:
+                data=("result:"+name).encode(); (root/name).write_bytes(data)
+                readbacks[name]=hashlib.sha256(data).hexdigest()
+            binding={"recovery_epoch":2,"target_image_digest":"sha256:"+"a"*64,
+                "new_volume_ids":{"postgres_cluster":"pg","ce_media":"media","uvm_state":"uvm"}}
+            raw=json.dumps(binding,sort_keys=True,separators=(",",":")).encode()
+            (root/"rollback-context-binding.json").write_bytes(raw)
+            readbacks["rollback-context-binding.json"]=hashlib.sha256(raw).hexdigest()
+            (root/"verification-readback-manifest.json").write_text(json.dumps(readbacks))
+            digest_value=validate_epoch_two_readbacks(root,readbacks,binding)
+            self.assertRegex(digest_value,r"^sha256:[0-9a-f]{64}$")
+            (root/"rollback-ce-findings.json").write_text("tampered")
+            with self.assertRaisesRegex(ValueError,"mismatched"):
+                validate_epoch_two_readbacks(root,readbacks,binding)
+            (root/"rollback-ce-findings.json").unlink()
+            with self.assertRaisesRegex(ValueError,"missing or mismatched"):
+                validate_epoch_two_readbacks(root,readbacks,binding)
 
     def test_recovery_control_listener_hides_all_product_routes(self):
         self.assertEqual(recovery_control_request_decision(

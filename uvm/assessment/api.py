@@ -433,6 +433,7 @@ _ACTIONS = (
     "warning.route.manage", "warning.actor_link.manage",
     "integration.health.read",
     "observer.timing.read", "observer.timing.configure",
+    "backup.settings.read", "backup.settings.configure",
 )
 _LOG = logging.getLogger("uvm.assessment.api")
 _TRUSTED_COMMAND_ORIGIN: contextvars.ContextVar[str | None] = contextvars.ContextVar(

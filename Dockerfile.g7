@@ -46,6 +46,16 @@ if source.count(needle) != 1:
     raise SystemExit('expected exactly one CE celery beat schedule option')
 path.write_text(source.replace(needle, replacement))
 PY
+RUN python3 - <<'PY'
+from pathlib import Path
+path = Path('/app/dojo/settings/settings.dist.py')
+source = path.read_text()
+needle = 'MIDDLEWARE = DJANGO_MIDDLEWARE_CLASSES'
+replacement = 'MIDDLEWARE = ["g7_verification_middleware.ReadOnlyRecoveryMiddleware", *DJANGO_MIDDLEWARE_CLASSES]'
+if source.count(needle) != 1:
+    raise SystemExit('expected exactly one DefectDojo middleware assignment')
+path.write_text(source.replace(needle, replacement))
+PY
 COPY docker/g7/versions.lock /tmp/uvm-g7-versions.lock
 RUN set -eu; \
     export DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none; \
@@ -93,6 +103,7 @@ WORKDIR /opt/uvm/app
 COPY --from=uvm-build --chown=uvm:uvm /build/.venv /opt/uvm/venv
 COPY --from=uvm-build --chown=uvm:uvm /build/uvm ./uvm
 COPY --chown=1001:1337 docker/g7/beat_progress_scheduler.py /app/beat_progress_scheduler.py
+COPY --chown=1001:1337 docker/g7/verification_middleware.py /app/g7_verification_middleware.py
 COPY --chown=uvm:uvm tools/g7_container_audit_export.py /opt/uvm/app/tools/g7_container_audit_export.py
 COPY --chown=uvm:uvm tools/g7_network_assert.py /opt/uvm/app/tools/g7_network_assert.py
 COPY --from=uvm-build --chown=uvm:uvm /build/migrations ./migrations
@@ -118,8 +129,9 @@ ENV PATH=/opt/uvm/venv/bin:$PATH \
     DD_UWSGI_MODE=socket \
     DD_UWSGI_ENDPOINT=127.0.0.1:3031 \
     UVM_API_HOST=0.0.0.0 \
-    UVM_API_PORT=8000
+    UVM_API_PORT=8000 \
+    UVM_G7_RECOVERY_CONTROL_PORT=8002
 VOLUME ["/var/lib/postgresql/data", "/app/media", "/opt/uvm/state"]
-EXPOSE 8000
+EXPOSE 8000 8002
 HEALTHCHECK --interval=10s --timeout=4s --start-period=180s --retries=3 CMD ["/usr/local/bin/uvm-g7-healthcheck"]
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/uvm-g7-entrypoint"]

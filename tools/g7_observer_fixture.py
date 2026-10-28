@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import copy
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
 import secrets
 import signal
+import ssl
 import subprocess
 import time
 from urllib.parse import quote
@@ -54,6 +56,32 @@ def run(args: argparse.Namespace) -> None:
         subprocess.run(["openssl", "pkey", "-in", str(private), "-pubout", "-out", str(public)],
             check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         public.chmod(0o644)
+        ca_key, ca_cert = host_dir / "recovery-ca.key", secrets_dir / "recovery-ca.crt"
+        server_key, server_csr = secrets_dir / "recovery-server.key", host_dir / "recovery-server.csr"
+        server_cert = secrets_dir / "recovery-server.crt"
+        client_key, client_csr = host_dir / "recovery-client.key", host_dir / "recovery-client.csr"
+        client_cert = host_dir / "recovery-client.crt"
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:3072", "-nodes",
+            "-keyout", str(ca_key), "-out", str(ca_cert), "-subj", "/CN=G7 fixture recovery CA",
+            "-days", "2", "-addext", "basicConstraints=critical,CA:TRUE",
+            "-addext", "keyUsage=critical,keyCertSign,cRLSign"],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for key, csr, cn in ((server_key, server_csr, "localhost"),
+                (client_key, client_csr, "g7-local-controller")):
+            subprocess.run(["openssl", "req", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", str(key), "-out", str(csr), "-subj", f"/CN={cn}"],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        (host_dir / "server.ext").write_text("subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n")
+        (host_dir / "client.ext").write_text("extendedKeyUsage=clientAuth\n")
+        for csr, cert, ext in ((server_csr, server_cert, host_dir / "server.ext"),
+                (client_csr, client_cert, host_dir / "client.ext")):
+            subprocess.run(["openssl", "x509", "-req", "-in", str(csr), "-CA", str(ca_cert),
+                "-CAkey", str(ca_key), "-CAcreateserial", "-out", str(cert), "-days", "2",
+                "-extfile", str(ext)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for path in (ca_key, server_key, client_key):
+            path.chmod(0o600)
+        for path in (ca_cert, server_cert, client_cert):
+            path.chmod(0o644)
         (secrets_dir / "registry.json").write_text(json.dumps([{
             "deployment_id": "g7-local", "label": "Disposable G7 local",
             "host_principal_id": "g7-host", "verification_key_file": "/run/uvm-g7-host-pub.pem"}, {
@@ -85,7 +113,8 @@ def run(args: argparse.Namespace) -> None:
                 "scopes": [], "actor_kind": "service", "origin": "g7-host-controller"}},
                 separators=(",", ":")),
             "UVM_NATIVE_GRANTABLE_ENVELOPE": json.dumps({
-                "actions": ["observer.timing.read", "observer.timing.configure", "audit.read"],
+                "actions": ["observer.timing.read", "observer.timing.configure",
+                    "backup.settings.read", "backup.settings.configure", "audit.read"],
                 "target_scope": {"group_ids": ["*"], "source_families": ["*"],
                     "environments": ["*"], "service_ids": ["*"], "membership_mode": "all_current"},
                 "limits": {"maximum_acceptance_days": None, "maximum_severity": None,
@@ -104,6 +133,12 @@ def run(args: argparse.Namespace) -> None:
                     "scope_key": "all"}], "deployment_scopes": ["g7-local", "g7-other"]},
                 separators=(",", ":")),
             "UVM_OBSERVER_DEPLOYMENT_REGISTRY_FILE": "/run/uvm-g7-registry.json",
+            "UVM_G7_INITIAL_MAXIMUM_FUTURE_SKEW_SECONDS": "30",
+            "UVM_G7_HOST_KEY_ID": "g7-host-controller-key",
+            "UVM_G7_CONTROLLER_INSTANCE_ID": "00000000-0000-4000-8000-000000000017",
+            "UVM_G7_RECOVERY_TLS_CERT_FILE": "/run/uvm-g7-secrets/recovery-server.crt",
+            "UVM_G7_RECOVERY_TLS_KEY_FILE": "/run/uvm-g7-secrets/recovery-server.key",
+            "UVM_G7_RECOVERY_TLS_CA_FILE": "/run/uvm-g7-secrets/recovery-ca.crt",
             "DD_ADMIN_USER": "admin", "DD_ADMIN_MAIL": "admin@defectdojo.local",
             "DD_ADMIN_FIRST_NAME": "Synthetic", "DD_ADMIN_LAST_NAME": "Operator",
             "DD_INITIALIZE": "true", "DD_ALLOWED_HOSTS": "localhost,127.0.0.1",
@@ -148,6 +183,60 @@ def run(args: argparse.Namespace) -> None:
         print("oidc_fixture_link=created")
         return
 
+    if args.command == "backup-policy":
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        policy = {"revision": 1,
+            "bounds": {
+                "interval_seconds": {"min": 60, "max": 3600},
+                "timeout_seconds": {"min": 1, "max": 1800},
+                "maximum_backup_age_seconds": {"min": 60, "max": 86400},
+                "restore_verification_timeout_seconds": {"min": 1, "max": 3600}},
+            "archive_target_refs": ["archive-target-local-a"],
+            "recovery_profile_refs": ["recovery-profile-local-a"],
+            "maximum_report_age_seconds": 300, "maximum_future_skew_seconds": 30}
+        policy["digest"] = "sha256:" + hashlib.sha256(json.dumps(policy,
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            allow_nan=False).encode("utf-8")).hexdigest()
+        observed = now.isoformat().replace("+00:00", "Z")
+        fresh_until = (now + timedelta(seconds=300)).isoformat().replace("+00:00", "Z")
+        unsigned = {"schema_version": 1, "deployment_id": "g7-local",
+            "report_id": str(uuid.uuid4()), "sequence": 1,
+            "controller_instance_id": "00000000-0000-4000-8000-000000000017",
+            "report_kind": "policy", "host_policy": policy,
+            "desired": None, "settings_application": None, "completed_archive": None,
+            "freshness": None, "restore_verification": None, "recovery_epoch": None,
+            "observed_at": observed, "fresh_until": fresh_until}
+        signed = host.signed_report({"signing_key_file": str(host_dir / "ed25519.pem")}, unsigned)
+        signed["signature"] = {"algorithm": "Ed25519",
+            "key_id": "g7-host-controller-key", "value": signed["signature"]}
+        token = (secrets_dir / "uvm_cursor_secret").read_text(encoding="utf-8").strip()
+        request = urllib.request.Request("https://127.0.0.1:8002/recovery-control/v1/g7-local/reports",
+            data=json.dumps(signed, sort_keys=True, separators=(",", ":")).encode(),
+            headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+            method="POST")
+        tls = ssl.create_default_context(cafile=str(secrets_dir / "recovery-ca.crt"))
+        tls.load_cert_chain(str(host_dir / "recovery-client.crt"), str(host_dir / "recovery-client.key"))
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                with urllib.request.urlopen(request, timeout=10, context=tls) as response:
+                    result = json.loads(response.read())
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code < 500:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(1)
+            except urllib.error.URLError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(1)
+        print(json.dumps({"host_policy_revision": result["host_policy_revision"],
+            "report_id": result["report_id"], "accepted": result["accepted"]}, separators=(",", ":")))
+        host.atomic_json(host_dir / "backup-policy.json", policy)
+        return
+
     if args.command == "host-config":
         host_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         state.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -181,6 +270,52 @@ def run(args: argparse.Namespace) -> None:
                 start_new_session=True)
             (host_dir / f"{mode}.pid").write_text(str(process.pid), encoding="ascii")
         print("host_processes=observer,supervisor,controller")
+        return
+
+    if args.command == "backup-host-config":
+        backup_dir = state / "backup"
+        backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        accepted_policy = host.read_json(host_dir / "backup-policy.json")
+        if not isinstance(accepted_policy, dict):
+            raise SystemExit("accepted backup host policy is unavailable")
+        config = {"schema_version": 1, "deployment_id": "g7-local",
+            "endpoint": "https://127.0.0.1:8002", "token_file": str(host_dir / "api-token"),
+            "client_cert_file": str(host_dir / "recovery-client.crt"),
+            "client_key_file": str(host_dir / "recovery-client.key"),
+            "server_ca_file": str(secrets_dir / "recovery-ca.crt"),
+            "signing_key_file": str(host_dir / "ed25519.pem"),
+            "signing_key_id": "g7-host-controller-key",
+            "controller_instance_id": "00000000-0000-4000-8000-000000000017",
+            "host_policy": accepted_policy,
+            "journal_file": str(backup_dir / "controller-journal.json"),
+            "active_settings_file": str(backup_dir / "active-settings.json")}
+        config_path = host_dir / "backup-controller.json"
+        host.atomic_json(config_path, config)
+        import tools.g7_backup_controller as backup_controller
+        backup_controller.atomic_json(Path(config["journal_file"]), {
+            "schema_version": 1, "deployment_id": "g7-local",
+            "controller_instance_id": config["controller_instance_id"],
+            "last_sequence": 1, "recovery_epoch_floor": 0,
+            "last_intent": None, "last_ack": None})
+        print(json.dumps({"controller_config": str(config_path),
+            "journal_sequence": 1, "host_policy_revision": accepted_policy["revision"]},
+            separators=(",", ":")))
+        return
+
+    if args.command == "backup-host-once":
+        completed = subprocess.run(["uv", "run", "python", "tools/g7_backup_controller.py",
+            "--config", str(host_dir / "backup-controller.json"), "--once"],
+            cwd=Path(__file__).resolve().parents[1], check=False,
+            capture_output=True, text=True)
+        if completed.returncode:
+            # The controller output is bounded and contains exception class/message only;
+            # retain it in the outer journey log so failures remain diagnosable.
+            if completed.stdout.strip():
+                print(completed.stdout.strip())
+            if completed.stderr.strip():
+                print(completed.stderr.strip(), file=sys.stderr)
+            raise SystemExit(completed.returncode)
+        print(completed.stdout.strip())
         return
 
     if args.command == "host-once":
@@ -325,7 +460,7 @@ def run(args: argparse.Namespace) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("create", "anchor-init", "link-actor", "host-config", "host-control", "host-once", "host-report-attacks", "host-telemetry-count"))
+    parser.add_argument("command", choices=("create", "anchor-init", "link-actor", "backup-policy", "host-config", "backup-host-config", "backup-host-once", "host-control", "host-once", "host-report-attacks", "host-telemetry-count"))
     parser.add_argument("--role", choices=("observer", "supervisor", "controller"))
     parser.add_argument("--action", choices=("stop", "resume", "restart", "start", "terminate", "tighten-policy", "restore-policy"))
     parser.add_argument("--report-id")

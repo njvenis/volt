@@ -1,0 +1,7 @@
+.backup-references { margin-top:24px; }
+.backup-evidence-grid { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:24px; }
+.backup-evidence-grid>section { min-width:0; }
+.backup-evidence-grid .observer-facts { grid-template-columns:minmax(0,1fr); }
+.backup-state { font-size:20px;font-weight:700;text-transform:capitalize; }
+.backup-evidence-grid h4 { margin-bottom:8px; }
+@media(max-width:1000px) { .backup-evidence-grid { grid-template-columns:minmax(0,1fr); } .backup-evidence-grid>section+section { border-top:1px solid var(--semantic-border);padding-top:8px; } }

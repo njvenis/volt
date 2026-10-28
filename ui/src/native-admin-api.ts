@@ -1,5 +1,5 @@
 import {sessionFetch, errorCode} from './session';
-import {hasGrantable,scopeWithin,limitsWithin,isObserverTimingAction,validDeploymentScopes,deploymentScopesWithin} from './native-admin-validation';
+import {hasGrantable,scopeWithin,limitsWithin,isDeploymentSettingsAction,validDeploymentScopes,deploymentScopesWithin} from './native-admin-validation';
 import type {ApprovalLimits, Duties, TargetScope} from './assessment-api';
 
 export type AuthorityMode = 'legacy' | 'uvm_native_v1';
@@ -42,7 +42,7 @@ function duties(v:unknown):boolean{return obj(v)&&bool(v.approval_requires_disti
 function membership(v:Record<string,unknown>):boolean{return id(v.principal_id)&&time(v.effective_from)&&(v.effective_until===null||time(v.effective_until)&&Date.parse(String(v.effective_until))>Date.parse(String(v.effective_from)))&&bool(v.enabled)&&integer(v.revision);}
 function history(v:Record<string,unknown>):boolean{return ['event_id','action','actor_id'].every(k=>id(v[k]))&&time(v.occurred_at)&&text(v.rationale)&&'before_value'in v&&'after_value'in v;}
 function item(v:Record<string,unknown>):boolean{return id(v.display_name)&&bool(v.enabled)&&integer(v.revision)&&rows(v.memberships,membership)&&rows(v.history,history)&&unique(v.history,'event_id');}
-function permission(v:Record<string,unknown>):boolean{return ['permission_id','role_id','action'].every(k=>id(v[k]))&&(isObserverTimingAction(String(v.action))?validDeploymentScopes(v.deployment_scopes)&&v.deployment_scopes.length>0:v.deployment_scopes===undefined)&&scope(v.target_scope)&&limits(v.limits)&&duties(v.separation_of_duties);}
+function permission(v:Record<string,unknown>):boolean{return ['permission_id','role_id','action'].every(k=>id(v[k]))&&(isDeploymentSettingsAction(String(v.action))?validDeploymentScopes(v.deployment_scopes)&&v.deployment_scopes.length>0:v.deployment_scopes===undefined)&&scope(v.target_scope)&&limits(v.limits)&&duties(v.separation_of_duties);}
 function base(v:unknown):v is Record<string,unknown>{return obj(v)&&v.schema_version===1&&integer(v.policy_revision);}
 export async function adminRequest(path:string,signal?:AbortSignal,body?:unknown):Promise<unknown>{
   const write=body!==undefined;let response:Response;
@@ -54,7 +54,7 @@ export async function adminRequest(path:string,signal?:AbortSignal,body?:unknown
 }
 export async function getAdminCatalogue(principalId:string,signal?:AbortSignal):Promise<AdminCatalogue>{
   const v=await adminRequest('administration/catalogue',signal);
-  if(!base(v)||!mode(v.authority_mode)||!integer(v.authority_revision)||!integer(v.ownership_revision)||!obj(v.caller)||v.caller.principal_id!==principalId||!bool(v.caller.can_manage_access_groups)||!bool(v.caller.can_manage_ownership_teams)||!grantable(v.caller.grantable)||!rows(v.selectable_actions,a=>id(a.action)&&scope(a.target_scope)&&limits(a.limits)&&(isObserverTimingAction(String(a.action))?validDeploymentScopes(a.deployment_scopes):a.deployment_scopes===undefined))||!unique(v.selectable_actions,'action'))throw new NativeAdminError(502,'unsupported_response');
+  if(!base(v)||!mode(v.authority_mode)||!integer(v.authority_revision)||!integer(v.ownership_revision)||!obj(v.caller)||v.caller.principal_id!==principalId||!bool(v.caller.can_manage_access_groups)||!bool(v.caller.can_manage_ownership_teams)||!grantable(v.caller.grantable)||!rows(v.selectable_actions,a=>id(a.action)&&scope(a.target_scope)&&limits(a.limits)&&(isDeploymentSettingsAction(String(a.action))?validDeploymentScopes(a.deployment_scopes):a.deployment_scopes===undefined))||!unique(v.selectable_actions,'action'))throw new NativeAdminError(502,'unsupported_response');
   const catalogue=v as AdminCatalogue;
   const envelope=catalogue.caller.grantable;
   if(!hasGrantable(envelope)){
@@ -62,7 +62,7 @@ export async function getAdminCatalogue(principalId:string,signal?:AbortSignal):
   }else if(catalogue.selectable_actions.some(action=>
     !(envelope.actions.includes('*')||envelope.actions.includes(action.action))||
     !scopeWithin(action.target_scope,envelope.target_scope)||!limitsWithin(action.limits,envelope.limits)||
-    isObserverTimingAction(action.action)&&!deploymentScopesWithin(action.deployment_scopes,envelope.deployment_scopes??[],true)))throw new NativeAdminError(502,'unsupported_response');
+    isDeploymentSettingsAction(action.action)&&!deploymentScopesWithin(action.deployment_scopes,envelope.deployment_scopes??[],true)))throw new NativeAdminError(502,'unsupported_response');
   return catalogue;
 }
 export async function getAccessGroups(catalogue:AdminCatalogue,signal?:AbortSignal):Promise<AccessGroups>{

@@ -117,3 +117,6 @@ h1 {font-weight:750;font-size:28px}
   .identity-review-context,.identity-import-summary,.identity-imports .facts {grid-template-columns:1fr}
   .identity-review-context section+section {border-top:1px solid var(--semantic-border);padding-top:20px}
 }
+
+/* Administration tabs grow as operational settings become available. */
+.administration-tabs { flex-wrap:wrap;row-gap:0; }

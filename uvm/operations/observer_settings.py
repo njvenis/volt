@@ -17,6 +17,35 @@ TIMING_FIELDS = (
     "scheduler_progress_freshness_seconds",
 )
 
+BACKUP_FIELDS = (
+    "interval_seconds", "timeout_seconds", "maximum_backup_age_seconds",
+    "restore_verification_timeout_seconds", "archive_target_ref", "recovery_profile_ref",
+)
+
+
+def validate_backup_values(values: object, policy: Mapping[str, object]) -> dict:
+    """Validate one complete settings document against the signed host policy."""
+    if not isinstance(values, dict) or set(values) != set(BACKUP_FIELDS):
+        raise ObserverSettingsError("backup values must contain exactly the six v1 fields")
+    bounds = policy.get("bounds")
+    refs = {"archive_target_ref": policy.get("archive_target_refs"),
+        "recovery_profile_ref": policy.get("recovery_profile_refs")}
+    checked = {}
+    for field in BACKUP_FIELDS[:4]:
+        value = values[field]
+        limit = bounds.get(field) if isinstance(bounds, Mapping) else None
+        if type(value) is not int or not isinstance(limit, Mapping) or set(limit) != {"min", "max"}:
+            raise ObserverSettingsError(f"{field} or its host-owned bounds are invalid")
+        if type(limit["min"]) is not int or type(limit["max"]) is not int or not limit["min"] <= value <= limit["max"]:
+            raise ObserverSettingsError(f"{field} is outside current host policy bounds")
+        checked[field] = value
+    for field in BACKUP_FIELDS[4:]:
+        value = values[field]
+        if not isinstance(value, str) or not value or len(value) > 256 or value not in refs[field]:
+            raise ObserverSettingsError(f"{field} is not an allowed opaque host reference")
+        checked[field] = value
+    return checked
+
 
 class ObserverSettingsError(ValueError):
     """A desired timing document is malformed or outside host policy."""
@@ -70,7 +99,8 @@ def deployment_grants(policy: dict, principal_id: str, action: str,
     target scope cannot supply this dimension. Explicit denies are evaluated
     after current membership resolution and override every matching grant.
     """
-    if action not in {"observer.timing.read", "observer.timing.configure"}:
+    if action not in {"observer.timing.read", "observer.timing.configure",
+            "backup.settings.read", "backup.settings.configure"}:
         return []
     if not isinstance(deployment_id, str) or not deployment_id or len(deployment_id) > 256:
         return []

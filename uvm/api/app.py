@@ -327,6 +327,14 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
     app = FastAPI(title="UVM Read API", version="1.0.0")
     @app.middleware("http")
     async def oauth_response_security_headers(request: Request, call_next):
+        recovery_port = int(os.getenv("UVM_G7_RECOVERY_CONTROL_PORT", "8002"))
+        server = request.scope.get("server")
+        listening_port = server[1] if isinstance(server, tuple) and len(server) == 2 else None
+        recovery_path = request.url.path.startswith("/recovery-control/v1/")
+        if ((listening_port == recovery_port and not recovery_path)
+                or (recovery_path and listening_port != recovery_port)):
+            return JSONResponse(status_code=404, content={"schema_version": 1,
+                "error": {"code": "not_found", "message": "Route not found"}})
         response = await call_next(request)
         if "/installation/" in request.url.path:
             response.headers["Referrer-Policy"] = "no-referrer"
@@ -367,6 +375,39 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
     from uvm.api.ingress import install as install_ingress_guard
     install_ingress_guard(app)
 
+    if os.getenv("UVM_G7_VERIFICATION_ONLY") == "1":
+        if os.getenv("UVM_AUTH_MODE", "bearer") not in {"bearer", "oidc"}:
+            raise RuntimeError("verification-only API requires bearer or restored OIDC session authentication")
+
+        @app.middleware("http")
+        async def recovery_read_only_fence(request: Request, call_next):
+            # The distinct mTLS control listener shares this app factory but
+            # has its own route allowlist and accepts authenticated recovery
+            # POSTs. Let that listener-specific fence evaluate its paths;
+            # the product listener never sets RECOVERY_CONTROL_ONLY.
+            if (os.getenv("UVM_G7_RECOVERY_CONTROL_ONLY") == "1"
+                    and request.url.path.startswith("/recovery-control/v1/")):
+                return await call_next(request)
+            from uvm.api.recovery_readonly import recovery_request_decision
+            decision = recovery_request_decision(request.method, request.url.path)
+            if decision == "not_found":
+                return JSONResponse(status_code=404, content={"detail": {
+                    "code": "not_found", "message": "Route not found"}})
+            if decision == "method_not_allowed":
+                return JSONResponse(status_code=405, content={"detail": {
+                    "code": "recovery_read_only", "message": "Recovery verification is read-only"}},
+                    headers={"Allow": "GET, HEAD"})
+            return await call_next(request)
+
+    if os.getenv("UVM_G7_RECOVERY_CONTROL_ONLY") == "1":
+        @app.middleware("http")
+        async def recovery_control_route_fence(request: Request, call_next):
+            from uvm.api.recovery_readonly import recovery_control_request_decision
+            if recovery_control_request_decision(request.url.path) == "not_found":
+                return JSONResponse(status_code=404, content={"detail": {
+                    "code": "not_found", "message": "Route not found"}})
+            return await call_next(request)
+
     @app.exception_handler(HTTPException)
     async def http_error(request, exc):
         detail = exc.detail if isinstance(exc.detail, dict) else {"code": "request_error", "message": str(exc.detail)}
@@ -376,6 +417,7 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
             or request.url.path == "/api/v1/assessment/commands"
             or request.url.path.startswith("/api/v1/github")
             or request.url.path.startswith("/api/v1/operations/observer-settings"))
+        connector_wire = connector_wire or request.url.path.startswith("/api/v1/operations/backup-settings")
         if connector_wire:
             aliases = {"invalid_settings":"invalid_request", "invalid_command":"invalid_request",
                 "request_error":"invalid_request", "persistence_unavailable":"dependency_unavailable",
@@ -389,7 +431,7 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
                 "not_found", "invalid_request", "revision_conflict", "command_conflict",
                 "submission_conflict", "credential_revoked", "restore_quarantined",
                 "callback_invalid", "validation_required", "dependency_unavailable", "outcome_unknown",
-                "report_expired", "report_superseded"}
+                "report_expired", "report_superseded", "host_policy_unavailable"}
             if code not in allowed:
                 code = ("authentication_required" if status == 401 else "forbidden" if status == 403
                     else "not_found" if status == 404 else "dependency_unavailable" if status >= 500
@@ -399,6 +441,7 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
                 "revision_conflict":409, "command_conflict":409, "submission_conflict":409,
                 "credential_revoked":409, "restore_quarantined":409, "callback_invalid":400,
                 "validation_required":409, "dependency_unavailable":503, "outcome_unknown":503,
+                "host_policy_unavailable":503,
                 "report_expired":400, "report_superseded":409}
             status = status_by_code[code]
             raw_details = detail.get("details") if isinstance(detail.get("details"), dict) else {}
@@ -427,6 +470,7 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
             or request.url.path == "/api/v1/assessment/commands"
             or request.url.path.startswith("/api/v1/github")
             or request.url.path.startswith("/api/v1/operations/observer-settings"))
+        connector_wire = connector_wire or request.url.path.startswith("/api/v1/operations/backup-settings")
         error = {"code":"invalid_request","message":"Request parameters are invalid"}
         if connector_wire:
             supplied=request.headers.get("x-correlation-id")
@@ -443,6 +487,7 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
             or request.url.path == "/api/v1/assessment/commands"
             or request.url.path.startswith("/api/v1/github")
             or request.url.path.startswith("/api/v1/operations/observer-settings"))
+        connector_wire = connector_wire or request.url.path.startswith("/api/v1/operations/backup-settings")
         error={"code":"dependency_unavailable" if connector_wire else "read_dependency_unavailable",
             "message":"The read service is temporarily unavailable"}
         if connector_wire:
@@ -458,7 +503,8 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
         _LOG.exception("Unhandled read API failure", exc_info=exc)
         connector_wire = (request.url.path.startswith("/api/v1/connectors")
             or request.url.path == "/api/v1/assessment/commands"
-            or request.url.path.startswith("/api/v1/github"))
+            or request.url.path.startswith("/api/v1/github")
+            or request.url.path.startswith("/api/v1/operations/backup-settings"))
         error={"code":"dependency_unavailable" if connector_wire else "internal_error",
             "message":"The read service could not complete the request"}
         if connector_wire:
@@ -790,6 +836,11 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
                 target = root / "index.html"
             return FileResponse(target, headers={"Cache-Control": "no-store",
                 "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"})
+    if os.getenv("UVM_G7_VERIFICATION_ONLY") == "1":
+        # Restricted processes expose retained readbacks only. Normal hooks
+        # include restore mutations, projection recovery and external pollers.
+        app.router.on_startup.clear()
+        app.router.on_shutdown.clear()
     return app
 
 

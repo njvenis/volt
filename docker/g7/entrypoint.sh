@@ -7,9 +7,11 @@ CHILD_PIDS=()
 CHILD_NAMES=()
 SERVICE_PIDS=()
 shutdown_requested=0
+quiesce_requested=0
 shutdown_status=0
 services_started=0
 cleanup_running=0
+recovery_control_gate_passed=0
 mkdir -p "$STATE" /run/secrets
 install -d -o 1001 -g 1337 -m 0750 /run/uvm-g7-scheduler
 if [[ ${UVM_G7_DISPOSABLE_MODE:-0} == 1 ]]; then
@@ -18,9 +20,10 @@ if [[ ${UVM_G7_DISPOSABLE_MODE:-0} == 1 ]]; then
   # read it from the dedicated bind mount.
   chmod 0755 /run/uvm-g7-scheduler
 fi
-rm -f "$STATE/ready" "$STATE/critical-failed"
+rm -f "$STATE/ready" "$STATE/critical-failed" "$STATE"/pid-*
 
 handle_shutdown() { shutdown_requested=1; }
+handle_quiesce() { quiesce_requested=1; }
 cleanup_on_exit() {
   local original_status=$? cleanup_status=0
   trap - EXIT TERM INT
@@ -34,6 +37,8 @@ cleanup_on_exit() {
 }
 trap cleanup_on_exit EXIT
 trap handle_shutdown TERM INT
+trap handle_quiesce USR1
+printf '%s\n' "$$" >"$STATE/entrypoint-pid"
 
 abort_if_shutdown() {
   if (( shutdown_requested )); then
@@ -66,20 +71,32 @@ stop_phase() {
   done
   for i in "${!selected[@]}"; do
     pid=${selected[$i]}
-    local stopped=0
+    local stopped=0 timed_out=0
     for attempt in $(seq 1 300); do
       if ! kill -0 "$pid" 2>/dev/null; then stopped=1; break; fi
       sleep 0.1
     done
     if (( ! stopped )); then
       echo "G7_STOP_ERROR phase=$phase action=timeout name=${selected_names[$i]} pid=$pid" >&2
-      kill -KILL -- "-$pid" 2>/dev/null || :
+      if [[ ${UVM_G7_QUIESCE_NO_KILL:-0} != 1 ]]; then
+        kill -KILL -- "-$pid" 2>/dev/null || :
+      else
+        timed_out=1
+      fi
       status=1
     fi
+    if (( timed_out )); then continue; fi
     if wait "$pid"; then :; else
       rc=$?
       if (( rc != 143 && rc != 0 && rc != 127 )); then
         echo "G7_STOP_ERROR phase=$phase action=wait name=${selected_names[$i]} pid=$pid status=$rc" >&2
+        status=1
+      fi
+    fi
+    if [[ ${UVM_G7_QUIESCE_NO_KILL:-0} == 1 ]]; then
+      group_processes=$(ps -eo pgid= | awk -v pgid="$pid" '$1 == pgid { count++ } END { print count+0 }')
+      if [[ $group_processes != 0 ]]; then
+        echo "G7_STOP_ERROR phase=$phase action=process-group-remains name=${selected_names[$i]}" >&2
         status=1
       fi
     fi
@@ -91,8 +108,8 @@ stop_phase() {
 stop_all() {
   local status=0
   rm -f "$STATE/ready"
-  stop_phase writers oidc-sync-api api oidc-provider ce-web || status=1
-  stop_phase workers exception-warning-worker ce-worker ce-beat || status=1
+  stop_phase writers oidc-sync-api recovery-control api oidc-provider ce-web || status=1
+  stop_phase workers exception-warning-worker ce-beat ce-worker || status=1
   if [[ -s /run/valkey/valkey.pid ]]; then
     valkey-cli -h 127.0.0.1 shutdown nosave >/dev/null 2>&1 || { echo 'G7_STOP_ERROR service=valkey' >&2; status=1; }
   fi
@@ -108,6 +125,48 @@ stop_all() {
   fi
   echo "G7_STOP_PHASE=databases status=$status"
   return "$status"
+}
+
+staged_quiesce() {
+  local status=0 acknowledged=0
+  rm -f "$STATE/ready"
+  # Stop periodic producers before admission surfaces and side-effect dispatch.
+  stop_phase quiesce-producers oidc-sync-api ce-beat || status=1
+  stop_phase quiesce-admission recovery-control api oidc-provider ce-web || status=1
+  stop_phase quiesce-effects exception-warning-worker || status=1
+  if (( status )); then return 1; fi
+  touch "$STATE/quiesce-writers-stopped"
+  echo 'G7_QUIESCE=writers-stopped'
+  for attempt in $(seq 1 "${UVM_G7_QUIESCE_TIMEOUT_SECONDS:-300}"); do
+    if [[ -e "$STATE/quiesce-drain-complete" ]]; then acknowledged=1; break; fi
+    if (( shutdown_requested )); then break; fi
+    sleep 1
+  done
+  if (( ! acknowledged )); then
+    echo 'G7_QUIESCE_ERROR=drain-not-acknowledged' >&2
+    return 1
+  fi
+  stop_phase quiesce-consumers ce-worker || status=1
+  [[ -s /run/valkey/valkey.pid ]] && {
+    valkey-cli -h 127.0.0.1 shutdown nosave >/dev/null 2>&1 || status=1
+    echo 'G7_STOP_DATABASE_STOPPED service=valkey'
+  }
+  if setpriv --reuid=postgres --regid=postgres --init-groups \
+      /usr/lib/postgresql/18/bin/pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
+    setpriv --reuid=postgres --regid=postgres --init-groups \
+      /usr/lib/postgresql/18/bin/pg_ctl -D "$PGDATA" -m fast -w stop >/dev/null 2>&1 || status=1
+    echo 'G7_STOP_DATABASE_STOPPED service=postgresql'
+  fi
+  (( status == 0 )) || return 1
+  touch "$STATE/quiesce-services-stopped"
+  echo 'G7_QUIESCE=services-stopped'
+  for attempt in $(seq 1 "${UVM_G7_QUIESCE_TIMEOUT_SECONDS:-300}"); do
+    [[ -e "$STATE/quiesce-capture-release" ]] && return 0
+    (( shutdown_requested )) && break
+    sleep 1
+  done
+  echo 'G7_QUIESCE_ERROR=capture-release-not-received' >&2
+  return 1
 }
 
 secret() {
@@ -184,6 +243,12 @@ export UVM_DB_URL="postgresql+psycopg://uvm_app:${UVM_PASSWORD_URL}@127.0.0.1:54
 export DD_DATABASE_URL="postgresql://ce_app:${CE_PASSWORD_URL}@127.0.0.1:5432/defectdojo"
 install -d -o root -g uvm -m 0750 /run/uvm-g7-secrets
 install -o root -g uvm -m 0640 /run/secrets/uvm_db_password /run/uvm-g7-secrets/uvm_db_password
+for recovery_material in recovery-server.crt recovery-server.key recovery-ca.crt; do
+  [[ -s "/run/secrets/$recovery_material" ]] || { echo "recovery TLS material is missing: $recovery_material" >&2; exit 70; }
+done
+install -o root -g uvm -m 0640 /run/secrets/recovery-server.crt /run/uvm-g7-secrets/recovery-server.crt
+install -o root -g uvm -m 0640 /run/secrets/recovery-server.key /run/uvm-g7-secrets/recovery-server.key
+install -o root -g uvm -m 0640 /run/secrets/recovery-ca.crt /run/uvm-g7-secrets/recovery-ca.crt
 if [[ -n ${UVM_EXCEPTION_WARNING_DESTINATIONS:-} ]]; then
   install -d -o root -g uvm -m 0750 /run/uvm-g7-secrets/exception-warning
   while IFS= read -r secret_name; do
@@ -195,6 +260,10 @@ if [[ -n ${UVM_EXCEPTION_WARNING_DESTINATIONS:-} ]]; then
   done < <(UVM_EXCEPTION_WARNING_DESTINATIONS="$UVM_EXCEPTION_WARNING_DESTINATIONS" python -c 'import json,os,re; d=json.loads(os.environ["UVM_EXCEPTION_WARNING_DESTINATIONS"]); print("\n".join(sorted({v["secret_ref"][7:] for v in d.values() if isinstance(v,dict) and isinstance(v.get("secret_ref"),str) and v["secret_ref"].startswith("secret:")})))')
 fi
 
+if [[ ${UVM_G7_VERIFICATION_ONLY:-0} == 1 && ! -s "$PGDATA/PG_VERSION" ]]; then
+  echo 'G7_RECOVERY_ERROR verification target has no restored PostgreSQL cluster' >&2
+  exit 70
+fi
 if [[ ! -s "$PGDATA/PG_VERSION" ]]; then
   install -d -o postgres -g postgres "$PGDATA"
   setpriv --reuid=postgres --regid=postgres --init-groups \
@@ -249,6 +318,7 @@ case ${UVM_G7_TEST_FAULT:-} in
 esac
 
 psql_local() { setpriv --reuid=postgres --regid=postgres --init-groups psql -X -v ON_ERROR_STOP=1 -h /var/run/postgresql "$@"; }
+if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_G7_RECOVERY_STAGE:-} != released ]]; then
 psql_local -d postgres -v uvm_password="$UVM_PASSWORD" -v ce_password="$CE_PASSWORD" <<'SQL'
 SELECT format('CREATE ROLE uvm_app LOGIN PASSWORD %L', :'uvm_password')
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'uvm_app') \gexec
@@ -263,11 +333,15 @@ REVOKE CONNECT ON DATABASE defectdojo FROM PUBLIC;
 GRANT CONNECT ON DATABASE uvm TO uvm_app;
 GRANT CONNECT ON DATABASE defectdojo TO ce_app;
 SQL
+fi
 wait_for 'uvm database' env PGPASSWORD="$UVM_PASSWORD" psql -h 127.0.0.1 -U uvm_app -d uvm -c 'SELECT 1'
 wait_for 'CE database' env PGPASSWORD="$CE_PASSWORD" psql -h 127.0.0.1 -U ce_app -d defectdojo -c 'SELECT 1'
 export DD_CELERY_BROKER_URL=redis://127.0.0.1:6379/0 DD_CACHE_URL=redis://127.0.0.1:6379/1
 export DD_DATABASE_HOST=127.0.0.1 DD_DATABASE_PORT=5432 DD_MEDIA_ROOT=/app/media
 
+CE_INITIALIZE=true
+if [[ ${UVM_G7_VERIFICATION_ONLY:-0} == 1 || ${UVM_G7_RECOVERY_STAGE:-} == released ]]; then CE_INITIALIZE=false; fi
+if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_G7_RECOVERY_STAGE:-} != released ]]; then
 echo 'G7_INIT=CE initialize'
 setpriv --reuid=1001 --regid=1337 --init-groups env -i PATH="$PATH" HOME=/nonexistent \
   DD_DATABASE_URL="$DD_DATABASE_URL" DD_SECRET_KEY="$DD_SECRET_KEY" \
@@ -277,11 +351,14 @@ setpriv --reuid=1001 --regid=1337 --init-groups env -i PATH="$PATH" HOME=/nonexi
   DD_ALLOWED_HOSTS="${DD_ALLOWED_HOSTS:-*}" DD_INITIALIZE=true \
   /entrypoint-initializer.sh /bin/true
 abort_if_shutdown
+fi
+if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_G7_RECOVERY_STAGE:-} != released ]]; then
 echo 'G7_INIT=UVM migrations'
 setpriv --reuid=uvm --regid=uvm --init-groups env -i PATH="$PATH" HOME=/opt/uvm \
   PYTHONPATH=/opt/uvm/app UVM_DB_URL="$UVM_DB_URL" \
   sh -c 'cd /opt/uvm/app && exec python -m alembic -c alembic.ini upgrade head'
 abort_if_shutdown
+fi
 
 start_child() {
   local name=$1 uid=$2 gid=$3; shift 3
@@ -292,17 +369,104 @@ start_child() {
   CHILD_PIDS+=("$pid")
   CHILD_NAMES+=("$name")
 }
+start_recovery_control() {
+  start_child recovery-control 1800 1800 env -i PATH="$PATH" HOME=/opt/uvm \
+    PYTHONPATH=/opt/uvm/app UVM_DB_URL="$UVM_DB_URL" \
+    UVM_API_CURSOR_SECRET="$UVM_API_CURSOR_SECRET" \
+    UVM_API_PRINCIPALS="${UVM_API_PRINCIPALS-}" \
+    UVM_OBSERVER_DEPLOYMENT_REGISTRY_FILE="${UVM_OBSERVER_DEPLOYMENT_REGISTRY_FILE-}" \
+    UVM_G7_INITIAL_MAXIMUM_FUTURE_SKEW_SECONDS="${UVM_G7_INITIAL_MAXIMUM_FUTURE_SKEW_SECONDS-}" \
+    UVM_G7_HOST_KEY_ID="${UVM_G7_HOST_KEY_ID-}" \
+    UVM_G7_CONTROLLER_INSTANCE_ID="${UVM_G7_CONTROLLER_INSTANCE_ID-}" \
+    UVM_G7_RECOVERY_CONTROL_ONLY=1 UVM_G7_VERIFICATION_ONLY=1 \
+    UVM_G7_DISPOSABLE_MODE="${UVM_G7_DISPOSABLE_MODE-}" \
+    UVM_G7_RECOVERY_CONTROL_PORT="${UVM_G7_RECOVERY_CONTROL_PORT:-8002}" \
+    UVM_API_HOST=0.0.0.0 UVM_API_PORT="${UVM_G7_RECOVERY_CONTROL_PORT:-8002}" \
+    UVM_G7_RECOVERY_TLS_CERT_FILE="$RECOVERY_TLS_DIR/server.crt" \
+    UVM_G7_RECOVERY_TLS_KEY_FILE="$RECOVERY_TLS_DIR/server.key" \
+    UVM_G7_RECOVERY_TLS_CA_FILE="$RECOVERY_TLS_DIR/client-ca.crt" \
+    UVM_AUTH_MODE=bearer python -m uvicorn uvm.api.app:app --host 0.0.0.0 \
+      --port "${UVM_G7_RECOVERY_CONTROL_PORT:-8002}" --workers 1 --no-proxy-headers \
+      --ssl-certfile "$RECOVERY_TLS_DIR/server.crt" \
+      --ssl-keyfile "$RECOVERY_TLS_DIR/server.key" \
+      --ssl-ca-certs "$RECOVERY_TLS_DIR/client-ca.crt" --ssl-cert-reqs 2
+}
+
+if [[ ${UVM_G7_RECOVERY_STAGE:-} == control-only || ${UVM_G7_RECOVERY_STAGE:-} == released ]]; then
+  [[ ${UVM_G7_VERIFICATION_ONLY:-0} == 1 || ${UVM_G7_RECOVERY_STAGE:-} == released ]] || { echo 'G7_RECOVERY_ERROR control-only requires verification-only mode' >&2; exit 70; }
+  case ${UVM_AUTH_MODE:-bearer} in
+    bearer|oidc) ;;
+    *) echo 'G7_RECOVERY_ERROR verification-only product API requires bearer or restored OIDC session authentication' >&2; exit 70 ;;
+  esac
+  : "${UVM_G7_STARTUP_FENCE_TOKEN:?signed startup-fence token is required}"
+  : "${UVM_G7_HOST_PUBLIC_KEY_FILE:?host verification key is required}"
+  : "${UVM_G7_DEPLOYMENT_ID:?deployment identity is required}"
+  : "${UVM_G7_TARGET_IMAGE_DIGEST:?target image digest is required}"
+  : "${UVM_G7_RECOVERY_VOLUME_IDS:?replacement volume identities are required}"
+  : "${UVM_G7_ARCHIVE_DIGEST:?verified archive digest is required}"
+  : "${UVM_G7_RECOVERY_EPOCH:?recovery epoch is required}"
+  : "${UVM_G7_CONNECTOR_RECOVERY_ID:?connector recovery UUID is required}"
+  [[ $UVM_G7_DEPLOYMENT_ID =~ ^[A-Za-z0-9._-]{1,128}$ ]] || { echo 'G7_RECOVERY_ERROR deployment identity is invalid' >&2; exit 70; }
+  PYTHONPATH=/opt/uvm/app python -m uvm.operations.startup_fence
+fi
+
+if [[ ${UVM_G7_RECOVERY_STAGE:-} == released ]]; then
+  PYTHONPATH=/opt/uvm/app /opt/uvm/venv/bin/python -m uvm.operations.startup_fence --check-host-release || {
+    echo 'G7_RECOVERY_ERROR released startup lacks its signed durable admission' >&2; exit 70;
+  }
+fi
+
+if [[ ${UVM_G7_RECOVERY_STAGE:-} == control-only ]]; then
+  install -d -o 1800 -g 1800 -m 0700 /run/uvm-g7-recovery
+  install -o 1800 -g 1800 -m 0644 "$UVM_G7_RECOVERY_TLS_CERT_FILE" /run/uvm-g7-recovery/server.crt
+  install -o 1800 -g 1800 -m 0600 "$UVM_G7_RECOVERY_TLS_KEY_FILE" /run/uvm-g7-recovery/server.key
+  install -o 1800 -g 1800 -m 0644 "$UVM_G7_RECOVERY_TLS_CA_FILE" /run/uvm-g7-recovery/client-ca.crt
+  RECOVERY_TLS_DIR=/run/uvm-g7-recovery
+  start_recovery_control
+  wait_for 'recovery-control listener' env RECOVERY_CONTROL_PORT="${UVM_G7_RECOVERY_CONTROL_PORT:-8002}" \
+    /opt/uvm/venv/bin/python -c 'import os,socket; s=socket.create_connection(("127.0.0.1",int(os.environ["RECOVERY_CONTROL_PORT"])),timeout=1); s.close()'
+  printf '%s\n' control >"$STATE/runtime-mode"
+  touch "$STATE/ready"
+  echo 'G7_READINESS=recovery-control-only'
+  # The host performs authenticated resync and quarantine while this is the
+  # only application listener. Product APIs and CE stay stopped until the
+  # signed volumes_restored transition is durable in the restored UVM DB.
+  for attempt in $(seq 1 "${UVM_G7_RECOVERY_GATE_TIMEOUT_SECONDS:-1800}"); do
+    if PYTHONPATH=/opt/uvm/app /opt/uvm/venv/bin/python -m uvm.operations.startup_fence \
+        --check-admission >"$STATE/recovery-gate.json" 2>"$STATE/recovery-gate-query.stderr"; then
+      recovery_state=restored
+      break
+    fi
+    abort_if_shutdown
+    sleep 1
+  done
+  [[ ${recovery_state:-} == restored ]] || {
+    echo 'G7_RECOVERY_ERROR host did not admit volumes_restored transition' >&2
+    [[ ! -s "$STATE/recovery-gate-query.stderr" ]] || sed -n '1,5p' "$STATE/recovery-gate-query.stderr" >&2
+    exit 70
+  }
+  recovery_control_gate_passed=1
+  rm -f "$STATE/ready"
+fi
+
+start_ce_web() {
 start_child ce-web 1001 1337 env -i PATH="$PATH" HOME=/nonexistent \
+  UVM_G7_VERIFICATION_ONLY="${UVM_G7_VERIFICATION_ONLY-0}" \
   DD_DATABASE_URL="$DD_DATABASE_URL" DD_SECRET_KEY="$DD_SECRET_KEY" \
   DD_CREDENTIAL_AES_256_KEY="$DD_CREDENTIAL_AES_256_KEY" DD_ADMIN_PASSWORD="$DD_ADMIN_PASSWORD" \
   DD_ADMIN_USER="${DD_ADMIN_USER:-admin}" DD_ADMIN_MAIL="${DD_ADMIN_MAIL:-admin@defectdojo.local}" \
   DD_ADMIN_FIRST_NAME="${DD_ADMIN_FIRST_NAME:-Synthetic}" DD_ADMIN_LAST_NAME="${DD_ADMIN_LAST_NAME:-Operator}" \
-  DD_ALLOWED_HOSTS="${DD_ALLOWED_HOSTS:-*}" DD_INITIALIZE=true \
+  DD_ALLOWED_HOSTS="${DD_ALLOWED_HOSTS:-*}" DD_INITIALIZE="$CE_INITIALIZE" \
   DD_UWSGI_EXTRA_ARGS='--die-on-term --master-fifo=/run/uwsgi/uvm-g7.fifo' \
   DD_CELERY_BROKER_URL="$DD_CELERY_BROKER_URL" DD_CACHE_URL="$DD_CACHE_URL" \
   DD_DATABASE_HOST=127.0.0.1 DD_DATABASE_PORT=5432 DD_MEDIA_ROOT=/app/media \
   DD_DEDUPLICATION_ALGORITHM_PER_PARSER='{"Generic Findings Import":"unique_id_from_tool"}' \
   DD_UWSGI_MODE=socket DD_UWSGI_ENDPOINT=127.0.0.1:3031 /entrypoint-uwsgi.sh
+}
+if [[ ${UVM_G7_RECOVERY_STAGE:-} != control-only || $recovery_control_gate_passed == 1 ]]; then
+  start_ce_web
+fi
+if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 ]]; then
 start_child ce-worker 1001 1337 env -i PATH="$PATH" HOME=/nonexistent \
   DD_DATABASE_URL="$DD_DATABASE_URL" DD_SECRET_KEY="$DD_SECRET_KEY" \
   DD_CREDENTIAL_AES_256_KEY="$DD_CREDENTIAL_AES_256_KEY" \
@@ -322,7 +486,8 @@ start_child ce-beat 1001 1337 env -i PATH="$PATH" HOME=/nonexistent \
   DD_DATABASE_HOST=127.0.0.1 DD_DATABASE_PORT=5432 DD_MEDIA_ROOT=/app/media \
   DD_DEDUPLICATION_ALGORITHM_PER_PARSER='{"Generic Findings Import":"unique_id_from_tool"}' \
   /entrypoint-celery-beat.sh
-if [[ ${UVM_AUTH_MODE:-bearer} == oidc ]]; then
+fi
+if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_AUTH_MODE:-bearer} == oidc ]]; then
   start_child oidc-provider 1800 1800 env -i PATH="$PATH" HOME=/opt/uvm \
     PYTHONPATH=/opt/uvm/app UVM_OIDC_ISSUER="$UVM_OIDC_ISSUER" \
     UVM_OIDC_CLIENT_ID="$UVM_OIDC_CLIENT_ID" UVM_OIDC_CALLBACK_URL="$UVM_OIDC_CALLBACK_URL" \
@@ -338,7 +503,7 @@ if [[ ${UVM_AUTH_MODE:-bearer} == oidc ]]; then
     UVM_G7_TEST_CLOCK_FILE="${UVM_G7_TEST_CLOCK_FILE-}" \
     python -m uvicorn uvm.auth.synthetic_provider:app --host 0.0.0.0 --port "${UVM_OIDC_PROVIDER_PORT:-9000}" --workers 1 --no-proxy-headers
 fi
-if [[ ${UVM_AUTH_MODE:-bearer} == oidc ]]; then
+if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_AUTH_MODE:-bearer} == oidc ]]; then
   start_child oidc-sync-api 1800 1800 env -i PATH="$PATH" HOME=/opt/uvm \
     PYTHONPATH=/opt/uvm/app UVM_DB_URL="$UVM_DB_URL" \
     UVM_API_CURSOR_SECRET="$UVM_API_CURSOR_SECRET" UVM_API_PRINCIPALS="${UVM_API_PRINCIPALS-}" \
@@ -364,7 +529,17 @@ fi
 READ_SNAPSHOT_DIR=/run/uvm-read-snapshots
 install -d -o 1800 -g 1800 -m 0700 "$READ_SNAPSHOT_DIR"
 find "$READ_SNAPSHOT_DIR" -mindepth 1 -maxdepth 1 -type f -delete
+: "${UVM_G7_RECOVERY_TLS_CERT_FILE:?recovery TLS server cert is required}"
+: "${UVM_G7_RECOVERY_TLS_KEY_FILE:?recovery TLS server key is required}"
+: "${UVM_G7_RECOVERY_TLS_CA_FILE:?recovery TLS client CA is required}"
+RECOVERY_TLS_DIR=/run/uvm-g7-recovery
+install -d -o 1800 -g 1800 -m 0700 "$RECOVERY_TLS_DIR"
+install -o 1800 -g 1800 -m 0644 "$UVM_G7_RECOVERY_TLS_CERT_FILE" "$RECOVERY_TLS_DIR/server.crt"
+install -o 1800 -g 1800 -m 0600 "$UVM_G7_RECOVERY_TLS_KEY_FILE" "$RECOVERY_TLS_DIR/server.key"
+install -o 1800 -g 1800 -m 0644 "$UVM_G7_RECOVERY_TLS_CA_FILE" "$RECOVERY_TLS_DIR/client-ca.crt"
 start_child api 1800 1800 env -i PATH="$PATH" HOME=/opt/uvm \
+  UVM_G7_VERIFICATION_ONLY="${UVM_G7_VERIFICATION_ONLY-0}" \
+  UVM_G7_CONNECTOR_RECOVERY_ID="${UVM_G7_CONNECTOR_RECOVERY_ID-}" \
   UVM_API_READ_SNAPSHOT_DIR="$READ_SNAPSHOT_DIR" \
   PYTHONPATH=/opt/uvm/app \
   UVM_DB_URL="$UVM_DB_URL" UVM_API_CURSOR_SECRET="$UVM_API_CURSOR_SECRET" \
@@ -373,6 +548,12 @@ start_child api 1800 1800 env -i PATH="$PATH" HOME=/opt/uvm \
   UVM_NATIVE_BOOTSTRAP_PRINCIPALS="${UVM_NATIVE_BOOTSTRAP_PRINCIPALS-}" \
   UVM_NATIVE_GRANTABLE_ENVELOPE="${UVM_NATIVE_GRANTABLE_ENVELOPE-}" \
   UVM_OBSERVER_DEPLOYMENT_REGISTRY_FILE="${UVM_OBSERVER_DEPLOYMENT_REGISTRY_FILE-}" \
+  UVM_G7_INITIAL_MAXIMUM_FUTURE_SKEW_SECONDS="${UVM_G7_INITIAL_MAXIMUM_FUTURE_SKEW_SECONDS-}" \
+  UVM_G7_HOST_KEY_ID="${UVM_G7_HOST_KEY_ID-}" \
+  UVM_G7_CONTROLLER_INSTANCE_ID="${UVM_G7_CONTROLLER_INSTANCE_ID-}" \
+  UVM_G7_RECOVERY_TLS_CERT_FILE="${UVM_G7_RECOVERY_TLS_CERT_FILE-}" \
+  UVM_G7_RECOVERY_TLS_KEY_FILE="${UVM_G7_RECOVERY_TLS_KEY_FILE-}" \
+  UVM_G7_RECOVERY_TLS_CA_FILE="${UVM_G7_RECOVERY_TLS_CA_FILE-}" \
   UVM_AUTH_MODE="${UVM_AUTH_MODE-bearer}" UVM_OIDC_CONFIG="${UVM_OIDC_CONFIG-}" \
   UVM_GITHUB_API_BASE_URL="${UVM_GITHUB_API_BASE_URL-}" \
   UVM_GITHUB_APP_BASE_URL="${UVM_GITHUB_APP_BASE_URL-}" \
@@ -408,7 +589,8 @@ start_child api 1800 1800 env -i PATH="$PATH" HOME=/opt/uvm \
   UVM_UI_ROOT=/opt/uvm/ui \
   UVM_API_HOST="$UVM_API_HOST" UVM_API_PORT="$UVM_API_PORT" \
   python -m uvicorn uvm.api.app:app --host "$UVM_API_HOST" --port "$UVM_API_PORT" --workers 2 --no-proxy-headers
-if [[ ${UVM_EXCEPTION_WARNING_WORKER:-0} == 1 ]]; then
+if [[ ${UVM_G7_RECOVERY_STAGE:-} != control-only ]]; then start_recovery_control; fi
+if [[ ${UVM_EXCEPTION_WARNING_WORKER:-0} == 1 && ${UVM_G7_VERIFICATION_ONLY:-0} != 1 ]]; then
   if [[ ${UVM_G7_DISPOSABLE_MODE:-0} == 1 && -n ${UVM_EXCEPTION_WARNING_PAUSE_FILE:-} ]]; then
     # Test control is synthetic and contains no secrets. Make bind-mount mode
     # translation explicit before the worker drops to uid 1800.
@@ -456,7 +638,7 @@ fi
 
 wait_for 'CE web' curl --silent --output /dev/null http://127.0.0.1:8081/api/v2/
 wait_for 'uWSGI master FIFO' test -p /run/uwsgi/uvm-g7.fifo
-if [[ ${UVM_AUTH_MODE:-bearer} == oidc ]]; then
+if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_AUTH_MODE:-bearer} == oidc ]]; then
   wait_for 'local OIDC provider' curl --fail --silent "http://127.0.0.1:${UVM_OIDC_PROVIDER_PORT:-9000}/healthz"
   wait_for 'loopback OIDC sync adapter' curl --fail --silent http://127.0.0.1:8001/healthz
 fi
@@ -464,14 +646,41 @@ wait_for 'UVM API' curl --fail --silent http://127.0.0.1:8000/openapi.json
 for pid in "${CHILD_PIDS[@]}"; do
   kill -0 "$pid" || { echo "critical child exited during startup: $pid" >&2; exit 70; }
 done
+if [[ ${UVM_G7_VERIFICATION_ONLY:-0} == 1 ]]; then
+  printf '%s\n' verification >"$STATE/runtime-mode"
+else
+  printf '%s\n' runtime >"$STATE/runtime-mode"
+fi
 touch "$STATE/ready"
 echo 'G7_READINESS=ready'
+if [[ ${UVM_G7_RECOVERY_STAGE:-} == control-only ]]; then
+  # The host must retain the signed acknowledgement and journal actual fence
+  # release before explicitly asking this supervisor to start runtime effects.
+  while [[ ! -f "$STATE/host-release" ]]; do
+    abort_if_shutdown
+    for pid in "${CHILD_PIDS[@]}"; do kill -0 "$pid" || exit 70; done
+    sleep 0.2
+  done
+  PYTHONPATH=/opt/uvm/app /opt/uvm/venv/bin/python -m uvm.operations.startup_fence --check-host-release || exit 70
+  cleanup_running=1
+  stop_all || exit 71
+  exec env UVM_G7_RECOVERY_STAGE=released UVM_G7_VERIFICATION_ONLY=0 "$0"
+fi
 trap 'handle_shutdown' TERM INT
 set +e
 exited_child_pid=
 wait -n -p exited_child_pid "${CHILD_PIDS[@]}"
 child_status=$?
 set -e
+if (( quiesce_requested )); then
+  trap - USR1
+  if staged_quiesce; then
+    cleanup_running=1
+    echo 'G7_QUIESCE=complete'
+    exit 0
+  fi
+  exit 72
+fi
 rm -f "$STATE/ready"
 if (( shutdown_requested )); then
   trap - TERM INT

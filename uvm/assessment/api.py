@@ -433,6 +433,7 @@ _ACTIONS = (
     "warning.route.manage", "warning.actor_link.manage",
     "integration.health.read",
     "observer.timing.read", "observer.timing.configure",
+    "backup.settings.read", "backup.settings.configure",
 )
 _LOG = logging.getLogger("uvm.assessment.api")
 _TRUSTED_COMMAND_ORIGIN: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -4205,7 +4206,7 @@ def install_assessment_routes(app: FastAPI) -> None:
                 portions.append(row)
             pending = connection.execute(sa.select(assessment_projection_intents).where(
                 assessment_projection_intents.c.target_id == group_id,
-                assessment_projection_intents.c.status == "pending").order_by(
+                assessment_projection_intents.c.status.in_(["pending", "uncertain"])).order_by(
                     assessment_projection_intents.c.created_at)).mappings().all()
             latest = connection.execute(sa.select(assessment_command_receipts).where(
                 assessment_command_receipts.c.target_id == group_id,

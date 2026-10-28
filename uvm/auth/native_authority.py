@@ -14,6 +14,8 @@ NATIVE_ACTIONS = {
     "ownership.team.create", "ownership.team.update", "ownership.team.membership.set",
 }
 OBSERVER_TIMING_ACTIONS = {"observer.timing.read", "observer.timing.configure"}
+BACKUP_SETTINGS_ACTIONS = {"backup.settings.read", "backup.settings.configure"}
+DEPLOYMENT_SETTINGS_ACTIONS = OBSERVER_TIMING_ACTIONS | BACKUP_SETTINGS_ACTIONS
 ACCESS_ACTIONS = {"native.authority.activate", "access_group.create", "access_group.update",
     "access_group.membership.set"}
 OWNERSHIP_ACTIONS = {"ownership.team.create", "ownership.team.update",
@@ -197,7 +199,7 @@ def apply_command(policy: dict, action: str, payload: dict, principal_id: str,
             fields = {"permission_id", "role_id", "action", "target_scope", "limits", "separation_of_duties"}
             supplied_fields = set(permission) if isinstance(permission, dict) else set()
             observer_action = (isinstance(permission, dict)
-                and permission.get("action") in OBSERVER_TIMING_ACTIONS)
+                and permission.get("action") in DEPLOYMENT_SETTINGS_ACTIONS)
             if (not isinstance(permission, dict)
                     or supplied_fields != fields | ({"deployment_scopes"} if observer_action else set())):
                 raise ValueError("Access-group permission shape is invalid")
@@ -215,7 +217,7 @@ def apply_command(policy: dict, action: str, payload: dict, principal_id: str,
                 "target_scope": permission["target_scope"], "limits": permission["limits"],
                 "separation_of_duties": permission["separation_of_duties"]}
             deployment_scopes = None
-            if permission_action in OBSERVER_TIMING_ACTIONS:
+            if permission_action in DEPLOYMENT_SETTINGS_ACTIONS:
                 deployment_scopes = permission.get("deployment_scopes")
                 if (not isinstance(deployment_scopes, list) or not deployment_scopes
                         or any(not isinstance(item, str) or not item.strip()

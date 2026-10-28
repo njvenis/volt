@@ -1,0 +1,53 @@
+import assert from 'node:assert/strict';
+import {createServer} from 'node:http';
+import {readFile,mkdir} from 'node:fs/promises';
+import {resolve,join,extname} from 'node:path';
+import {createHash} from 'node:crypto';
+import {chromium} from 'playwright';
+import {runPreservationBrowserStep} from './preservation-audit-browser.mjs';
+import {fixture,masked,unknown,scope,page,record,classIds,evidencePath,countFields} from './preservation-fixtures.mjs';
+const root=resolve(import.meta.dirname,'../dist'),evidence=process.env.G7_UI_EVIDENCE_DIR??'/tmp/volt-g7-ui-preservation-evidence';await mkdir(evidence,{recursive:true,mode:0o700});
+const bytes=Buffer.from('Synthetic preserved evidence\n'),raw=createHash('sha256').update(bytes).digest('hex');
+let summary=fixture(),mode='normal',pages={},requests=[];
+function setup(value){summary=value;pages=Object.fromEntries(classIds.map(c=>{const p=page(c);p.items[0].retained_at=summary.checked_at;p.items[0].expected_sha256=p.items[0].actual_sha256=c===classIds[0]?'sha256:'+raw:null;const second={...p.items[0],record_key:'synthetic-record-2'};return [c,[p.items[0],second]];}));requests=[];mode='normal';}
+const server=createServer(async(req,res)=>{try{const url=new URL(req.url,'http://localhost');requests.push({path:url.pathname,method:req.method});const send=(body,status=200)=>{res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(body));};
+ if(url.pathname==='/api/v1/auth/session')return send({schema_version:1,authenticated:true,credential_mode:'oidc_session',principal_id:'Synthetic reviewer',csrf_token:'synthetic-csrf',source_scopes:[Object.values(scope)],authority:{group_scopes:{candidate:[['synthetic','denied-account','denied-scope']]}}});
+ if(url.pathname==='/api/v1/ingestion/runs')return send({schema_version:1,items:[],next_cursor:null,as_of:summary.response_at});
+ if(url.pathname==='/api/v1/operations/preservation'){
+  if(url.searchParams.get('source_account_id')==='denied-account'||mode==='denied')return send({error:{code:'not_found'}},404);
+  if(mode==='outage')return send({error:{code:'dependency_unavailable'}},503);
+  if(mode==='delayed')await new Promise(r=>setTimeout(r,500));
+  return send(summary);
+ }
+ if(url.pathname==='/api/v1/operations/preservation/records'){
+  if(mode==='cursor'&&url.searchParams.has('cursor'))return send({error:{code:'invalid_cursor'}},400);
+  if(mode==='snapshot')return send({error:{code:'snapshot_expired'}},409);
+  const c=url.searchParams.get('class_id');if(summary.classes.find(x=>x.class_id===c).expected_records===null)return send({error:{code:'not_found'}},404);
+  const items=pages[c],next=url.searchParams.has('cursor');return send({schema_version:1,snapshot_id:summary.snapshot_id,class_id:c,items:next?items.slice(1):items.slice(0,1),next_cursor:!next&&items.length>1?'opaque-page-2':null});
+ }
+ if(url.pathname===evidencePath){if(mode==='evidence-denied')return send({error:{code:'not_found'}},404);res.writeHead(200,{'content-type':'application/octet-stream','content-length':bytes.length,'content-digest':'sha-256=:'+Buffer.from(raw,'hex').toString('base64')+':','x-content-type-options':'nosniff','content-disposition':'attachment; filename="synthetic.bin"','cache-control':'no-store'});return res.end(bytes);}
+ if(url.pathname.startsWith('/api/'))return send({error:{code:'not_found'}},404);
+ const path=join(root,url.pathname==='/'?'index.html':url.pathname);if(!path.startsWith(root+'/'))return res.writeHead(404).end();const data=await readFile(path);res.writeHead(200,{'content-type':{'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml'}[extname(path)]??'application/octet-stream'});res.end(data);
+ }catch{res.writeHead(500).end();}});
+await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
+const origin='http://127.0.0.1:'+server.address().port;
+const browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE_PATH??'/home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome'});
+const expected=(id)=>({schema_version:1,id,synthetic_labels:true,scope,status:200,summary,records:Object.fromEntries(summary.classes.filter(c=>c.expected_records!==null).map(c=>[c.class_id,pages[c.class_id]])),evidence:[{class_id:classIds[0],record_key:'synthetic-record-1',status:200,sha256:raw,size:bytes.length}],timeout_ms:10000});
+async function run(e){const context=await browser.newContext({viewport:{width:1440,height:1000},acceptDownloads:true});try{return await runPreservationBrowserStep({page:await context.newPage(),origin,expectations:e,evidenceDirectory:evidence});}finally{await context.close();}}
+try{
+ setup(fixture());await run(expected('verified'));console.log('PASS rendered verified classes, pagination, evidence bytes, refresh, keyboard, axe and reflow');
+ setup(masked());await run(expected('masked'));console.log('PASS masked audit counts and provenance');
+ setup(unknown());const missing=expected('absent');missing.evidence=[];await run(missing);console.log('PASS absent signed report');
+ setup(fixture());mode='denied';await run({schema_version:1,id:'denied',synthetic_labels:true,scope,status:404,error_code:'not_found'});console.log('PASS non-disclosing denied state');
+ setup(fixture());mode='outage';await run({schema_version:1,id:'outage',synthetic_labels:true,scope,status:503,error_code:'dependency_unavailable'});console.log('PASS dependency outage');
+
+ setup(fixture());summary.classes[0].state='gap';summary.classes[0].reasons=['record_missing'];summary.classes[0].verified_records=1;summary.classes[0].missing_records=1;summary.uncovered_classes=[classIds[0]];Object.assign(pages[classIds[0]][1],{state:'missing',reasons:['record_missing'],record_sha256:null,actual_sha256:null,readback_url:null});await run(expected('gap'));console.log('PASS established missing record and gap counts');
+ setup(fixture());const failed=summary.classes[0];failed.state='failed';failed.reasons=['evidence_store_unavailable'];failed.oldest_retained_at=null;for(const key of countFields)failed[key]=null;summary.uncovered_classes=[classIds[0]];const failExpected=expected('failed');failExpected.evidence=[];await run(failExpected);console.log('PASS incomplete class read with null counts');
+ setup(fixture());const empty=summary.classes[0];for(const key of countFields)empty[key]=0;empty.oldest_retained_at=null;pages[classIds[0]]=[];const emptyExpected=expected('empty');emptyExpected.evidence=[];await run(emptyExpected);console.log('PASS trusted empty class');
+ setup(unknown('report_expired'));summary.snapshot_id='11111111-1111-5111-8111-111111111111';summary.checked_at='2020-01-01T00:00:00Z';summary.valid_until='2020-01-02T00:00:00Z';const staleExpected=expected('stale');staleExpected.evidence=[];await run(staleExpected);console.log('PASS expired observation is stale with no established counts');
+ setup(fixture());mode='evidence-denied';const deniedEvidence=expected('evidence-denied');deniedEvidence.evidence[0].status=404;await run(deniedEvidence);console.log('PASS evidence access denied after link read');
+ setup(fixture());mode='cursor';const cursorContext=await browser.newContext();try{const p=await cursorContext.newPage();await p.goto(origin+'/#preservation');const selection=p.getByLabel('Source scope',{exact:true});await selection.selectOption(JSON.stringify(Object.values(scope)));await p.getByRole('button',{name:'Browse source evidence',exact:true}).click();await p.getByRole('button',{name:'Next records page',exact:true}).click();await p.getByRole('alert').filter({hasText:'page binding is no longer valid'}).waitFor();const count=requests.filter(r=>r.path.endsWith('/records')).length;await p.waitForTimeout(100);assert.equal(requests.filter(r=>r.path.endsWith('/records')).length,count);assert.equal(await selection.inputValue(),JSON.stringify(Object.values(scope)));mode='normal';await p.getByRole('button',{name:'Reload current source report',exact:true}).click();await p.getByRole('button',{name:'Browse source evidence',exact:true}).waitFor();assert.equal(await p.locator('[data-record-key]').count(),0);assert.equal(await selection.inputValue(),JSON.stringify(Object.values(scope)));await p.screenshot({path:join(evidence,'cursor-reset.png'),fullPage:true});console.log('PASS cursor binding reset is explicit and preserves current scope');}finally{await cursorContext.close();}
+ setup(fixture());mode='delayed';const loadingContext=await browser.newContext();try{const p=await loadingContext.newPage();await p.goto(origin+'/#preservation');await p.getByLabel('Source scope',{exact:true}).selectOption(JSON.stringify(Object.values(scope)));await p.getByText('Loading the signed preservation observation…',{exact:true}).waitFor();await p.screenshot({path:join(evidence,'loading.png'),fullPage:true});await p.locator('[data-class]').first().waitFor();console.log('PASS loading state before observation');}finally{await loadingContext.close();}
+ for(const [id,mutate] of [['wrong-scope',e=>e.summary.scope={...scope,scope_key:'wrong'}],['wrong-report',e=>e.summary.snapshot_id='33333333-3333-5333-8333-333333333333'],['wrong-count',e=>e.summary.classes[0].expected_records=99],['wrong-state',e=>e.summary.classes[0].state='gap'],['wrong-content',e=>e.records[classIds[0]][0].record_sha256='sha256:'+'f'.repeat(64)]]){setup(fixture());const e=structuredClone(expected(id));mutate(e);await assert.rejects(()=>run(e));console.log('PASS negative '+id);}
+ setup(fixture());const context=await browser.newContext();try{const page=await context.newPage();await page.addInitScript(()=>{addEventListener('hashchange',()=>{if(location.hash.startsWith('#preservation'))void fetch('/api/unexpected-write',{method:'POST'});});});await assert.rejects(()=>runPreservationBrowserStep({page,origin,expectations:expected('unexpected-write'),evidenceDirectory:evidence}),/unexpected_write_request/);console.log('PASS negative unexpected write');}finally{await context.close();}
+}finally{await browser.close();await new Promise(resolve=>server.close(resolve));console.log('CLEANUP browser and isolated HTTP fixture closed');}

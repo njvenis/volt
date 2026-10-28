@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives import serialization
 from uvm.operations.api import install_observer_settings_routes
 from uvm.operations.backup_host import canonical_json, digest
 from uvm.persistence.backup_settings_schema import (g7_backup_state,
-    g7_backup_host_records, g7_backup_settings_revisions, g7_backup_connector_quarantine)
+    g7_backup_host_records, g7_backup_settings_revisions, g7_backup_connector_quarantine, g7_backup_projection_evidence)
 from uvm.persistence.assessment_schema import (assessment_policy,
     assessment_audit_events, assessment_command_receipts)
 from tools.g7_backup_recovery import _container_mounts, RecoveryError, VOLUMES
@@ -41,7 +41,7 @@ class RecoverySafetyTests(unittest.TestCase):
         self.addCleanup(self.engine.dispose)
         for table in (assessment_policy, assessment_audit_events, assessment_command_receipts,
                 g7_backup_state, g7_backup_host_records, g7_backup_settings_revisions,
-                g7_backup_connector_quarantine):
+                g7_backup_connector_quarantine, g7_backup_projection_evidence):
             table.create(self.engine)
         self.app = FastAPI()
         self.app.state.engine = self.engine
@@ -646,3 +646,169 @@ class RecoverySafetyTests(unittest.TestCase):
         with self.assertRaises(RecoveryError): c.reconcile_desired()
         self.assertFalse(c.active_file.exists())
         self.assertEqual(c.state['last_intent']['revision'],9)
+
+    def test_history_only_signed_status_cannot_retime_projection_evidence(self):
+        self.publish_backup()
+        with self.engine.connect() as c: state=c.execute(sa.select(g7_backup_state)).mappings().one()
+        ack={'schema_version':1,'deployment_id':'local','ack_id':str(uuid.uuid4()),'sequence':2,
+            'controller_instance_id':self.instance,'intent_id':state['application_intent_id'],
+            'requested_revision':1,'requested_digest':'sha256:'+state['requested_digest'],
+            'active_revision':1,'active_digest':'sha256:'+state['requested_digest'],'host_policy_revision':1,
+            'outcome':'applied','failure_code':None,'observed_at':self.now.isoformat()}
+        self.endpoint('/acks')('local',self.signed(ack),None,self.identity)
+        def read():
+            with patch('uvm.operations.api._registry',return_value={'local':{}}),patch('uvm.operations.api.deployment_grants',return_value=True):
+                return self.endpoint('/backup-settings/{deployment_id}')('local',SimpleNamespace(state=SimpleNamespace()),'admin')
+        before=read()
+        application={**before['status']['settings_application'],
+            'reported_at':(self.now+timedelta(days=1)).isoformat(),'host_policy_revision':999}
+        old=self.now-timedelta(hours=1)
+        body={'schema_version':1,'deployment_id':'local','report_id':str(uuid.uuid4()),'sequence':3,
+            'controller_instance_id':self.instance,'report_kind':'status','host_policy':self.policy,
+            'desired':{'revision':1,'digest':ack['requested_digest']},'settings_application':application,
+            'completed_archive':{'archive_id':None,'completed_at':None,'manifest_digest':None,'outcome':None},
+            'freshness':{'state':'unknown','evaluated_at':None,'age_seconds':None,'basis_completed_at':None,'maximum_backup_age_seconds':None},
+            'restore_verification':{'state':'unknown','archive_id':None,'recovery_epoch':0,'verified_at':None,'failure_code':None},
+            'recovery_epoch':0,'observed_at':old.isoformat(),'fresh_until':(old+timedelta(seconds=300)).isoformat()}
+        signed=self.signed(body)
+        accepted=self.endpoint('/reports')('local',signed,None,self.identity)
+        self.assertTrue(accepted['accepted'])
+        self.assertEqual(self.endpoint('/reports')('local',signed,None,self.identity),accepted)
+        after=read()
+        self.assertEqual(after['effective'],before['effective'])
+        self.assertEqual(after['status']['settings_application'],before['status']['settings_application'])
+        with self.engine.connect() as c:
+            state=c.execute(sa.select(g7_backup_state)).mappings().one()
+            self.assertEqual(c.execute(sa.select(g7_backup_projection_evidence.c.application_evidence_record_id)).scalar_one(),ack['ack_id'])
+            self.assertEqual(c.execute(sa.select(g7_backup_projection_evidence.c.effective_evidence_record_id)).scalar_one(),ack['ack_id'])
+            retained=c.execute(sa.select(g7_backup_host_records.c.document).where(g7_backup_host_records.c.record_id==body['report_id'])).scalar_one()
+            self.assertEqual(retained,signed)
+        # A valid projection-admitted status advances provenance atomically.
+        fresh={**body,'report_id':str(uuid.uuid4()),'sequence':4,'observed_at':self.now.isoformat(),
+            'fresh_until':(self.now+timedelta(seconds=300)).isoformat(),
+            'settings_application':before['status']['settings_application']}
+        self.endpoint('/reports')('local',self.signed(fresh),None,self.identity)
+        with self.engine.connect() as c:
+            state=c.execute(sa.select(g7_backup_state)).mappings().one()
+            self.assertEqual(c.execute(sa.select(g7_backup_projection_evidence.c.application_evidence_record_id)).scalar_one(),fresh['report_id'])
+            self.assertEqual(c.execute(sa.select(g7_backup_projection_evidence.c.effective_evidence_record_id)).scalar_one(),fresh['report_id'])
+        self.assertEqual(read()['effective'],before['effective'])
+        failed={**fresh,'report_id':str(uuid.uuid4()),'sequence':5}
+        def fail_projection(_connection,_cursor,statement,_parameters,_context,_many):
+            if statement.startswith('UPDATE g7_backup_state'):
+                raise sa.exc.OperationalError(statement,{},RuntimeError('projection write failure'))
+        sa.event.listen(self.engine,'before_cursor_execute',fail_projection)
+        try:
+            with self.assertRaises(sa.exc.OperationalError):
+                self.endpoint('/reports')('local',self.signed(failed),None,self.identity)
+        finally: sa.event.remove(self.engine,'before_cursor_execute',fail_projection)
+        with self.engine.connect() as c:
+            state=c.execute(sa.select(g7_backup_state)).mappings().one()
+            self.assertEqual(c.execute(sa.select(g7_backup_projection_evidence.c.effective_evidence_record_id)).scalar_one(),fresh['report_id'])
+            self.assertEqual(c.execute(sa.select(g7_backup_projection_evidence.c.application_evidence_record_id)).scalar_one(),fresh['report_id'])
+            self.assertEqual(state['latest_sequence'],4)
+            self.assertIsNone(c.execute(sa.select(g7_backup_host_records.c.record_id).where(g7_backup_host_records.c.record_id==failed['report_id'])).scalar_one_or_none())
+
+    def assert_revoked_ref_holds_capture(self, ref_key, registry_key):
+        from tools.g7_backup_scheduler import consume
+        from tools.g7_backup_controller import atomic_json
+        c=self.make_controller();atomic_json(c.journal,c.state)
+        values={'interval_seconds':300,'timeout_seconds':7,'maximum_backup_age_seconds':7200,
+            'restore_verification_timeout_seconds':83,'archive_target_ref':'archive-a','recovery_profile_ref':'profile-a'}
+        candidate={'deployment_id':'local','revision':1,'digest':'sha256:'+digest(values),
+            'intent_id':str(uuid.uuid4()),'values':values}
+        atomic_json(c.active_file,candidate)
+        good=consume(c.config,self.now)
+        readback=Path(c.config['scheduler_readback_file']);retained=readback.read_bytes()
+        capture=Path(c.config['capture_request_file']);self.assertTrue(capture.exists())
+        policy=json.loads(json.dumps(self.policy));policy['revision']=2
+        policy[registry_key]=['replacement-only']
+        policy['digest']='sha256:'+digest({k:v for k,v in policy.items() if k!='digest'})
+        c.config['host_policy']=policy
+        self.assertEqual(consume(c.config,self.now+timedelta(seconds=301)),good)
+        self.assertEqual(readback.read_bytes(),retained)
+        self.assertEqual(json.loads(c.active_file.read_text()),candidate)
+        self.assertFalse(capture.exists(),'revoked-ref work must not remain queued')
+        failure=json.loads(readback.with_suffix('.failure.json').read_text())
+        self.assertEqual(failure['failure_code'],'capture_ref_unavailable')
+        self.assertEqual(failure['revision'],1)
+        # Further due intervals do not produce more revoked-ref work.
+        consume(c.config,self.now+timedelta(seconds=602))
+        self.assertFalse(capture.exists())
+        self.assertEqual(readback.read_bytes(),retained)
+        c.config['host_policy']=self.policy
+        consume(c.config,self.now+timedelta(seconds=603))
+        resumed=json.loads(capture.read_text())
+        self.assertEqual(resumed[ref_key],values[ref_key])
+        self.assertFalse(readback.with_suffix('.failure.json').exists())
+
+    def test_revoked_archive_target_holds_last_good_capture(self):
+        self.assert_revoked_ref_holds_capture('archive_target_ref','archive_target_refs')
+
+    def test_revoked_recovery_profile_holds_last_good_capture(self):
+        self.assert_revoked_ref_holds_capture('recovery_profile_ref','recovery_profile_refs')
+
+    def test_projection_provenance_migration_preserves_legacy_state_without_guessing_from_history(self):
+        import importlib.util
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+        legacy=sa.create_engine('sqlite://')
+        self.addCleanup(legacy.dispose)
+        names={'application_evidence_record_id','effective_evidence_record_id'}
+        metadata=sa.MetaData()
+        state_table=sa.Table('g7_backup_state',metadata,*[
+            column._copy() for column in g7_backup_state.columns if column.name not in names])
+        metadata.create_all(legacy)
+        with legacy.begin() as c:
+            c.execute(state_table.insert().values(deployment_id='local',effective_revision=4,
+                effective_digest='a'*64,requested_revision=4,requested_digest='a'*64,
+                application_status='applied',latest_sequence=17))
+        spec=importlib.util.spec_from_file_location('provenance_migration','migrations/versions/0059_g7_backup_projection_evidence.py')
+        migration=importlib.util.module_from_spec(spec);spec.loader.exec_module(migration)
+        with legacy.begin() as c,Operations.context(MigrationContext.configure(c)):
+            migration.upgrade()
+            row=c.execute(sa.text('SELECT * FROM g7_backup_state')).mappings().one()
+            self.assertEqual(row['effective_revision'],4)
+            self.assertEqual(row['application_status'],'applied')
+            self.assertEqual(row['latest_sequence'],17)
+            from uvm.operations.backup_settings import projection_evidence
+            self.assertEqual(projection_evidence(c,'local'),{})
+            migration.downgrade()
+        self.assertFalse(sa.inspect(legacy).has_table('g7_backup_projection_evidence'))
+        self.assertTrue(names.isdisjoint(column['name'] for column in sa.inspect(legacy).get_columns('g7_backup_state')))
+
+    def test_legacy_archive_control_resync_and_public_read_work_before_evidence_migration(self):
+        self.publish_backup()
+        with self.engine.begin() as c:
+            state=c.execute(sa.select(g7_backup_state)).mappings().one()
+            c.execute(g7_backup_state.update().values(effective_revision=1,effective_digest=state['requested_digest'],application_status='applied'))
+        g7_backup_projection_evidence.drop(self.engine)
+        checkpoint={'schema_version':1,'deployment_id':'local','resync_id':str(uuid.uuid4()),
+            'controller_instance_id':self.instance,'database_epoch_seen':0,'database_sequence_seen':1,
+            'checkpoint_epoch_floor':1,'checkpoint_last_sequence':9,'issued_at':self.now.isoformat()}
+        response=self.endpoint('/sequence-resync')('local',checkpoint,None,self.identity)
+        self.assertTrue(response['accepted'])
+        with patch('uvm.operations.api._registry',return_value={'local':{}}),patch('uvm.operations.api.deployment_grants',return_value=True):
+            dto=self.endpoint('/backup-settings/{deployment_id}')('local',SimpleNamespace(state=SimpleNamespace()),'admin')
+        self.assertEqual(dto['effective']['revision'],1)
+        self.assertIsNone(dto['effective']['verified_at'])
+        self.assertEqual(dto['status']['settings_application']['state'],'applied')
+        self.assertIsNone(dto['status']['settings_application']['reported_at'])
+        # After the explicit upgrade, a report may carry the unchanged legacy
+        # applied state with unknown time; it must not invent historical time.
+        g7_backup_projection_evidence.create(self.engine)
+        with self.engine.begin() as c:c.execute(g7_backup_state.update().values(recovery_epoch=1))
+        status={'schema_version':1,'deployment_id':'local','report_id':str(uuid.uuid4()),'sequence':10,
+            'controller_instance_id':self.instance,'report_kind':'status','host_policy':self.policy,
+            'desired':{'revision':1,'digest':dto['desired']['digest']},
+            'settings_application':dto['status']['settings_application'],
+            'completed_archive':dto['status']['completed_archive'],'freshness':dto['status']['freshness'],
+            'restore_verification':{**dto['status']['restore_verification'],'recovery_epoch':1},
+            'recovery_epoch':1,'observed_at':self.now.isoformat(),
+            'fresh_until':(self.now+timedelta(seconds=300)).isoformat()}
+        self.assertTrue(self.endpoint('/reports')('local',self.signed(status),None,self.identity)['accepted'])
+        from uvm.operations.backup_settings import admitted_application_evidence,projection_evidence
+        with self.engine.connect() as c:
+            links=projection_evidence(c,'local')
+            self.assertEqual(links['effective_evidence_record_id'],status['report_id'])
+            self.assertIsNone(admitted_application_evidence(c,'local',links['effective_evidence_record_id'])['reported_at'])

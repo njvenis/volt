@@ -133,6 +133,7 @@ def admit_status(engine, deployment_id, body, entry, now):
             'desired_digest': desired['digest'] if desired else None,
             'accepted_at': now.isoformat().replace('+00:00', 'Z')}
         updates = {'latest_sequence': body['sequence'], 'updated_at': now}
+        evidence_links = {}
         policy_observed = state['host_policy_observed_at']
         if policy_observed and policy_observed.tzinfo is None:
             policy_observed = policy_observed.replace(tzinfo=timezone.utc)
@@ -167,13 +168,17 @@ def admit_status(engine, deployment_id, body, entry, now):
                             ack['active_digest'] == application['active_digest'] for ack in old_acks):
                         raise HTTPException(409, {'code': 'revision_conflict', 'message': 'Historical application policy lacks its exact acknowledgement'})
                 reported_at = parse_utc(application['reported_at']) if application['reported_at'] else None
-                if (reported_at is None or reported_at > now + timedelta(seconds=policy['maximum_future_skew_seconds']) or
-                        now - reported_at > timedelta(seconds=policy['maximum_report_age_seconds'])):
-                    # A fresh archive report may carry old application evidence;
-                    # it cannot newly apply settings from stale evidence.
-                    if (application['state'] != state['application_status'] or
-                            application['active_revision'] != state['effective_revision'] or
-                            application['active_digest'] != ('sha256:' + state['effective_digest'] if state['effective_digest'] else None)):
+                if reported_at and reported_at > now + timedelta(seconds=policy['maximum_future_skew_seconds']):
+                    raise HTTPException(409, {'code': 'revision_conflict', 'message': 'Application evidence is future dated'})
+                if reported_at is None or now - reported_at > timedelta(seconds=policy['maximum_report_age_seconds']):
+                    from uvm.operations.backup_settings import admitted_application_evidence, projection_evidence
+                    admitted = admitted_application_evidence(connection, deployment_id,
+                        projection_evidence(connection, deployment_id).get('application_evidence_record_id'))
+                    unchanged_without_evidence = (reported_at is None and admitted is None and
+                        application['state'] == state['application_status'] and
+                        application['active_revision'] == state['effective_revision'] and
+                        application['active_digest'] == ('sha256:' + state['effective_digest'] if state['effective_digest'] else None))
+                    if application != admitted and not unchanged_without_evidence:
                         raise HTTPException(409, {'code': 'revision_conflict', 'message': 'Application evidence expired before first delivery'})
                 if application['state'] == 'applied':
                     if (application['active_revision'] != application['requested_revision'] or
@@ -181,7 +186,9 @@ def admit_status(engine, deployment_id, body, entry, now):
                         raise HTTPException(409, {'code': 'revision_conflict', 'message': 'Applied status differs from desired'})
                     updates.update(effective_revision=application['active_revision'],
                         effective_digest=_digest(application['active_digest']))
+                    evidence_links['effective_evidence_record_id'] = body['report_id']
                 updates.update(application_status=application['state'], latest_failure_code=application['failure_code'])
+                evidence_links['application_evidence_record_id'] = body['report_id']
             effective_revision = updates.get('effective_revision', state['effective_revision'])
             effective = connection.execute(sa.select(g7_backup_settings_revisions).where(
                 g7_backup_settings_revisions.c.deployment_id == deployment_id,
@@ -222,4 +229,7 @@ def admit_status(engine, deployment_id, body, entry, now):
             document=body, response=response, received_at=now))
         connection.execute(g7_backup_state.update().where(
             g7_backup_state.c.deployment_id == deployment_id).values(**updates))
+        if evidence_links:
+            from uvm.operations.backup_settings import bind_projection_evidence
+            bind_projection_evidence(connection, deployment_id, **evidence_links)
         return response

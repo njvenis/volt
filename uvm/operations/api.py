@@ -298,32 +298,25 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                     fresh_until=stamp(observed + timedelta(seconds=max_age)) if observed else None,
                     freshness=("fresh" if age is not None and 0 <= age <= max_age
                         else "stale" if age is not None and age > max_age else "unknown"))
-            # Application evidence has its own signed timestamp. Policy and
-            # archive/status traffic cannot retime an existing application.
+            # Provenance is committed alongside the projection. Retained
+            # history cannot select or retime current application evidence.
+            from uvm.operations.backup_settings import admitted_application_evidence, projection_evidence
             application_at = effective_at = application_policy = None
             if state:
-                from uvm.persistence.backup_settings_schema import g7_backup_host_records
-                history = connection.execute(sa.select(g7_backup_host_records).where(
-                    g7_backup_host_records.c.deployment_id == deployment_id,
-                    g7_backup_host_records.c.record_kind.in_(["ack", "status"])
-                    ).order_by(g7_backup_host_records.c.sequence.desc())).mappings()
-                for record in history:
-                    doc = record["document"]
-                    evidence = ({"state": doc["outcome"], "requested_revision": doc["requested_revision"],
-                        "intent_id": doc["intent_id"], "host_policy_revision": doc["host_policy_revision"], "active_revision": doc["active_revision"],
-                        "active_digest": doc["active_digest"], "reported_at": doc["observed_at"]}
-                        if record["record_kind"] == "ack" else doc.get("settings_application"))
-                    if not evidence or not evidence.get("reported_at"):
-                        continue
-                    if (application_at is None and evidence["requested_revision"] == state["requested_revision"] and
-                            evidence["intent_id"] == state["application_intent_id"] and
-                            evidence["state"] == state["application_status"]):
-                        application_at = parse_utc(evidence["reported_at"])
-                        application_policy = evidence["host_policy_revision"]
-                    if (effective_at is None and evidence["state"] == "applied" and
-                            evidence["active_revision"] == state["effective_revision"] and
-                            evidence["active_digest"] == digest(state["effective_digest"])):
-                        effective_at = parse_utc(evidence["reported_at"])
+                links = projection_evidence(connection, deployment_id)
+                evidence = admitted_application_evidence(connection, deployment_id,
+                    links.get("application_evidence_record_id"))
+                if (evidence and evidence["requested_revision"] == state["requested_revision"] and
+                        evidence["intent_id"] == state["application_intent_id"] and
+                        evidence["state"] == state["application_status"]):
+                    application_at = parse_utc(evidence["reported_at"]) if evidence["reported_at"] else None
+                    application_policy = evidence["host_policy_revision"]
+                effective_evidence = admitted_application_evidence(connection, deployment_id,
+                    links.get("effective_evidence_record_id"))
+                if (effective_evidence and effective_evidence["state"] == "applied" and
+                        effective_evidence["active_revision"] == state["effective_revision"] and
+                        effective_evidence["active_digest"] == digest(state["effective_digest"])):
+                    effective_at = parse_utc(effective_evidence["reported_at"]) if effective_evidence["reported_at"] else None
             evaluated_at = app.state.utc_now()
             active = None if not state or state["effective_revision"] is None else {
                 "revision": state["effective_revision"], "digest": digest(state["effective_digest"]),
@@ -809,6 +802,11 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                         effective_digest=body["active_digest"].removeprefix("sha256:"))
                 connection.execute(g7_backup_state.update().where(
                     g7_backup_state.c.deployment_id == deployment_id).values(**values))
+                from uvm.operations.backup_settings import bind_projection_evidence
+                links = {"application_evidence_record_id": ack_id}
+                if body["outcome"] == "applied":
+                    links["effective_evidence_record_id"] = ack_id
+                bind_projection_evidence(connection, deployment_id, **links)
                 return response
         except sa.exc.SQLAlchemyError:
             raise HTTPException(503, {"code": "dependency_unavailable", "message": "Acknowledgement was not committed"}) from None

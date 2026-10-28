@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -51,6 +52,23 @@ def consume(config, now=None):
             'observed_at': now.isoformat().replace('+00:00', 'Z')})
     elif accepted:
         failure_path.unlink(missing_ok=True)
+    # Numeric bounds may narrow while last-good continues. Registry authority
+    # is different: neither a removed archive target nor recovery profile may
+    # authorize more capture work, including an outstanding request file.
+    policy = config['host_policy']
+    if (values['archive_target_ref'] not in policy['archive_target_refs'] or
+            values['recovery_profile_ref'] not in policy['recovery_profile_refs']):
+        request_path = Path(config['capture_request_file'])
+        if request_path.exists():
+            request_path.unlink()
+            descriptor = os.open(request_path.parent, os.O_RDONLY)
+            try: os.fsync(descriptor)
+            finally: os.close(descriptor)
+        atomic_json(failure_path, {'revision': candidate['revision'], 'digest': candidate['digest'],
+            'intent_id': candidate['intent_id'], 'failure_code': 'capture_ref_unavailable',
+            'observed_at': now.isoformat().replace('+00:00', 'Z')})
+        # Keep the last independently consumed readback/history unchanged.
+        return prior
     same = prior and prior['revision'] == candidate['revision'] and prior.get('recovery_epoch', 0) == candidate.get('recovery_epoch', 0)
     due = prior['next_capture_at'] if same else now.timestamp()
     # These are host-owned work requests. The capture driver independently

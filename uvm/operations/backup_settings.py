@@ -133,6 +133,7 @@ def commit_backup_settings(connection, *, deployment_id: str, principal: str,
     else:
         connection.execute(g7_backup_state.update().where(
             g7_backup_state.c.deployment_id == deployment_id).values(**status_values))
+    bind_projection_evidence(connection, deployment_id, application_evidence_record_id=None)
     result = {"schema_version": 1, "command_id": command_id,
         "deployment_id": deployment_id, "actor_id": principal, "action": action,
         "request_digest": "sha256:" + request_digest, "settings_digest": "sha256:" + digest,
@@ -168,3 +169,46 @@ def intent_quarantined(connection, intent_id: str, connector_id: str | None = No
                 connector_id, connector_intents.name])])
     return connection.execute(sa.select(g7_backup_connector_quarantine.c.intent_id).where(
         *conditions).limit(1)).first() is not None
+
+
+def admitted_application_evidence(connection, deployment_id, record_id):
+    """Read only the immutable record named by the committed projection."""
+    from uvm.persistence.backup_settings_schema import g7_backup_host_records
+    if record_id is None:
+        return None
+    record = connection.execute(sa.select(g7_backup_host_records).where(
+        g7_backup_host_records.c.deployment_id == deployment_id,
+        g7_backup_host_records.c.record_id == record_id)).mappings().one_or_none()
+    if record is None:
+        return None
+    doc = record["document"]
+    if record["record_kind"] == "ack":
+        return {"state": doc["outcome"], "requested_revision": doc["requested_revision"],
+            "requested_digest": doc["requested_digest"], "intent_id": doc["intent_id"],
+            "host_policy_revision": doc["host_policy_revision"], "active_revision": doc["active_revision"],
+            "active_digest": doc["active_digest"], "reported_at": doc["observed_at"],
+            "failure_code": doc["failure_code"]}
+    if record["record_kind"] == "status":
+        return doc.get("settings_application")
+    return None
+
+
+def projection_evidence(connection, deployment_id):
+    from uvm.persistence.backup_settings_schema import g7_backup_projection_evidence
+    # Control-only verification of an older archive precedes explicit migration.
+    if not sa.inspect(connection).has_table(g7_backup_projection_evidence.name):
+        return {}
+    return connection.execute(sa.select(g7_backup_projection_evidence).where(
+        g7_backup_projection_evidence.c.deployment_id == deployment_id)).mappings().one_or_none() or {}
+
+
+def bind_projection_evidence(connection, deployment_id, **links):
+    """Call only in the transaction that admits the corresponding projection."""
+    from uvm.persistence.backup_settings_schema import g7_backup_projection_evidence
+    row = connection.execute(sa.select(g7_backup_projection_evidence).where(
+        g7_backup_projection_evidence.c.deployment_id == deployment_id).with_for_update()).first()
+    if row is None:
+        connection.execute(g7_backup_projection_evidence.insert().values(deployment_id=deployment_id, **links))
+    else:
+        connection.execute(g7_backup_projection_evidence.update().where(
+            g7_backup_projection_evidence.c.deployment_id == deployment_id).values(**links))

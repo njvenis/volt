@@ -103,3 +103,13 @@ g7_backup_connector_quarantine = Table(
     Column("reason_code", String(64), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
+
+
+# Separate from the legacy state row so control-only restores can read that
+# row before an explicitly authorized upgrade creates this additive table.
+g7_backup_projection_evidence = Table(
+    "g7_backup_projection_evidence", uvm_metadata,
+    Column("deployment_id", String(256), primary_key=True),
+    Column("application_evidence_record_id", String(36)),
+    Column("effective_evidence_record_id", String(36)),
+)

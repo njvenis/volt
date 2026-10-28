@@ -64,6 +64,8 @@ def admit_status(engine, deployment_id, body, entry, now):
             if application['state'] not in {'pending', 'applied', 'failed', 'uncertain', 'unknown'}:
                 raise ValueError('invalid application state')
             for name in ('requested_revision', 'host_policy_revision'):
+                if name == 'host_policy_revision' and application[name] is None:
+                    continue
                 if type(application[name]) is not int or application[name] < 1:
                     raise ValueError('invalid application revision')
             _digest(application['requested_digest'])
@@ -156,7 +158,17 @@ def admit_status(engine, deployment_id, body, entry, now):
                                 application['active_revision'] != state['effective_revision'] or
                                 application['active_digest'] != ('sha256:' + state['effective_digest'] if state['effective_digest'] else None)))):
                     raise HTTPException(409, {'code': 'revision_conflict', 'message': 'Application intent differs'})
-                if application['host_policy_revision'] != policy['revision']:
+                if application['host_policy_revision'] is None:
+                    from uvm.operations.backup_settings import admitted_application_evidence, projection_evidence
+                    admitted = admitted_application_evidence(connection, deployment_id,
+                        projection_evidence(connection, deployment_id).get('application_evidence_record_id'))
+                    if (application['reported_at'] is not None or
+                            (admitted is not None and admitted['host_policy_revision'] is not None) or
+                            application['state'] != state['application_status'] or
+                            application['active_revision'] != state['effective_revision'] or
+                            application['active_digest'] != ('sha256:' + state['effective_digest'] if state['effective_digest'] else None)):
+                        raise HTTPException(409, {'code': 'revision_conflict', 'message': 'Unknown application provenance may only carry unchanged legacy state'})
+                elif application['host_policy_revision'] != policy['revision']:
                     old_acks = connection.execute(sa.select(g7_backup_host_records.c.document).where(
                         g7_backup_host_records.c.deployment_id == deployment_id,
                         g7_backup_host_records.c.record_kind == 'ack')).scalars()
@@ -175,6 +187,7 @@ def admit_status(engine, deployment_id, body, entry, now):
                     admitted = admitted_application_evidence(connection, deployment_id,
                         projection_evidence(connection, deployment_id).get('application_evidence_record_id'))
                     unchanged_without_evidence = (reported_at is None and admitted is None and
+                        application['host_policy_revision'] is None and
                         application['state'] == state['application_status'] and
                         application['active_revision'] == state['effective_revision'] and
                         application['active_digest'] == ('sha256:' + state['effective_digest'] if state['effective_digest'] else None))

@@ -327,7 +327,7 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                     "requested_revision": state["requested_revision"],
                     "requested_digest": digest(state["requested_digest"]),
                     "intent_id": state["application_intent_id"],
-                    "host_policy_revision": application_policy or state["host_policy_revision"],
+                    "host_policy_revision": application_policy,
                     "active_revision": active["revision"] if active else None,
                     "active_digest": active["digest"] if active else None,
                     "reported_at": stamp(application_at),

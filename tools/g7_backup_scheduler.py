@@ -14,17 +14,65 @@ from uvm.operations.backup_host import digest
 from uvm.operations.observer_settings import validate_backup_values
 
 
+def registered_refs(config, values):
+    return (isinstance(values, dict) and
+        values.get('archive_target_ref') in config['host_policy']['archive_target_refs'] and
+        values.get('recovery_profile_ref') in config['host_policy']['recovery_profile_refs'])
+
+
+def hold_capture(config, work, now, failure_code):
+    request_path = Path(config['capture_request_file'])
+    if request_path.exists():
+        request_path.unlink()
+        descriptor = os.open(request_path.parent, os.O_RDONLY)
+        try: os.fsync(descriptor)
+        finally: os.close(descriptor)
+    atomic_json(Path(config['scheduler_readback_file']).with_suffix('.failure.json'), {
+        'revision': work.get('revision'), 'digest': work.get('digest'),
+        'intent_id': work.get('intent_id'), 'failure_code': failure_code,
+        'observed_at': now.isoformat().replace('+00:00', 'Z')})
+
+
+def queued_request_failure(config, work):
+    if (not isinstance(work, dict) or work.get('deployment_id') != config['deployment_id'] or
+            type(work.get('schema_version')) is not int or work['schema_version'] != 1 or
+            type(work.get('revision')) is not int or work['revision'] < 1 or
+            not isinstance(work.get('intent_id'), str) or not work['intent_id'] or
+            not isinstance(work.get('values'), dict) or work.get('digest') != 'sha256:' + digest(work['values']) or
+            any(work.get(key) != work['values'].get(key) for key in ('archive_target_ref', 'recovery_profile_ref'))):
+        return 'capture_request_invalid'
+    if not registered_refs(config, work['values']):
+        return 'capture_ref_unavailable'
+    return None
+
+
 def consume(config, now=None):
     now = now or datetime.now(timezone.utc)
     readback_path = Path(config['scheduler_readback_file'])
     try:
         prior = json.loads(readback_path.read_text())
-    except FileNotFoundError:
+    except (OSError, ValueError):
         prior = None
+    # Request publication precedes the readback receipt. Inspect that durable
+    # queue independently, even when interruption left no last-good readback.
+    try:
+        queued = json.loads(Path(config['capture_request_file']).read_text())
+    except FileNotFoundError:
+        queued = None
+    except (OSError, ValueError):
+        queued = {}
+    if queued is not None:
+        failure = queued_request_failure(config, queued)
+        if failure:
+            hold_capture(config, queued if isinstance(queued, dict) else {}, now, failure)
+            return prior
     rejected, accepted = None, True
     try:
         candidate = json.loads(Path(config['active_settings_file']).read_text())
         rejected = candidate
+        if not registered_refs(config, candidate.get('values')):
+            hold_capture(config, candidate, now, 'capture_ref_unavailable')
+            return prior
         values = validate_backup_values(candidate['values'], config['host_policy'])
         namespace_epoch = json.loads(Path(config['journal_file']).read_text()).get('desired_namespace', {}).get('epoch', 0) if config.get('journal_file') else 0
         candidate_epoch = candidate.get('recovery_epoch', 0)
@@ -55,19 +103,8 @@ def consume(config, now=None):
     # Numeric bounds may narrow while last-good continues. Registry authority
     # is different: neither a removed archive target nor recovery profile may
     # authorize more capture work, including an outstanding request file.
-    policy = config['host_policy']
-    if (values['archive_target_ref'] not in policy['archive_target_refs'] or
-            values['recovery_profile_ref'] not in policy['recovery_profile_refs']):
-        request_path = Path(config['capture_request_file'])
-        if request_path.exists():
-            request_path.unlink()
-            descriptor = os.open(request_path.parent, os.O_RDONLY)
-            try: os.fsync(descriptor)
-            finally: os.close(descriptor)
-        atomic_json(failure_path, {'revision': candidate['revision'], 'digest': candidate['digest'],
-            'intent_id': candidate['intent_id'], 'failure_code': 'capture_ref_unavailable',
-            'observed_at': now.isoformat().replace('+00:00', 'Z')})
-        # Keep the last independently consumed readback/history unchanged.
+    if not registered_refs(config, values):
+        hold_capture(config, candidate, now, 'capture_ref_unavailable')
         return prior
     same = prior and prior['revision'] == candidate['revision'] and prior.get('recovery_epoch', 0) == candidate.get('recovery_epoch', 0)
     due = prior['next_capture_at'] if same else now.timestamp()

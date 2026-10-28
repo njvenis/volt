@@ -788,18 +788,38 @@ class RecoverySafetyTests(unittest.TestCase):
             'checkpoint_epoch_floor':1,'checkpoint_last_sequence':9,'issued_at':self.now.isoformat()}
         response=self.endpoint('/sequence-resync')('local',checkpoint,None,self.identity)
         self.assertTrue(response['accepted'])
-        with patch('uvm.operations.api._registry',return_value={'local':{}}),patch('uvm.operations.api.deployment_grants',return_value=True):
-            dto=self.endpoint('/backup-settings/{deployment_id}')('local',SimpleNamespace(state=SimpleNamespace()),'admin')
+        def read_public():
+            with patch('uvm.operations.api._registry',return_value={'local':{}}),patch('uvm.operations.api.deployment_grants',return_value=True):
+                return self.endpoint('/backup-settings/{deployment_id}')('local',SimpleNamespace(state=SimpleNamespace()),'admin')
+        dto=read_public()
         self.assertEqual(dto['effective']['revision'],1)
         self.assertIsNone(dto['effective']['verified_at'])
         self.assertEqual(dto['status']['settings_application']['state'],'applied')
         self.assertIsNone(dto['status']['settings_application']['reported_at'])
+        self.assertIsNone(dto['status']['settings_application']['host_policy_revision'])
         # After the explicit upgrade, a report may carry the unchanged legacy
         # applied state with unknown time; it must not invent historical time.
-        g7_backup_projection_evidence.create(self.engine)
+        import importlib.util
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+        spec=importlib.util.spec_from_file_location('legacy_provenance_upgrade','migrations/versions/0059_g7_backup_projection_evidence.py')
+        migration=importlib.util.module_from_spec(spec);spec.loader.exec_module(migration)
+        with self.engine.begin() as c,Operations.context(MigrationContext.configure(c)):migration.upgrade()
+        migrated=read_public()
+        self.assertEqual(migrated['effective'],dto['effective'])
+        self.assertEqual(migrated['status']['settings_application'],dto['status']['settings_application'])
+        policy={**self.policy,'revision':2};policy['digest']='sha256:'+digest({k:v for k,v in policy.items() if k!='digest'})
+        renewal={'schema_version':1,'deployment_id':'local','report_id':str(uuid.uuid4()),'sequence':10,
+            'controller_instance_id':self.instance,'report_kind':'policy','host_policy':policy,
+            **{k:None for k in ('desired','settings_application','completed_archive','freshness','restore_verification','recovery_epoch')},
+            'observed_at':self.now.isoformat(),'fresh_until':(self.now+timedelta(seconds=300)).isoformat()}
+        self.endpoint('/reports')('local',self.signed(renewal),None,self.identity)
+        renewed=read_public()
+        self.assertEqual(renewed['host_policy']['revision'],2)
+        self.assertEqual(renewed['status']['settings_application'],dto['status']['settings_application'])
         with self.engine.begin() as c:c.execute(g7_backup_state.update().values(recovery_epoch=1))
-        status={'schema_version':1,'deployment_id':'local','report_id':str(uuid.uuid4()),'sequence':10,
-            'controller_instance_id':self.instance,'report_kind':'status','host_policy':self.policy,
+        status={'schema_version':1,'deployment_id':'local','report_id':str(uuid.uuid4()),'sequence':11,
+            'controller_instance_id':self.instance,'report_kind':'status','host_policy':policy,
             'desired':{'revision':1,'digest':dto['desired']['digest']},
             'settings_application':dto['status']['settings_application'],
             'completed_archive':dto['status']['completed_archive'],'freshness':dto['status']['freshness'],
@@ -812,3 +832,52 @@ class RecoverySafetyTests(unittest.TestCase):
             links=projection_evidence(c,'local')
             self.assertEqual(links['effective_evidence_record_id'],status['report_id'])
             self.assertIsNone(admitted_application_evidence(c,'local',links['effective_evidence_record_id'])['reported_at'])
+        current=read_public()
+        self.assertEqual(current['effective'],dto['effective'])
+        self.assertEqual(current['status']['settings_application'],dto['status']['settings_application'])
+        invented={**status,'report_id':str(uuid.uuid4()),'sequence':12,
+            'settings_application':{**status['settings_application'],'host_policy_revision':2}}
+        with self.assertRaises(HTTPException) as caught:self.endpoint('/reports')('local',self.signed(invented),None,self.identity)
+        self.assertEqual(caught.exception.status_code,409)
+        self.assertIsNone(read_public()['status']['settings_application']['host_policy_revision'])
+
+    def assert_interrupted_request_revocation(self, registry_key):
+        from tools.g7_backup_scheduler import consume
+        from tools.g7_backup_controller import atomic_json
+        c=self.make_controller();atomic_json(c.journal,c.state)
+        values={'interval_seconds':300,'timeout_seconds':7,'maximum_backup_age_seconds':7200,
+            'restore_verification_timeout_seconds':83,'archive_target_ref':'archive-a','recovery_profile_ref':'profile-a'}
+        candidate={'deployment_id':'local','revision':1,'digest':'sha256:'+digest(values),
+            'intent_id':str(uuid.uuid4()),'values':values}
+        atomic_json(c.active_file,candidate)
+        capture=Path(c.config['capture_request_file']);readback=Path(c.config['scheduler_readback_file'])
+        def interrupted(path,value):
+            atomic_json(path,value)
+            if path==capture:raise KeyboardInterrupt('interruption after durable request publication')
+        with patch('tools.g7_backup_scheduler.atomic_json',side_effect=interrupted):
+            with self.assertRaises(KeyboardInterrupt):consume(c.config,self.now)
+        self.assertTrue(capture.exists())
+        self.assertFalse(readback.exists())
+        active_before=c.active_file.read_bytes()
+        policy=json.loads(json.dumps(self.policy));policy['revision']=2;policy[registry_key]=['replacement-only']
+        policy['digest']='sha256:'+digest({k:v for k,v in policy.items() if k!='digest'})
+        c.config['host_policy']=policy
+        self.assertIsNone(consume(c.config,self.now+timedelta(seconds=1)))
+        self.assertFalse(capture.exists())
+        self.assertFalse(readback.exists())
+        self.assertEqual(c.active_file.read_bytes(),active_before)
+        failure=json.loads(readback.with_suffix('.failure.json').read_text())
+        self.assertEqual(failure['failure_code'],'capture_ref_unavailable')
+        self.assertEqual(failure['intent_id'],candidate['intent_id'])
+        self.assertIsNone(consume(c.config,self.now+timedelta(seconds=301)))
+        self.assertFalse(capture.exists())
+        self.assertFalse(readback.exists())
+        c.config['host_policy']=self.policy
+        self.assertEqual(consume(c.config,self.now+timedelta(seconds=302))['revision'],1)
+        self.assertTrue(capture.exists());self.assertTrue(readback.exists())
+
+    def test_interrupted_request_then_archive_target_revocation_holds_without_readback(self):
+        self.assert_interrupted_request_revocation('archive_target_refs')
+
+    def test_interrupted_request_then_recovery_profile_revocation_holds_without_readback(self):
+        self.assert_interrupted_request_revocation('recovery_profile_refs')

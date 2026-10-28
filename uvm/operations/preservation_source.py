@@ -20,7 +20,7 @@ from uvm.persistence.assessment_schema import assessment_audit_events
 from uvm.persistence.exception_sla_schema import source_observation_receipts
 from uvm.persistence.ingestion_schema import (
     collection_runs, collection_schedules, expected_runs, expected_run_events,
-    run_attempts, run_pages, ingestion_evidence,
+    run_attempts, run_pages, ingestion_evidence, collection_request_reservations,
 )
 from uvm.persistence.observation_schema import source_observations
 from uvm.persistence.lineage_schema import identity_resolutions
@@ -69,20 +69,18 @@ def _source_members(connection, scope: tuple[str, str, str]) -> tuple[list[dict]
     # The retained source table intentionally stores run IDs as source-facing
     # strings while ingestion run IDs are PostgreSQL UUIDs. SQLite compares
     # these implicitly; PostgreSQL requires the explicit wire-form cast.
-    query = (sa.select(source_observations).select_from(source_observations.join(
-        collection_runs, sa.cast(collection_runs.c.run_id, sa.String)
-            == source_observations.c.run_id))
-        .where(collection_runs.c.source_family == family,
-            collection_runs.c.source_account_id == account,
-            collection_runs.c.scope_key == scope_key).distinct())
-    observations = connection.execute(query).mappings().all()
+    query = (sa.select(source_observations, collection_runs.c.scope_key.label("attributed_scope"))
+        .select_from(source_observations.outerjoin(collection_runs, sa.and_(
+            sa.cast(collection_runs.c.run_id, sa.String) == source_observations.c.run_id,
+            collection_runs.c.source_family == source_observations.c.source_family,
+            collection_runs.c.source_account_id == source_observations.c.source_account_id)))
+        .where(source_observations.c.source_family == family,
+            source_observations.c.source_account_id == account).distinct())
+    candidates = connection.execute(query).mappings().all()
+    complete = all(row["attributed_scope"] is not None for row in candidates)
+    observations = [row for row in candidates
+        if row["attributed_scope"] == scope_key]
     members: list[dict] = []
-    # This class inventories every committed UVM source-evidence record in the
-    # authorized tuple. A scanner run's freshness/coverage assessment is a
-    # separate operational fact and cannot make an otherwise coherent,
-    # complete DB snapshot unreadable. The read transaction itself and each
-    # registered evidence linkage determine inventory completeness below.
-    complete = True
     oldest = None
     max_watermark = None
     registrations = connection.execute(sa.select(ingestion_evidence, collection_runs.c.source_family,
@@ -96,6 +94,18 @@ def _source_members(connection, scope: tuple[str, str, str]) -> tuple[list[dict]
     by_ref_digest: dict[tuple[str, str], list[dict]] = {}
     for registration in registrations:
         by_ref_digest.setdefault((registration["evidence_ref"], registration["sha256"]), []).append(dict(registration))
+    expected_owners = {}
+    try:
+        from uvm.operations.preservation_streams import read_stream, namespace, INVENTORY
+        baseline, _ = read_stream(os.environ["UVM_G7_PRESERVATION_TRUST_DIR"],
+            os.environ["UVM_G7_PRESERVATION_PUBLIC_KEY_FILE"], namespace(
+                os.environ["UVM_G7_DEPLOYMENT_ID"], INVENTORY, scope, SOURCE_CLASS), key_id=os.environ.get("UVM_G7_PRESERVATION_KEY_ID"))
+        for expected in baseline["content"]["members"]:
+            item = expected["member"]
+            if item["record_kind"] == "observation" and item.get("evidence_id"):
+                expected_owners[item["evidence_id"]] = item["record_key"].split(":", 1)[1]
+    except (KeyError, FileNotFoundError):
+        pass
     observation_owners = {}
     observation_digests = {}
     for row in observations:
@@ -104,15 +114,13 @@ def _source_members(connection, scope: tuple[str, str, str]) -> tuple[list[dict]
         observation_digests[key] = _digest(SOURCE_CLASS, observation)
         matches = by_ref_digest.get((row["raw_evidence_ref"], row["raw_evidence_sha256"]), [])
         matches = [entry for entry in matches if entry["run_id"] == row["run_id"]]
-        selected = matches[0] if matches else None
+        selected = min(matches, key=lambda entry: (int(entry["run_revision"]), str(entry["evidence_id"]))) if matches else None
         observation_owners.setdefault((row["run_id"], row["raw_evidence_ref"],
             row["raw_evidence_sha256"]), "observation:" + key)
         members.append(_member(SOURCE_CLASS, "observation", "observation:" + key, observation,
             row["collected_at"], raw_sha256=row["raw_evidence_sha256"],
             byte_size=selected.get("byte_size") if selected else None,
             evidence_id=selected.get("evidence_id") if selected else None))
-        if selected is None or selected.get("byte_size") is None:
-            complete = False
         if oldest is None or row["collected_at"] < oldest:
             oldest = row["collected_at"]
         max_watermark = max(max_watermark or row["retention_order"], row["retention_order"])
@@ -169,6 +177,10 @@ def _source_members(connection, scope: tuple[str, str, str]) -> tuple[list[dict]
                 complete = False
                 continue
             try:
+                if (raw_observation.get("source_family") != family
+                        or raw_observation.get("source_account_id") != account
+                        or str(raw_observation.get("run_id")) != str(run["run_id"])):
+                    raise ValueError("observation_source_attribution_mismatch")
                 observation_id = str(raw_observation["observation_id"])
                 evidence_ref = raw_observation["raw_evidence_ref"]
                 raw_sha256 = raw_observation["raw_evidence_sha256"]
@@ -198,13 +210,11 @@ def _source_members(connection, scope: tuple[str, str, str]) -> tuple[list[dict]
         observation_owners[(str(observation["run_id"]), evidence_ref, raw_sha256)] = owner_key
         matches = by_ref_digest.get((evidence_ref, raw_sha256), [])
         matches = [entry for entry in matches if entry["run_id"] == str(observation["run_id"])]
-        selected = max(matches, key=lambda entry: int(entry["run_revision"])) if matches else None
+        selected = min(matches, key=lambda entry: (int(entry["run_revision"]), str(entry["evidence_id"]))) if matches else None
         members.append(_member(SOURCE_CLASS, "observation", owner_key, preimage,
             observation.get("collected_at") or retained_at, raw_sha256=raw_sha256,
             byte_size=selected.get("byte_size") if selected else None,
             evidence_id=selected.get("evidence_id") if selected else None))
-        if selected is None or selected.get("byte_size") is None:
-            complete = False
         candidate_oldest = _wire(observation.get("collected_at") or retained_at)
         if oldest is None or candidate_oldest < _wire(oldest):
             oldest = candidate_oldest
@@ -212,6 +222,7 @@ def _source_members(connection, scope: tuple[str, str, str]) -> tuple[list[dict]
 
     for registration in registrations:
         owner_key = observation_owners.get((registration["run_id"], registration["evidence_ref"], registration["sha256"]))
+        owner_key = owner_key or expected_owners.get(registration["evidence_id"])
         if owner_key is None:
             continue
         preimage = {"schema_version": registration["schema_version"],
@@ -267,6 +278,11 @@ def _scanner_members(connection, scope: tuple[str, str, str]) -> tuple[list[dict
             "schedule_id", "schedule_revision", "source_report_id", "expected_at", "started_at",
             "ended_at", "state", "retrieval_status", "retrieval_reasons", "coverage_status",
             "coverage_reasons", "freshness_status", "freshness_reasons", "created_at")}
+        reservations = connection.execute(sa.select(collection_request_reservations).where(
+            collection_request_reservations.c.run_id == row["run_id"],
+            collection_request_reservations.c.run_revision == row["revision"])
+            .order_by(collection_request_reservations.c.attempt_no)).mappings().all()
+        preimage["request_reservations"] = [_wire(dict(item)) for item in reservations]
         preimage["facts_snapshot_digest"] = hashlib.sha256(canonical_json(_wire(row["facts_snapshot"]))).hexdigest()
         preimage["provenance_snapshot_digest"] = hashlib.sha256(canonical_json(_wire(row["provenance_snapshot"]))).hexdigest()
         members.append(_member(SCANNER_CLASS, "run_revision", f"run_revision:{row['run_id']}:{int(row['revision'])}",
@@ -346,10 +362,17 @@ def source_snapshot(connection, scope: tuple[str, str, str], class_ids: list[str
         generation = None
     trust_context_valid = bool(generation and epoch_text and epoch_text.isdigit()
         and volume_set_digest and re.fullmatch(r"[0-9a-f]{64}", volume_set_digest))
+    schema_heads = (sorted(connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalars())
+        if sa.inspect(connection).has_table("alembic_version") else [])
+    schema_head_digest = hashlib.sha256(canonical_json(schema_heads)).hexdigest()
     class_watermarks: dict[str, int] = {}
     result = {"schema_version": 1, "deployment_id": deployment_id,
+        "checked_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "schema_head_digest": schema_head_digest,
         "scope": {"source_family": scope[0], "source_account_id": scope[1], "scope_key": scope[2]},
         "storage_generation": generation,
+        "recovery_epoch": int(epoch_text) if epoch_text and epoch_text.isdigit() else None,
+        "volume_set_digest": volume_set_digest,
         "classes": []}
     for class_id in sorted(class_ids):
         if class_id == SOURCE_CLASS:

@@ -63,6 +63,30 @@ class PreservationWireTimestampTests(unittest.TestCase):
             dto["expected_transitions"][0]["recorded_at"]]
         self.assertEqual(set(timestamps), {"2026-10-28T19:22:46.359284Z"})
 
+    def test_actual_missing_report_dto_is_accepted_by_ui_parser(self):
+        import importlib.util
+        import os
+        from unittest.mock import patch
+        from starlette.requests import Request
+        from uvm.api.app import create_app
+        spec = importlib.util.spec_from_file_location("g7_api_fixture", ROOT / "tests/operations/test_g7_preservation_api.py")
+        fixture_module = importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture_module)
+        fixture = fixture_module.PreservationApiTest(); fixture.setUp(); self.addCleanup(fixture.tearDown)
+        app = create_app(fixture.engine, principals={}, cursor_secret="synthetic-cursor-secret")
+        route = next(r for r in app.routes if getattr(r, "path", None) == "/api/v1/operations/preservation")
+        request = Request({"type":"http", "method":"GET", "path":route.path,
+            "query_string":b"source_family=synthetic&source_account_id=account-a&scope_key=scope-a",
+            "headers":[], "app":app})
+        with patch("uvm.operations.preservation_api.load_report", return_value=(None, "baseline_missing")), patch.dict(
+                os.environ, {"UVM_G7_PRESERVATION_ENVIRONMENT":"synthetic"}):
+            summary = route.endpoint(request, *fixture.scope, principal={"name":"alice",
+                "context":fixture.context, "scopes":(fixture.scope,)})
+        with tempfile.TemporaryDirectory() as directory:
+            response = Path(directory) / "summary.json"; response.write_text(json.dumps(summary))
+            result = subprocess.run(["node", str(ROOT / "tools/g7_preservation_ui_timestamp_regression.mjs"),
+                "--summary-only", str(response)], cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_actual_summary_is_normalized_and_accepted_by_current_ui_parser(self):
         summary = json.loads((FIXTURES / "summary-actual-v1.json").read_text())
         summary["classes"] = [_class_wire(item) for item in summary["classes"]]

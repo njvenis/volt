@@ -375,6 +375,17 @@ PHSCRUB
     docker run --rm --network none --mount "type=bind,src=$RUN_ROOT/scheduler,dst=/owned-scheduler" \
       --entrypoint /bin/chmod "$IMAGE" -R a+rwX /owned-scheduler >/dev/null 2>&1 || cleanup_rc=1
   fi
+  if (( DATA_PRESERVATION_MODE )) && [[ -d "$RUN_ROOT/copied-preservation" ]]; then
+    docker run --rm --network none --label "uvm.g7.run-id=$RUN_ID" \
+      --tmpfs /var/lib/postgresql/data --tmpfs /app/media --tmpfs /opt/uvm/state \
+      --mount "type=bind,src=$RUN_ROOT/copied-preservation,dst=/owned" --entrypoint /bin/sh "$IMAGE" \
+      -c "chown -R $(id -u):$(id -g) /owned && chmod -R u+rwX /owned" >/dev/null 2>&1 || cleanup_rc=1
+  fi
+  if (( DATA_PRESERVATION_MODE )); then
+    cp "$RUN_ROOT/secrets/host-pub.pem" "$EVIDENCE/preservation-verifier-public-key.pem" || cleanup_rc=1
+    cp -a "$RUN_ROOT/host/preservation-trust" "$EVIDENCE/preservation-trust" || cleanup_rc=1
+  fi
+  python3 "$ROOT/tools/g7_redact_retained_inspects.py" "$EVIDENCE" >"$EVIDENCE/credential-redaction.stdout" || cleanup_rc=1
   chmod -R u+rwX "$RUN_ROOT" 2>/dev/null || true
   rm -rf "$RUN_ROOT" || cleanup_rc=1
   [[ ! -e "$RUN_ROOT" ]] || cleanup_rc=1
@@ -465,6 +476,16 @@ print(hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(',',':')).encode
 PRESVOL
 )
   printf '%s\n' "${PRESERVATION_VOLUME_NAMES[@]}" >"$EVIDENCE/preservation-volume-names.txt"
+  mkdir -p "$RUN_ROOT/host/preservation-trust"
+  chmod 755 "$RUN_ROOT/host/preservation-trust"
+  PRESERVATION_SCHEMA_HEAD_DIGEST=$(python3 - "$ROOT/docker/g7/schema-head" <<'SCHEMAHASH'
+import hashlib,json,sys
+from pathlib import Path
+print(hashlib.sha256(json.dumps([Path(sys.argv[1]).read_text().strip()],separators=(',',':')).encode()).hexdigest())
+SCHEMAHASH
+)
+  PRESERVATION_KEY_VALID_FROM=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)
+  PRESERVATION_KEY_VALID_UNTIL=$(date -u -d '1 day' +%Y-%m-%dT%H:%M:%SZ)
   mkdir -p "$RUN_ROOT/host/preservation-reports"
   chmod 755 "$RUN_ROOT/host/preservation-reports"
   cat >>"$RUN_ROOT/container.env" <<PRESENV
@@ -474,6 +495,8 @@ UVM_G7_STORAGE_GENERATION=$PRESERVATION_STORAGE_GENERATION
 UVM_G7_VOLUME_SET_DIGEST=$PRESERVATION_VOLUME_SET_DIGEST
 UVM_G7_PRESERVATION_PUBLIC_KEY_FILE=/run/uvm-g7-host-pub.pem
 UVM_G7_PRESERVATION_KEY_ID=g7-preservation-fixture
+UVM_G7_PRESERVATION_TRUST_DIR=/run/uvm-g7-preservation-trust
+UVM_G7_PRESERVATION_ENVIRONMENT=local
 UVM_G7_PRESERVATION_REPORT_DIR=/run/uvm-g7-preservation-reports
 UVM_G7_PRESERVATION_MAX_FUTURE_SKEW_SECONDS=30
 PRESENV
@@ -481,6 +504,7 @@ PRESENV
     --mount "type=volume,src=${PRESERVATION_VOLUME_NAMES[0]},dst=/var/lib/postgresql/data"
     --mount "type=volume,src=${PRESERVATION_VOLUME_NAMES[1]},dst=/app/media"
     --mount "type=volume,src=${PRESERVATION_VOLUME_NAMES[2]},dst=/opt/uvm/state"
+    --mount "type=bind,src=$RUN_ROOT/host/preservation-trust,dst=/run/uvm-g7-preservation-trust,readonly"
     --mount "type=bind,src=$RUN_ROOT/host/preservation-reports,dst=/run/uvm-g7-preservation-reports,readonly"
   )
 fi
@@ -719,6 +743,10 @@ if (( DATA_PRESERVATION_MODE )); then
     --origin "http://127.0.0.1:$API_PORT" \
     --token-file "$RUN_ROOT/secrets/g7_preservation_source_token" \
     --signing-key-file "$RUN_ROOT/host/ed25519.pem" \
+    --trust-dir "$RUN_ROOT/host/preservation-trust" \
+    --freshness-seconds 900 --volume-set-digest "$PRESERVATION_VOLUME_SET_DIGEST" --schema-head-digest "$PRESERVATION_SCHEMA_HEAD_DIGEST" \
+    --key-valid-from "$PRESERVATION_KEY_VALID_FROM" --key-valid-until "$PRESERVATION_KEY_VALID_UNTIL" \
+    --admit-new-members --provision-controller \
     --report-dir "$RUN_ROOT/host/preservation-reports" \
     --key-id g7-preservation-fixture --deployment-id g7-local --recovery-epoch 1 \
     --storage-generation "$PRESERVATION_STORAGE_GENERATION" --environment local \
@@ -741,6 +769,15 @@ if (( DATA_PRESERVATION_MODE )); then
       >"$EVIDENCE/preservation-public-readback.stdout" \
       2>"$EVIDENCE/preservation-public-readback.stderr"
   mkdir -m 0700 "$EVIDENCE/preservation-negative"
+  phase_mark copied_store_negatives_start
+  uv run python "$ROOT/tools/g7_preservation_copied_stores.py" \
+    --run-root "$RUN_ROOT" --source-container "$CONTAINER" --anchor-container "$ANCHOR_CONTAINER" \
+    --image "$IMAGE" --report-path "$report_source" --evidence-dir "$EVIDENCE/copied-stores" \
+    --key-valid-from "$PRESERVATION_KEY_VALID_FROM" --key-valid-until "$PRESERVATION_KEY_VALID_UNTIL" \
+    --schema-head-digest "$PRESERVATION_SCHEMA_HEAD_DIGEST" \
+    >"$EVIDENCE/copied-store-negatives.stdout" 2>"$EVIDENCE/copied-store-negatives.stderr"
+  phase_mark copied_store_negatives_end
+  cp -a "$RUN_ROOT/host/preservation-trust" "$RUN_ROOT/host/preservation-trust-sink-unavailable"
   mkdir -m 0755 "$RUN_ROOT/host/preservation-reports-sink-unavailable"
   ANCHOR_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$ANCHOR_CONTAINER")
   SIGNER_ANCHOR_PASSWORD=$(cat "$RUN_ROOT/host/anchor-signer-password")
@@ -768,6 +805,9 @@ if (( DATA_PRESERVATION_MODE )); then
     --origin "http://127.0.0.1:$API_PORT" \
     --token-file "$RUN_ROOT/secrets/g7_preservation_source_token" \
     --signing-key-file "$RUN_ROOT/host/ed25519.pem" \
+    --trust-dir "$RUN_ROOT/host/preservation-trust-sink-unavailable" \
+    --freshness-seconds 900 --volume-set-digest "$PRESERVATION_VOLUME_SET_DIGEST" --schema-head-digest "$PRESERVATION_SCHEMA_HEAD_DIGEST" \
+    --key-valid-from "$PRESERVATION_KEY_VALID_FROM" --key-valid-until "$PRESERVATION_KEY_VALID_UNTIL" \
     --report-dir "$RUN_ROOT/host/preservation-reports-sink-unavailable" \
     --key-id g7-preservation-fixture --deployment-id g7-local --recovery-epoch 1 \
     --storage-generation "$PRESERVATION_STORAGE_GENERATION" --environment local \
@@ -779,6 +819,7 @@ if (( DATA_PRESERVATION_MODE )); then
   chmod 0600 "$EVIDENCE/preservation-sink-unavailable-inventory.stdout" \
     "$EVIDENCE/preservation-sink-unavailable-inventory.stderr" \
     "$EVIDENCE/preservation-sink-unavailable-source-metadata.json"
+  cp -a "$RUN_ROOT/host/preservation-trust" "$RUN_ROOT/host/preservation-trust-evidence-unavailable"
   mkdir -m 0755 "$RUN_ROOT/host/preservation-reports-evidence-unavailable"
   EVIDENCE_PROXY_PORT=$(choose_port 19091 29091 39091 49091 59091)
   command node "$ROOT/tools/g7_preservation_evidence_fault_proxy.mjs" \
@@ -798,6 +839,9 @@ if (( DATA_PRESERVATION_MODE )); then
     --origin "http://127.0.0.1:$EVIDENCE_PROXY_PORT" \
     --token-file "$RUN_ROOT/secrets/g7_preservation_source_token" \
     --signing-key-file "$RUN_ROOT/host/ed25519.pem" \
+    --trust-dir "$RUN_ROOT/host/preservation-trust-evidence-unavailable" \
+    --freshness-seconds 900 --volume-set-digest "$PRESERVATION_VOLUME_SET_DIGEST" --schema-head-digest "$PRESERVATION_SCHEMA_HEAD_DIGEST" \
+    --key-valid-from "$PRESERVATION_KEY_VALID_FROM" --key-valid-until "$PRESERVATION_KEY_VALID_UNTIL" \
     --report-dir "$RUN_ROOT/host/preservation-reports-evidence-unavailable" \
     --key-id g7-preservation-fixture --deployment-id g7-local --recovery-epoch 1 \
     --storage-generation "$PRESERVATION_STORAGE_GENERATION" --environment local \
@@ -842,6 +886,9 @@ EVIDENCEFAULTASSERT
       --origin "http://127.0.0.1:$API_PORT" \
       --token-file "$RUN_ROOT/secrets/g7_preservation_source_token" \
       --signing-key-file "$RUN_ROOT/host/ed25519.pem" \
+    --trust-dir "$RUN_ROOT/host/preservation-trust" \
+    --freshness-seconds 900 --volume-set-digest "$PRESERVATION_VOLUME_SET_DIGEST" --schema-head-digest "$PRESERVATION_SCHEMA_HEAD_DIGEST" \
+    --key-valid-from "$PRESERVATION_KEY_VALID_FROM" --key-valid-until "$PRESERVATION_KEY_VALID_UNTIL" \
       --report-dir "$RUN_ROOT/host/preservation-reports-source-unavailable" \
       --key-id g7-preservation-fixture --deployment-id g7-local --recovery-epoch 1 \
       --storage-generation "$PRESERVATION_STORAGE_GENERATION" --environment local \
@@ -872,6 +919,22 @@ EVIDENCEFAULTASSERT
   PRESERVATION_STORAGE_GENERATION=$(python3 -c 'import uuid;print(uuid.uuid4())')
   REPLACEMENT_REPORT_DIR="$RUN_ROOT/host/preservation-reports-replacement"
   mkdir -m 0755 "$REPLACEMENT_REPORT_DIR"
+  cp -a "$RUN_ROOT/host/preservation-reports/snapshots" "$REPLACEMENT_REPORT_DIR/snapshots"
+  # Advance the independently signed generation before replacement starts
+  # and before any source/export/readback operation uses that generation.
+  uv run python "$ROOT/tools/g7_preservation_inventory.py" \
+    --origin "http://127.0.0.1:$API_PORT" \
+    --token-file "$RUN_ROOT/secrets/g7_preservation_source_token" \
+    --signing-key-file "$RUN_ROOT/host/ed25519.pem" \
+    --trust-dir "$RUN_ROOT/host/preservation-trust" \
+    --report-dir "$REPLACEMENT_REPORT_DIR" \
+    --freshness-seconds 900 --volume-set-digest "$PRESERVATION_VOLUME_SET_DIGEST" --schema-head-digest "$PRESERVATION_SCHEMA_HEAD_DIGEST" \
+    --key-valid-from "$PRESERVATION_KEY_VALID_FROM" --key-valid-until "$PRESERVATION_KEY_VALID_UNTIL" \
+    --provision-controller --provision-controller-only \
+    --key-id g7-preservation-fixture --deployment-id g7-local --recovery-epoch 1 \
+    --storage-generation "$PRESERVATION_STORAGE_GENERATION" --environment local \
+    --source-family local --source-account-id g7-local --scope-key all \
+    >"$EVIDENCE/replacement-controller-provision.stdout" 2>"$EVIDENCE/replacement-controller-provision.stderr"
   python3 - "$RUN_ROOT/container.env" "$PRESERVATION_STORAGE_GENERATION" \
       "$REPLACEMENT_REPORT_DIR" <<'PRESENVUPDATE'
 import sys
@@ -888,6 +951,7 @@ PRESENVUPDATE
     --mount "type=volume,src=${PRESERVATION_VOLUME_NAMES[0]},dst=/var/lib/postgresql/data"
     --mount "type=volume,src=${PRESERVATION_VOLUME_NAMES[1]},dst=/app/media"
     --mount "type=volume,src=${PRESERVATION_VOLUME_NAMES[2]},dst=/opt/uvm/state"
+    --mount "type=bind,src=$RUN_ROOT/host/preservation-trust,dst=/run/uvm-g7-preservation-trust,readonly"
     --mount "type=bind,src=$REPLACEMENT_REPORT_DIR,dst=/run/uvm-g7-preservation-reports-replacement,readonly"
   )
   docker stop --time 30 "$CONTAINER" >"$EVIDENCE/pre-replacement-stop.txt"
@@ -949,6 +1013,10 @@ PRESENVUPDATE
     --origin "http://127.0.0.1:$API_PORT" \
     --token-file "$RUN_ROOT/secrets/g7_preservation_source_token" \
     --signing-key-file "$RUN_ROOT/host/ed25519.pem" \
+    --trust-dir "$RUN_ROOT/host/preservation-trust" \
+    --freshness-seconds 900 --volume-set-digest "$PRESERVATION_VOLUME_SET_DIGEST" --schema-head-digest "$PRESERVATION_SCHEMA_HEAD_DIGEST" \
+    --key-valid-from "$PRESERVATION_KEY_VALID_FROM" --key-valid-until "$PRESERVATION_KEY_VALID_UNTIL" \
+    --provision-controller \
     --previous-report "$EVIDENCE/preservation-signed-report.json" \
     --report-dir "$REPLACEMENT_REPORT_DIR" \
     --key-id g7-preservation-fixture --deployment-id g7-local --recovery-epoch 1 \
@@ -999,6 +1067,7 @@ PRESERVATIONCONTINUITY
     node "$ROOT/tools/g7_preservation_live_readback.mjs" \
       --origin "http://127.0.0.1:$API_PORT" \
       --storage-state "$RUN_ROOT/host/preservation-session.json" \
+      --previous-readback "$EVIDENCE/preservation-public-readback.json" \
       --output "$EVIDENCE/preservation-replacement-public-readback.json" \
       >"$EVIDENCE/preservation-replacement-public-readback.stdout" \
       2>"$EVIDENCE/preservation-replacement-public-readback.stderr"

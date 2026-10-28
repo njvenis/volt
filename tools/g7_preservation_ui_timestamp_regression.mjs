@@ -6,11 +6,17 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 
 const [actualSummaryPath, normalizedSummaryPath, normalizedPagePath] = process.argv.slice(2);
-if (!normalizedPagePath) throw new Error('usage: node tool.mjs actual-summary normalized-summary normalized-page');
+if (!normalizedPagePath && actualSummaryPath !== '--summary-only') throw new Error('usage: node tool.mjs actual-summary normalized-summary normalized-page');
 const output = join(tmpdir(), `g7-preservation-parser-${process.pid}.cjs`);
 await build({entryPoints:['ui/src/preservation-api.ts'],bundle:true,platform:'node',format:'cjs',outfile:output,logLevel:'silent'});
 const parser=createRequire(import.meta.url)(output);
 await unlink(output);
+if (actualSummaryPath === '--summary-only') {
+  const summary=JSON.parse(await readFile(normalizedSummaryPath,'utf8'));
+  assert.deepEqual(parser.parseSummary(structuredClone(summary),summary.scope),summary);
+  console.log(JSON.stringify({actual_summary_accepted:true}));
+  process.exit(0);
+}
 const actual=JSON.parse(await readFile(actualSummaryPath,'utf8'));
 assert.throws(()=>parser.parseSummary(structuredClone(actual),actual.scope),error=>error?.code==='invalid_response');
 const summary=JSON.parse(await readFile(normalizedSummaryPath,'utf8'));

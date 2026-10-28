@@ -205,6 +205,8 @@ class IngestionStore:
             "quality_inputs": {"scope_coverage": _jsonable(run.scope_coverage), "freshness": _jsonable(run.freshness)},
         }
         with self.engine.begin() as c:
+            from uvm.assessment.policy_lock import lock_policy
+            lock_policy(c)
             schedule_row = c.execute(sa.select(collection_schedules).where(
                 collection_schedules.c.schedule_id == run.schedule.schedule_id,
                 collection_schedules.c.revision == run.schedule.revision)).mappings().first()
@@ -313,6 +315,27 @@ class IngestionStore:
                 c.execute(ingestion_evidence.insert().values(evidence_id=_id(eid, "evidence_id"), schema_version=1,
                     run_id=run.run_id, run_revision=run.revision, evidence_ref=ref, sha256=digest,
                     byte_size=byte_size, kind="page", registered_at=created_at))
+            from uvm.persistence.assessment_schema import assessment_audit_events, assessment_policy
+            event_id = str(uuid.uuid5(uuid.UUID(run.run_id), f"scanner-checkpoint:{run.revision}"))
+            sequence = c.execute(sa.select(sa.func.coalesce(sa.func.max(
+                assessment_audit_events.c.event_sequence), 0) + 1)).scalar_one()
+            policy_revision = c.execute(sa.select(assessment_policy.c.revision).where(
+                assessment_policy.c.policy_id == 1)).scalar_one_or_none() or 0
+            c.execute(assessment_audit_events.insert().values(
+                event_id=event_id, event_sequence=sequence, actor_id="scanner-collector",
+                actor_kind="service", origin="scanner_collection", action="scanner.checkpoint",
+                target_id=run.run_id, before_value={"revision": run.revision - 1},
+                after_value={"revision": run.revision, "state": run.state,
+                    "facts_sha256": hashlib.sha256(_fact_key(values["facts_snapshot"]).encode()).hexdigest(),
+                    "provenance_sha256": hashlib.sha256(_fact_key(values["provenance_snapshot"]).encode()).hexdigest()},
+                membership_ids=[], membership_revision=run.revision,
+                rationale="Durable scanner checkpoint", evidence_ref="scanner-checkpoint:" + event_id,
+                policy_revision=policy_revision, identity_revision=0,
+                occurred_at=created_at, received_at=created_at,
+                correlation_id=run.run_id, command_id=event_id,
+                authorization_context={"source_scope": {"source_family": run.source_family,
+                    "source_account_id": run.source_account_id, "scope_key": run.scope_key},
+                    "service": "scanner-collector"}))
         return "created"
 
     def read_run(self, run_id, revision=None):

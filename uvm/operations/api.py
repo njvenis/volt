@@ -1539,6 +1539,7 @@ def install_observer_settings_routes(app: FastAPI) -> None:
             events.append({"event_id": str(event["event_id"]),
                 "event_sequence": int(event["event_sequence"]),
                 "event_digest": event_digest(event),
+                "event_digest_v2": event_digest(event, "g7-audit-anchor/v2"),
                 "received_at": _now_text(row["received_at"]),
                 "sink_receipt": row["sink_receipt"],
                 "acknowledged_at": _now_text(row["acknowledged_at"])})

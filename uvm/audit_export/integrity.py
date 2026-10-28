@@ -8,7 +8,7 @@ change the retained inventory.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import hashlib
 import json
 from typing import Any, Iterator
@@ -19,13 +19,24 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 
-ANCHOR_VERSION = "g7-audit-anchor/v1"
+ANCHOR_VERSION = "g7-audit-anchor/v2"
 INCIDENT_VERSION = "g7-operations-incident/v1"
 DEPLOYMENT_ID = "uvm-local-disposable-v1"
 
 
-def canonical_event(event: dict[str, Any]) -> bytes:
+def canonical_event(event: dict[str, Any], version: str = "g7-audit-anchor/v1") -> bytes:
     """Return the versioned complete-event representation used by anchors."""
+    if version not in {"g7-audit-anchor/v1", "g7-audit-anchor/v2"}:
+        raise ValueError("unsupported audit canonicalization version")
+    if version == "g7-audit-anchor/v2":
+        from uvm.operations.preservation import utc_timestamp
+        event = dict(event)
+        for field in ("occurred_at", "received_at"):
+            if field in event:
+                value = event[field]
+                if isinstance(value, str):
+                    value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                event[field] = utc_timestamp(value)
     def normalise(value):
         if isinstance(value, datetime):
             if value.tzinfo is None or value.utcoffset() is None:
@@ -42,8 +53,46 @@ def canonical_event(event: dict[str, Any]) -> bytes:
         separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 
-def event_digest(event: dict[str, Any]) -> str:
-    return hashlib.sha256(canonical_event(event)).hexdigest()
+def event_digest(event: dict[str, Any], version: str = "g7-audit-anchor/v1") -> str:
+    return hashlib.sha256(canonical_event(event, version)).hexdigest()
+
+
+class LegacyPreimageUnavailable(ValueError):
+    def __init__(self): super().__init__('legacy_preimage_unavailable')
+
+
+def legacy_event_digest(event: dict[str, Any], metadata: dict | None) -> str:
+    """Reconstruct v1 input types/format from independently retained safe facts.
+
+    Never infer the original representation by trying candidate digests. Values
+    come from the authorized current payload; metadata contains no time values.
+    """
+    if not isinstance(metadata, dict) or not isinstance(metadata.get('legacy_time_preimage'), dict):
+        raise LegacyPreimageUnavailable()
+    modes = metadata['legacy_time_preimage']
+    if set(modes) != {'occurred_at', 'received_at'}: raise LegacyPreimageUnavailable()
+    reconstructed = dict(event)
+    for field in ('occurred_at', 'received_at'):
+        mode = modes[field]; value = event.get(field)
+        try:
+            if isinstance(value, str): value = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+                raise LegacyPreimageUnavailable()
+            if mode == {'kind': 'datetime'}:
+                reconstructed[field] = value
+            elif (isinstance(mode, dict) and set(mode) == {'kind','timespec','offset_minutes','zone'}
+                    and mode['kind']=='string' and mode['timespec'] in {'auto','seconds','milliseconds','microseconds'}
+                    and type(mode['offset_minutes']) is int and -1439 <= mode['offset_minutes'] <= 1439
+                    and mode['zone'] in {'Z','offset'} and (mode['zone']!='Z' or mode['offset_minutes']==0)):
+                if (mode['timespec']=='seconds' and value.microsecond
+                        or mode['timespec']=='milliseconds' and value.microsecond % 1000):
+                    raise LegacyPreimageUnavailable()
+                rendered=value.astimezone(timezone(timedelta(minutes=mode['offset_minutes']))).isoformat(timespec=mode['timespec'])
+                reconstructed[field]=rendered.replace('+00:00','Z') if mode['zone']=='Z' else rendered
+            else: raise LegacyPreimageUnavailable()
+        except (KeyError, TypeError, ValueError):
+            raise LegacyPreimageUnavailable() from None
+    return event_digest(reconstructed, 'g7-audit-anchor/v1')
 
 
 def advisory_key(deployment_id: str, sink_id: str, event_id: str) -> int:
@@ -122,7 +171,7 @@ def anchor_payload(authority: AuditAnchorAuthority, *, sink_id: str,
     with authority.locked(sink_id, event_id) as lease:
         if lease.get() is not None:
             return {"status": "already-anchored", "event_id": event_id}
-        if event_digest(event) != event_digest(sink_payload):
+        if event_digest(event, ANCHOR_VERSION) != event_digest(sink_payload, ANCHOR_VERSION):
             lease.anomaly("siem_integrity", {"reason": "source_sink_mismatch"})
             raise RuntimeError("source and SIEM differ; event was not anchored")
         conn = lease.connection
@@ -131,6 +180,6 @@ def anchor_payload(authority: AuditAnchorAuthority, *, sink_id: str,
              sink_receipt,affected_scope,anchored_at,contract_version)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (authority.deployment_id, sink_id, event_id, int(event["event_sequence"]),
-             event_digest(event), sink_receipt, affected_scope,
+             event_digest(event, ANCHOR_VERSION), sink_receipt, affected_scope,
              anchored_at or datetime.now(timezone.utc), ANCHOR_VERSION))
     return {"status": "anchored", "event_id": event_id}

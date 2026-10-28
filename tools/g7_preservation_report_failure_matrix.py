@@ -195,94 +195,23 @@ def main() -> int:
     key = serialization.load_pem_private_key(key_data, password=None)
     if not isinstance(key, Ed25519PrivateKey):
         raise ValueError("invalid_fixture_signing_key")
-    cases = ("healthy_cursor_binding", "untrusted_signature", "expired_report", "wrong_generation", "incomplete_source_inventory",
-        "source_one_member_missing", "source_all_expected_missing", "source_bytes_changed",
-        "audit_sink_event_missing", "audit_sink_event_changed", "audit_all_sink_events_missing",
-        "audit_established_receipt_missing", "audit_established_receipt_changed",
-        "audit_anchor_missing", "audit_anchor_changed")
+    # These are report-trust attacks only. Store reconciliation is exercised
+    # separately against actual copied stores, never fabricated signed outcomes.
+    cases = ("healthy_cursor_binding", "untrusted_signature", "expired_report", "wrong_generation")
     results = []
     backup = evidence / "preservation-report-original.json"
     backup.write_bytes(original_bytes); backup.chmod(0o600)
     try:
         for case in cases:
             negative, expected = mutate(original, case, key)
+            if case != "healthy_cursor_binding":
+                expected["reasons"]["product.audit_history"] = "audit_scope_incomplete"
             expected_path = evidence / f"preservation-negative-{case}-expect.json"
             negative_path = evidence / f"preservation-negative-{case}-signed.json"
             output_path = evidence / f"preservation-negative-{case}-public.json"
             expected_path.write_bytes(canonical_json(expected) + b"\n"); expected_path.chmod(0o600)
             negative_bytes = canonical_json(negative) + b"\n"
             negative_path.write_bytes(negative_bytes); negative_path.chmod(0o600)
-            swap = report_path.with_name(".g7-negative-report.json")
-            swap.write_bytes(negative_bytes); swap.chmod(0o644); os.replace(swap, report_path)
-            try:
-                env = dict(os.environ)
-                env["PLAYWRIGHT_BROWSERS_PATH"] = "/home/nicho/.cache/ms-playwright"
-                env["CHROMIUM_EXECUTABLE_PATH"] = "/home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome"
-                command = ["node", str(Path(__file__).with_suffix(".mjs")),
-                    "--origin", args.origin, "--storage-state", args.storage_state,
-                    "--expect", str(expected_path), "--output", str(output_path)]
-                result = subprocess.run(command, capture_output=True, text=True, env=env, check=False)
-                (evidence / f"preservation-negative-{case}.stdout").write_text(result.stdout)
-                (evidence / f"preservation-negative-{case}.stderr").write_text(result.stderr)
-                if result.returncode:
-                    raise RuntimeError("public_negative_assertion_failed:" + case)
-                results.append(json.loads(result.stdout))
-            finally:
-                restore = report_path.with_name(".g7-original-report.json")
-                restore.write_bytes(original_bytes); restore.chmod(0o644); os.replace(restore, report_path)
-        if args.evidence_unavailable_report:
-            case = "observed_evidence_store_unavailable"
-            negative_bytes = Path(args.evidence_unavailable_report).read_bytes()
-            negative = json.loads(negative_bytes)
-            negative_path = evidence / f"preservation-negative-{case}-signed.json"
-            negative_path.write_bytes(negative_bytes); negative_path.chmod(0o600)
-            expected = {"case": case,
-                "states": {"product.source_evidence": "failed",
-                    "product.audit_history": "verified", "operational.scanner_collection": "failed"},
-                "nullCountClasses": ["product.source_evidence", "operational.scanner_collection"],
-                "reasons": {"product.source_evidence": "evidence_unreadable",
-                    "operational.scanner_collection": "evidence_unreadable"}}
-            expected_path = evidence / f"preservation-negative-{case}-expect.json"
-            output_path = evidence / f"preservation-negative-{case}-public.json"
-            expected_path.write_bytes(canonical_json(expected) + b"\n"); expected_path.chmod(0o600)
-            swap = report_path.with_name(".g7-negative-report.json")
-            swap.write_bytes(negative_bytes); swap.chmod(0o644); os.replace(swap, report_path)
-            try:
-                env = dict(os.environ)
-                env["PLAYWRIGHT_BROWSERS_PATH"] = "/home/nicho/.cache/ms-playwright"
-                env["CHROMIUM_EXECUTABLE_PATH"] = "/home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome"
-                command = ["node", str(Path(__file__).with_suffix(".mjs")),
-                    "--origin", args.origin, "--storage-state", args.storage_state,
-                    "--expect", str(expected_path), "--output", str(output_path)]
-                result = subprocess.run(command, capture_output=True, text=True, env=env, check=False)
-                (evidence / f"preservation-negative-{case}.stdout").write_text(result.stdout)
-                (evidence / f"preservation-negative-{case}.stderr").write_text(result.stderr)
-                if result.returncode:
-                    raise RuntimeError("public_negative_assertion_failed:" + case)
-                results.append(json.loads(result.stdout))
-            finally:
-                restore = report_path.with_name(".g7-original-report.json")
-                restore.write_bytes(original_bytes); restore.chmod(0o644); os.replace(restore, report_path)
-        if args.sink_unavailable_report:
-            case = "observed_sink_unavailable"
-            negative_bytes = Path(args.sink_unavailable_report).read_bytes()
-            negative = json.loads(negative_bytes)
-            negative_path = evidence / f"preservation-negative-{case}-signed.json"
-            negative_path.write_bytes(negative_bytes); negative_path.chmod(0o600)
-            expected = {"case": case,
-                "states": {"product.source_evidence": "verified",
-                    "product.audit_history": "unknown", "operational.scanner_collection": "verified"},
-                "nullCountClasses": ["product.audit_history"],
-                "reasons": {"product.audit_history": "sink_unavailable"},
-                "auditCopy": {"state": "unknown", "expected_events": None,
-                    "matching_events": None, "missing_events": None, "changed_events": None,
-                    "unexpected_events": None, "expected_receipts": None,
-                    "matching_receipts": None, "missing_receipts": None,
-                    "changed_receipts": None, "unexpected_receipts": None,
-                    "pending_receipts": None}}
-            expected_path = evidence / f"preservation-negative-{case}-expect.json"
-            output_path = evidence / f"preservation-negative-{case}-public.json"
-            expected_path.write_bytes(canonical_json(expected) + b"\n"); expected_path.chmod(0o600)
             swap = report_path.with_name(".g7-negative-report.json")
             swap.write_bytes(negative_bytes); swap.chmod(0o644); os.replace(swap, report_path)
             try:

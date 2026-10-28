@@ -47,7 +47,14 @@ def _scope(value: dict) -> tuple[str, str, str]:
 
 def _authority(engine, principal: dict, scope: tuple[str, str, str], action: str,
                *, deployment_id: str | None = None, target_id: str | None = None,
-               connection=None, service_adapter: bool = False) -> tuple[bool, str | None]:
+               connection=None, service_adapter: bool = False, attribution_proven: bool = False) -> tuple[bool, str | None]:
+    connection = connection if connection is not None else principal.get("preservation_policy_connection")
+    if connection is None:
+        from uvm.assessment.policy_lock import lock_policy
+        with engine.begin() as current:
+            lock_policy(current, shared=True)
+            return _authority(engine, principal, scope, action, deployment_id=deployment_id,
+                target_id=target_id, connection=current, service_adapter=service_adapter, attribution_proven=attribution_proven)
     context = principal.get("context")
     configured_service = os.environ.get("UVM_G7_SOURCE_ADAPTER_PRINCIPAL")
     service_context = context is not None and context.credential_mode == "service_bearer"
@@ -79,7 +86,12 @@ def _authority(engine, principal: dict, scope: tuple[str, str, str], action: str
         policy = row["document"]
         state = native_state(policy)
         principal_id = context.principal_id if context is not None else configured_service
+        if policy.get("principals", {}).get(principal_id, {}).get("enabled") is False:
+            return False, None
         if service_context:
+            service_access = effective_access(policy, principal_id)
+            service_groups = set(service_access[0]) if service_access is not None else set()
+            service_deny_ids = {principal_id, *service_groups, "*"}
             configured_grants = principal.get("service_grants", ())
             matching_service = []
             for grant in configured_grants:
@@ -98,7 +110,7 @@ def _authority(engine, principal: dict, scope: tuple[str, str, str], action: str
             service_denies = []
             for denial in policy.get("denies", []):
                 if (not isinstance(denial, dict)
-                        or denial.get("principal_id") not in {principal_id, "*"}
+                        or denial.get("principal_id") not in service_deny_ids
                         or ("*" not in denial.get("actions", [])
                             and action not in denial.get("actions", []))):
                     continue
@@ -121,7 +133,7 @@ def _authority(engine, principal: dict, scope: tuple[str, str, str], action: str
                 "denies": sorted((item.get("deny_id"), item.get("principal_id"),
                     item.get("actions"), item.get("target_ids"), item.get("source_scopes"))
                     for item in policy.get("denies", []) if isinstance(item, dict)
-                    and item.get("principal_id") in {principal_id, "*"}
+                    and item.get("principal_id") in service_deny_ids
                     and ("*" in item.get("actions", []) or action in item.get("actions", [])))}
             fingerprint = hashlib.sha256(json.dumps(authority, sort_keys=True,
                 separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
@@ -150,6 +162,31 @@ def _authority(engine, principal: dict, scope: tuple[str, str, str], action: str
                     continue
                 if deployment_id is not None and deployment_id not in permission.get("deployment_scopes", []):
                     continue
+                selectors = permission.get("target_scope", {})
+                families = selectors.get("source_families", [])
+                if families and "*" not in families and scope[0] not in families:
+                    continue
+                if target_id is not None:
+                    from uvm.assessment.api import _complete_target_grants, _scoped_grants, _target_scoped_grants
+                    from uvm.auth.schema import AUTHORITY_CONTEXT
+                    token = AUTHORITY_CONTEXT.set(context)
+                    try:
+                        native_grants = (_target_scoped_grants(connection, _scoped_grants(policy,
+                            principal_id, action, target_id, scope[0], include_unresolved=True), target_id)
+                            if attribution_proven else _complete_target_grants(connection, policy, principal_id,
+                                action, target_id, scope[0]))
+                    finally:
+                        AUTHORITY_CONTEXT.reset(token)
+                    if permission.get("role_id") not in {g.get("role_id") for g in native_grants}:
+                        continue
+                else:
+                    limits = permission.get("limits", {})
+                    # A tuple/deployment supplies no environment/service facts.
+                    # Restricted selectors cannot be widened by treating missing facts as a match.
+                    if any(values and "*" not in values for values in (
+                            selectors.get("environments", []), selectors.get("service_ids", []),
+                            limits.get("allowed_environments", []), limits.get("allowed_service_ids", []))):
+                        continue
                 matching.append((group_id, permission))
         if target_id is not None:
             matching = [(gid, item) for gid, item in matching
@@ -163,7 +200,9 @@ def _authority(engine, principal: dict, scope: tuple[str, str, str], action: str
                     and ("*" in denial.get("target_ids", [])
                          or any(gid in denial.get("target_ids", []) for gid, _ in matching)
                          or (deployment_id and deployment_id in denial.get("target_ids", []))
-                         or (target_id and target_id in denial.get("target_ids", [])))):
+                         or (target_id and target_id in denial.get("target_ids", []))
+                         or scope in {tuple(value.get(k) for k in ("source_family", "source_account_id", "scope_key"))
+                             for value in denial.get("source_scopes", []) if isinstance(value, dict)})):
                 return False, None
         if not matching:
             return False, None
@@ -185,9 +224,10 @@ def _authority(engine, principal: dict, scope: tuple[str, str, str], action: str
                   for value in policy.get("native_authority", {}).get("access_groups", {}).get(group_id, {}).get("source_scopes", [])])]))
                 for group_id in groups),
             "grants": sorted((gid, item.get("permission_id"), item.get("role_id"), item.get("action"),
-                item.get("deployment_scopes")) for gid, item in matching)}
+                item.get("deployment_scopes"), item.get("target_scope"), item.get("limits"),
+                item.get("separation_of_duties")) for gid, item in matching)}
         authority["denies"] = sorted((item.get("deny_id"), item.get("principal_id"),
-            item.get("actions"), item.get("target_ids")) for item in denies
+            item.get("actions"), item.get("target_ids"), item.get("source_scopes")) for item in denies
             if isinstance(item, dict) and item.get("principal_id") in deny_ids
             and ("*" in item.get("actions", []) or action in item.get("actions", [])))
         fingerprint = hashlib.sha256(json.dumps(authority, sort_keys=True,
@@ -205,7 +245,7 @@ def _report_files() -> list[Path]:
         return []
     try:
         return [entry for entry in Path(root).iterdir()
-            if entry.name.endswith(".json") and len(entry.name) == 69]
+            if entry.name.endswith(".json") and len(entry.name) == 69] + list((Path(root) / "snapshots").glob("*.json"))
     except OSError:
         return []
 
@@ -213,32 +253,16 @@ def _report_files() -> list[Path]:
 def _find_snapshot(snapshot_id: str):
     if not re_uuid(snapshot_id):
         return None, None
-    try:
-        epoch_raw = os.environ.get("UVM_G7_RECOVERY_EPOCH")
-        if epoch_raw is None or not epoch_raw.isascii() or not epoch_raw.isdecimal():
-            return None, None
-        expected_epoch = int(epoch_raw)
-    except (ValueError, AttributeError):
-        return None, None
     for path in _report_files():
         try:
             raw = json.loads(_read_regular(path, 32 * 1024 * 1024))
-            from uvm.operations.preservation import _verify
-            payload = _verify(raw, Path(os.environ["UVM_G7_PRESERVATION_PUBLIC_KEY_FILE"]), "readcheck-report-v1")
-            if payload.get("snapshot_id") == snapshot_id:
-                signature = raw.get("signature", {})
-                if (payload.get("contract_id") != "g7-data-preservation/v1"
-                        or payload.get("purpose") != "readcheck-report-v1"
-                        or payload.get("deployment_id") != os.environ.get("UVM_G7_DEPLOYMENT_ID")
-                        or type(payload.get("recovery_epoch")) is not int
-                        or payload.get("recovery_epoch") != expected_epoch
-                        or payload.get("storage_generation") != os.environ.get("UVM_G7_STORAGE_GENERATION")
-                        or signature.get("key_id") != os.environ.get("UVM_G7_PRESERVATION_KEY_ID")):
-                    return None, None
-                scope = _scope(payload.get("scope_object")) if isinstance(payload.get("scope_object"), dict) else tuple(payload.get("scope", []))
-                if len(scope) == 3:
-                    return payload, scope
-        except Exception:
+            scope = tuple(raw.get("payload", {}).get("scope", ()))
+            if len(scope) != 3:
+                continue
+            payload, _ = load_report(scope, allow_expired=True, report_path=path, allow_previous=True)
+            if payload is not None and payload.get("snapshot_id") == snapshot_id:
+                return payload, scope
+        except (OSError, ValueError, TypeError):
             continue
     return None, None
 
@@ -289,8 +313,17 @@ def _read_cursor(secret: bytes, token: str):
 
 
 def install_preservation_routes(app, engine, auth, cursor_secret: bytes):
+    def current_authority(principal=Depends(auth)):
+        from uvm.assessment.policy_lock import lock_policy
+        try:
+            with engine.begin() as connection:
+                lock_policy(connection, shared=True)
+                yield {**principal, "preservation_policy_connection": connection}
+        except sa.exc.SQLAlchemyError:
+            _error(503, "dependency_unavailable", "Current permission authority is unavailable")
+
     @app.post("/internal/g7/preservation/source-snapshot")
-    async def preservation_source_snapshot(request: Request, principal=Depends(auth)):
+    async def preservation_source_snapshot(request: Request, principal=Depends(current_authority)):
         """Internal host adapter; never a browser DTO or a raw evidence route."""
         expected_subject = os.environ.get("UVM_G7_SOURCE_ADAPTER_SUBJECT")
         expected_issuer = os.environ.get("UVM_G7_SOURCE_ADAPTER_ISSUER")
@@ -357,7 +390,7 @@ def install_preservation_routes(app, engine, auth, cursor_secret: bytes):
     @app.get("/api/v1/operations/preservation")
     def preservation_summary(request: Request, source_family: str = Query(...),
             source_account_id: str = Query(...), scope_key: str = Query(...),
-            principal=Depends(auth)):
+            principal=Depends(current_authority)):
         if set(request.query_params) != {"source_family", "source_account_id", "scope_key"}:
             _error(400, "invalid_request", "Unknown query parameter")
         scope = (source_family, source_account_id, scope_key)
@@ -369,7 +402,7 @@ def install_preservation_routes(app, engine, auth, cursor_secret: bytes):
         payload, trust_reason = load_report(scope)
         classes = class_map(payload, scope, trust_reason or "baseline_missing")
         deployment_id = (payload or {}).get("deployment_id") or os.environ.get("UVM_G7_DEPLOYMENT_ID", "")
-        audit_ok = True
+        audit_ok = payload is not None
         audit_authorities = []
         audit_fingerprint = hashlib.sha256(b"no-audit-members").hexdigest()
         if payload:
@@ -389,14 +422,16 @@ def install_preservation_routes(app, engine, auth, cursor_secret: bytes):
                     audit_ok = False
                     break
                 for target in audit_targets:
-                    if not isinstance(target, dict):
+                    if not isinstance(target, dict) or target.get("kind") not in {"source", "deployment"}:
                         audit_ok = False; break
                     if target.get("kind") == "deployment":
                         permitted, grant_fingerprint = _authority(engine, principal, scope,
                             _DEPLOYMENT_AUDIT_ACTION, deployment_id=deployment_id)
-                    else:
+                    elif target.get("kind") == "source" and target.get("scope") == list(scope):
                         permitted, grant_fingerprint = _authority(engine, principal, scope,
-                            _AUDIT_ACTION, target_id=str(target.get("target_id", "")))
+                            _AUDIT_ACTION, target_id=str(target.get("target_id", "")), attribution_proven=True)
+                    else:
+                        audit_ok = False; break
                     if not permitted:
                         audit_ok = False; break
                     audit_authorities.append(grant_fingerprint)
@@ -410,6 +445,12 @@ def install_preservation_routes(app, engine, auth, cursor_secret: bytes):
         for class_id, _ in CLASSES:
             if class_id not in classes:
                 classes[class_id] = unknown_class(class_id, dict(CLASSES)[class_id], trust_reason or "baseline_untrusted")
+        environment = (payload or {}).get("environment") or os.environ.get("UVM_G7_PRESERVATION_ENVIRONMENT")
+        if not environment:
+            for dto in classes.values():
+                dto["reasons"] = sorted(set(dto["reasons"]) | {"environment_unlabelled"})
+                if isinstance(dto.get("audit_copy"), dict):
+                    dto["audit_copy"]["reasons"] = sorted(set(dto["audit_copy"]["reasons"]) | {"environment_unlabelled"})
         result = {"schema_version": 1, "scope": {"source_family": scope[0],
             "source_account_id": scope[1], "scope_key": scope[2]},
             "snapshot_id": (payload or {}).get("snapshot_id"),
@@ -420,7 +461,7 @@ def install_preservation_routes(app, engine, auth, cursor_secret: bytes):
                 if (payload or {}).get("valid_until") is not None else None,
             "authority_fingerprint": fingerprint, "audit_authority_fingerprint": audit_fingerprint,
             "mask_reasons": [] if audit_ok else ["audit_scope_incomplete"],
-            "environment": (payload or {}).get("environment"),
+            "environment": environment or None,
             "classes": [classes[key] for key, _ in CLASSES],
             "uncovered_classes": sorted(key for key, _ in CLASSES if classes[key]["state"] != "verified"),
             "elapsed_preservation": "unverified"}
@@ -429,7 +470,7 @@ def install_preservation_routes(app, engine, auth, cursor_secret: bytes):
     @app.get("/api/v1/operations/preservation/records")
     def preservation_records(request: Request, snapshot_id: str = Query(...),
             class_id: str = Query(...), limit: int = Query(50), cursor: str | None = None,
-            principal=Depends(auth)):
+            principal=Depends(current_authority)):
         if set(request.query_params) - {"snapshot_id", "class_id", "limit", "cursor"}:
             _error(400, "invalid_request", "Unknown query parameter")
         if not re_uuid(snapshot_id) or class_id not in _CLASS_IDS or not 1 <= limit <= 100:
@@ -442,6 +483,9 @@ def install_preservation_routes(app, engine, auth, cursor_secret: bytes):
             _error(404, "not_found", "Preservation snapshot not found")
         entry = next((item for item in payload.get("classes", [])
             if isinstance(item, dict) and item.get("class_id") == class_id), None)
+        validated = class_map(payload, scope).get(class_id, {})
+        if validated.get("state") not in {"verified", "gap"}:
+            _error(404, "not_found", "Preservation class not found")
         if entry is None or not isinstance(entry.get("members"), list):
             _error(404, "not_found", "Preservation class not found")
         if not isinstance(entry.get("dto"), dict) or entry["dto"].get("state") not in {"verified", "gap"}:
@@ -452,19 +496,27 @@ def install_preservation_routes(app, engine, auth, cursor_secret: bytes):
                 raise ValueError
         except (KeyError, ValueError, AttributeError, TypeError):
             _error(404, "not_found", "Preservation snapshot not found")
-        if snapshot_expiry <= datetime.now(UTC):
-            _error(409, "snapshot_expired", "Preservation snapshot has expired")
         if class_id == "product.audit_history":
             targets = entry.get("audit_targets")
             dto = entry.get("dto", {})
             if (not isinstance(targets, list) or not isinstance(dto, dict)
                     or (not targets and dto.get("expected_records") != 0)
-                    or not all(isinstance(t, dict) and _authority(engine, principal, scope,
+                    or not all(isinstance(t, dict) and (t.get("kind") == "deployment"
+                            or t.get("kind") == "source" and t.get("scope") == list(scope))
+                        and _authority(engine, principal, scope,
                         _DEPLOYMENT_AUDIT_ACTION if t.get("kind") == "deployment" else _AUDIT_ACTION,
                         deployment_id=payload.get("deployment_id") if t.get("kind") == "deployment" else None,
-                        target_id=str(t.get("target_id", "")) if t.get("kind") != "deployment" else None)[0]
+                        target_id=str(t.get("target_id", "")) if t.get("kind") != "deployment" else None,
+                        attribution_proven=t.get("kind") == "source")[0]
                         for t in targets)):
                 _error(404, "not_found", "Preservation class not found")
+        current_report, _ = load_report(scope)
+        if current_report is not None and current_report.get("snapshot_id") != snapshot_id:
+            _error(409, "snapshot_expired", "Preservation snapshot has been replaced")
+        if current_report is None and snapshot_expiry > datetime.now(UTC):
+            _error(404, "not_found", "Preservation snapshot not found")
+        if snapshot_expiry <= datetime.now(UTC):
+            _error(409, "snapshot_expired", "Preservation snapshot has expired")
         report_digest = hashlib.sha256(json.dumps(payload, sort_keys=True,
             separators=(",", ":")).encode()).hexdigest()
         after = ""
@@ -500,7 +552,7 @@ def install_preservation_routes(app, engine, auth, cursor_secret: bytes):
             "class_id": class_id, "items": page, "next_cursor": next_cursor}
 
     @app.get("/api/v1/ingestion/runs/{run_id}/revisions/{revision}")
-    def preservation_run_revision(run_id: str, revision: int, principal=Depends(auth)):
+    def preservation_run_revision(run_id: str, revision: int, principal=Depends(current_authority)):
         if not re_uuid(run_id) or revision < 1:
             _error(400, "invalid_request", "Run revision is invalid")
         with engine.connect() as connection:
@@ -532,13 +584,14 @@ def install_preservation_routes(app, engine, auth, cursor_secret: bytes):
             if run["expected_run_id"]:
                 transitions = connection.execute(sa.select(expected_run_events).where(
                     expected_run_events.c.expected_run_id == run["expected_run_id"],
-                    expected_run_events.c.run_id == run_id).order_by(expected_run_events.c.revision)).mappings().all()
+                    expected_run_events.c.run_id == run_id,
+                    expected_run_events.c.run_revision <= revision).order_by(expected_run_events.c.revision)).mappings().all()
         return _run_dto(dict(run), [dict(x) for x in attempts], [dict(x) for x in pages],
             [dict(x) for x in evidence], [dict(x) for x in transitions], fingerprint,
             cursor_secret)
 
     @app.get("/api/v1/operations/preservation/evidence/{evidence_id}")
-    def preservation_evidence(evidence_id: str, principal=Depends(auth)):
+    def preservation_evidence(evidence_id: str, principal=Depends(current_authority)):
         if not re_uuid(evidence_id):
             _error(404, "not_found", "Evidence not found")
         try:
@@ -563,12 +616,43 @@ def install_preservation_routes(app, engine, auth, cursor_secret: bytes):
             service_adapter=True)
         if not read_allowed or not evidence_allowed:
             _error(404, "not_found", "Evidence not found")
+        try:
+            from uvm.operations.preservation_streams import admitted_evidence
+            trust_root = os.environ.get("UVM_G7_PRESERVATION_TRUST_DIR")
+            verifier = os.environ.get("UVM_G7_PRESERVATION_PUBLIC_KEY_FILE")
+            expected = admitted_evidence(trust_root, verifier, os.environ["UVM_G7_DEPLOYMENT_ID"],
+                scope, evidence_id, key_id=os.environ.get("UVM_G7_PRESERVATION_KEY_ID")) if trust_root and verifier else None
+        except (OSError, ValueError, KeyError, TypeError):
+            _error(503, "evidence_store_unavailable", "Independent evidence inventory is unavailable")
+        # The dedicated independent capture credential may inspect a new object
+        # before admission. Public callers require prior independent membership.
+        context = principal.get("context")
+        capture_credential = (principal.get("name") == os.environ.get("UVM_G7_SOURCE_ADAPTER_PRINCIPAL")
+            and context is not None and context.credential_mode == "service_bearer")
+        if expected is None and not capture_credential:
+            _error(404, "not_found", "Evidence not found")
+        if expected is not None:
+            try:
+                from uvm.operations.preservation import _verify
+                controller_doc = json.loads(_read_regular(Path(trust_root) / "controller.json", 65536))
+                controller = _verify(controller_doc, Path(verifier), "deployment-controller-v1")
+                now = datetime.now(UTC)
+                if (controller_doc["signature"]["key_id"] != os.environ.get("UVM_G7_PRESERVATION_KEY_ID")
+                        or controller.get("deployment_id") != os.environ.get("UVM_G7_DEPLOYMENT_ID")
+                        or controller.get("storage_generation") != os.environ.get("UVM_G7_STORAGE_GENERATION")
+                        or controller.get("volume_set_digest") != os.environ.get("UVM_G7_VOLUME_SET_DIGEST")
+                        or controller.get("recovery_epoch") != int(os.environ["UVM_G7_RECOVERY_EPOCH"])
+                        or not datetime.fromisoformat(controller["key_valid_from"].replace("Z", "+00:00")) <= now
+                            < datetime.fromisoformat(controller["key_valid_until"].replace("Z", "+00:00"))):
+                    raise ValueError("independent_inventory_trust_invalid")
+            except Exception:
+                _error(503, "evidence_store_unavailable", "Independent evidence trust is unavailable")
+        if expected is not None and expected != (row["sha256"], row["byte_size"]):
+            _error(409, "evidence_changed", "Registered evidence differs from independent inventory")
         root_value = os.environ.get("UVM_G7_SOURCE_EVIDENCE_ROOT", "/opt/uvm/state/source-evidence")
         try:
             root = Path(root_value)
             root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        except FileNotFoundError:
-            _error(409, "evidence_missing", "Registered evidence bytes are missing")
         except OSError:
             _error(503, "evidence_store_unavailable", "Evidence storage is unavailable")
         try:

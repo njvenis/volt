@@ -409,60 +409,96 @@ class AuditExportSource:
 
 
 class DeploymentAuditExportSource:
-    """All-event exporter source guarded by the exact deployment service grant.
+    """Deployment export bound to one coherent watermark and authority context."""
 
-    This is deliberately separate from the legacy group-scoped G3 source. The
-    callback revalidates current deployment authority before every source read
-    or acknowledgement, so the deployment path cannot inherit a broader
-    browser/group projection.
-    """
+    def __init__(self, engine: Engine, authorize, *, sink_id="g7-siem",
+                 authorize_on_connection=False, deployment_id="synthetic", source_scope=(), service_id="synthetic"):
+        from uvm.audit_export.integrity import event_digest
+        self.engine, self._authorize, self.sink_id = engine, authorize, sink_id
+        self._authorize_on_connection = authorize_on_connection
+        self.authority_fingerprint = None
+        with self._operation() as connection:
+            # The same policy/append coordination used by audit writers prevents
+            # a partial sequence allocation from entering the captured context.
+            rows = connection.execute(sa.select(assessment_audit_events).order_by(
+                assessment_audit_events.c.event_sequence)).mappings().all()
+            self.watermark = max((int(row['event_sequence']) for row in rows), default=0)
+            self._expected = {str(row['event_id']): (int(row['event_sequence']),
+                event_digest(dict(row), "g7-audit-anchor/v2")) for row in rows}
+        import hashlib, json
+        self.context_id = hashlib.sha256(json.dumps([deployment_id, list(source_scope), service_id, "g7-data-preservation/v1",
+            self.authority_fingerprint, sink_id, self.watermark,
+            sorted(self._expected.items())], separators=(',', ':')).encode()).hexdigest()
 
-    def __init__(self, engine: Engine, authorize):
-        self.engine = engine
-        self._authorize = authorize
+    @contextmanager
+    def _operation(self):
+        with self.engine.begin() as connection:
+            acquire_policy_lock(connection, shared=True)
+            authority = self._authorize(connection) if self._authorize_on_connection else self._authorize()
+            if self.authority_fingerprint is not None and authority != self.authority_fingerprint:
+                raise PermissionError("deployment export authority context changed")
+            self.authority_fingerprint = authority
+            yield connection
 
     def authorize(self):
-        self._authorize()
+        with self._operation():
+            pass
+
+    def _checked_event(self, connection, event_id):
+        from uvm.audit_export.integrity import event_digest
+        expected = self._expected.get(str(event_id))
+        if expected is None:
+            raise PermissionError('audit event is outside the captured export context')
+        row = connection.execute(sa.select(assessment_audit_events).where(
+            assessment_audit_events.c.event_id == str(event_id))).mappings().one_or_none()
+        if row is None or (int(row['event_sequence']), event_digest(dict(row), "g7-audit-anchor/v2")) != expected:
+            raise ValueError('captured audit event is missing or changed')
+        return dict(row)
 
     def list_authorised_audit_page(self, limit: int, after_sequence: int = 0) -> list[dict]:
-        if isinstance(limit, bool) or not 1 <= limit <= 5000 or after_sequence < 0:
-            raise ValueError("invalid deployment audit page bounds")
-        self.authorize()
-        fields = ("event_id", "event_sequence", "actor_id", "actor_kind", "origin", "action",
-            "target_id", "before_value", "after_value", "membership_ids", "membership_revision",
-            "rationale", "evidence_ref", "policy_revision", "identity_revision", "occurred_at",
-            "received_at", "correlation_id", "command_id", "authorization_context")
-        query = (sa.select(*(assessment_audit_events.c[name] for name in fields))
-            .where(assessment_audit_events.c.event_sequence > after_sequence)
-            .order_by(assessment_audit_events.c.event_sequence).limit(limit))
-        with self.engine.connect() as connection:
-            return [dict(row) for row in connection.execute(query).mappings().all()]
+        if type(limit) is not int or not 1 <= limit <= 5000 or type(after_sequence) is not int or after_sequence < 0:
+            raise ValueError('invalid deployment audit page bounds')
+        with self._operation() as connection:
+            expected = sorted((sequence, event_id) for event_id, (sequence, _) in self._expected.items()
+                if sequence > after_sequence)[:limit]
+            return [self._checked_event(connection, event_id) for _, event_id in expected]
 
     def count_authorised_audit_events(self) -> int:
-        self.authorize()
-        with self.engine.connect() as connection:
-            return int(connection.execute(sa.select(sa.func.count()).select_from(
-                assessment_audit_events)).scalar_one())
+        with self._operation() as connection:
+            count = connection.execute(sa.select(sa.func.count()).select_from(assessment_audit_events)
+                .where(assessment_audit_events.c.event_sequence <= self.watermark)).scalar_one()
+            if count != len(self._expected):
+                raise ValueError('captured audit membership changed')
+            return len(self._expected)
 
     def get_sink_receipt(self, event_id, sink_id: str) -> str | None:
-        self.authorize()
-        with self.engine.connect() as connection:
+        if sink_id != self.sink_id:
+            raise PermissionError('sink differs from export context')
+        with self._operation() as connection:
+            self._checked_event(connection, event_id)
             return connection.execute(sa.select(assessment_sink_export_receipts.c.sink_receipt)
                 .where(assessment_sink_export_receipts.c.event_id == str(event_id),
                     assessment_sink_export_receipts.c.sink_id == sink_id)).scalar_one_or_none()
 
+    def acknowledgement_binding(self, payload):
+        from uvm.audit_export.integrity import event_digest
+        return {'event_sequence': int(payload['event_sequence']), 'payload_digest': event_digest(payload, 'g7-audit-anchor/v2'),
+            'watermark': self.watermark, 'context_id': self.context_id}
+
     def acknowledge_sink_export(self, event_id, sink_id: str, sink_receipt: str,
-                                acknowledged_at: datetime) -> bool:
-        self.authorize()
-        if not sink_id.strip() or not sink_receipt.strip():
-            raise ValueError("sink_id and sink_receipt must be non-empty")
+                                acknowledged_at: datetime, *, event_sequence: int,
+                                payload_digest: str, watermark: int, context_id: str) -> bool:
+        if (sink_id != self.sink_id or watermark != self.watermark or context_id != self.context_id
+                or self._expected.get(str(event_id)) != (event_sequence, payload_digest)
+                or sink_receipt != f'postgres:uvm_audit_export.events:{event_id}'):
+            raise ValueError('acknowledgement differs from captured export context')
         table = assessment_sink_export_receipts
-        with self.engine.begin() as connection:
-            event_exists = connection.execute(sa.select(assessment_audit_events.c.event_id)
-                .where(assessment_audit_events.c.event_id == str(event_id))).scalar_one_or_none()
-            if event_exists is None:
-                raise PermissionError("deployment audit event is unavailable")
-            inserted = connection.execute(pg_insert(table).values(event_id=str(event_id),
+        with self._operation() as connection:
+            self._checked_event(connection, event_id)
+            dialect_insert = pg_insert
+            if connection.dialect.name == 'sqlite':
+                from sqlalchemy.dialects.sqlite import insert as dialect_insert
+            inserted = connection.execute(dialect_insert(table).values(event_id=str(event_id),
                 sink_id=sink_id, sink_receipt=sink_receipt,
                 acknowledged_at=acknowledged_at.astimezone(timezone.utc))
                 .on_conflict_do_nothing(index_elements=[table.c.event_id, table.c.sink_id])
@@ -472,21 +508,21 @@ class DeploymentAuditExportSource:
             existing = connection.execute(sa.select(table.c.sink_receipt).where(
                 table.c.event_id == str(event_id), table.c.sink_id == sink_id)).scalar_one_or_none()
             if existing != sink_receipt:
-                raise ValueError("deployment audit receipt conflicts with the established receipt")
+                raise ValueError('deployment audit receipt conflicts with established receipt')
             return False
 
     def sink_backlog_count(self, sink_id: str) -> int:
-        self.authorize()
+        if sink_id != self.sink_id:
+            raise PermissionError('sink differs from export context')
         event, receipt = assessment_audit_events, assessment_sink_export_receipts
-        query = sa.select(sa.func.count()).select_from(event.outerjoin(receipt, sa.and_(
-            receipt.c.event_id == event.c.event_id, receipt.c.sink_id == sink_id))).where(
-                receipt.c.event_id.is_(None))
-        with self.engine.connect() as connection:
-            return int(connection.execute(query).scalar_one())
+        with self._operation() as connection:
+            return int(connection.execute(sa.select(sa.func.count()).select_from(
+                event.outerjoin(receipt, sa.and_(receipt.c.event_id == event.c.event_id,
+                    receipt.c.sink_id == sink_id))).where(event.c.event_sequence <= self.watermark,
+                        receipt.c.event_id.is_(None))).scalar_one())
 
     def backlog_count(self) -> int:
-        return self.sink_backlog_count("g7-siem")
-
+        return self.sink_backlog_count(self.sink_id)
 
 def _source_engine(database_url: str) -> Engine:
     """Use the project's pinned psycopg3 driver for scheme-only PostgreSQL DSNs."""

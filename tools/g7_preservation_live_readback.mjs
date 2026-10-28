@@ -1,5 +1,5 @@
 import {chromium} from '../ui/node_modules/playwright/index.mjs';
-import {writeFile} from 'node:fs/promises';
+import {readFile,writeFile} from 'node:fs/promises';
 import process from 'node:process';
 
 function arg(name){const i=process.argv.indexOf(name);if(i<0||!process.argv[i+1])throw new Error(`missing ${name}`);return process.argv[i+1];}
@@ -17,6 +17,7 @@ try{
     correlation_id:response.headers.get('x-correlation-id'),
     request_id:response.headers.get('x-request-id')};
  },query);
+ await writeFile(output+'.summary-response.json',JSON.stringify(summary,null,2)+'\n',{mode:0o600});
  if(summary.status!==200)throw new Error('public_summary_not_authorized');
  if(summary.body.scope?.source_family!==scope.source_family
     ||summary.body.scope?.source_account_id!==scope.source_account_id
@@ -24,6 +25,29 @@ try{
  const classes=Object.fromEntries(summary.body.classes.map(item=>[item.class_id,item]));
  if(classes['product.source_evidence']?.state!=='verified'
    ||classes['operational.scanner_collection']?.state!=='verified')throw new Error('public_source_readcheck_not_verified');
+ const firstPage=await page.evaluate(async snapshot_id=>{
+  const r=await fetch('/api/v1/operations/preservation/records?'+new URLSearchParams({snapshot_id,class_id:'product.source_evidence',limit:'1'}),{credentials:'same-origin'});
+  return {status:r.status,body:await r.json()};
+ },summary.body.snapshot_id);
+ if(firstPage.status!==200||typeof firstPage.body.next_cursor!=='string')throw new Error('source_cursor_not_captured');
+ const cursorProbe={snapshot_id:summary.body.snapshot_id,class_id:'product.source_evidence',limit:1,cursor:firstPage.body.next_cursor};
+ let previousSnapshotProbe=null;
+ const previousAt=process.argv.indexOf('--previous-readback');
+ if(previousAt>=0){
+  const previous=JSON.parse(await readFile(process.argv[previousAt+1],'utf8'));
+  if(!previous.cursor_probe?.cursor)throw new Error('previous_cursor_missing');
+  const fetchRecords=parameters=>page.evaluate(async parameters=>{
+   const r=await fetch('/api/v1/operations/preservation/records?'+new URLSearchParams(parameters),{credentials:'same-origin'});
+   const body=await r.json();return {status:r.status,code:body.error?.code??body.detail?.code??null};
+  },parameters);
+  const base={snapshot_id:previous.snapshot_id,class_id:'product.source_evidence',limit:'1'};
+  const oldSnapshot=await fetchRecords(base);
+  const oldCursor=await fetchRecords({...base,cursor:previous.cursor_probe.cursor});
+  const splicedCursor=await fetchRecords({...base,snapshot_id:summary.body.snapshot_id,cursor:previous.cursor_probe.cursor});
+  if(oldSnapshot.status!==409||oldSnapshot.code!=='snapshot_expired'||oldCursor.status!==409||oldCursor.code!=='snapshot_expired'
+      ||splicedCursor.status!==400||splicedCursor.code!=='invalid_cursor')throw new Error('replacement_snapshot_cursor_binding_failed:'+JSON.stringify({oldSnapshot,oldCursor,splicedCursor}));
+  previousSnapshotProbe={old_snapshot:oldSnapshot,old_cursor:oldCursor,spliced_cursor:splicedCursor};
+ }
  const audit=classes['product.audit_history'];
  if(audit?.state!=='verified'||audit.audit_copy?.state!=='verified'
     ||audit.audit_copy?.expected_events!==audit.audit_copy?.matching_events
@@ -61,7 +85,7 @@ try{
  });
  if(denied!==404)throw new Error('unauthorised_scope_not_masked');
  const report={schema_version:1,scope,summary_status:summary.status,
-  snapshot_id:summary.body.snapshot_id,checked_at:summary.body.checked_at,
+  snapshot_id:summary.body.snapshot_id,checked_at:summary.body.checked_at,cursor_probe:cursorProbe,previous_snapshot_probe:previousSnapshotProbe,
   class_states:Object.fromEntries(Object.entries(classes).map(([key,value])=>[key,value.state])),
   class_counts:Object.fromEntries(Object.entries(classes).map(([key,value])=>[key,value.expected_records])),
   audit_copy:{state:audit.audit_copy.state,expected_events:audit.audit_copy.expected_events,

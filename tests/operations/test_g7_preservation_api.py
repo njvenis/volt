@@ -64,10 +64,14 @@ class PreservationApiTest(unittest.TestCase):
             "headers": [], "scheme": "http", "server": ("test", 80),
             "client": ("127.0.0.1", 12345), "root_path": "", "app": app})
         with patch.dict(os.environ, {"UVM_G7_PRESERVATION_REPORT_DIR": "/nonexistent/g7-reports",
-                "UVM_G7_PRESERVATION_PUBLIC_KEY_FILE": "/nonexistent/g7-public.pem"}, clear=False):
+                "UVM_G7_PRESERVATION_PUBLIC_KEY_FILE": "/nonexistent/g7-public.pem",
+                "UVM_G7_PRESERVATION_ENVIRONMENT": ""}, clear=False):
             body = route.endpoint(request, source_family="synthetic",
                 source_account_id="account-a", scope_key="scope-a",
                 principal={"name": "alice", "scopes": (self.scope,), "context": self.context})
+            self.assertIsNone(body["environment"])
+            self.assertTrue(all("environment_unlabelled" in c["reasons"] for c in body["classes"]))
+            self.assertEqual(body["mask_reasons"], ["audit_scope_incomplete"])
             self.assertIsNone(body["snapshot_id"])
             self.assertEqual(body["elapsed_preservation"], "unverified")
             self.assertEqual([c["state"] for c in body["classes"]], ["unknown"] * 3)
@@ -77,6 +81,18 @@ class PreservationApiTest(unittest.TestCase):
                     source_account_id="account-a", scope_key="other-scope",
                     principal={"name": "alice", "scopes": (self.scope,), "context": self.context})
             self.assertEqual(denied.exception.status_code, 404)
+
+    def test_restricted_audit_grant_does_not_cover_other_source_family(self):
+        from uvm.operations.preservation_api import _authority
+        from uvm.persistence.assessment_schema import assessment_policy
+        with self.engine.begin() as connection:
+            policy = connection.execute(sa.select(assessment_policy.c.document)).scalar_one()
+            policy["native_authority"]["access_groups"]["group-a"]["permissions"].append({
+                "permission_id":"audit-source", "role_id":"role-a", "action":"audit.read",
+                "target_scope":{"group_ids":["target-a"], "source_families":["different-family"]}})
+            connection.execute(assessment_policy.update().values(document=policy, revision=2))
+        self.assertFalse(_authority(self.engine, {"name":"alice", "context":self.context},
+            self.scope, "audit.read", target_id="target-a")[0])
 
     def test_current_deny_revokes_previously_authorized_session(self):
         from uvm.operations.preservation_api import _authority
@@ -112,8 +128,12 @@ class PreservationApiTest(unittest.TestCase):
         allowed, authority = _authority(self.engine, principal, self.scope, "preservation.read")
         self.assertTrue(allowed)
         snapshot_id = "00000000-0000-4000-8000-000000000041"
-        payload = {"valid_until": "2999-01-01T00:00:00Z", "classes": [{
-            "class_id": "product.source_evidence", "dto": {"state": "verified"},
+        payload = {"snapshot_id": snapshot_id, "valid_until": "2999-01-01T00:00:00Z", "classes": [{
+            "class_id": "product.source_evidence", "minimum_period": "P1Y",
+            "dto": {**__import__("uvm.operations.preservation", fromlist=["unknown_class"]).unknown_class(
+                "product.source_evidence", "P1Y", "baseline_missing"), "state": "verified", "reasons": [],
+                "baseline_digest": "sha256:" + "a" * 64, "expected_records": 0, "verified_records": 0, "missing_records": 0,
+                "changed_records": 0, "unreadable_records": 0, "unexpected_records": 0},
             "members": []}]}
 
         def invoke(cursor):
@@ -133,7 +153,8 @@ class PreservationApiTest(unittest.TestCase):
             "report_digest": __import__("hashlib").sha256(json.dumps(payload, sort_keys=True,
                 separators=(",", ":")).encode()).hexdigest()}
         with patch("uvm.operations.preservation_api._find_snapshot",
-                return_value=(payload, self.scope)):
+                return_value=(payload, self.scope)), patch(
+                "uvm.operations.preservation_api.load_report", return_value=(payload, "")):
             expired = _cursor(app.state.cursor_secret, {**base, "expires_at": 1})
             with self.assertRaises(HTTPException) as expired_error:
                 invoke(expired)

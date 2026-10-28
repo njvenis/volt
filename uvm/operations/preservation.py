@@ -121,13 +121,13 @@ def _verify(document: dict, key_path: Path, expected_purpose: str) -> dict:
     return document["payload"]
 
 
-def load_report(scope: tuple[str, str, str]) -> tuple[dict | None, str]:
+def load_report(scope: tuple[str, str, str], *, allow_expired: bool = False, report_path: Path | None = None, allow_previous: bool = False) -> tuple[dict | None, str]:
     root = os.environ.get("UVM_G7_PRESERVATION_REPORT_DIR")
     public_key = os.environ.get("UVM_G7_PRESERVATION_PUBLIC_KEY_FILE")
     if not root or not public_key:
         return None, "baseline_missing"
     try:
-        report_path = Path(root) / (tuple_digest(scope) + ".json")
+        report_path = report_path or Path(root) / (tuple_digest(scope) + ".json")
         report = json.loads(_read_regular(report_path, 32 * 1024 * 1024))
         payload = _verify(report, Path(public_key), PURPOSE)
         expected_deployment = os.environ.get("UVM_G7_DEPLOYMENT_ID")
@@ -136,7 +136,11 @@ def load_report(scope: tuple[str, str, str]) -> tuple[dict | None, str]:
         expected_key_id = os.environ.get("UVM_G7_PRESERVATION_KEY_ID")
         if not expected_epoch or not expected_epoch.isdigit():
             raise ValueError("preservation recovery epoch is invalid")
-        if (payload.get("contract_id") != CONTRACT or payload.get("purpose") != PURPOSE
+        if (type(payload.get("schema_version")) is not int or payload.get("schema_version") != 1
+                or payload.get("scope_object") != dict(zip(("source_family", "source_account_id", "scope_key"), scope))
+                or not _canonical_timestamp(payload.get("checked_at"))
+                or not _canonical_timestamp(payload.get("valid_until"))
+                or payload.get("contract_id") != CONTRACT or payload.get("purpose") != PURPOSE
                 or payload.get("scope") != list(scope) or not isinstance(payload.get("classes"), list)
                 or len(payload["classes"]) != len(CLASSES)
                 or {item.get("class_id") for item in payload["classes"] if isinstance(item, dict)}
@@ -144,8 +148,8 @@ def load_report(scope: tuple[str, str, str]) -> tuple[dict | None, str]:
                 or not isinstance(payload.get("snapshot_id"), str)
                 or not expected_deployment or payload.get("deployment_id") != expected_deployment
                 or type(payload.get("recovery_epoch")) is not int
-                or payload.get("recovery_epoch") != int(expected_epoch)
-                or not expected_generation or payload.get("storage_generation") != expected_generation
+                or (not allow_previous and payload.get("recovery_epoch") != int(expected_epoch))
+                or not expected_generation or (not allow_previous and payload.get("storage_generation") != expected_generation)
                 or not expected_key_id or report["signature"].get("key_id") != expected_key_id):
             raise ValueError("preservation report binding mismatch")
         checked = datetime.fromisoformat(payload["checked_at"].replace("Z", "+00:00"))
@@ -155,12 +159,19 @@ def load_report(scope: tuple[str, str, str]) -> tuple[dict | None, str]:
         if (checked.tzinfo is None or expiry.tzinfo is None
                 or checked > now + timedelta(seconds=skew)):
             raise ValueError("report time is invalid")
-        if expiry <= now:
+        if expiry <= now and not allow_expired:
             return None, "report_expired"
         freshness = payload.get("freshness_seconds")
         if (type(freshness) is not int or freshness <= 0
                 or expiry > checked + timedelta(seconds=freshness)):
             raise ValueError("preservation freshness binding mismatch")
+        trust_root = os.environ.get("UVM_G7_PRESERVATION_TRUST_DIR")
+        if not trust_root:
+            raise ValueError("independent trust store unavailable")
+        from uvm.operations.preservation_streams import validate_bindings
+        validate_bindings(payload, trust_root, public_key, expected_key_id, now=now, allow_previous=allow_previous)
+        if payload.get("volume_set_digest") != os.environ.get("UVM_G7_VOLUME_SET_DIGEST"):
+            raise ValueError("volume-set binding mismatch")
         return payload, ""
     except FileNotFoundError:
         return None, "baseline_missing"
@@ -300,7 +311,8 @@ def _valid_members(members: list, class_id: str, dto: dict) -> bool:
         if member["retained_at"] is not None:
             if not _canonical_timestamp(member["retained_at"]):
                 return False
-    if ordered != sorted(ordered) or len(set(ordered)) != len(ordered):
+    if (ordered != sorted(ordered) or len(set(ordered)) != len(ordered)
+            or len({item["record_key"] for item in members}) != len(members)):
         return False
     if dto["state"] == "failed":
         return not members
@@ -339,6 +351,12 @@ def _valid_class_dto(dto: dict, class_id: str) -> bool:
     if dto["state"] in {"verified", "gap"} and any(value is None for value in counts):
         return False
     if all(value is not None for value in counts):
+        if dto.get("baseline_digest") is None:
+            return False
+        if dto["expected_records"] == 0 and dto.get("oldest_retained_at") is not None:
+            return False
+        if dto["state"] == "unknown" and any(dto[key] for key in ("missing_records", "changed_records", "unreadable_records", "unexpected_records")):
+            return False
         if dto["expected_records"] != sum(dto[key] for key in (
                 "verified_records", "missing_records", "changed_records", "unreadable_records")):
             return False
@@ -348,6 +366,10 @@ def _valid_class_dto(dto: dict, class_id: str) -> bool:
                  or not _HEX.fullmatch(dto["baseline_digest"][7:]))):
         return False
     if dto.get("oldest_retained_at") is not None and not _canonical_timestamp(dto["oldest_retained_at"]):
+        return False
+    if dto["state"] == "verified" and (any(dto[key] != 0 for key in
+            ("missing_records", "changed_records", "unreadable_records", "unexpected_records"))
+            or dto["reasons"]):
         return False
     if class_id != "product.audit_history":
         return dto["audit_copy"] is None
@@ -386,4 +408,8 @@ def _valid_class_dto(dto: dict, class_id: str) -> bool:
         if audit["expected_receipts"] != sum(audit[key] for key in
                 ("matching_receipts", "missing_receipts", "changed_receipts")):
             return False
+    if audit["state"] == "verified" and (any(audit[key] != 0 for key in
+            ("missing_events", "changed_events", "unexpected_events", "missing_receipts",
+             "changed_receipts", "unexpected_receipts", "pending_receipts")) or audit["reasons"]):
+        return False
     return True

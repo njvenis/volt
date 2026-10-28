@@ -8,7 +8,7 @@ export const classLabels:Record<ClassId,string> = {'product.source_evidence':'So
 export const recordKinds:Record<ClassId,string[]> = {
  'product.source_evidence':['observation','observation_linkage','retention_receipt','evidence_registration'],
  'product.audit_history':['audit_event','audit_attribution','audit_copy_receipt_established','audit_anchor'],
- 'operational.scanner_collection':['expected_run','run_revision','attempt','page','expected_transition'],
+ 'operational.scanner_collection':['expected_run','run_revision','attempt','page','expected_transition','evidence_registration'],
 };
 export const reasonCodes = 'baseline_missing baseline_incomplete baseline_untrusted baseline_discontinuous baseline_replay baseline_expired legacy_preimage_unavailable coverage_unsupported scope_incomplete audit_scope_incomplete environment_unlabelled record_missing bytes_changed bytes_unreadable receipt_missing receipt_changed sink_record_missing sink_record_changed unexpected_member source_unavailable sink_unavailable evidence_store_unavailable evidence_missing evidence_changed evidence_unreadable source_checkpoint_missing report_expired cursor_expired snapshot_expired authority_changed trust_key_unavailable trust_config_mismatch schema_mismatch future_timestamp internal_check_failed'.split(' ');
 const countFields = ['expected_records','verified_records','missing_records','changed_records','unreadable_records','unexpected_records'] as const;

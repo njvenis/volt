@@ -63,3 +63,24 @@ test('download without an admitted raw digest fails before issuing a request',as
 });
 
 test('matching event and receipt counters cannot verify the copy when an established audit member is missing',()=>{const s=fixture(),a=s.classes[1];a.state='gap';a.reasons=['record_missing'];a.verified_records=1;a.missing_records=1;s.uncovered_classes=[classIds[1]];assert.throws(()=>api.parseSummary(s,scope),{code:'invalid_response'});});
+
+for(const downloadable of [true,false])test('scanner evidence registration retains raw/canonical digests with '+(downloadable?'permitted':'withheld')+' readback',()=>{
+ const p=page();p.class_id='operational.scanner_collection';if(!downloadable)p.items[0].readback_url=null;
+ assert.notEqual(p.items[0].record_sha256,p.items[0].expected_sha256);
+ assert.deepEqual(api.parsePage(p,snapshot,p.class_id),p);
+});
+for(const [name,mutate] of [
+ ['raw digest missing on verified registration',p=>p.items[0].expected_sha256=null],
+ ['canonical digest substituted for raw bytes',p=>p.items[0].actual_sha256=canonical],
+ ['canonical record digest missing',p=>p.items[0].record_sha256=null],
+ ['unsafe evidence URL',p=>p.items[0].readback_url='https://example.invalid/private'],
+ ['unknown record kind',p=>p.items[0].record_kind='scanner_payload'],
+ ['source-only observation kind',p=>{p.items[0].record_kind='observation';p.items[0].readback_url=null;}],
+ ['metadata page carrying raw bytes',p=>p.items[0].record_kind='page'],
+])test('scanner records reject '+name,()=>{
+ const p=page();p.class_id='operational.scanner_collection';mutate(p);
+ assert.throws(()=>api.parsePage(p,snapshot,p.class_id),{code:'invalid_response'});
+});
+test('audit class still rejects otherwise valid evidence registrations',()=>{
+ const p=page();p.class_id='product.audit_history';assert.throws(()=>api.parsePage(p,snapshot,p.class_id),{code:'invalid_response'});
+});

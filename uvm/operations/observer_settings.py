@@ -141,7 +141,8 @@ def commit_desired_revision(connection, *, deployment_id: str, command_id: str,
         actor_id: str, actor_kind: str, action: str, request_digest: str,
         expected_revisions: dict, rationale: str, evidence_ref: str | None,
         values: dict | None, rollback_revision: int | None,
-        now: datetime, authorization_context: dict | None = None) -> dict:
+        now: datetime, authorization_context: dict | None = None,
+        disposable_failpoint: str | None = None) -> dict:
     """Atomically append settings, audit, receipt and host-application intent.
 
     The caller owns authentication/current deployment grants, an open database
@@ -158,6 +159,10 @@ def commit_desired_revision(connection, *, deployment_id: str, command_id: str,
         g7_observer_application_intents, g7_observer_settings_revisions,
         g7_observer_status,
     )
+
+    def fail_fixture_stage(stage: str) -> None:
+        if disposable_failpoint == stage:
+            raise ObserverSettingsUnavailable(f"disposable {stage} write failure fixture")
 
     if action not in {"observer.timing.publish", "observer.timing.rollback"}:
         raise ObserverSettingsError("unsupported observer timing action")
@@ -282,6 +287,7 @@ def commit_desired_revision(connection, *, deployment_id: str, command_id: str,
         digest=settings_digest, command_id=canonical_command_id, actor_id=actor_id,
         action=action, copied_from_revision=rollback_revision, rationale=rationale,
         evidence_ref=evidence_ref, created_at=now))
+    fail_fixture_stage("audit")
     connection.execute(assessment_audit_events.insert().values(
         event_id=event_id, event_sequence=sequence, actor_id=actor_id,
         actor_kind=actor_kind, origin="observer_settings_api", action=action,
@@ -291,6 +297,7 @@ def commit_desired_revision(connection, *, deployment_id: str, command_id: str,
         policy_revision=int(policy_row["revision"]), identity_revision=0,
         occurred_at=now, received_at=now, correlation_id=canonical_command_id,
         command_id=canonical_command_id, authorization_context=authorization_context))
+    fail_fixture_stage("intent")
     connection.execute(g7_observer_application_intents.insert().values(
         intent_id=intent_id, deployment_id=deployment_id, command_id=canonical_command_id,
         revision=revision, digest=settings_digest, status="pending", result=None,
@@ -312,6 +319,7 @@ def commit_desired_revision(connection, *, deployment_id: str, command_id: str,
             "authority": authority_revision, "host_policy": host_policy_revision},
         "audit_id": event_id, "intent_id": intent_id,
         "committed_at": now.isoformat().replace("+00:00", "Z")}
+    fail_fixture_stage("receipt")
     connection.execute(assessment_command_receipts.insert().values(
         command_id=canonical_command_id, principal_id=actor_id, action=action,
         target_id=target_id, request_digest=request_digest, decision_id=decision_id,

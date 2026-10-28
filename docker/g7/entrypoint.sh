@@ -12,6 +12,12 @@ services_started=0
 cleanup_running=0
 mkdir -p "$STATE" /run/secrets
 install -d -o 1001 -g 1337 -m 0750 /run/uvm-g7-scheduler
+if [[ ${UVM_G7_DISPOSABLE_MODE:-0} == 1 ]]; then
+  # The scheduler signal is bounded process health metadata, not host policy
+  # or secret material. A separately launched local observer must be able to
+  # read it from the dedicated bind mount.
+  chmod 0755 /run/uvm-g7-scheduler
+fi
 rm -f "$STATE/ready" "$STATE/critical-failed"
 
 handle_shutdown() { shutdown_requested=1; }

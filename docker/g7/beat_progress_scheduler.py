@@ -54,6 +54,10 @@ class G7ProgressScheduler(PersistentScheduler):
                 os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
+            if os.environ.get("UVM_G7_DISPOSABLE_MODE") == "1":
+                # The observer's separate host process reads only this
+                # non-secret completion sequence and timestamps.
+                os.chmod(target, 0o644)
         finally:
             try:
                 os.unlink(temporary)

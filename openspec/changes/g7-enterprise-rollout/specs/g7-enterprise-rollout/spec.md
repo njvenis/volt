@@ -88,6 +88,8 @@ Authorised operational configuration SHALL retain immutable desired revisions, s
 - **WHEN** a monitored backup is restored into a replacement container or a dependency/schema upgrade is rolled back in a disposable candidate
 - **THEN** UVM and DefectDojo mappings, decisions, media, audit history and queued intents reconcile through supported interfaces without fabricating remediation or history
 - **AND** actual restoration and outage measurements are retained without inventing an owner-approved availability, RPO or RTO target
+- **AND** a fenced, explicit 0058 to 0059 upgrade is verified on fresh volumes with candidate B, while rollback restores the original archive using its bound prior image A on another fresh volume set at a higher external recovery epoch
+- **AND** the image-owned startup compatibility guard rejects unknown, multiple and incompatible schema heads before effects or initialization, while retained post-backup product writes are zero and uncertain external effects remain held for reconciliation
 
 #### Scenario: G7-CUT-01 controlled legacy issue cutover
 - **WHEN** the authorised operator adopts verified existing issue IDs and changes the writer for a live target

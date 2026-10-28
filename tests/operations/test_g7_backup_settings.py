@@ -88,6 +88,95 @@ class BackupSettingsValidationTests(unittest.TestCase):
                     recovery_epoch=3, connector_recovery_id=document["connector_recovery_id"],
                     key_id="test-key")
 
+    def test_upgrade_compatibility_admission_binds_schema_and_image_package_pair(self):
+        private = Ed25519PrivateKey.generate()
+        volume_ids = {"postgres_cluster": "pg-upgrade", "ce_media": "media-upgrade",
+            "uvm_state": "uvm-upgrade"}
+        image_digest = "sha256:" + "a" * 64
+        archive_digest = "sha256:" + "b" * 64
+        package_digest = "sha256:" + hashlib.sha256(
+            b"pyproject.toml\0pyproject\n\0uv.lock\0uv lock\n\0").hexdigest()
+        admission = {"admission_id": str(uuid.uuid4()), "recovery_epoch": 4,
+            "source_image_digest": "sha256:" + "d" * 64,
+            "source_package_manifest_digest": "sha256:" + "e" * 64,
+            "target_image_digest": image_digest,
+            "target_package_manifest_digest": package_digest,
+            "archive_digest": archive_digest, "from_schema": "0058", "to_schema": "0059",
+            "volume_ids": volume_ids}
+        document = {"schema_version": 1, "deployment_id": "g7-local",
+            "target_image_digest": image_digest, "volume_ids": volume_ids,
+            "archive_digest": archive_digest, "recovery_epoch": 4,
+            "connector_recovery_id": str(uuid.uuid4()),
+            "compatibility_admission": admission,
+            "issued_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+        signed = {**document, "signature": {"algorithm": "Ed25519", "key_id": "test-key",
+            "value": base64.urlsafe_b64encode(private.sign(canonical_json(document))).decode().rstrip("=")}}
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            key = root / "pub.pem"
+            key.write_bytes(private.public_key().public_bytes(
+                serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
+            token = root / "token.json"
+            token.write_bytes(canonical_json(signed))
+            with patch("uvm.operations.startup_fence._runtime_package_digest", return_value=package_digest), \
+                    patch.dict("os.environ", {"UVM_G7_SCHEMA_MODE": "upgrade-verification"}):
+                verified = verify_startup_fence(str(token), str(key), deployment_id="g7-local",
+                    image_digest=image_digest, volume_ids=volume_ids, archive_digest=archive_digest,
+                    recovery_epoch=4, connector_recovery_id=document["connector_recovery_id"],
+                    key_id="test-key")
+            self.assertEqual(verified["compatibility_admission"]["from_schema"], "0058")
+
+    def test_schema_compatibility_admission_is_journaled_before_replay(self):
+        with tempfile.TemporaryDirectory() as temp:
+            controller = Controller.__new__(Controller)
+            controller.deployment = "g7-local"
+            controller.journal = Path(temp) / "controller-journal.json"
+            controller.state = {"schema_version": 1, "deployment_id": "g7-local",
+                "recovery_epoch_floor": 1, "schema_compatibility_admissions": {}}
+            admission = {"admission_id": str(uuid.uuid4()), "recovery_epoch": 1,
+                "source_image_digest": "sha256:" + "a" * 64,
+                "source_package_manifest_digest": "sha256:" + "b" * 64,
+                "target_image_digest": "sha256:" + "c" * 64,
+                "target_package_manifest_digest": "sha256:" + "d" * 64,
+                "archive_digest": "sha256:" + "e" * 64,
+                "from_schema": "0058", "to_schema": "0059",
+                "volume_ids": {"postgres_cluster": "pg", "ce_media": "media", "uvm_state": "uvm"}}
+            saved = controller.journal_schema_compatibility_admission(admission)
+            retained = json.loads(controller.journal.read_text())
+            self.assertEqual(retained["schema_compatibility_admissions"]["1"], admission)
+            replay = {**admission, "admission_id": str(uuid.uuid4())}
+            self.assertEqual(controller.journal_schema_compatibility_admission(replay), admission)
+            conflicting = {**replay, "target_image_digest": "sha256:" + "f" * 64}
+            with self.assertRaises(RecoveryError):
+                controller.journal_schema_compatibility_admission(conflicting)
+            self.assertEqual(saved, admission)
+
+    def test_development_rollback_request_requires_zero_writes_and_effects_under_fence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            controller = Controller.__new__(Controller)
+            controller.deployment = "g7-local"
+            controller.journal = Path(temp) / "controller-journal.json"
+            controller.state = {"schema_version": 1, "deployment_id": "g7-local",
+                "recovery_epoch_floor": 1}
+            request = {"request_id": str(uuid.uuid4()), "state": "development_rollback_requested",
+                "recovery_epoch": 1, "archive_id": str(uuid.uuid4()),
+                "archive_digest": "sha256:" + "a" * 64,
+                "source_image_digest": "sha256:" + "b" * 64,
+                "source_package_manifest_digest": "sha256:" + "c" * 64,
+                "upgraded_image_digest": "sha256:" + "d" * 64,
+                "target_package_manifest_digest": "sha256:" + "e" * 64,
+                "forward_volume_ids": {"postgres_cluster": "pg", "ce_media": "media", "uvm_state": "uvm"},
+                "schema_head": "0059", "product_write_count": 0,
+                "unexpected_inventory_change_count": 0, "unresolved_external_effect_count": 0,
+                "ingress_fenced": True, "egress_fenced": True, "public_readback_match": True,
+                "requested_at": "2026-10-28T12:00:00Z"}
+            self.assertEqual(controller.journal_development_rollback_request(request), request)
+            retained = json.loads(controller.journal.read_text())
+            self.assertEqual(retained["development_rollback_requests"]["1"], request)
+            with self.assertRaises(RecoveryError):
+                controller.journal_development_rollback_request({**request,
+                    "product_write_count": 1, "request_id": str(uuid.uuid4())})
+
     def test_external_controller_resync_persists_authenticated_ack_and_sequence_floor(self):
         with tempfile.TemporaryDirectory() as temp:
             journal = Path(temp) / "journal.json"

@@ -767,11 +767,14 @@ def restore_new_volumes(*, archive_dir: Path, public_key: Path,
 
 def submit_restore_events(*, config_path: Path, manifest_path: Path,
         volume_ids_path: Path, recovery_epoch: int, connector_recovery_id: str,
-        drain_proof_path: Path, public_key: Path) -> dict:
+        drain_proof_path: Path, public_key: Path, target_image_digest: str | None = None) -> dict:
     from tools.g7_backup_controller import Controller, load_config
     controller = Controller(load_config(config_path))
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"), object_pairs_hook=_unique_pairs)
     volumes = json.loads(volume_ids_path.read_text(encoding="utf-8"), object_pairs_hook=_unique_pairs)
+    target_image_digest = target_image_digest or manifest["image_digest"]
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", target_image_digest):
+        raise RecoveryError("restore target image digest is invalid")
     if (recovery_epoch != controller.state["recovery_epoch_floor"]
             or str(uuid.UUID(connector_recovery_id)) != connector_recovery_id):
         raise RecoveryError("restore identity does not match the external journal")
@@ -796,7 +799,7 @@ def submit_restore_events(*, config_path: Path, manifest_path: Path,
             "migration": "not_run", "details_digest": None},
         "queue_inventory_digest": manifest["queue_inventory_digest"],
         "public_readback_digest": None, "failure_code": None}
-    expected = {**common, "target_image_digest": manifest["image_digest"], "new_volume_ids": volumes}
+    expected = {**common, "target_image_digest": target_image_digest, "new_volume_ids": volumes}
     records = list(controller.state.get("recovery_receipts", {}).values())
     if controller.state.get("last_recovery_event"):
         records.append(controller.state["last_recovery_event"])
@@ -820,7 +823,7 @@ def submit_restore_events(*, config_path: Path, manifest_path: Path,
                     "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")})
         body = {**common, "event_id": str(uuid.uuid4()), "event_type": event_type,
             "previous_epoch": recovery_epoch - 1 if event_type == "restore_started" else recovery_epoch,
-            "target_image_digest": manifest["image_digest"] if event_type == "volumes_restored" else None,
+            "target_image_digest": target_image_digest if event_type == "volumes_restored" else None,
             "new_volume_ids": volumes if event_type == "volumes_restored" else None,
             "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
         responses.append(controller.submit_recovery_event(body))
@@ -892,11 +895,13 @@ def main() -> None:
     admit.add_argument("--connector-recovery-id", required=True)
     admit.add_argument("--drain-proof", type=Path, required=True)
     admit.add_argument("--public-key", type=Path, required=True)
+    admit.add_argument("--target-image-digest")
     token = sub.add_parser("startup-token")
     token.add_argument("--deployment-id", required=True)
     token.add_argument("--image-digest", required=True)
     token.add_argument("--volume-ids-json", type=Path, required=True)
     token.add_argument("--archive-digest", required=True)
+    token.add_argument("--compatibility-admission-json", type=Path)
     token.add_argument("--recovery-epoch", type=int, required=True)
     token.add_argument("--connector-recovery-id", required=True)
     token.add_argument("--key-id", required=True)
@@ -956,7 +961,8 @@ def main() -> None:
             manifest_path=args.manifest, volume_ids_path=args.volume_ids,
             recovery_epoch=args.recovery_epoch,
             connector_recovery_id=args.connector_recovery_id,
-            drain_proof_path=args.drain_proof, public_key=args.public_key)
+            drain_proof_path=args.drain_proof, public_key=args.public_key,
+            target_image_digest=args.target_image_digest)
         print(json.dumps(result, separators=(",", ":")))
     elif args.command == "startup-token":
         try:
@@ -975,6 +981,17 @@ def main() -> None:
                 "archive_digest": args.archive_digest, "recovery_epoch": args.recovery_epoch,
                 "connector_recovery_id": args.connector_recovery_id,
                 "issued_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+            if args.compatibility_admission_json is not None:
+                admission = json.loads(args.compatibility_admission_json.read_text(encoding="utf-8"),
+                    object_pairs_hook=_unique_pairs, parse_float=_reject_float,
+                    parse_constant=_reject_constant)
+                if (not isinstance(admission, dict)
+                        or admission.get("recovery_epoch") != args.recovery_epoch
+                        or admission.get("target_image_digest") != args.image_digest
+                        or admission.get("archive_digest") != args.archive_digest
+                        or admission.get("volume_ids") != volumes):
+                    raise RecoveryError("schema compatibility admission does not bind the startup target")
+                unsigned["compatibility_admission"] = admission
             signature = _sign(canonical_json(unsigned), args.signing_key)
             document = {**unsigned, "signature": {"algorithm": "Ed25519",
                 "key_id": args.key_id,

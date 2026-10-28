@@ -89,7 +89,7 @@ def run(args: argparse.Namespace) -> None:
             "host_principal_id": "g7-host-b", "verification_key_file": "/run/uvm-g7-host-pub.pem"}],
             separators=(",", ":")), encoding="utf-8")
         (secrets_dir / "registry.json").chmod(0o644)
-        oidc = "http://127.0.0.1:9000"
+        oidc = f"http://127.0.0.1:{args.oidc_port}"
         api = "http://127.0.0.1:8000"
         config = {"schema_version": 1, "provider_id": "g7-synthetic", "issuer": oidc,
             "discovery_url": oidc + "/.well-known/openid-configuration",
@@ -475,6 +475,7 @@ def main() -> int:
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--image", default="")
     parser.add_argument("--anchor-port", type=int, default=5433)
+    parser.add_argument("--oidc-port", type=int, default=9000)
     args = parser.parse_args()
     run(args)
     return 0

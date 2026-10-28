@@ -1,0 +1,28 @@
+# G7 upgrade rollback development delta
+
+Status: implementation delta for FR-OP-01, G7-REC-01, G7-PKG-01 and CR-01/03/09/10/11. It implements only a local disposable 0058 to 0059 upgrade rollback proof. It selects no production policy, release, visibility, retention, RPO or RTO decision.
+
+## Compatibility contract
+
+- Image A is the executable source snapshot at `983ce03455de33fa48f34d6a656d700873b37319`, with the captured startup guard/invocation overlay and runtime package-manifest copies retained separately. It is a development fixture with known NO-GOs. Image B is the complete candidate from the authorized implementation branch. Both image identities bind a canonical package manifest digest and complete source snapshot digest.
+- Before any service role change, CE initialization, migration, listener or worker startup against an existing cluster, the image-owned guard reads the exact Alembic heads and compares them with that image's supported schema set and startup mode. It rejects unknown, multiple, or mode-incompatible heads without modifying the database. Empty database bootstrap remains a separate path. A rejects schema 0059.
+- B's ordinary mode requires 0059. Its explicitly fenced upgrade-verification mode may inspect 0058, but may proceed to the one-shot 0058 to 0059 migration only after the host journal binds the source and target image/package identities, verified archive digest, exact transition, and replacement volume IDs. Automatic migrations stay disabled. No downgrade occurs.
+- Archive restoration uses the exact source image/package bound in the archive. Upgrade verification uses B on restored copies in fresh volumes. Rollback uses the original archive, A and a second fresh volume set, and advances the external epoch floor. Neither attempt mounts a volume used by another image.
+
+## Effect boundary
+
+The source cold-capture, recovery-control, supported API readback, queue reconciliation and release machinery stays authoritative. B remains fenced for product writes and external effects throughout its lifetime. The only database changes admitted after the archive are enumerated host-journaled recovery-control submissions and the declared 0058 to 0059 migration. A mismatch in the public product-write/effect inventory, unexplained retained-state change, missing evidence, stale/replayed context or unresolved acknowledged effect blocks rollback release and preserves the upgraded volumes. Successful rollback is possible only if the measured post-backup product mutation count is zero.
+
+## Decisive executable journey
+
+`tools/g7_container_journey.sh --upgrade-rollback-only` extends the maintained backup/recovery runner. It builds and binds A and B, establishes supported-API before-capture sentinels, performs a coordinated stopped three-volume archive, restores A's state into fresh forward volumes under epoch 1, proves schema 0058 and retained readback, executes the explicit fenced Alembic upgrade to 0059, proves post-migration readback, and records the rollback request while preserving the effect fence. It validates no unexpected post-capture product writes, restores the original archive into separate fresh rollback volumes with A under epoch 2 and a new connector recovery UUID, reconciles held queues, persists verification before admission, rejects stale epoch-1 context, and verifies the admitted A runtime's progress while egress remains denied.
+
+Negative assertions cover A on 0059; unknown/multiple heads; unsupported compatibility; changed post-backup inventory; missing/corrupt archive evidence; mismatched image/package binding; stale epoch/replay; and failed release. Measurements are descriptive and environment-labelled. The runner retains the exact source snapshot, overlay, image/package identities, invocation, raw exits/output, archive/readback evidence, and resource ownership/cleanup. No private historical evidence or runtime credential enters the public tree or retained evidence.
+
+## Preflight before structural implementation
+
+- Checkout: clean `g7-upgrade-rollback-development` at `00f1cff74c75b788326b28d9e7a93cc6bead8311`; Docker client and server are 29.6.2; disk has 22 GiB free.
+- Historical source commit A exists in the local Git object database. Relevant pinned VOLT/CE images are cached. CPython 3.13.15 is available through uv, but the host uv cache lacks at least the pinned `pydantic-core` wheel; use existing container runtimes or establish the packet's authorized pinned runtime before claiming the host compile/import check. No browser package resolves from the checkout; Playwright browser binaries are cached under `/home/nicho/.cache/ms-playwright`.
+- The disposable Docker bridge and source-IP egress fence were created, listed, and removed through the authorized escalation route. The established-reply rule preceded the new-forwarded-traffic drop and matched the runner's fence setup. Host firewall inspection from the default sandbox remains denied; that did not prevent verification of the disposable fence.
+- The daemon rejected publishing `127.0.0.1:9000` with `/forwards/expose` HTTP 500 despite an unbound host port. A short-lived disposable mapping to `127.0.0.1:18000` succeeded. The maintained fixture publishes its internal OIDC listener on a preflight-selected loopback port and proxies canonical loopback issuer port 9000 to it, preserving matching host and container issuer URLs.
+- `ui/package-lock.json` dependencies were restored with `npm ci --offline --no-audit --no-fund` (55 packages; Playwright browser 1234 was already cached). The pinned OpenSpec package and lockfile are present under `tools/g0_ci/openspec`, but its `.bin/openspec` executable is absent; use the lockfile cache if available.

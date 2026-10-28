@@ -109,9 +109,12 @@ COPY --chown=uvm:uvm tools/g7_recovery_retained_fixture.py /opt/uvm/app/tools/g7
 COPY --chown=uvm:uvm tools/g7_network_assert.py /opt/uvm/app/tools/g7_network_assert.py
 COPY --from=uvm-build --chown=uvm:uvm /build/migrations ./migrations
 COPY --from=uvm-build --chown=uvm:uvm /build/alembic.ini ./alembic.ini
+COPY --from=uvm-build --chown=uvm:uvm /build/pyproject.toml ./pyproject.toml
+COPY --from=uvm-build --chown=uvm:uvm /build/uv.lock ./uv.lock
 COPY --from=ui-build --chown=uvm:uvm /ui/dist /opt/uvm/ui
 WORKDIR /app
 COPY docker/g7/entrypoint.sh /usr/local/bin/uvm-g7-entrypoint
+COPY docker/g7/schema-head /etc/uvm-g7-schema-head
 COPY docker/g7/healthcheck.sh /usr/local/bin/uvm-g7-healthcheck
 COPY docker/g7/valkey-server /usr/local/bin/valkey-server
 COPY docker/g7/valkey-cli /usr/local/bin/valkey-cli

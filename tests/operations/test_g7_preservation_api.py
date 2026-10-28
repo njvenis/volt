@@ -98,6 +98,54 @@ class PreservationApiTest(unittest.TestCase):
         self.assertFalse(denied)
         self.assertIsNone(denied_fingerprint)
 
+    def test_cursor_expiry_and_current_authority_change_have_distinct_errors(self):
+        import json
+        from unittest.mock import patch
+        from starlette.requests import Request
+        from uvm.api.app import create_app
+        from uvm.operations.preservation_api import _authority, _cursor
+        from uvm.operations.preservation import tuple_digest
+        app = create_app(self.engine, principals={}, cursor_secret="g7-cursor-secret")
+        route = next(r for r in app.routes if getattr(r, "path", None) ==
+            "/api/v1/operations/preservation/records")
+        principal = {"name": "alice", "scopes": (self.scope,), "context": self.context}
+        allowed, authority = _authority(self.engine, principal, self.scope, "preservation.read")
+        self.assertTrue(allowed)
+        snapshot_id = "00000000-0000-4000-8000-000000000041"
+        payload = {"valid_until": "2999-01-01T00:00:00Z", "classes": [{
+            "class_id": "product.source_evidence", "dto": {"state": "verified"},
+            "members": []}]}
+
+        def invoke(cursor):
+            request = Request({"type": "http", "method": "GET",
+                "path": "/api/v1/operations/preservation/records",
+                "query_string": b"snapshot_id=" + snapshot_id.encode() +
+                    b"&class_id=product.source_evidence&limit=1",
+                "headers": [], "scheme": "http", "server": ("test", 80),
+                "client": ("127.0.0.1", 12345), "root_path": "", "app": app})
+            return route.endpoint(request, snapshot_id=snapshot_id,
+                class_id="product.source_evidence", limit=1, cursor=cursor,
+                principal=principal)
+
+        base = {"snapshot_id": snapshot_id, "class_id": "product.source_evidence",
+            "limit": 1, "after": "observation\0opaque", "scope": tuple_digest(self.scope),
+            "authority": authority,
+            "report_digest": __import__("hashlib").sha256(json.dumps(payload, sort_keys=True,
+                separators=(",", ":")).encode()).hexdigest()}
+        with patch("uvm.operations.preservation_api._find_snapshot",
+                return_value=(payload, self.scope)):
+            expired = _cursor(app.state.cursor_secret, {**base, "expires_at": 1})
+            with self.assertRaises(HTTPException) as expired_error:
+                invoke(expired)
+            self.assertEqual(expired_error.exception.status_code, 409)
+            self.assertEqual(expired_error.exception.detail["code"], "cursor_expired")
+            changed_authority = _cursor(app.state.cursor_secret,
+                {**base, "authority": "b" * 64, "expires_at": 4102444800})
+            with self.assertRaises(HTTPException) as changed_error:
+                invoke(changed_authority)
+            self.assertEqual(changed_error.exception.status_code, 400)
+            self.assertEqual(changed_error.exception.detail["code"], "invalid_cursor")
+
     def test_record_projection_is_allowlisted_and_keeps_metadata_hashes_null(self):
         from uvm.operations.preservation_api import _record_item
         member = {"record_key": "observation:opaque", "record_kind": "observation",

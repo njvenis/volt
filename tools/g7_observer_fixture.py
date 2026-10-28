@@ -114,7 +114,7 @@ def run(args: argparse.Namespace) -> None:
                 separators=(",", ":")),
             "UVM_NATIVE_GRANTABLE_ENVELOPE": json.dumps({
                 "actions": ["observer.timing.read", "observer.timing.configure",
-                    "backup.settings.read", "backup.settings.configure", "audit.read"],
+                    "backup.settings.read", "backup.settings.configure", "assessment.read", "audit.read"],
                 "target_scope": {"group_ids": ["*"], "source_families": ["*"],
                     "environments": ["*"], "service_ids": ["*"], "membership_mode": "all_current"},
                 "limits": {"maximum_acceptance_days": None, "maximum_severity": None,
@@ -288,7 +288,9 @@ def run(args: argparse.Namespace) -> None:
             "controller_instance_id": "00000000-0000-4000-8000-000000000017",
             "host_policy": accepted_policy,
             "journal_file": str(backup_dir / "controller-journal.json"),
-            "active_settings_file": str(backup_dir / "active-settings.json")}
+            "active_settings_file": str(backup_dir / "active-settings.json"),
+            "scheduler_readback_file": str(backup_dir / "scheduler-readback.json"),
+            "capture_request_file": str(backup_dir / "capture-request.json")}
         config_path = host_dir / "backup-controller.json"
         host.atomic_json(config_path, config)
         import tools.g7_backup_controller as backup_controller
@@ -297,6 +299,12 @@ def run(args: argparse.Namespace) -> None:
             "controller_instance_id": config["controller_instance_id"],
             "last_sequence": 1, "recovery_epoch_floor": 0,
             "last_intent": None, "last_ack": None})
+        scheduler_log = (host_dir / "backup-scheduler.log").open("ab")
+        scheduler = subprocess.Popen([sys.executable, "tools/g7_backup_scheduler.py",
+            "--config", str(config_path)], cwd=Path(__file__).resolve().parents[1],
+            stdout=scheduler_log, stderr=scheduler_log, start_new_session=True)
+        (host_dir / "backup-scheduler.pid").write_text(str(scheduler.pid))
+        scheduler_log.close()
         print(json.dumps({"controller_config": str(config_path),
             "journal_sequence": 1, "host_policy_revision": accepted_policy["revision"]},
             separators=(",", ":")))

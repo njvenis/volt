@@ -151,9 +151,18 @@ def _container_mounts(container: str) -> tuple[str, dict[str, str]]:
     declared = image_inspect.get("Config", {}).get("Volumes") or {}
     if set(declared) != set(VOLUMES.values()):
         raise RecoveryError("pinned image declares a volume set other than the exact v1 allowlist")
-    mounts = [mount for mount in inspected.get("Mounts", []) if mount.get("Type") == "volume"]
+    runtime_mounts = inspected.get("Mounts", [])
+    mounts = [mount for mount in runtime_mounts if mount.get("Type") == "volume"]
     mapping = {mount.get("Destination"): mount.get("Name") for mount in mounts}
-    if set(mapping) != set(VOLUMES.values()) or any(not value for value in mapping.values()):
+    durable_paths = tuple(VOLUMES.values())
+    shadow = any(mount.get("Type") != "volume" and any(
+        mount.get("Destination", "") == target or
+        mount.get("Destination", "").startswith(target + "/") or
+        target.startswith(mount.get("Destination", "").rstrip("/") + "/")
+        for target in durable_paths) for mount in runtime_mounts)
+    if (len(mounts) != len(VOLUMES) or len(set(mapping.values())) != len(VOLUMES)
+            or shadow or set(mapping) != set(durable_paths)
+            or any(not value for value in mapping.values())):
         raise RecoveryError("runtime volume mounts do not match the exact three-member allowlist")
     state = inspected.get("State", {})
     if state.get("Running") is True:
@@ -312,7 +321,7 @@ settled = {"applied", "accepted", "sent", "cancelled", "superseded", "acknowledg
     "delivered", "suppressed", "completed", "complete", "committed", "succeeded"}
 engine = create_engine(__import__("os").environ["UVM_DB_URL"])
 result = {"schema_version": 1, "tables": {}, "missing_expected_tables": missing,
-    "unresolved_count": 0}
+    "unresolved_count": 0, "held_intents": []}
 with engine.connect() as connection:
     connection.execute(text("SET TRANSACTION READ ONLY"))
     for name, table in sorted(tables.items()):
@@ -320,7 +329,15 @@ with engine.connect() as connection:
         rows = connection.execute(select(state, func.count()).select_from(table).group_by(state)).all() if state is not None else []
         count = sum(row[1] for row in rows) if state is not None else connection.execute(select(func.count()).select_from(table)).scalar_one()
         states = {str(row[0]): row[1] for row in rows} if state is not None else {}
-        unresolved = sum(value for key, value in states.items() if key not in settled)
+        held = []
+        identifier = next((table.c[key] for key in ("intent_id", "projection_id") if key in table.c), None)
+        if state is not None and identifier is not None:
+            held = list(connection.execute(select(identifier).where(state == "uncertain")).scalars())
+            for intent_id in held:
+                if str(__import__('uuid').UUID(intent_id)) != intent_id:
+                    raise ValueError("held intent has no stable canonical idempotency identity")
+                result["held_intents"].append({"connector_id": name, "intent_id": intent_id, "state": "uncertain"})
+        unresolved = sum(value for key, value in states.items() if key not in settled) - len(held)
         if state is None and count:
             unresolved = count
         result["tables"][name] = {"row_count": count, "state_counts": states,
@@ -456,7 +473,7 @@ def _create_archive_staging(*, container: str, deployment_id: str, archive_dir: 
         settings_digest: str, host_policy_revision: int, host_policy_digest: str,
         controller_instance_id: str, controller_sequence: int,
         package_manifest_digest: str, helper_image: str,
-        stop_timeout: int = 120) -> Path:
+        stop_timeout: int = 120, consumer_state: Path | None = None) -> Path:
     if (not isinstance(deployment_id, str) or not re.fullmatch(
             r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", deployment_id)
             or type(generation) is not int or generation < 1
@@ -474,6 +491,15 @@ def _create_archive_staging(*, container: str, deployment_id: str, archive_dir: 
     for value in (package_manifest_digest, settings_digest, host_policy_digest):
         if not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
             raise RecoveryError("capture digest input is malformed")
+    if consumer_state is not None:
+        from uvm.operations.backup_host import digest
+        consumed = json.loads(consumer_state.read_text(encoding="utf-8"), object_pairs_hook=_unique_pairs)
+        if (consumed.get("deployment_id") != deployment_id or
+                consumed.get("revision") != settings_revision or
+                consumed.get("digest") != settings_digest or
+                "sha256:" + digest(consumed.get("values")) != settings_digest or
+                consumed.get("capture_timeout_seconds") != stop_timeout):
+            raise RecoveryError("capture does not match independently consumed settings")
     archive_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
     image, mounts = _container_mounts(container)
     image_digest = _run(["docker", "image", "inspect", image, "--format", "{{.Id}}"])
@@ -500,7 +526,7 @@ def _create_archive_staging(*, container: str, deployment_id: str, archive_dir: 
         digest, size = _sha(member)
         members.append({"name": name, "volume_id": source,
             "member": member.name, "sha256": digest, "byte_length": size})
-    completed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    completed_at = consistency_point_at
     manifest = {"schema_version": 1, "deployment_id": deployment_id,
         "archive_id": str(uuid.uuid4()), "generation": generation,
         "recovery_epoch": recovery_epoch, "capture_started_at": capture_started_at,
@@ -536,6 +562,7 @@ def create_archive(**kwargs) -> Path:
     try:
         staged_manifest = _create_archive_staging(**kwargs)
         os.replace(staging, destination)
+        _fsync_path(destination.parent)
         return destination / staged_manifest.name
     finally:
         if staging.exists():
@@ -583,7 +610,7 @@ def verify_archive(*, archive_dir: Path, public_key: Path,
         started, consistency = parse_utc(manifest["capture_started_at"]), parse_utc(
             manifest["consistency_point_at"])
         completed = parse_utc(manifest["completed_at"])
-        if started < consistency or completed < started:
+        if started < consistency or completed != consistency:
             raise ValueError
     except (ValueError, TypeError, KeyError):
         raise RecoveryError("archive identity or consistency-point timestamps are invalid") from None
@@ -610,6 +637,9 @@ def verify_archive(*, archive_dir: Path, public_key: Path,
             or any(not isinstance(item.get("name"), str) for item in volumes)
             or {item["name"] for item in volumes} != set(VOLUMES)):
         raise RecoveryError("archive must contain exactly the three declared volume members")
+    volume_ids = [member.get("volume_id") for member in volumes]
+    if any(not isinstance(value, str) for value in volume_ids) or len(set(volume_ids)) != 3:
+        raise RecoveryError("archive contains duplicated or invalid volume identities")
     seen = set()
     for member in volumes:
         if set(member) != {"name", "volume_id", "member", "sha256", "byte_length"}:
@@ -689,45 +719,27 @@ def restore_new_volumes(*, archive_dir: Path, public_key: Path,
 
 
 def submit_restore_events(*, config_path: Path, manifest_path: Path,
-        volume_ids_path: Path, recovery_epoch: int, connector_recovery_id: str) -> dict:
-    from tools.g7_backup_controller import load_config, atomic_json
-    config = load_config(config_path)
-    journal_path = Path(config["journal_file"])
-    journal = json.loads(journal_path.read_text(encoding="utf-8"), object_pairs_hook=_unique_pairs)
+        volume_ids_path: Path, recovery_epoch: int, connector_recovery_id: str,
+        drain_proof_path: Path, public_key: Path) -> dict:
+    from tools.g7_backup_controller import Controller, load_config
+    controller = Controller(load_config(config_path))
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"), object_pairs_hook=_unique_pairs)
     volumes = json.loads(volume_ids_path.read_text(encoding="utf-8"), object_pairs_hook=_unique_pairs)
-    context = ssl.create_default_context(cafile=config["server_ca_file"])
-    context.load_cert_chain(config["client_cert_file"], config["client_key_file"])
-    token = Path(config["token_file"]).read_text(encoding="utf-8").strip()
-    base = config["endpoint"].rstrip("/") + "/recovery-control/v1/" + config["deployment_id"]
-    def post(path: str, body: dict) -> dict:
-        request = urllib.request.Request(base + path, data=canonical_json(body),
-            headers={"Authorization": "Bearer " + token,
-                "Content-Type": "application/json", "Accept": "application/json"}, method="POST")
-        with urllib.request.urlopen(request, context=context, timeout=15) as response:
-            return json.loads(response.read())
-    sequence = int(journal["last_sequence"])
-    epoch_floor = int(journal["recovery_epoch_floor"])
-    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    resync = {"schema_version": 1, "deployment_id": config["deployment_id"],
-        "resync_id": str(uuid.uuid4()), "controller_instance_id": config["controller_instance_id"],
-        "database_epoch_seen": 0, "database_sequence_seen": sequence,
-        "checkpoint_epoch_floor": epoch_floor - 1,
-        "checkpoint_last_sequence": sequence, "issued_at": now}
-    resync_ack = post("/sequence-resync", resync)
-    if resync_ack.get("accepted") is not True or resync_ack.get("next_sequence") != sequence + 1:
-        raise RecoveryError("sequence resynchronization was not acknowledged")
-    atomic_json(journal_path, {**journal, "last_sequence": sequence,
-        "recovery_epoch_floor": epoch_floor, "last_resync": resync_ack})
-    try:
-        if str(uuid.UUID(connector_recovery_id)) != connector_recovery_id:
-            raise ValueError
-    except (ValueError, TypeError):
-        raise RecoveryError("connector recovery identity is invalid") from None
-    common = {"schema_version": 1, "deployment_id": config["deployment_id"],
-        "controller_instance_id": config["controller_instance_id"],
+    if (recovery_epoch != controller.state["recovery_epoch_floor"]
+            or str(uuid.UUID(connector_recovery_id)) != connector_recovery_id):
+        raise RecoveryError("restore identity does not match the external journal")
+    # The pre-capture database sequence is bound by the signed manifest; the
+    # externally retained controller sequence can have advanced since capture.
+    response = controller.resynchronize(database_epoch_seen=manifest["recovery_epoch"],
+        database_sequence_seen=manifest["controller_sequence"],
+        checkpoint_epoch_floor=controller.state["recovery_epoch_floor"])
+    proof = _load_signed(drain_proof_path, public_key, controller.config["signing_key_id"])
+    if proof["queue_inventory_digest"] != manifest["queue_inventory_digest"]:
+        raise RecoveryError("restore inventory does not match the signed archive")
+    held = proof["queue_inventory"]["intent_inventory"].get("held_intents", [])
+    common = {"schema_version": 1, "deployment_id": controller.deployment,
         "recovery_epoch": recovery_epoch, "connector_recovery_id": connector_recovery_id,
-        "previous_epoch": epoch_floor - 1, "archive_id": manifest["archive_id"],
+        "archive_id": manifest["archive_id"],
         "manifest_digest": "sha256:" + _sha(manifest_path)[0],
         "source_image_digest": manifest["image_digest"],
         "target_image_digest": None, "new_volume_ids": None,
@@ -737,24 +749,32 @@ def submit_restore_events(*, config_path: Path, manifest_path: Path,
         "queue_inventory_digest": manifest["queue_inventory_digest"],
         "public_readback_digest": None, "failure_code": None}
     responses = []
-    for offset, event_type in enumerate(("restore_started", "volumes_restored"), start=1):
-        body = {**common, "event_id": str(uuid.uuid4()), "sequence": sequence + offset,
-            "event_type": event_type,
-            "previous_epoch": epoch_floor - 1 if event_type == "restore_started" else recovery_epoch,
+    # Reuse the exact event/ack pair after interruption. Controller journals
+    # each signed request before I/O, including the event UUID and timestamp.
+    for event_type in ("restore_started", "volumes_restored"):
+        if event_type == "volumes_restored":
+            for item in held:
+                controller.submit_quarantine({"schema_version": 1,
+                    "deployment_id": controller.deployment, "event_id": str(uuid.uuid4()),
+                    "recovery_epoch": recovery_epoch, "connector_recovery_id": connector_recovery_id,
+                    "connector_id": item["connector_id"], "intent_ids": [item["intent_id"]],
+                    "reason_code": "restore_uncertain_effect",
+                    "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")})
+        last = controller.state.get("last_recovery_event") or {}
+        last_event = last.get("event") or {}
+        if (last_event.get("recovery_epoch") == recovery_epoch and
+                last_event.get("event_type") in ({"restore_started", "volumes_restored"}
+                    if event_type == "restore_started" else {"volumes_restored"})):
+            responses.append(last["response"])
+            continue
+        body = {**common, "event_id": str(uuid.uuid4()), "event_type": event_type,
+            "previous_epoch": recovery_epoch - 1 if event_type == "restore_started" else recovery_epoch,
             "target_image_digest": manifest["image_digest"] if event_type == "volumes_restored" else None,
             "new_volume_ids": volumes if event_type == "volumes_restored" else None,
             "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
-        unsigned = dict(body)
-        body["signature"] = {"algorithm": "Ed25519", "key_id": config["signing_key_id"],
-            "value": base64.urlsafe_b64encode(_sign(canonical_json(unsigned),
-                Path(config["signing_key_file"]))).decode("ascii").rstrip("=")}
-        result = post("/recovery-events", body)
-        if result.get("accepted") is not True:
-            raise RecoveryError("host recovery event was not admitted")
-        responses.append(result)
-    atomic_json(journal_path, {**journal, "last_sequence": sequence + 2,
-        "recovery_epoch_floor": recovery_epoch, "last_recovery_event": responses[-1]})
-    return {"resync": resync_ack, "events": responses}
+        responses.append(controller.submit_recovery_event(body))
+
+    return {"resync": response, "events": responses}
 
 
 def main() -> None:
@@ -779,6 +799,7 @@ def main() -> None:
     capture.add_argument("--package-manifest-digest", required=True)
     capture.add_argument("--helper-image", required=True)
     capture.add_argument("--stop-timeout", type=int, default=120)
+    capture.add_argument("--consumer-state", type=Path)
     observe = sub.add_parser("observe-queue")
     observe.add_argument("--container", required=True)
     observe.add_argument("--output", type=Path, required=True)
@@ -817,6 +838,8 @@ def main() -> None:
     admit.add_argument("--volume-ids", type=Path, required=True)
     admit.add_argument("--recovery-epoch", type=int, required=True)
     admit.add_argument("--connector-recovery-id", required=True)
+    admit.add_argument("--drain-proof", type=Path, required=True)
+    admit.add_argument("--public-key", type=Path, required=True)
     token = sub.add_parser("startup-token")
     token.add_argument("--deployment-id", required=True)
     token.add_argument("--image-digest", required=True)
@@ -838,7 +861,8 @@ def main() -> None:
             controller_instance_id=args.controller_instance_id,
             controller_sequence=args.controller_sequence,
             package_manifest_digest=args.package_manifest_digest,
-            helper_image=args.helper_image, stop_timeout=args.stop_timeout)
+            helper_image=args.helper_image, stop_timeout=args.stop_timeout,
+            consumer_state=args.consumer_state)
         print(json.dumps({"archive_manifest": str(manifest), "outcome": "complete"}, separators=(",", ":")))
     elif args.command == "observe-queue":
         inventory = observe_queue_state(args.container,
@@ -879,7 +903,8 @@ def main() -> None:
         result = submit_restore_events(config_path=args.config,
             manifest_path=args.manifest, volume_ids_path=args.volume_ids,
             recovery_epoch=args.recovery_epoch,
-            connector_recovery_id=args.connector_recovery_id)
+            connector_recovery_id=args.connector_recovery_id,
+            drain_proof_path=args.drain_proof, public_key=args.public_key)
         print(json.dumps(result, separators=(",", ":")))
     elif args.command == "startup-token":
         try:

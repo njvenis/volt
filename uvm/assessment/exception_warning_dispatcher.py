@@ -54,6 +54,11 @@ def dispatch_due(engine, *, now: datetime | None = None, limit: int = 20,
                 exception_warning_intents.c.intent_id == intent_id).with_for_update()).mappings().one_or_none()
             if intent is None or intent["status"] not in {"pending", "failed"}:
                 continue
+            from uvm.operations.backup_settings import intent_quarantined
+            if intent_quarantined(connection, intent_id):
+                results.append({"intent_id": intent_id, "status": "uncertain",
+                    "reason": "restore_uncertain_effect"})
+                continue
             # Sample only after obtaining the row lock. Waiting on a concurrent
             # claimant must not let a send begin after the effective expiry.
             claim_now = now + timedelta(seconds=max(0.0, time.monotonic() - batch_monotonic))

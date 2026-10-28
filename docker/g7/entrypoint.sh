@@ -20,7 +20,7 @@ if [[ ${UVM_G7_DISPOSABLE_MODE:-0} == 1 ]]; then
   # read it from the dedicated bind mount.
   chmod 0755 /run/uvm-g7-scheduler
 fi
-rm -f "$STATE/ready" "$STATE/critical-failed"
+rm -f "$STATE/ready" "$STATE/critical-failed" "$STATE"/pid-*
 
 handle_shutdown() { shutdown_requested=1; }
 handle_quiesce() { quiesce_requested=1; }
@@ -318,7 +318,7 @@ case ${UVM_G7_TEST_FAULT:-} in
 esac
 
 psql_local() { setpriv --reuid=postgres --regid=postgres --init-groups psql -X -v ON_ERROR_STOP=1 -h /var/run/postgresql "$@"; }
-if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 ]]; then
+if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_G7_RECOVERY_STAGE:-} != released ]]; then
 psql_local -d postgres -v uvm_password="$UVM_PASSWORD" -v ce_password="$CE_PASSWORD" <<'SQL'
 SELECT format('CREATE ROLE uvm_app LOGIN PASSWORD %L', :'uvm_password')
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'uvm_app') \gexec
@@ -340,8 +340,8 @@ export DD_CELERY_BROKER_URL=redis://127.0.0.1:6379/0 DD_CACHE_URL=redis://127.0.
 export DD_DATABASE_HOST=127.0.0.1 DD_DATABASE_PORT=5432 DD_MEDIA_ROOT=/app/media
 
 CE_INITIALIZE=true
-if [[ ${UVM_G7_VERIFICATION_ONLY:-0} == 1 ]]; then CE_INITIALIZE=false; fi
-if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 ]]; then
+if [[ ${UVM_G7_VERIFICATION_ONLY:-0} == 1 || ${UVM_G7_RECOVERY_STAGE:-} == released ]]; then CE_INITIALIZE=false; fi
+if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_G7_RECOVERY_STAGE:-} != released ]]; then
 echo 'G7_INIT=CE initialize'
 setpriv --reuid=1001 --regid=1337 --init-groups env -i PATH="$PATH" HOME=/nonexistent \
   DD_DATABASE_URL="$DD_DATABASE_URL" DD_SECRET_KEY="$DD_SECRET_KEY" \
@@ -352,7 +352,7 @@ setpriv --reuid=1001 --regid=1337 --init-groups env -i PATH="$PATH" HOME=/nonexi
   /entrypoint-initializer.sh /bin/true
 abort_if_shutdown
 fi
-if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 ]]; then
+if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_G7_RECOVERY_STAGE:-} != released ]]; then
 echo 'G7_INIT=UVM migrations'
 setpriv --reuid=uvm --regid=uvm --init-groups env -i PATH="$PATH" HOME=/opt/uvm \
   PYTHONPATH=/opt/uvm/app UVM_DB_URL="$UVM_DB_URL" \
@@ -392,8 +392,8 @@ start_recovery_control() {
       --ssl-ca-certs "$RECOVERY_TLS_DIR/client-ca.crt" --ssl-cert-reqs 2
 }
 
-if [[ ${UVM_G7_RECOVERY_STAGE:-} == control-only ]]; then
-  [[ ${UVM_G7_VERIFICATION_ONLY:-0} == 1 ]] || { echo 'G7_RECOVERY_ERROR control-only requires verification-only mode' >&2; exit 70; }
+if [[ ${UVM_G7_RECOVERY_STAGE:-} == control-only || ${UVM_G7_RECOVERY_STAGE:-} == released ]]; then
+  [[ ${UVM_G7_VERIFICATION_ONLY:-0} == 1 || ${UVM_G7_RECOVERY_STAGE:-} == released ]] || { echo 'G7_RECOVERY_ERROR control-only requires verification-only mode' >&2; exit 70; }
   case ${UVM_AUTH_MODE:-bearer} in
     bearer|oidc) ;;
     *) echo 'G7_RECOVERY_ERROR verification-only product API requires bearer or restored OIDC session authentication' >&2; exit 70 ;;
@@ -410,6 +410,12 @@ if [[ ${UVM_G7_RECOVERY_STAGE:-} == control-only ]]; then
   PYTHONPATH=/opt/uvm/app python -m uvm.operations.startup_fence
 fi
 
+if [[ ${UVM_G7_RECOVERY_STAGE:-} == released ]]; then
+  PYTHONPATH=/opt/uvm/app /opt/uvm/venv/bin/python -m uvm.operations.startup_fence --check-release || {
+    echo 'G7_RECOVERY_ERROR released startup lacks its signed durable admission' >&2; exit 70;
+  }
+fi
+
 if [[ ${UVM_G7_RECOVERY_STAGE:-} == control-only ]]; then
   install -d -o 1800 -g 1800 -m 0700 /run/uvm-g7-recovery
   install -o 1800 -g 1800 -m 0644 "$UVM_G7_RECOVERY_TLS_CERT_FILE" /run/uvm-g7-recovery/server.crt
@@ -419,16 +425,18 @@ if [[ ${UVM_G7_RECOVERY_STAGE:-} == control-only ]]; then
   start_recovery_control
   wait_for 'recovery-control listener' env RECOVERY_CONTROL_PORT="${UVM_G7_RECOVERY_CONTROL_PORT:-8002}" \
     /opt/uvm/venv/bin/python -c 'import os,socket; s=socket.create_connection(("127.0.0.1",int(os.environ["RECOVERY_CONTROL_PORT"])),timeout=1); s.close()'
+  printf '%s\n' control >"$STATE/runtime-mode"
   touch "$STATE/ready"
   echo 'G7_READINESS=recovery-control-only'
   # The host performs authenticated resync and quarantine while this is the
   # only application listener. Product APIs and CE stay stopped until the
   # signed volumes_restored transition is durable in the restored UVM DB.
   for attempt in $(seq 1 "${UVM_G7_RECOVERY_GATE_TIMEOUT_SECONDS:-1800}"); do
-    recovery_state=$(PGPASSWORD="$UVM_PASSWORD" psql -h 127.0.0.1 -U uvm_app -d uvm -X -At \
-      -c "SELECT restore_state FROM g7_backup_state WHERE deployment_id = '$UVM_G7_DEPLOYMENT_ID'" \
-      2>"$STATE/recovery-gate-query.stderr" || true)
-    [[ $recovery_state == restored ]] && break
+    if PYTHONPATH=/opt/uvm/app /opt/uvm/venv/bin/python -m uvm.operations.startup_fence \
+        --check-admission >"$STATE/recovery-gate.json" 2>"$STATE/recovery-gate-query.stderr"; then
+      recovery_state=restored
+      break
+    fi
     abort_if_shutdown
     sleep 1
   done
@@ -531,6 +539,7 @@ install -o 1800 -g 1800 -m 0600 "$UVM_G7_RECOVERY_TLS_KEY_FILE" "$RECOVERY_TLS_D
 install -o 1800 -g 1800 -m 0644 "$UVM_G7_RECOVERY_TLS_CA_FILE" "$RECOVERY_TLS_DIR/client-ca.crt"
 start_child api 1800 1800 env -i PATH="$PATH" HOME=/opt/uvm \
   UVM_G7_VERIFICATION_ONLY="${UVM_G7_VERIFICATION_ONLY-0}" \
+  UVM_G7_CONNECTOR_RECOVERY_ID="${UVM_G7_CONNECTOR_RECOVERY_ID-}" \
   UVM_API_READ_SNAPSHOT_DIR="$READ_SNAPSHOT_DIR" \
   PYTHONPATH=/opt/uvm/app \
   UVM_DB_URL="$UVM_DB_URL" UVM_API_CURSOR_SECRET="$UVM_API_CURSOR_SECRET" \
@@ -629,7 +638,7 @@ fi
 
 wait_for 'CE web' curl --silent --output /dev/null http://127.0.0.1:8081/api/v2/
 wait_for 'uWSGI master FIFO' test -p /run/uwsgi/uvm-g7.fifo
-if [[ ${UVM_AUTH_MODE:-bearer} == oidc ]]; then
+if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_AUTH_MODE:-bearer} == oidc ]]; then
   wait_for 'local OIDC provider' curl --fail --silent "http://127.0.0.1:${UVM_OIDC_PROVIDER_PORT:-9000}/healthz"
   wait_for 'loopback OIDC sync adapter' curl --fail --silent http://127.0.0.1:8001/healthz
 fi
@@ -637,8 +646,26 @@ wait_for 'UVM API' curl --fail --silent http://127.0.0.1:8000/openapi.json
 for pid in "${CHILD_PIDS[@]}"; do
   kill -0 "$pid" || { echo "critical child exited during startup: $pid" >&2; exit 70; }
 done
+if [[ ${UVM_G7_VERIFICATION_ONLY:-0} == 1 ]]; then
+  printf '%s\n' verification >"$STATE/runtime-mode"
+else
+  printf '%s\n' runtime >"$STATE/runtime-mode"
+fi
 touch "$STATE/ready"
 echo 'G7_READINESS=ready'
+if [[ ${UVM_G7_RECOVERY_STAGE:-} == control-only ]]; then
+  # The host must retain the signed acknowledgement and journal actual fence
+  # release before explicitly asking this supervisor to start runtime effects.
+  while [[ ! -f "$STATE/host-release" ]]; do
+    abort_if_shutdown
+    for pid in "${CHILD_PIDS[@]}"; do kill -0 "$pid" || exit 70; done
+    sleep 0.2
+  done
+  PYTHONPATH=/opt/uvm/app /opt/uvm/venv/bin/python -m uvm.operations.startup_fence --check-release || exit 70
+  cleanup_running=1
+  stop_all || exit 71
+  exec env UVM_G7_RECOVERY_STAGE=released UVM_G7_VERIFICATION_ONLY=0 "$0"
+fi
 trap 'handle_shutdown' TERM INT
 set +e
 exited_child_pid=

@@ -284,7 +284,7 @@ class BackupSettingsValidationTests(unittest.TestCase):
                 "archive_id": str(uuid.uuid4()), "generation": 1, "recovery_epoch": 0,
                 "capture_started_at": "2026-10-27T12:00:30Z",
                 "consistency_point_at": "2026-10-27T12:00:00Z",
-                "completed_at": "2026-10-27T12:01:00Z",
+                "completed_at": "2026-10-27T12:00:00Z",
                 "image_digest": "sha256:" + "a" * 64,
                 "package_manifest_digest": "sha256:" + "b" * 64,
                 "volumes": members, "settings_revision": 1,

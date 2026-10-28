@@ -26,7 +26,8 @@ def canonical_digest(value: object) -> str:
 
 def commit_backup_settings(connection, *, deployment_id: str, principal: str,
         command_id: str, action: str, body: dict, now: datetime,
-        authorization_context: dict | None = None) -> tuple[dict, bool]:
+        authorization_context: dict | None = None,
+        disposable_failpoint: str | None = None) -> tuple[dict, bool]:
     """Commit revision, audit, host intent and receipt in the caller's transaction.
 
     The current global policy lock is acquired first. The locked assessment
@@ -110,6 +111,8 @@ def commit_backup_settings(connection, *, deployment_id: str, principal: str,
         copied_from_revision=rollback, rationale=body["rationale"],
         evidence_ref=body.get("evidence_ref"), policy_revision=actual["policy"],
         authority_revision=authority, host_policy_revision=host_revision, created_at=now))
+    if disposable_failpoint == "audit":
+        raise ObserverSettingsUnavailable("disposable audit write failure fixture")
     connection.execute(assessment_audit_events.insert().values(
         event_id=event_id, event_sequence=sequence, actor_id=principal,
         actor_kind="principal", origin="backup_settings_api", action=action,
@@ -119,6 +122,8 @@ def commit_backup_settings(connection, *, deployment_id: str, principal: str,
         policy_revision=actual["policy"], identity_revision=0, occurred_at=now,
         received_at=now, correlation_id=command_id, command_id=command_id,
         authorization_context=authorization_context))
+    if disposable_failpoint == "intent":
+        raise ObserverSettingsUnavailable("disposable intent write failure fixture")
     status_values = {"deployment_id": deployment_id, "requested_revision": revision,
         "requested_digest": digest, "application_intent_id": intent_id,
         "application_status": "pending", "latest_failure_code": None,
@@ -136,9 +141,18 @@ def commit_backup_settings(connection, *, deployment_id: str, principal: str,
         "audit_id": event_id, "intent_id": intent_id,
         "committed_at": now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
         "outcome": "desired_committed"}
+    if disposable_failpoint == "receipt":
+        raise ObserverSettingsUnavailable("disposable receipt write failure fixture")
     connection.execute(assessment_command_receipts.insert().values(
         command_id=command_id, principal_id=principal, action=action,
         target_id=target, request_digest=request_digest, decision_id=decision_id,
         audit_event_id=event_id, intent_id=intent_id, result=result, created_at=now,
         authorization_context=authorization_context))
     return result, False
+
+
+def intent_quarantined(connection, intent_id: str) -> bool:
+    """The durable restore hold remains authoritative at dispatch admission."""
+    from uvm.persistence.backup_settings_schema import g7_backup_connector_quarantine
+    return connection.execute(sa.select(g7_backup_connector_quarantine.c.intent_id).where(
+        g7_backup_connector_quarantine.c.intent_id == intent_id).limit(1)).first() is not None

@@ -317,6 +317,18 @@ def install_observer_settings_routes(app: FastAPI) -> None:
             host_policy_fresh = bool(policy_doc and policy_observed and
                 0 <= (app.state.utc_now() - policy_observed).total_seconds() <=
                 int(policy_doc["maximum_report_age_seconds"]))
+            archive_age, archive_maximum, archive_freshness = None, None, "unknown"
+            if state and state["effective_revision"] is not None and state["archive_outcome"] == "complete" and state["archive_completed_at"]:
+                effective_settings = connection.execute(sa.select(g7_backup_settings_revisions.c["values"]).where(
+                    g7_backup_settings_revisions.c.deployment_id == deployment_id,
+                    g7_backup_settings_revisions.c.revision == state["effective_revision"])).scalar_one_or_none()
+                completed = state["archive_completed_at"]
+                if completed.tzinfo is None:
+                    completed = completed.replace(tzinfo=timezone.utc)
+                age = int((app.state.utc_now() - completed).total_seconds())
+                if effective_settings and age >= 0:
+                    archive_age, archive_maximum = age, effective_settings["maximum_backup_age_seconds"]
+                    archive_freshness = "fresh" if age <= archive_maximum else "stale"
             return {"schema_version": 1, "deployment_id": deployment_id,
                 "revisions": {"configuration": int(revision), "policy": int(policy_row["revision"]),
                     "authority": authority, "host_policy": int(state["host_policy_revision"] or 0) if state else 0,
@@ -327,17 +339,17 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                         "completed_at": stamp(state["archive_completed_at"]) if state else None,
                         "manifest_digest": digest(state["archive_manifest_digest"]) if state else None,
                         "outcome": state["archive_outcome"] if state else None},
-                    "freshness": {"state": state["freshness_state"] if state else "unknown",
+                    "freshness": {"state": archive_freshness,
                         "evaluated_at": stamp(state["latest_report_at"]) if state else None,
-                        "age_seconds": state["freshness_age_seconds"] if state else None,
+                        "age_seconds": archive_age,
                         "basis_completed_at": stamp(state["archive_completed_at"]) if state else None,
-                        "maximum_backup_age_seconds": state["freshness_max_age_seconds"] if state else None},
+                        "maximum_backup_age_seconds": archive_maximum},
                     # ``restored`` is an internal transition after volume restore,
                     # before supported-API verification has passed. It must not be
                     # exposed as a successful verification state.
                     "restore_verification": {"state": (state["restore_state"]
                         if state and state["restore_state"] in {"verified", "failed", "uncertain"}
-                        else "unknown"),
+                        else "verified" if state and state["restore_state"] == "released" else "unknown"),
                         "archive_id": state["restore_archive_id"] if state else None,
                         "recovery_epoch": int(state["recovery_epoch"] or 0) if state else 0,
                         "verified_at": stamp(state["restore_verified_at"]) if state else None,
@@ -377,6 +389,11 @@ def install_observer_settings_routes(app: FastAPI) -> None:
             raise HTTPException(400, {"code": "invalid_request", "message": "Command ID must be a UUID"}) from None
         if command_id != body["command_id"]:
             raise HTTPException(400, {"code": "invalid_request", "message": "Command ID must be canonical"})
+        fixture_failpoint = request.headers.get("x-uvm-g7-fixture-failpoint")
+        if fixture_failpoint is not None and (os.environ.get("UVM_G7_DISPOSABLE_MODE") != "1"
+                or fixture_failpoint not in {"audit", "intent", "receipt"}):
+            raise HTTPException(404, {"code": "not_found", "message": "Fixture endpoint is unavailable"})
+        transaction_body_completed = False
         try:
             with engine.begin() as connection:
                 from uvm.assessment.policy_lock import lock_policy
@@ -396,7 +413,8 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                         deployment_id=deployment_id, principal=principal,
                         command_id=command_id, action=action, body=body,
                         now=app.state.utc_now(),
-                        authorization_context=context.document() if context else None)
+                        authorization_context=context.document() if context else None,
+                        disposable_failpoint=fixture_failpoint)
                 except Exception as exc:
                     from uvm.operations.observer_settings import (ObserverSettingsConflict,
                         ObserverSettingsError, ObserverSettingsUnavailable)
@@ -408,9 +426,22 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                         raise HTTPException(503, {"code": "host_policy_unavailable", "message": str(exc),
                             "details": {"outcome": "not_committed"}}) from None
                     raise
-        except sa.exc.SQLAlchemyError:
-            raise HTTPException(503, {"code": "dependency_unavailable",
-                "message": "Backup settings could not be committed"}) from None
+                transaction_body_completed = True
+        except sa.exc.SQLAlchemyError as exc:
+            # COMMIT acknowledgement loss is resolved through the receipt.
+            sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+            proved_abort = (not transaction_body_completed and
+                (isinstance(exc, sa.exc.IntegrityError) or
+                 (sqlstate and not getattr(exc, "connection_invalidated", True))))
+            return JSONResponse(status_code=503, content={"schema_version": 1, "error": {
+                "code": "dependency_unavailable" if proved_abort else "outcome_unknown",
+                "message": "Backup settings could not be committed" if proved_abort else
+                    "Backup settings commit outcome could not be established",
+                "correlation_id": str(uuid.uuid4()), "details": {
+                    "outcome": "not_committed" if proved_abort else "unknown",
+                    "expected_revisions": body["expected_revisions"], "current_revisions": None,
+                    "lookup_url": None if proved_abort else
+                        f"/api/v1/operations/backup-settings/{deployment_id}/receipts/{command_id}"}}})
         return JSONResponse(status_code=200 if replay else 201, content=receipt)
 
     @app.get("/api/v1/operations/backup-settings/{deployment_id}/revisions/{revision}")
@@ -532,6 +563,9 @@ def install_observer_settings_routes(app: FastAPI) -> None:
         _principal, entry = identity
         if entry["deployment_id"] != deployment_id:
             raise HTTPException(404, {"code": "not_found", "message": "Deployment not found"})
+        if body.get("report_kind") == "status":
+            from uvm.operations.backup_status import admit_status
+            return admit_status(engine, deployment_id, body, entry, app.state.utc_now())
         fields = {"schema_version", "deployment_id", "report_id", "sequence",
             "controller_instance_id", "report_kind", "host_policy", "desired",
             "settings_application", "completed_archive", "freshness", "restore_verification",
@@ -596,14 +630,7 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                         raise HTTPException(503, {"code": "host_policy_unavailable",
                             "message": "Initial host clock trust is not configured"})
                     old_skew = int(initial_skew)
-                if old_revision and state["host_policy_document"]:
-                    old_age = int(state["host_policy_document"]["maximum_report_age_seconds"])
-                    previous_observed = state["host_policy_observed_at"]
-                    if previous_observed and previous_observed.tzinfo is None:
-                        previous_observed = previous_observed.replace(tzinfo=timezone.utc)
-                    if not previous_observed or now > previous_observed + timedelta(seconds=old_age):
-                        raise HTTPException(503, {"code": "host_policy_unavailable", "message": "Prior trusted host policy expired"})
-                if (policy["revision"] != old_revision + 1 or body["sequence"] != old_sequence + 1
+                if (policy["revision"] <= old_revision or body["sequence"] != old_sequence + 1
                         or observed_at > now + timedelta(seconds=old_skew) or now > fresh_until):
                     raise HTTPException(409, {"code": "revision_conflict", "message": "Policy revision, sequence or trusted time is invalid"})
                 policy_digest = policy["digest"].removeprefix("sha256:")
@@ -664,11 +691,14 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                 raise ValueError
             if (type(body["sequence"]) is not int or body["sequence"] < 1
                     or type(body["requested_revision"]) is not int or body["requested_revision"] < 1
-                    or type(body["active_revision"]) is not int or body["active_revision"] < 1
+                    or (body["active_revision"] is not None and
+                        (type(body["active_revision"]) is not int or body["active_revision"] < 1))
                     or type(body["host_policy_revision"]) is not int or body["host_policy_revision"] < 1):
                 raise ValueError
             parse_digest = lambda value: isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value)
-            if not parse_digest(body["requested_digest"]) or not parse_digest(body["active_digest"]):
+            if (not parse_digest(body["requested_digest"]) or
+                    (body["active_revision"] is None and body["active_digest"] is not None) or
+                    (body["active_revision"] is not None and not parse_digest(body["active_digest"]))):
                 raise ValueError
             observed = parse_utc(body["observed_at"])
             if not os.getenv("UVM_G7_HOST_KEY_ID"):
@@ -702,6 +732,12 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                         or state["host_policy_revision"] != body["host_policy_revision"]
                         or body["sequence"] != int(state["latest_sequence"] or 0) + 1):
                     raise HTTPException(409, {"code": "revision_conflict", "message": "Host policy or sequence changed"})
+                external_floor = connection.execute(sa.select(sa.func.max(
+                    g7_backup_host_records.c.recovery_epoch)).where(
+                        g7_backup_host_records.c.deployment_id == deployment_id,
+                        g7_backup_host_records.c.record_kind == "resync")).scalar_one() or 0
+                if int(state["recovery_epoch"] or 0) < external_floor:
+                    raise HTTPException(409, {"code": "revision_conflict", "message": "Application acknowledgement is below the external epoch floor"})
                 hp = state["host_policy_document"]
                 policy_observed = state["host_policy_observed_at"]
                 if policy_observed and policy_observed.tzinfo is None:
@@ -805,8 +841,7 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                 observed = state["host_policy_observed_at"]
                 if observed and observed.tzinfo is None:
                     observed = observed.replace(tzinfo=timezone.utc)
-                if (not observed or now > observed + timedelta(seconds=int(policy_doc["maximum_report_age_seconds"]))
-                        or issued_at > now + timedelta(seconds=int(policy_doc["maximum_future_skew_seconds"]))
+                if (issued_at > now + timedelta(seconds=int(policy_doc["maximum_future_skew_seconds"]))
                         or now - issued_at > timedelta(seconds=int(policy_doc["maximum_report_age_seconds"]))):
                     raise HTTPException(503, {"code": "host_policy_unavailable", "message": "Resync clock or policy is stale"})
                 if (body["database_epoch_seen"] > body["checkpoint_epoch_floor"]
@@ -826,12 +861,11 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                     "accepted_at": now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")}
                 connection.execute(g7_backup_host_records.insert().values(
                     record_id=resync_id, deployment_id=deployment_id, record_kind="resync",
-                    sequence=body["checkpoint_last_sequence"],
+                    sequence=None,
                     recovery_epoch=body["checkpoint_epoch_floor"], record_digest=request_digest,
                     document=body, response=response, received_at=now))
                 connection.execute(g7_backup_state.update().where(
                     g7_backup_state.c.deployment_id == deployment_id).values(
-                        recovery_epoch=body["checkpoint_epoch_floor"],
                         latest_sequence=body["checkpoint_last_sequence"],
                         updated_at=now))
                 return response
@@ -908,6 +942,13 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                     raise HTTPException(503, {"code": "host_policy_unavailable", "message": "Quarantine policy or clock is stale"})
                 if body["recovery_epoch"] != int(state["recovery_epoch"] or 0):
                     raise HTTPException(409, {"code": "revision_conflict", "message": "Quarantine recovery epoch is stale"})
+                started = connection.execute(sa.select(g7_backup_host_records.c.document).where(
+                    g7_backup_host_records.c.deployment_id == deployment_id,
+                    g7_backup_host_records.c.record_kind == "recovery",
+                    g7_backup_host_records.c.recovery_epoch == body["recovery_epoch"]).order_by(
+                        g7_backup_host_records.c.sequence)).scalars().first()
+                if not started or started["connector_recovery_id"] != connector_recovery_id:
+                    raise HTTPException(409, {"code": "revision_conflict", "message": "Quarantine restore identity differs"})
                 response = {"schema_version": 1, "deployment_id": deployment_id,
                     "event_id": event_id, "accepted": True,
                     "recovery_epoch": body["recovery_epoch"],
@@ -921,11 +962,22 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                     recovery_epoch=body["recovery_epoch"], record_digest=record_digest,
                     signature=signature, document=body, response=response, received_at=now))
                 for intent_id in intent_ids:
-                    connection.execute(g7_backup_connector_quarantine.insert().values(
-                        deployment_id=deployment_id, intent_id=intent_id,
-                        connector_id=body["connector_id"], recovery_epoch=body["recovery_epoch"],
-                        connector_recovery_id=connector_recovery_id, event_id=event_id,
-                        reason_code=body["reason_code"], created_at=now))
+                    existing = connection.execute(sa.select(g7_backup_connector_quarantine).where(
+                        g7_backup_connector_quarantine.c.deployment_id == deployment_id,
+                        g7_backup_connector_quarantine.c.intent_id == intent_id).with_for_update()).mappings().first()
+                    values = {"deployment_id": deployment_id, "intent_id": intent_id,
+                        "connector_id": body["connector_id"], "recovery_epoch": body["recovery_epoch"],
+                        "connector_recovery_id": connector_recovery_id, "event_id": event_id,
+                        "reason_code": body["reason_code"], "created_at": now}
+                    if existing:
+                        if (existing["connector_id"] != body["connector_id"] or
+                                existing["recovery_epoch"] >= body["recovery_epoch"]):
+                            raise HTTPException(409, {"code": "revision_conflict", "message": "Intent already has a conflicting recovery hold"})
+                        connection.execute(g7_backup_connector_quarantine.update().where(
+                            g7_backup_connector_quarantine.c.deployment_id == deployment_id,
+                            g7_backup_connector_quarantine.c.intent_id == intent_id).values(**values))
+                    else:
+                        connection.execute(g7_backup_connector_quarantine.insert().values(**values))
                 return response
         except sa.exc.IntegrityError:
             raise HTTPException(409, {"code": "command_conflict", "message": "Quarantine intent conflicts"}) from None
@@ -980,7 +1032,7 @@ def install_observer_settings_routes(app: FastAPI) -> None:
             if volumes is not None and (not isinstance(volumes, dict)
                     or set(volumes) != {"postgres_cluster", "ce_media", "uvm_state"}
                     or any(not isinstance(value, str) or not value or len(value) > 256
-                        for value in volumes.values())):
+                        for value in volumes.values()) or len(set(volumes.values())) != 3):
                 raise ValueError
             for key in ("target_image_digest", "public_readback_digest"):
                 if body[key] is not None and not re.fullmatch(r"sha256:[0-9a-f]{64}", body[key]):
@@ -1036,19 +1088,47 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                     ("restored", "verification_passed"): "verified",
                     ("restored", "verification_failed"): "failed",
                     ("verified", "fence_released"): "released"}
-                expected_epoch = old_epoch + 1 if event == "restore_started" else old_epoch
+                checkpoint_floor = connection.execute(sa.select(
+                    sa.func.max(g7_backup_host_records.c.recovery_epoch)).where(
+                        g7_backup_host_records.c.deployment_id == deployment_id,
+                        g7_backup_host_records.c.record_kind == "resync")).scalar_one() or 0
+                expected_epoch = max(old_epoch + 1, int(checkpoint_floor)) if event == "restore_started" else old_epoch
+                if body["recovery_epoch"] < int(checkpoint_floor):
+                    raise HTTPException(409, {"code": "revision_conflict", "message": "Recovery epoch is below the external floor"})
                 if (body["sequence"] != int(state["latest_sequence"] or 0) + 1
-                        or body["previous_epoch"] != old_epoch
+                        or body["previous_epoch"] != (expected_epoch - 1 if event == "restore_started" else old_epoch)
                         or body["recovery_epoch"] != expected_epoch
                         or (old_state, event) not in transitions):
                     raise HTTPException(409, {"code": "revision_conflict", "message": "Recovery transition or epoch is stale"})
+                if event != "restore_started":
+                    retained = connection.execute(sa.select(g7_backup_host_records.c.document).where(
+                        g7_backup_host_records.c.deployment_id == deployment_id,
+                        g7_backup_host_records.c.record_kind == "recovery",
+                        g7_backup_host_records.c.recovery_epoch == old_epoch).order_by(
+                            g7_backup_host_records.c.sequence)).scalars().all()
+                    started = next((doc for doc in retained if doc["event_type"] == "restore_started"), None)
+                    restored = next((doc for doc in retained if doc["event_type"] == "volumes_restored"), None)
+                    binding = ("connector_recovery_id", "archive_id", "manifest_digest",
+                        "source_image_digest", "queue_inventory_digest")
+                    if (started is None or any(body[key] != started[key] for key in binding)
+                            or (restored is not None and any(body[key] != restored[key]
+                                for key in ("target_image_digest", "new_volume_ids")))):
+                        raise HTTPException(409, {"code": "revision_conflict",
+                            "message": "Recovery event changes the admitted restore identity"})
                 if event == "volumes_restored" and (body["new_volume_ids"] is None
                         or body["target_image_digest"] is None):
                     raise HTTPException(400, {"code": "invalid_request", "message": "Restored volumes and target image are required"})
                 if event == "verification_passed" and (body["public_readback_digest"] is None
                         or any(body["verification"][key] != "passed" for key in
-                            ("uvm_public_api", "ce_public_api", "media_readback", "queue_reconciliation"))):
+                            ("uvm_public_api", "ce_public_api", "media_readback", "queue_reconciliation", "migration"))
+                        or body["verification"]["details_digest"] is None):
                     raise HTTPException(409, {"code": "revision_conflict", "message": "Public verification evidence is incomplete"})
+                if event == "fence_released":
+                    verified = next((doc for doc in retained if doc["event_type"] == "verification_passed"), None)
+                    if (verified is None or body["verification"] != verified["verification"] or
+                            body["public_readback_digest"] != verified["public_readback_digest"] or
+                            body["failure_code"] is not None):
+                        raise HTTPException(409, {"code": "revision_conflict", "message": "Fence release changes the verified recovery proof"})
                 policy_doc = policy_row["document"]
                 revisions = {"configuration": int(state["requested_revision"] or 0),
                     "policy": int(policy_row["revision"]),
@@ -1059,6 +1139,9 @@ def install_observer_settings_routes(app: FastAPI) -> None:
                     "recovery_epoch": body["recovery_epoch"], "accepted": True,
                     "current_state": transitions[(old_state, event)], "revisions": revisions,
                     "accepted_at": now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")}
+                if event == "volumes_restored":
+                    from uvm.connectors.api import apply_restore_quarantine_connection
+                    apply_restore_quarantine_connection(connection, connector_recovery_id)
                 connection.execute(g7_backup_host_records.insert().values(
                     record_id=event_id, deployment_id=deployment_id, record_kind="recovery",
                     sequence=body["sequence"], recovery_epoch=body["recovery_epoch"],

@@ -163,14 +163,26 @@ PYVOLS
     anchor_rm_exit=missing_owned_id
     cleanup_rc=1
   fi
+  if [[ -f "$RUN_ROOT/host/state/backup/controller-journal.json" ]]; then
+    cp "$RUN_ROOT/host/state/backup/controller-journal.json" "$EVIDENCE/controller-journal.json" || cleanup_rc=1
+    cp "$RUN_ROOT/secrets/host-pub.pem" "$EVIDENCE/host-public-key.pem" || cleanup_rc=1
+    cp "$RUN_ROOT/host/backup-policy.json" "$EVIDENCE/host-backup-policy.json" || cleanup_rc=1
+  fi
+  # A stopped replacement may have left a root-owned scheduler directory on
+  # this run's sole writable bind. Repair only that known disposable mount.
+  if [[ -d "$RUN_ROOT/scheduler" ]] && ! rm -rf "$RUN_ROOT/scheduler" 2>/dev/null; then
+    docker run --rm --network none --mount "type=bind,src=$RUN_ROOT/scheduler,dst=/owned-scheduler" \
+      --entrypoint /bin/chmod "$IMAGE" -R a+rwX /owned-scheduler >/dev/null 2>&1 || cleanup_rc=1
+  fi
+  chmod -R u+rwX "$RUN_ROOT" 2>/dev/null || true
+  rm -rf "$RUN_ROOT" || cleanup_rc=1
+  [[ ! -e "$RUN_ROOT" ]] || cleanup_rc=1
   if (( CREATED_IMAGE )); then docker image rm "$IMAGE" >/dev/null 2>&1; fi
   printf 'container_id=%s\ncontainer_remove_exit=%s\ncontainer_absence_verified=%s\nrestore_container_id=%s\nrestore_container_remove_exit=%s\nrestore_container_absence_verified=%s\nrestore_volumes_absence_verified=%s\nanchor_id=%s\nanchor_remove_exit=%s\nanchor_absence_verified=%s\nrunner_exit=%s\ncleanup_exit=%s\n' \
     "${CONTAINER_ID:-unknown}" "$container_rm_exit" "$container_removed" \
     "${RESTORE_CONTAINER_ID:-not_started}" "$restore_container_rm_exit" "$restore_container_removed" "$restore_volumes_removed" \
     "${ANCHOR_ID:-unknown}" "$anchor_rm_exit" "$anchor_removed" "$rc" "$cleanup_rc" \
     >"$EVIDENCE/owned-resource-cleanup.txt"
-  chmod -R u+rwX "$RUN_ROOT" 2>/dev/null || true
-  rm -rf "$RUN_ROOT"
   if (( cleanup_rc != 0 && rc == 0 )); then rc=70; fi
   exit "$rc"
 }
@@ -279,6 +291,8 @@ curl --fail --silent --show-error http://127.0.0.1:9000/healthz >/dev/null
 
 if [[ $MODE == --backup-recovery-only ]]; then
   CE_ADMIN_PASSWORD=$(cat "$RUN_ROOT/secrets/ce_admin_password")
+  docker exec "$CONTAINER" /opt/uvm/venv/bin/python /opt/uvm/app/tools/g7_recovery_retained_fixture.py \
+    >"$EVIDENCE/retained-fixture-ids.json"
   python3 - "$RUN_ROOT/g7-ce-recovery-sentinel.json" <<'PYSENTINEL'
 import json,sys
 json.dump({'name':'G7 Backup Recovery Sentinel','type':'G7 Backup Recovery Fixture',
@@ -303,6 +317,19 @@ PYSENTINEL
   docker exec "$CONTAINER" curl --fail --silent --show-error --max-time 15 -u "admin:$CE_ADMIN_PASSWORD" \
     'http://127.0.0.1:8081/api/v2/findings/?limit=100' \
     >"$EVIDENCE/source-ce-findings.json"
+
+  FINDING_ID=$(python3 -c 'import json,sys;print(next(f["id"] for f in json.load(open(sys.argv[1]))["results"] if f.get("unique_id_from_tool")=="g7-backup-recovery-sentinel-v1"))' "$EVIDENCE/source-ce-findings.json")
+  printf 'Synthetic retained CE media sentinel v1\n' >"$RUN_ROOT/recovery-media.txt"
+  docker cp "$RUN_ROOT/recovery-media.txt" "$CONTAINER:/tmp/recovery-media.txt"
+  docker exec "$CONTAINER" curl --fail --silent --show-error --max-time 15 -u "admin:$CE_ADMIN_PASSWORD" \
+    -F title=g7-recovery-media -F 'file=@/tmp/recovery-media.txt;type=text/plain' \
+    "http://127.0.0.1:8081/api/v2/findings/$FINDING_ID/files/" >"$EVIDENCE/source-ce-media-descriptor.json"
+  MEDIA_ID=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["id"])' "$EVIDENCE/source-ce-media-descriptor.json")
+  docker exec "$CONTAINER" curl --fail --silent --show-error --max-time 15 -u "admin:$CE_ADMIN_PASSWORD" \
+    "http://127.0.0.1:8081/api/v2/findings/$FINDING_ID/files/download/$MEDIA_ID/" >"$EVIDENCE/source-ce-media.txt"
+  cmp "$RUN_ROOT/recovery-media.txt" "$EVIDENCE/source-ce-media.txt"
+  docker exec "$CONTAINER" curl --fail --silent --show-error --max-time 15 -u "admin:$CE_ADMIN_PASSWORD" \
+    'http://127.0.0.1:8081/api/v2/findings/?limit=100' >"$EVIDENCE/source-ce-findings.json"
   python3 - "$EVIDENCE/source-ce-findings.json" "$EVIDENCE/source-ce-public-sentinel.json" <<'PYSOURCECE'
 import hashlib,json,sys
 document=json.load(open(sys.argv[1],encoding='utf-8'))
@@ -314,6 +341,9 @@ encoded=json.dumps(retained,ensure_ascii=False,sort_keys=True,separators=(',',':
 json.dump({'count':len(retained),'results_sha256':'sha256:'+hashlib.sha256(encoded).hexdigest()},
  open(sys.argv[2],'x',encoding='utf-8'),sort_keys=True,separators=(',',':'))
 PYSOURCECE
+  ENGAGEMENT_ID=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["engagement_id"])' "$EVIDENCE/source-ce-import-response.json")
+  docker exec "$CONTAINER" curl --fail --silent --show-error --max-time 15 -u "admin:$CE_ADMIN_PASSWORD" \
+    "http://127.0.0.1:8081/api/v2/engagements/$ENGAGEMENT_ID/" >"$EVIDENCE/source-ce-engagement.json"
   chmod 600 "$RUN_ROOT/g7-ce-recovery-sentinel.json" "$EVIDENCE/source-ce-import-response.json" \
     "$EVIDENCE/source-ce-findings.json" "$EVIDENCE/source-ce-public-sentinel.json"
 fi
@@ -471,11 +501,14 @@ PYARCHIVE
     --public-key "$RUN_ROOT/secrets/host-pub.pem" \
     --signing-key "$RUN_ROOT/host/ed25519.pem" \
     --key-id g7-host-controller-key --generation 1 --recovery-epoch 0 \
-    --settings-revision 1 --settings-digest "$SETTINGS_DIGEST" \
+    --settings-revision "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["effective_revision"])' "$EVIDENCE/backup-seed-readback.json")" --settings-digest "$SETTINGS_DIGEST" \
     --host-policy-revision 1 --host-policy-digest "$POLICY_DIGEST" \
     --controller-instance-id 00000000-0000-4000-8000-000000000017 \
-    --controller-sequence 2 --package-manifest-digest "$PACKAGE_DIGEST" \
+    --controller-sequence "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["last_sequence"])' "$RUN_ROOT/host/state/backup/controller-journal.json")" --package-manifest-digest "$PACKAGE_DIGEST" \
+    --consumer-state "$RUN_ROOT/host/state/backup/capture-request.json" \
     --helper-image "$IMAGE" >"$EVIDENCE/capture.stdout" 2>"$EVIDENCE/capture.stderr"
+  cp "$RUN_ROOT/host/state/backup/scheduler-readback.json" "$EVIDENCE/backup-scheduler-readback.json"
+  cp "$RUN_ROOT/host/state/backup/capture-request.json" "$EVIDENCE/backup-capture-request.json"
   cp -a "$ARCHIVE_DIR" "$EVIDENCE/archive"
   uv run python "$ROOT/tools/g7_backup_recovery.py" verify \
     --archive-dir "$EVIDENCE/archive" --public-key "$RUN_ROOT/secrets/host-pub.pem" \
@@ -615,6 +648,7 @@ PYFW
     --config "$RUN_ROOT/host/backup-controller.json" \
     --manifest "$EVIDENCE/archive/manifest.json" --volume-ids "$RESTORE_VOLUMES_JSON" \
     --recovery-epoch "$RECOVERY_EPOCH" --connector-recovery-id "$CONNECTOR_RECOVERY_ID" \
+    --drain-proof "$EVIDENCE/signed-drain-proof.json" --public-key "$RUN_ROOT/secrets/host-pub.pem" \
     >"$EVIDENCE/restore-event-acks.json" 2>"$EVIDENCE/restore-event-acks.stderr"
   product_readers_ready=0
   for _ in $(seq 1 180); do
@@ -677,6 +711,12 @@ json.dump(restored,open(sys.argv[3],'x',encoding='utf-8'),sort_keys=True,separat
 if restored != source: raise SystemExit('restored CE public findings differ from source public readback')
 if restored['count'] < 1: raise SystemExit('CE public readback has no retained sentinel finding')
 PYRESTORECE
+  docker exec "$RESTORE_CONTAINER" curl --fail --silent --show-error --max-time 15 -u "admin:$CE_ADMIN_PASSWORD" \
+    "http://127.0.0.1:8081/api/v2/findings/$FINDING_ID/files/download/$MEDIA_ID/" >"$EVIDENCE/restore-ce-media.txt"
+  cmp "$EVIDENCE/source-ce-media.txt" "$EVIDENCE/restore-ce-media.txt"
+  docker exec "$RESTORE_CONTAINER" curl --fail --silent --show-error --max-time 15 -u "admin:$CE_ADMIN_PASSWORD" \
+    "http://127.0.0.1:8081/api/v2/engagements/$ENGAGEMENT_ID/" >"$EVIDENCE/restore-ce-engagement.json"
+  cmp "$EVIDENCE/source-ce-engagement.json" "$EVIDENCE/restore-ce-engagement.json"
   chmod 600 "$EVIDENCE/restore-ce-findings.json" "$EVIDENCE/restore-ce-public-sentinel.json"
   python3 - "$EVIDENCE/recovery-auth-state.json" "$EVIDENCE" <<'PYPUBLICPROBE'
 import http.client,json,sys,urllib.error,urllib.request
@@ -705,11 +745,112 @@ for name,path in [('recovery-session','/api/v1/auth/session'),
   value={'body_bytes':len(body)}
  json.dump({'status':status,'response':value},open(root/(name+'.json'),'w',encoding='utf-8'),sort_keys=True,separators=(',',':'))
 PYPUBLICPROBE
+  uv run python "$ROOT/tools/g7_recovery_public_readback.py" --evidence "$EVIDENCE" --phase pre-migration \
+    >"$EVIDENCE/pre-migration-public-readback.json"
+  set +e
+  docker exec "$RESTORE_CONTAINER" bash -lc \
+    'export UVM_DB_URL="postgresql+psycopg://uvm_app:$(cat /run/secrets/uvm_db_password)@127.0.0.1:5432/uvm"; cd /opt/uvm/app; exec /opt/uvm/venv/bin/python -m alembic -c alembic.ini upgrade head' \
+    >"$EVIDENCE/explicit-migration.stdout" 2>"$EVIDENCE/explicit-migration.stderr"
+  MIGRATION_EXIT=$?
+  set -e
+  printf '%s\n' "$MIGRATION_EXIT" >"$EVIDENCE/explicit-migration.exit"
+  (( MIGRATION_EXIT == 0 )) || exit "$MIGRATION_EXIT"
+  # Renew the startup context, restart verification processes after the explicit
+  # migration, and obtain a fresh authenticated checkpoint before readers return.
+  rm "$RUN_ROOT/secrets/startup-fence.json"
+  uv run python "$ROOT/tools/g7_backup_recovery.py" startup-token \
+    --deployment-id g7-local --image-digest "$IMAGE_DIGEST" \
+    --volume-ids-json "$RESTORE_VOLUMES_JSON" --archive-digest "$ARCHIVE_DIGEST" \
+    --recovery-epoch "$RECOVERY_EPOCH" --connector-recovery-id "$CONNECTOR_RECOVERY_ID" \
+    --key-id g7-host-controller-key --signing-key "$RUN_ROOT/host/ed25519.pem" \
+    --output "$RUN_ROOT/secrets/startup-fence.json" >"$EVIDENCE/post-migration-startup-token.stdout"
+  docker restart "$RESTORE_CONTAINER" >"$EVIDENCE/post-migration-restart.stdout"
+  for _ in $(seq 1 90); do
+    if [[ $(docker inspect "$RESTORE_CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null) == healthy ]]; then break; fi
+    sleep 1
+  done
+  CURRENT_SEQUENCE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["last_sequence"])' "$RUN_ROOT/host/state/backup/controller-journal.json")
+  uv run python "$ROOT/tools/g7_backup_controller.py" --config "$RUN_ROOT/host/backup-controller.json" \
+    --resync-database-epoch "$RECOVERY_EPOCH" --resync-database-sequence "$CURRENT_SEQUENCE" \
+    --resync-checkpoint-epoch "$RECOVERY_EPOCH" --force-resync >"$EVIDENCE/post-migration-resync.json"
+  post_migration_ready=0
+  for _ in $(seq 1 90); do
+    if curl --fail --silent --max-time 2 http://127.0.0.1:8000/openapi.json >/dev/null; then post_migration_ready=1; break; fi
+    sleep 1
+  done
+  (( post_migration_ready )) || { echo 'post-migration verification listener unavailable' >&2; exit 2; }
+  uv run python "$ROOT/tools/g7_recovery_public_readback.py" --evidence "$EVIDENCE" --phase post-migration \
+    >"$EVIDENCE/post-migration-public-readback.json"
+  uv run python - "$RUN_ROOT/host/backup-controller.json" "$EVIDENCE" <<'PYFINISH'
+from datetime import datetime,timedelta,timezone
+import hashlib,json,sys,urllib.request,uuid
+from pathlib import Path
+from tools.g7_backup_controller import Controller,load_config,atomic_json
+from uvm.operations.backup_host import digest
+config=load_config(Path(sys.argv[1])); controller=Controller(config); root=Path(sys.argv[2])
+if (root/'explicit-migration.exit').read_text().strip()!='0': raise ValueError('explicit migration failed')
+for phase in ('pre-migration','post-migration'):
+ if json.loads((root/(phase+'-public-readback.json')).read_text()).get('passed') is not True: raise ValueError('public retained assertions missing')
+for name in ('media.txt','engagement.json'):
+ if (root/('source-ce-'+name)).read_bytes() != (root/('restore-ce-'+name)).read_bytes(): raise ValueError('CE retained sentinel differs')
+files=['pre-migration-public-readback.json','post-migration-public-readback.json','source-ce-public-sentinel.json','restore-ce-public-sentinel.json','source-ce-media.txt','restore-ce-media.txt','source-ce-engagement.json','restore-ce-engagement.json','explicit-migration.exit','signed-drain-proof.json']
+readbacks={name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in files}
+readback_digest='sha256:'+digest(readbacks)
+atomic_json(root/'verification-readback-manifest.json',readbacks)
+last=controller.state['last_recovery_event']['event']
+unsigned={k:v for k,v in last.items() if k not in {'signature','sequence','controller_instance_id'}}
+verification={k:'passed' for k in ('uvm_public_api','ce_public_api','media_readback','queue_reconciliation','migration')}
+verification['details_digest']=readback_digest
+unsigned.update(event_id=str(uuid.uuid4()),previous_epoch=last['recovery_epoch'],event_type='verification_passed',verification=verification,public_readback_digest=readback_digest,observed_at=datetime.now(timezone.utc).isoformat().replace('+00:00','Z'))
+verified=controller.submit_recovery_event(unsigned)
+storage=json.loads((root/'recovery-auth-state.json').read_text())
+cookie=next(c['value'] for c in storage['cookies'] if c['name']=='uvm_session' and c['domain']=='127.0.0.1')
+request=urllib.request.Request('http://127.0.0.1:8000/api/v1/operations/backup-settings/g7-local',headers={'Cookie':'uvm_session='+cookie})
+with urllib.request.urlopen(request,timeout=15) as response: dto=json.load(response)
+manifest=json.loads((root/'archive/manifest.json').read_text())
+now=datetime.now(timezone.utc);completed=datetime.fromisoformat(manifest['completed_at'].replace('Z','+00:00'))
+maximum=dto['desired']['values']['maximum_backup_age_seconds'];age=int((now-completed).total_seconds())
+status={'schema_version':1,'deployment_id':controller.deployment,'report_id':str(uuid.uuid4()),'report_kind':'status','host_policy':config['host_policy'],
+ 'desired':{k:dto['desired'][k] for k in ('revision','digest')},'settings_application':dto['status']['settings_application'],
+ 'completed_archive':{'archive_id':manifest['archive_id'],'completed_at':manifest['completed_at'],'manifest_digest':'sha256:'+hashlib.sha256((root/'archive/manifest.json').read_bytes()).hexdigest(),'outcome':'complete'},
+ 'freshness':{'state':'fresh' if age<=maximum else 'stale','evaluated_at':now.isoformat().replace('+00:00','Z'),'age_seconds':age,'basis_completed_at':manifest['completed_at'],'maximum_backup_age_seconds':maximum},
+ 'restore_verification':dto['status']['restore_verification'],'recovery_epoch':last['recovery_epoch'],
+ 'observed_at':now.isoformat().replace('+00:00','Z'),'fresh_until':(now+timedelta(seconds=config['host_policy']['maximum_report_age_seconds'])).isoformat().replace('+00:00','Z')}
+status_ack=controller.submit_status(status)
+unsigned.update(event_id=str(uuid.uuid4()),event_type='fence_released',observed_at=datetime.now(timezone.utc).isoformat().replace('+00:00','Z'))
+released=controller.submit_recovery_event(unsigned)
+atomic_json(root/'signed-verification-release-acks.json',{'verification':verified,'status':status_ack,'release':released})
+PYFINISH
+  sudo -n nft delete table inet "$RESTORE_FIREWALL_TABLE" >"$EVIDENCE/host-egress-release.stdout" 2>"$EVIDENCE/host-egress-release.stderr"
+  RESTORE_FIREWALL_TABLE=''
+  python3 - "$EVIDENCE/host-fence-release-journal.json" <<'PYRELEASE'
+from datetime import datetime,timezone
+import json,os,sys
+from pathlib import Path
+path=Path(sys.argv[1]); value={'signed_public_acknowledgement_retained':True,'ingress':'loopback-only-disposable','egress_rule_removed':True,'workers_release_requested':False,'observed_at':datetime.now(timezone.utc).isoformat()}
+with path.open('x') as stream:
+ json.dump(value,stream,sort_keys=True);stream.flush();os.fsync(stream.fileno())
+PYRELEASE
+  docker exec "$RESTORE_CONTAINER" touch /run/uvm-g7/host-release
+  released_runtime_ready=0
+  for _ in $(seq 1 180); do
+    if docker exec "$RESTORE_CONTAINER" test -f /run/uvm-g7/pid-ce-worker \
+        && curl --fail --silent --max-time 2 http://127.0.0.1:8000/openapi.json >/dev/null; then released_runtime_ready=1; break; fi
+    if [[ $(docker inspect "$RESTORE_CONTAINER" --format '{{.State.Running}}') != true ]]; then break; fi
+    sleep 1
+  done
+  (( released_runtime_ready )) || { echo 'signed recovery did not release runtime workers' >&2; exit 2; }
+  PYTHONPATH="$ROOT" uv run python "$ROOT/tools/g7_recovery_runtime_probe.py" \
+    --container "$RESTORE_CONTAINER" --evidence "$EVIDENCE" >"$EVIDENCE/released-runtime-proof.stdout" \
+    2>"$EVIDENCE/released-runtime-proof.stderr"
+  uv run python "$ROOT/tools/g7_recovery_public_readback.py" --evidence "$EVIDENCE" --phase released \
+    >"$EVIDENCE/released-public-readback.json"
+  docker exec "$RESTORE_CONTAINER" ps -eo pid,comm,args >"$EVIDENCE/released-processes.txt"
   python3 - "$EVIDENCE/restore-browser-expectations.json" <<'PYEXPECT'
 import json,sys
 json.dump({'schema_version':1,'id':'restored-readback','deployment_id':'g7-local','action':'read',
- 'timeout_ms':60000,'expect':{'desired_revision':1,'effective_revision':1,'application':'applied',
- 'archive':'unknown','freshness':'unknown','restore':'unknown'}},
+ 'timeout_ms':60000,'expect':{'desired_revision':4,'effective_revision':4,'application':'applied',
+ 'archive':'complete','freshness':'fresh','restore':'verified'}},
  open(sys.argv[1],'x',encoding='utf-8'),sort_keys=True,separators=(',',':'))
 PYEXPECT
   node "$ROOT/tools/g7_recovery_ui_probe.mjs" --origin http://127.0.0.1:8000 \

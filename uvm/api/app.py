@@ -836,6 +836,11 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
                 target = root / "index.html"
             return FileResponse(target, headers={"Cache-Control": "no-store",
                 "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"})
+    if os.getenv("UVM_G7_VERIFICATION_ONLY") == "1":
+        # Restricted processes expose retained readbacks only. Normal hooks
+        # include restore mutations, projection recovery and external pollers.
+        app.router.on_startup.clear()
+        app.router.on_shutdown.clear()
     return app
 
 

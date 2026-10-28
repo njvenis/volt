@@ -809,6 +809,10 @@ def _send_projection_step(engine, intent, group_id, step_key, request, rest,
     now = _now()
     digest = _sha(request)
     with engine.begin() as connection:
+        from uvm.operations.backup_settings import intent_quarantined
+        if intent_quarantined(connection, intent["projection_id"]):
+            raise GitHubOutcomeUnknown("projection is held for recovery reconciliation")
+
         # Poll finalization takes this same row lock before committing remote
         # readback conclusions. A new native write therefore either appears in
         # its revalidation or starts strictly after that conclusion commits.

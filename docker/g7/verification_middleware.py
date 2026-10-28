@@ -7,6 +7,7 @@ import os
 
 _ALLOWED = (
     re.compile(r"^/api/v2/(?:findings|engagements|tests|files)/(?:\d+)?/?$"),
+    re.compile(r"^/api/v2/findings/\d+/files(?:/download/\d+)?/?$"),
     re.compile(r"^/media/[A-Za-z0-9._/-]+$"),
     re.compile(r"^/healthz/?$"),
 )

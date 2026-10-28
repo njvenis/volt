@@ -1,3 +1,4 @@
+import {runBackupBrowserStep} from '../ui/tests/backup-recovery-browser.mjs';
 import { chromium } from '../ui/node_modules/playwright/index.mjs';
 import { readFile, mkdir, writeFile, unlink } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
@@ -145,7 +146,7 @@ try {
 
   const bootstrap = await api('/api/v1/assessment/bootstrap-policy',{method:'POST',write:true,
     body:JSON.stringify({policy:{grants:[],denies:[{deny_id:'g7-deny-b-observer',principal_id:'g7-actor',
-      actions:['observer.timing.read','observer.timing.configure'],target_ids:['g7-other']}],
+      actions:['observer.timing.read','observer.timing.configure','backup.settings.read','backup.settings.configure'],target_ids:['g7-other']}],
       acceptance_material_changes:{},exception_warning_routes:[]}})});
   if (![200,409].includes(bootstrap.status)) throw new Error(`bootstrap policy failed with ${bootstrap.status}`);
   counts.bootstrap = bootstrap.status;
@@ -191,7 +192,7 @@ try {
   const duties=grant.separation_of_duties??{approval_requires_distinct_actor:true,prohibit_requester_approval:true,
     required_approver_count:1,prohibited_action_pairs:[]};
   const actions=['observer.timing.read','observer.timing.configure',
-    'backup.settings.read','backup.settings.configure','audit.read'];
+    'backup.settings.read','backup.settings.configure','assessment.read','audit.read'];
   const permissions=actions.map(action=>({permission_id:crypto.randomUUID(),role_id:crypto.randomUUID(),action,
     target_scope:scope,limits,separation_of_duties:duties,
     ...(action.startsWith('observer.timing.')||action.startsWith('backup.settings.')?{deployment_scopes:['g7-local','g7-other']}: {})}));
@@ -245,8 +246,17 @@ try {
       ||backupInitial.body.status?.settings_application!==null||backupInitial.body.can_configure!==true)
     throw new Error(`backup initial readback failed: ${JSON.stringify(backupInitial)}`);
   counts.backupInitialRead=1;
-  const backupCommandId=crypto.randomUUID();
-  const backupReceipt=await api('/api/v1/operations/backup-settings/g7-local/commands',{
+  let backupCommandId=crypto.randomUUID();
+  let backupReceipt;
+  if(backupSeedOnly){
+    const step=await runBackupBrowserStep({page,origin, evidenceDirectory:path.join(evidence,"ui-publish"),
+      expectations:{schema_version:1,id:"initial-publish",deployment_id:"g7-local",action:"publish",
+        rationale:"Exercise the reviewed local backup settings contract",evidence_ref:"g7-backup-journey-fixture",
+        values:{interval_seconds:300,timeout_seconds:120,maximum_backup_age_seconds:7200,restore_verification_timeout_seconds:600,archive_target_ref:"archive-target-local-a",recovery_profile_ref:"recovery-profile-local-a"},
+        expect:{desired_revision:1,effective_revision:null,application:"pending",archive:"unknown",freshness:"unknown",restore:"unknown"}}});
+    backupCommandId=step.commands[0].command_id;
+    backupReceipt=await api(`/api/v1/operations/backup-settings/g7-local/receipts/${backupCommandId}`);
+  }else backupReceipt=await api('/api/v1/operations/backup-settings/g7-local/commands',{
     method:'POST',write:true,body:JSON.stringify({schema_version:1,command_id:backupCommandId,
       action:'backup.settings.publish',expected_revisions:{configuration:0,
         policy:backupInitial.body.revisions.policy,authority:backupInitial.body.revisions.authority,host_policy:1},
@@ -254,7 +264,7 @@ try {
       values:{interval_seconds:300,timeout_seconds:120,maximum_backup_age_seconds:7200,
         restore_verification_timeout_seconds:600,archive_target_ref:'archive-target-local-a',
         recovery_profile_ref:'recovery-profile-local-a'}})});
-  if(backupReceipt.status!==201||backupReceipt.body.outcome!=='desired_committed'
+  if(![200,201].includes(backupReceipt.status)||backupReceipt.body.outcome!=='desired_committed'
       ||backupReceipt.body.desired_revision!==1||backupReceipt.body.settings_digest?.length!==71)
     throw new Error(`backup settings command failed: ${JSON.stringify(backupReceipt)}`);
   counts.backupSettingsCommit=1;
@@ -286,12 +296,63 @@ try {
   counts.backupHostApplied=1;
   counts.backupEffectiveReadback=1;
   if(backupSeedOnly){
+    for(const item of [
+      {id:'change',action:'publish',revision:2,interval:360},
+      {id:'lost-ack',action:'publish',revision:3,interval:420,lose_acknowledgement:true},
+      {id:'rollback',action:'rollback',revision:4,rollback_revision:1}]){
+      await runBackupBrowserStep({page,origin,evidenceDirectory:path.join(evidence,'ui-'+item.id),
+        expectations:{schema_version:1,id:item.id,deployment_id:'g7-local',action:item.action,
+          rationale:'Disposable recovery '+item.id,evidence_ref:'g7-backup-journey-fixture',
+          ...(item.action==='publish'?{values:{...backupEffective.body.desired.values,interval_seconds:item.interval}}:{rollback_revision:1}),
+          ...(item.lose_acknowledgement?{lose_acknowledgement:true}:{}),
+          expect:{desired_revision:item.revision,effective_revision:item.revision-1,application:'pending',archive:'unknown',freshness:'unknown',restore:'unknown'}}});
+      execFileSync('uv',['run','python','tools/g7_observer_fixture.py','backup-host-once','--root',fixtureRoot],
+        {cwd:repoRoot,encoding:'utf8',stdio:['ignore','pipe','pipe']});
+      const applied=await api('/api/v1/operations/backup-settings/g7-local');
+      if(applied.status!==200||applied.body.effective?.revision!==item.revision||applied.body.status.settings_application.state!=='applied')
+        throw new Error('UI command was not independently consumed: '+JSON.stringify(applied));
+    }
+    const backupNegatives={};
+    const stableBackup=await api('/api/v1/operations/backup-settings/g7-local');
+    const {configuration,policy,authority,host_policy}=stableBackup.body.revisions;
+    const makeCommand=()=>({schema_version:1,command_id:crypto.randomUUID(),action:'backup.settings.publish',
+      expected_revisions:{configuration,policy,authority,host_policy},rationale:'Local backup safety assertion',
+      evidence_ref:'g7-backup-journey-fixture',values:stableBackup.body.desired.values});
+    const denied=await api('/api/v1/operations/backup-settings/g7-other/commands',{method:'POST',write:true,body:JSON.stringify(makeCommand())});
+    if(denied.status!==404)throw new Error('Backup explicit deny disclosed or allowed the deployment');
+    backupNegatives.crossDeploymentDenied=denied.status;
+    const staleBody=makeCommand();staleBody.expected_revisions.configuration=0;
+    const stale=await api('/api/v1/operations/backup-settings/g7-local/commands',{method:'POST',write:true,body:JSON.stringify(staleBody)});
+    if(stale.status!==409)throw new Error('Backup stale revision was accepted');
+    backupNegatives.staleRevision=stale.status;
+    for(const stage of ['audit','intent','receipt']){
+      const before=await hostTelemetryCount();const command=makeCommand();
+      const failed=await api('/api/v1/operations/backup-settings/g7-local/commands',{method:'POST',write:true,
+        headers:{'X-UVM-G7-Fixture-Failpoint':stage},body:JSON.stringify(command)});
+      const after=await hostTelemetryCount();
+      const receipt=await api('/api/v1/operations/backup-settings/g7-local/receipts/'+command.command_id);
+      const unchanged=await api('/api/v1/operations/backup-settings/g7-local');
+      if(failed.status!==503||receipt.status!==404||unchanged.body.revisions.configuration!==4||before.audit_event_count!==after.audit_event_count)
+        throw new Error('Backup atomic '+stage+' failure leaked durable state');
+      backupNegatives[stage]={status:failed.status,receipt_status:receipt.status,audit_unchanged:true,configuration:4};
+    }
+    await writeFile(path.join(evidence,'backup-command-negatives.json'),JSON.stringify(backupNegatives),{mode:0o600});
+    const retainedIds=JSON.parse(await readFile(path.join(evidence,'retained-fixture-ids.json'),'utf8'));
+    const retainedGroup=await api('/api/v1/assessment/groups/'+retainedIds.group);
+    const retainedAudit=await api('/api/v1/assessment/audit?group_id='+retainedIds.group);
+    if(retainedGroup.status!==200||retainedAudit.status!==200||retainedGroup.body.assessment.assessed_severity?.value!=='high'
+        ||retainedGroup.body.github.issue_number!==7||retainedGroup.body.github.state!=='uncertain'
+        ||!retainedGroup.body.assessment.pending_projection_intents.some(i=>i.intent_id===retainedIds.intent&&i.status==='uncertain'))
+      throw new Error('Retained UVM public sentinel is incomplete: '+JSON.stringify({retainedGroup,retainedAudit}));
+    await writeFile(path.join(evidence,'source-uvm-retained-group.json'),JSON.stringify(retainedGroup.body),{mode:0o600});
+    await writeFile(path.join(evidence,'source-uvm-retained-audit.json'),JSON.stringify(retainedAudit.body),{mode:0o600});
+    const finalBackup=await api('/api/v1/operations/backup-settings/g7-local');
     counts.status='backup_seeded';
     await context.storageState({path:path.join(evidence,'recovery-auth-state.json')});
     await writeFile(path.join(evidence,'backup-seed-readback.json'),JSON.stringify({
-      public_settings:'applied',desired_revision:backupReadback.body.desired.revision,
-      effective_revision:backupEffective.body.effective.revision,
-      effective_digest:backupEffective.body.effective.digest,
+      public_settings:'applied',desired_revision:finalBackup.body.desired.revision,
+      effective_revision:finalBackup.body.effective.revision,
+      effective_digest:finalBackup.body.effective.digest,
       receipt_id:retainedBackupReceipt.body.intent_id},null,2)+'\n',{mode:0o600});
     const marker=new Error('G7_BACKUP_SEED_ONLY_COMPLETE');
     marker.backupSeedOnly=true;

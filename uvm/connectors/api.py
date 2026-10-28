@@ -78,6 +78,11 @@ def _z(value):
 
 def _recovery_epoch(*, allow_not_yet_created: bool = False) -> str | None:
     """Read the infrastructure-supplied restore fence, never a DB-restored value."""
+    host_restore_id = os.getenv("UVM_G7_CONNECTOR_RECOVERY_ID")
+    if host_restore_id:
+        if not _UUID.fullmatch(host_restore_id):
+            raise RuntimeError("host connector recovery UUID is invalid")
+        return host_restore_id
     path = os.getenv("UVM_CONNECTOR_RECOVERY_EPOCH_FILE")
     if not path:
         return None
@@ -105,55 +110,59 @@ def _recovery_epoch(*, allow_not_yet_created: bool = False) -> str | None:
 
 def apply_restore_quarantine(engine, epoch_id: str) -> int:
     """Fail-close every restored connector before request/worker readiness."""
+    with engine.begin() as connection:
+        return apply_restore_quarantine_connection(connection, epoch_id)
+
+
+def apply_restore_quarantine_connection(connection, epoch_id: str) -> int:
+    """Bind connector recovery to the authenticated host restore UUID atomically."""
     epoch_id = _uuid(epoch_id, "recovery_epoch_id")
     now = datetime.now(UTC)
-    with engine.begin() as connection:
-        rows = connection.execute(sa.select(connectors).with_for_update()).mappings().all()
-        for row in rows:
-            if (row["recovery"].get("state") == "quarantined"
-                    and row["recovery"].get("recovery_epoch_id") == epoch_id):
-                continue
-            recovery = {"state":"quarantined", "recovery_epoch_id":epoch_id,
-                "operator_clearance_present":False, "requires_fresh_credentials":True,
-                "reason":"restore_quarantined"}
-            connection.execute(connectors.update().where(
-                connectors.c.connector_id == row["connector_id"]).values(
-                    recovery=recovery, lifecycle="disabled", active_configuration_revision=None,
-                    connector_revision=int(row["connector_revision"])+1,
-                    validation={"status":"failed","checked_at":_z(now),"intent_id":None,
-                        "configuration_revision":row["configuration_revision"],
-                        "reason":"restore_quarantined"}, updated_at=now))
-            connection.execute(connector_secrets.update().where(
-                connector_secrets.c.connector_id == row["connector_id"],
-                connector_secrets.c.state != "revoked").values(quarantine="restored_version"))
-            # A restored row cannot establish whether an externally issued
-            # revocation completed after the backup snapshot. Keep the exact
-            # secret/version binding, but expose remote status as uncertain.
-            secrets_to_reconcile = connection.execute(sa.select(connector_secrets).where(
-                connector_secrets.c.connector_id == row["connector_id"],
-                connector_secrets.c.state != "revoked").with_for_update()).mappings().all()
-            for secret in secrets_to_reconcile:
-                remote = dict(secret["remote_revocation"] or {})
-                if remote.get("status") not in {"complete", "confirmed_revoked"}:
-                    # The v1 nested remote status uses `unknown`; intent
-                    # settlement uses `outcome_unknown`.
-                    remote.update(status="unknown", reason="outcome_unknown")
-                    connection.execute(connector_secrets.update().where(
-                        connector_secrets.c.connector_id == row["connector_id"],
-                        connector_secrets.c.secret_id == secret["secret_id"],
-                        connector_secrets.c.version_id == secret["version_id"]).values(
-                            remote_revocation=remote))
-                    if remote.get("intent_id"):
-                        connection.execute(connector_intents.update().where(
-                            connector_intents.c.connector_id == row["connector_id"],
-                            connector_intents.c.intent_id == remote["intent_id"],
-                            connector_intents.c.kind == "connector.remote_revoke",
-                            connector_intents.c.status.in_(["pending", "running"])).values(
-                                status="uncertain", result={"reason":"database_restore_status_unknown",
-                                    "secret_id":secret["secret_id"],"version_id":secret["version_id"]},
-                                updated_at=now))
+    rows = connection.execute(sa.select(connectors).with_for_update()).mappings().all()
+    for row in rows:
+        if (row["recovery"].get("state") == "quarantined"
+                and row["recovery"].get("recovery_epoch_id") == epoch_id):
+            continue
+        recovery = {"state":"quarantined", "recovery_epoch_id":epoch_id,
+            "operator_clearance_present":False, "requires_fresh_credentials":True,
+            "reason":"restore_quarantined"}
+        connection.execute(connectors.update().where(
+            connectors.c.connector_id == row["connector_id"]).values(
+                recovery=recovery, lifecycle="disabled", active_configuration_revision=None,
+                connector_revision=int(row["connector_revision"])+1,
+                validation={"status":"failed","checked_at":_z(now),"intent_id":None,
+                    "configuration_revision":row["configuration_revision"],
+                    "reason":"restore_quarantined"}, updated_at=now))
+        connection.execute(connector_secrets.update().where(
+            connector_secrets.c.connector_id == row["connector_id"],
+            connector_secrets.c.state != "revoked").values(quarantine="restored_version"))
+        # A restored row cannot establish whether an externally issued
+        # revocation completed after the backup snapshot. Keep the exact
+        # secret/version binding, but expose remote status as uncertain.
+        secrets_to_reconcile = connection.execute(sa.select(connector_secrets).where(
+            connector_secrets.c.connector_id == row["connector_id"],
+            connector_secrets.c.state != "revoked").with_for_update()).mappings().all()
+        for secret in secrets_to_reconcile:
+            remote = dict(secret["remote_revocation"] or {})
+            if remote.get("status") not in {"complete", "confirmed_revoked"}:
+                # The v1 nested remote status uses `unknown`; intent
+                # settlement uses `outcome_unknown`.
+                remote.update(status="unknown", reason="outcome_unknown")
+                connection.execute(connector_secrets.update().where(
+                    connector_secrets.c.connector_id == row["connector_id"],
+                    connector_secrets.c.secret_id == secret["secret_id"],
+                    connector_secrets.c.version_id == secret["version_id"]).values(
+                        remote_revocation=remote))
+                if remote.get("intent_id"):
+                    connection.execute(connector_intents.update().where(
+                        connector_intents.c.connector_id == row["connector_id"],
+                        connector_intents.c.intent_id == remote["intent_id"],
+                        connector_intents.c.kind == "connector.remote_revoke",
+                        connector_intents.c.status.in_(["pending", "running"])).values(
+                            status="uncertain", result={"reason":"database_restore_status_unknown",
+                                "secret_id":secret["secret_id"],"version_id":secret["version_id"]},
+                            updated_at=now))
     return len(rows)
-
 
 def _authenticate(app, request: Request) -> str:
     context = getattr(request.state, "authority_context", None)
@@ -554,14 +563,15 @@ def install_connector_routes(app):
 
     def quarantine_restored_instance():
         authority_path = os.getenv("UVM_CONNECTOR_RECOVERY_EPOCH_FILE")
-        if not authority_path:
+        host_restore_id = os.getenv("UVM_G7_CONNECTOR_RECOVERY_ID")
+        if not authority_path and not host_restore_id:
             with engine.connect() as connection:
                 configured = connection.execute(sa.select(connectors.c.connector_id).where(
                     connectors.c.configuration_revision > 0).limit(1)).first()
             if configured:
                 raise RuntimeError("connector recovery epoch is required for configured state")
             return
-        if authority_path and not os.path.lexists(authority_path):
+        if authority_path and not host_restore_id and not os.path.lexists(authority_path):
             # A clean disposable boot creates its fixture connector after the
             # API starts, then its restore fixture supplies the epoch. A
             # restored database with existing connector rows must never boot
@@ -883,6 +893,9 @@ def install_connector_routes(app):
             snapshot_policy=_policy(snapshot_connection)
             snapshot_row=snapshot_connection.execute(sa.select(connectors).where(
                 connectors.c.connector_id==connector_id)).mappings().first()
+            from uvm.operations.backup_settings import intent_quarantined
+            if intent_quarantined(snapshot_connection, intent_id):
+                _fail(409, "restore_uncertain_effect", "Intent is held for recovery reconciliation")
             snapshot_intent=snapshot_connection.execute(sa.select(connector_intents).where(
                 connector_intents.c.connector_id==connector_id,
                 connector_intents.c.intent_id==intent_id)).mappings().first()

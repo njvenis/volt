@@ -63,7 +63,7 @@ def load_config(path: Path) -> dict:
     required = {"schema_version", "deployment_id", "endpoint", "token_file",
         "client_cert_file", "client_key_file", "server_ca_file", "signing_key_file",
         "signing_key_id", "controller_instance_id", "host_policy", "journal_file",
-        "active_settings_file"}
+        "active_settings_file", "scheduler_readback_file", "capture_request_file"}
     if (not isinstance(config, dict) or set(config) != required
             or type(config["schema_version"]) is not int or config["schema_version"] != 1
             or any(not isinstance(config[key], str) or not config[key]
@@ -103,7 +103,7 @@ class Controller:
         required = {"schema_version", "deployment_id", "controller_instance_id",
             "last_sequence", "recovery_epoch_floor", "last_intent", "last_ack"}
         if (not isinstance(value, dict) or set(value) - required - {"pending_ack", "pending_resync",
-                "last_resync", "pending_recovery_event", "last_recovery_event"}
+                "last_resync", "pending_recovery_event", "last_recovery_event", "last_effective", "pending_quarantine", "quarantine_receipts", "pending_status", "last_status"}
                 or not required.issubset(value)
                 or type(value.get("schema_version")) is not int or value.get("schema_version") != 1
                 or value.get("deployment_id") != self.deployment
@@ -114,11 +114,17 @@ class Controller:
         return value
 
     def resynchronize(self, *, database_epoch_seen: int, database_sequence_seen: int,
-            checkpoint_epoch_floor: int) -> dict:
+            checkpoint_epoch_floor: int, force: bool = False) -> dict:
         """Authenticate DB rollback recovery and journal the transport ack first."""
         for value in (database_epoch_seen, database_sequence_seen, checkpoint_epoch_floor):
             if type(value) is not int or value < 0:
                 raise RecoveryError("sequence resync counters are invalid")
+        last = self.state.get("last_resync") or {}
+        previous = last.get("request") or {}
+        if (not force and previous.get("database_epoch_seen") == database_epoch_seen and
+                previous.get("database_sequence_seen") == database_sequence_seen and
+                previous.get("checkpoint_epoch_floor") == checkpoint_epoch_floor):
+            return last["response"]
         pending = self.state.get("pending_resync")
         if pending is None:
             if checkpoint_epoch_floor < self.state["recovery_epoch_floor"]:
@@ -186,6 +192,51 @@ class Controller:
         atomic_json(self.journal, self.state)
         return response
 
+    def submit_status(self, unsigned: dict) -> dict:
+        event = self.state.get("pending_status")
+        if event is None:
+            event = {**unsigned, "sequence": self.state["last_sequence"] + 1,
+                "controller_instance_id": self.config["controller_instance_id"]}
+            event["signature"] = {"algorithm": "Ed25519", "key_id": self.config["signing_key_id"],
+                "value": __import__("base64").urlsafe_b64encode(_sign(canonical_json(event),
+                    Path(self.config["signing_key_file"]))).decode().rstrip("=")}
+            self.state["pending_status"] = event
+            atomic_json(self.journal, self.state)
+        response = self._request("reports", event)
+        if (response.get("accepted") is not True or response.get("report_id") != event["report_id"]
+                or response.get("sequence") != event["sequence"]):
+            raise RecoveryError("status acknowledgement differs from the durable request")
+        self.state["last_sequence"] = event["sequence"]
+        self.state["last_status"] = {"request": event, "response": response}
+        self.state.pop("pending_status", None)
+        atomic_json(self.journal, self.state)
+        return response
+
+    def submit_quarantine(self, unsigned: dict) -> dict:
+        identity = unsigned["connector_id"] + ":" + ",".join(unsigned["intent_ids"]) + ":" + str(unsigned["recovery_epoch"])
+        receipts = self.state.setdefault("quarantine_receipts", {})
+        if identity in receipts:
+            return receipts[identity]["response"]
+        event = self.state.get("pending_quarantine")
+        if event is None:
+            event = dict(unsigned)
+            event["signature"] = {"algorithm": "Ed25519", "key_id": self.config["signing_key_id"],
+                "value": __import__("base64").urlsafe_b64encode(_sign(canonical_json(unsigned),
+                    Path(self.config["signing_key_file"]))).decode().rstrip("=")}
+            self.state["pending_quarantine"] = event
+            atomic_json(self.journal, self.state)
+        if (event["connector_id"] != unsigned["connector_id"] or event["intent_ids"] != unsigned["intent_ids"]
+                or event["recovery_epoch"] != unsigned["recovery_epoch"]):
+            raise RecoveryError("a different quarantine acknowledgement remains pending")
+        response = self._request("connector-quarantine", event)
+        if (response.get("accepted") is not True or response.get("event_id") != event["event_id"]
+                or response.get("recovery_epoch") != event["recovery_epoch"]):
+            raise RecoveryError("quarantine acknowledgement differs from the durable request")
+        receipts[identity] = {"request": event, "response": response}
+        self.state.pop("pending_quarantine", None)
+        atomic_json(self.journal, self.state)
+        return response
+
     def _request(self, path: str, body: dict | None = None) -> dict:
         url = self.config["endpoint"].rstrip("/") + f"/recovery-control/v1/{self.deployment}/{path}"
         request = urllib.request.Request(url, data=canonical_json(body) if body is not None else None,
@@ -196,6 +247,24 @@ class Controller:
             return json.loads(response.read())
 
     def reconcile_desired(self) -> dict:
+        # Complete the journaled at-least-once acknowledgement first. UVM may
+        # already have retained it and admitted a newer desired revision after
+        # the response was lost; fetching that revision must not strand replay.
+        pending_ack = self.state.get("pending_ack")
+        if pending_ack is not None:
+            response = self._request("acks", pending_ack)
+            if response.get("ack_id") != pending_ack["ack_id"] or response.get("accepted") is not True:
+                raise RecoveryError("UVM did not return the retained pending acknowledgement")
+            self.state["last_sequence"] = pending_ack["sequence"]
+            self.state["last_ack"] = response
+            self.state["last_intent"]["status"] = pending_ack["outcome"]
+            if pending_ack["outcome"] == "applied":
+                self.state["last_effective"] = {"revision": pending_ack["active_revision"],
+                    "digest": pending_ack["active_digest"]}
+            self.state.pop("pending_ack", None)
+            atomic_json(self.journal, self.state)
+            return {"state": pending_ack["outcome"], "revision": pending_ack["requested_revision"],
+                "sequence": pending_ack["sequence"], "replayed": True}
         dto = self._request("desired")
         if (dto.get("schema_version") != 1 or dto.get("deployment_id") != self.deployment
                 or not isinstance(dto.get("revisions"), dict)):
@@ -238,37 +307,55 @@ class Controller:
                 "digest": desired["digest"], "intent_id": desired["intent_id"],
                 "command_id": desired["command_id"], "status": "received"}
             atomic_json(self.journal, self.state)
-        if (self.state.get("last_intent", {}).get("status") == "applied"
-                and not self.state.get("pending_ack")):
+        if self.state["last_intent"].get("status") == "applied":
             try:
-                active = json.loads(self.active_file.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                raise RecoveryError("last applied settings record is unavailable") from exc
-            if active.get("revision") != desired["revision"] or active.get("digest") != desired["digest"]:
-                raise RecoveryError("last applied settings record changed")
-            return {"state": "applied", "revision": desired["revision"],
-                "sequence": self.state["last_sequence"], "replayed": False}
-        pending_ack = self.state.get("pending_ack")
-        if pending_ack is not None:
-            if (pending_ack.get("intent_id") != desired["intent_id"]
-                    or pending_ack.get("requested_revision") != desired["revision"]
-                    or pending_ack.get("requested_digest") != desired["digest"]):
-                raise RecoveryError("pending acknowledgement belongs to a different desired intent")
-            response = self._request("acks", pending_ack)
-            if response.get("ack_id") != pending_ack["ack_id"] or response.get("accepted") is not True:
-                raise RecoveryError("UVM did not return the retained pending acknowledgement")
-            self.state["last_sequence"] = pending_ack["sequence"]
-            self.state["last_ack"] = response
-            self.state["last_intent"]["status"] = "applied"
-            self.state.pop("pending_ack", None)
-            atomic_json(self.journal, self.state)
-            return {"state": "applied", "revision": desired["revision"],
-                "sequence": pending_ack["sequence"], "replayed": True}
+                readback = json.loads(Path(self.config["scheduler_readback_file"]).read_text())
+                if (readback.get("revision") == desired["revision"] and
+                        readback.get("digest") == desired["digest"] and
+                        readback.get("intent_id") == desired["intent_id"] and
+                        readback.get("values") == values and
+                        0 <= (datetime.now(timezone.utc) - parse_utc(readback["observed_at"])).total_seconds() <= 5):
+                    return {"state": "applied", "revision": desired["revision"],
+                        "sequence": self.state["last_sequence"], "replayed": False}
+            except (OSError, ValueError, KeyError):
+                pass
         active = {"schema_version": 1, "deployment_id": self.deployment,
             "revision": desired["revision"], "digest": desired["digest"],
             "intent_id": desired["intent_id"], "values": values,
             "applied_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
         atomic_json(self.active_file, active)
+        outcome, failure_code, consumed = "uncertain", "consumer_readback_unavailable", None
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                candidate = json.loads(Path(self.config["scheduler_readback_file"]).read_text())
+                observed = parse_utc(candidate["observed_at"])
+                if (candidate.get("deployment_id") == self.deployment and
+                        candidate.get("revision") == desired["revision"] and
+                        candidate.get("digest") == desired["digest"] and
+                        candidate.get("intent_id") == desired["intent_id"] and
+                        candidate.get("values") == values and
+                        observed >= parse_utc(active["applied_at"]) and
+                        0 <= (datetime.now(timezone.utc) - observed).total_seconds() <= 5):
+                    consumed = candidate
+                    outcome, failure_code = "applied", None
+                    break
+            except (OSError, ValueError, KeyError):
+                pass
+            try:
+                failure = json.loads(Path(self.config["scheduler_readback_file"]).with_suffix(".failure.json").read_text())
+                if (failure.get("revision") == desired["revision"] and
+                        failure.get("digest") == desired["digest"] and failure.get("intent_id") == desired["intent_id"] and
+                        failure.get("failure_code") == "consumer_rejected" and
+                        parse_utc(failure["observed_at"]) >= parse_utc(active["applied_at"])):
+                    outcome, failure_code = "failed", "consumer_rejected"
+                    break
+            except (OSError, ValueError, KeyError):
+                pass
+            time.sleep(0.1)
+        last_good = self.state.get("last_effective") or {}
+        active_revision = desired["revision"] if consumed else last_good.get("revision")
+        active_digest = desired["digest"] if consumed else last_good.get("digest")
         ack_id = str(uuid.uuid4())
         sequence = self.state["last_sequence"] + 1
         now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -276,9 +363,9 @@ class Controller:
             "ack_id": ack_id, "sequence": sequence,
             "controller_instance_id": self.config["controller_instance_id"],
             "intent_id": desired["intent_id"], "requested_revision": desired["revision"],
-            "requested_digest": desired["digest"], "active_revision": desired["revision"],
-            "active_digest": desired["digest"], "host_policy_revision": policy["revision"],
-            "outcome": "applied", "failure_code": None,
+            "requested_digest": desired["digest"], "active_revision": active_revision,
+            "active_digest": active_digest, "host_policy_revision": policy["revision"],
+            "outcome": outcome, "failure_code": failure_code,
             "observed_at": now.isoformat().replace("+00:00", "Z")}
         signed = {**unsigned, "signature": {"algorithm": "Ed25519",
             "key_id": self.config["signing_key_id"],
@@ -294,10 +381,12 @@ class Controller:
             raise RecoveryError("UVM did not retain the exact application acknowledgement")
         self.state["last_sequence"] = sequence
         self.state["last_ack"] = response
-        self.state["last_intent"]["status"] = "applied"
+        self.state["last_intent"]["status"] = outcome
+        if outcome == "applied":
+            self.state["last_effective"] = {"revision": active_revision, "digest": active_digest}
         self.state.pop("pending_ack", None)
         atomic_json(self.journal, self.state)
-        return {"state": "applied", "revision": desired["revision"], "sequence": sequence}
+        return {"state": outcome, "revision": desired["revision"], "sequence": sequence}
 
 
 def main() -> None:
@@ -308,11 +397,16 @@ def main() -> None:
     parser.add_argument("--resync-database-epoch", type=int)
     parser.add_argument("--resync-database-sequence", type=int)
     parser.add_argument("--resync-checkpoint-epoch", type=int)
+    parser.add_argument("--force-resync", action="store_true")
     parser.add_argument("--recovery-event-json", type=Path)
+    parser.add_argument("--status-json", type=Path)
     args = parser.parse_args()
     if not 1 <= args.poll_seconds <= 3600:
         raise RecoveryError("poll interval is outside host-owned bounds")
     controller = Controller(load_config(args.config))
+    if args.status_json is not None:
+        print(json.dumps(controller.submit_status(json.loads(args.status_json.read_text())), separators=(",", ":")))
+        return
     if args.recovery_event_json is not None:
         try:
             event = json.loads(args.recovery_event_json.read_text(encoding="utf-8"))
@@ -327,7 +421,7 @@ def main() -> None:
             raise RecoveryError("all three sequence-resync counters are required together")
         print(json.dumps(controller.resynchronize(database_epoch_seen=args.resync_database_epoch,
             database_sequence_seen=args.resync_database_sequence,
-            checkpoint_epoch_floor=args.resync_checkpoint_epoch), separators=(",", ":")))
+            checkpoint_epoch_floor=args.resync_checkpoint_epoch, force=args.force_resync), separators=(",", ":")))
         return
     while True:
         result = controller.reconcile_desired()

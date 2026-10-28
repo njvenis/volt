@@ -258,3 +258,34 @@ for(const phase of ['navigation','refresh'])test('read handoff rejects backup-co
  const report=JSON.parse(await readFile(join(evidenceDirectory,expectations.id+'-browser.json'),'utf8'));assert.equal(report.passed,false);assert.equal(report.commands.length,1);
 });
 test('read handoff observes independent state without sending commands',async t=>{const {page,evidenceDirectory,expectations}=await handoffFixture(t,'read-no-writes');expectations.action='read';expectations.expect={desired_revision:4,effective_revision:3,application:'failed',archive:'unknown',freshness:'unknown',restore:'unknown'};const report=await runBackupBrowserStep({page,origin,expectations,evidenceDirectory});assert.equal(report.passed,true);assert.deepEqual(report.commands,[]);});
+
+function legacyAppliedSettings(){const state=settings('applied');state.effective.verified_at=null;state.status.settings_application.reported_at=null;state.status.settings_application.host_policy_revision=null;state.status.settings_application.intent_id=null;return state;}
+test('legacy applied state renders known revisions and unknown evidence; refresh preserves independent provenance',async t=>{
+ const {page,state,commands}=await fixture(t,legacyAppliedSettings());
+ const fact=name=>page.locator('dt').filter({hasText:new RegExp('^'+name+'$')}).locator('..').locator('dd');
+ assert.match(await page.locator('.observer-summary').innerText(),/Revision 4[\s\S]*Revision 4/);
+ assert.match(await page.locator('.observer-summary').innerText(),/Verification evidence time · Unknown/);
+ assert.match(await page.locator('.observer-state').innerText(),/Applied/);
+ assert.equal(await fact('Application host policy').innerText(),'Unknown');
+ assert.equal(await fact('Application reported at').innerText(),'Unknown');
+ assert.equal(await fact('Current host policy').innerText(),'Revision 3');
+ await page.getByText(/The applied state is retained, but some application evidence is unknown/).waitFor();
+ assert.deepEqual(await page.locator('.backup-state').allTextContents(),['Unknown','unknown','unknown']);
+ const refresh=page.getByRole('button',{name:'Refresh backup state',exact:true});await refresh.focus();
+ assert.equal(await refresh.evaluate(el=>el===document.activeElement&&getComputedStyle(el).outlineStyle!=='none'&&getComputedStyle(el).outlineWidth!=='0px'),true);
+ await page.keyboard.press('Enter');await refresh.waitFor();await page.waitForFunction(()=>!Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Refresh backup state').disabled);
+ assert.equal(await fact('Application host policy').innerText(),'Unknown');
+ state.status.settings_application.host_policy_revision=2;
+ state.status.settings_application.reported_at='2026-10-01T12:00:00Z';state.effective.verified_at='2026-10-01T12:00:00Z';
+ await refresh.click();await page.getByText('Revision 2',{exact:true}).waitFor();
+ assert.equal(await fact('Application host policy').innerText(),'Revision 2');assert.equal(await fact('Current host policy').innerText(),'Revision 3');
+ assert.equal(await fact('Application reported at').locator('time').getAttribute('datetime'),'2026-10-01T12:00:00Z');
+ assert.equal(await page.getByText(/The applied state is retained, but some application evidence is unknown/).count(),0);
+ assert.equal(commands.length,0);
+});
+for(const [name,mutate] of [['invalid time',s=>s.effective.verified_at='unknown'],['mismatched digest',s=>s.status.settings_application.active_digest=oldDigest]])test('legacy browser fails closed for '+name,async t=>{const state=legacyAppliedSettings();mutate(state);const {page,commands}=await fixture(t,state,null,{invalidRead:true});assert.equal(await page.locator('.observer-state').count(),0);assert.equal(await page.locator('.observer-summary').count(),0);assert.equal(commands.length,0);});
+test('legacy unknown evidence is accessible and reflows at 1440, 390 and 320',async t=>{
+ const {page}=await fixture(t,legacyAppliedSettings());await page.addScriptTag({path:resolve(import.meta.dirname,'../node_modules/axe-core/axe.min.js')});const results=[];
+ for(const width of [1440,390,320]){await page.setViewportSize({width,height:1000});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`legacy reflow ${width}`);const violations=await page.evaluate(async()=>(await axe.run(document.querySelector('main'),{runOnly:{type:'tag',values:['wcag2a','wcag2aa','wcag21aa','wcag22aa']}})).violations);assert.deepEqual(violations,[],`legacy axe ${width}`);results.push({width,overflow:false,violations});if(process.env.BACKUP_UI_EVIDENCE_DIR){await mkdir(process.env.BACKUP_UI_EVIDENCE_DIR,{recursive:true});await page.screenshot({path:join(process.env.BACKUP_UI_EVIDENCE_DIR,`synthetic-legacy-backup-${width}.png`),fullPage:true});}}
+ if(process.env.BACKUP_UI_EVIDENCE_DIR)await writeFile(join(process.env.BACKUP_UI_EVIDENCE_DIR,'synthetic-legacy-accessibility.json'),JSON.stringify({environment:'synthetic legacy DTO browser fixture; no database migration execution',results},null,2));
+});

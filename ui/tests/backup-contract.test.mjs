@@ -56,3 +56,18 @@ for(const [name,raw] of [
  ['oversized page',{schema_version:1,deployments:Array.from({length:51},(_,i)=>({deployment_id:String(i),label:String(i),can_configure:false})),next_cursor:null}],
  ['empty page with continuation',{schema_version:1,deployments:[],next_cursor:'more'}],
 ])test('discovery rejects '+name,()=>assert.throws(()=>api.parseDeployments(raw),{code:'invalid_response'}));
+
+function legacyAppliedSettings(){const s=freshSettings();s.effective={revision:2,digest,verified_at:null};s.status.settings_application={state:'applied',requested_revision:2,requested_digest:digest,intent_id:null,host_policy_revision:null,active_revision:2,active_digest:digest,reported_at:null,failure_code:null};return s;}
+test('legacy applied state retains exact revision and digest with unknown evidence times and host policy',()=>{const state=legacyAppliedSettings();assert.deepEqual(api.parseSettings(state,'fixture'),state);});
+for(const [name,mutate] of [
+ ['missing effective evidence time',s=>delete s.effective.verified_at],
+ ['invalid effective evidence time',s=>s.effective.verified_at='unknown'],
+ ['missing application report time',s=>delete s.status.settings_application.reported_at],
+ ['invalid application report time',s=>s.status.settings_application.reported_at=0],
+ ['missing application policy provenance',s=>delete s.status.settings_application.host_policy_revision],
+ ['invalid application policy provenance',s=>s.status.settings_application.host_policy_revision='3'],
+ ['nonmatching effective revision',s=>s.effective.revision=1],
+ ['nonmatching effective digest',s=>s.effective.digest='sha256:'+'d'.repeat(64)],
+ ['nonmatching application revision',s=>s.status.settings_application.active_revision=1],
+ ['nonmatching application digest',s=>s.status.settings_application.active_digest='sha256:'+'d'.repeat(64)],
+])test('legacy applied state rejects '+name,()=>{const state=legacyAppliedSettings();mutate(state);assert.throws(()=>api.parseSettings(state,'fixture'),{code:'invalid_response'});});

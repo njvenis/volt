@@ -9,7 +9,7 @@ import urllib.request
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--evidence', type=Path, required=True)
-    parser.add_argument('--phase', choices=('pre-migration', 'post-migration', 'released'), required=True)
+    parser.add_argument('--phase', choices=('pre-migration', 'post-migration', 'rollback', 'released'), required=True)
     args = parser.parse_args()
     root = args.evidence
     ids = json.loads((root / 'retained-fixture-ids.json').read_text())

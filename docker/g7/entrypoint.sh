@@ -269,6 +269,9 @@ if [[ ! -s "$PGDATA/PG_VERSION" ]]; then
   setpriv --reuid=postgres --regid=postgres --init-groups \
     /usr/lib/postgresql/18/bin/initdb -D "$PGDATA" --encoding=UTF8 --no-locale \
     --auth-local=peer --auth-host=scram-sha-256
+  PG_CLUSTER_INITIALIZED=1
+else
+  PG_CLUSTER_INITIALIZED=0
 fi
 chown -R postgres:postgres "$PGDATA"
 services_started=1
@@ -318,6 +321,32 @@ case ${UVM_G7_TEST_FAULT:-} in
 esac
 
 psql_local() { setpriv --reuid=postgres --regid=postgres --init-groups psql -X -v ON_ERROR_STOP=1 -h /var/run/postgresql "$@"; }
+G7_SCHEMA_MODE=${UVM_G7_SCHEMA_MODE:-normal}
+G7_SCHEMA_DECLARED_HEAD=$(cat /etc/uvm-g7-schema-head)
+G7_SCHEMA_COMPAT_ADMITTED=0
+if [[ $G7_SCHEMA_MODE == upgrade-verification ]]; then
+  [[ ${UVM_G7_VERIFICATION_ONLY:-0} == 1 && ${UVM_G7_RECOVERY_STAGE:-} == control-only ]] || {
+    echo 'G7_SCHEMA_COMPATIBILITY_REJECTED reason=upgrade-mode-requires-control-only' >&2; exit 70;
+  }
+  PYTHONPATH=/opt/uvm/app /opt/uvm/venv/bin/python -m uvm.operations.startup_fence --check-schema-admission
+  G7_SCHEMA_COMPAT_ADMITTED=1
+fi
+if (( PG_CLUSTER_INITIALIZED )); then
+  G7_SCHEMA_HEADS='[]'
+else
+  if [[ $(psql_local -d postgres -Atc "SELECT 1 FROM pg_database WHERE datname='uvm'") == 1 ]]; then
+    G7_SCHEMA_QUERY=$(psql_local -d uvm -Atc "SELECT CASE WHEN to_regclass('public.alembic_version') IS NULL THEN '__MISSING__' ELSE COALESCE((SELECT json_agg(version_num ORDER BY version_num)::text FROM alembic_version), '[]') END")
+    [[ $G7_SCHEMA_QUERY != __MISSING__ ]] || { echo 'G7_SCHEMA_COMPATIBILITY_REJECTED reason=missing-version-table' >&2; exit 70; }
+    G7_SCHEMA_HEADS=$G7_SCHEMA_QUERY
+  else
+    echo 'G7_SCHEMA_COMPATIBILITY_REJECTED reason=existing-cluster-missing-uvm-database' >&2; exit 70
+  fi
+fi
+/opt/uvm/venv/bin/python -m uvm.operations.schema_compatibility \
+  --declared-head "$G7_SCHEMA_DECLARED_HEAD" --mode "$G7_SCHEMA_MODE" \
+  --heads-json "$G7_SCHEMA_HEADS" \
+  $([[ ${PG_CLUSTER_INITIALIZED:-0} == 1 ]] && printf '%s' --empty-cluster) \
+  $([[ $G7_SCHEMA_COMPAT_ADMITTED == 1 ]] && printf '%s' --compatibility-admitted)
 if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_G7_RECOVERY_STAGE:-} != released ]]; then
 psql_local -d postgres -v uvm_password="$UVM_PASSWORD" -v ce_password="$CE_PASSWORD" <<'SQL'
 SELECT format('CREATE ROLE uvm_app LOGIN PASSWORD %L', :'uvm_password')

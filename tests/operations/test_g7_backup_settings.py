@@ -22,6 +22,8 @@ from uvm.operations.startup_fence import verify_startup_fence
 from uvm.operations.api import _discovery_cursor, _read_discovery_cursor
 from tools.g7_backup_recovery import RecoveryError, restore_new_volumes, verify_archive
 from tools.g7_backup_controller import Controller, _last_intent_revision
+from tools.g7_upgrade_assertions import validate_verification_queue, validate_epoch_two_readbacks, classify_verification_queue
+from tools.g7_product_inventory import compare as compare_product_inventory
 from uvm.api.recovery_readonly import (recovery_control_request_decision,
     recovery_request_decision as uvm_recovery_request_decision)
 from docker.g7.verification_middleware import recovery_request_decision
@@ -88,6 +90,155 @@ class BackupSettingsValidationTests(unittest.TestCase):
                     recovery_epoch=3, connector_recovery_id=document["connector_recovery_id"],
                     key_id="test-key")
 
+    def test_upgrade_compatibility_admission_binds_schema_and_image_package_pair(self):
+        private = Ed25519PrivateKey.generate()
+        volume_ids = {"postgres_cluster": "pg-upgrade", "ce_media": "media-upgrade",
+            "uvm_state": "uvm-upgrade"}
+        image_digest = "sha256:" + "a" * 64
+        archive_digest = "sha256:" + "b" * 64
+        package_digest = "sha256:" + hashlib.sha256(
+            b"pyproject.toml\0pyproject\n\0uv.lock\0uv lock\n\0").hexdigest()
+        admission = {"admission_id": str(uuid.uuid4()), "recovery_epoch": 4,
+            "source_image_digest": "sha256:" + "d" * 64,
+            "source_package_manifest_digest": "sha256:" + "e" * 64,
+            "target_image_digest": image_digest,
+            "target_package_manifest_digest": package_digest,
+            "archive_digest": archive_digest, "from_schema": "0058", "to_schema": "0059",
+            "volume_ids": volume_ids}
+        document = {"schema_version": 1, "deployment_id": "g7-local",
+            "target_image_digest": image_digest, "volume_ids": volume_ids,
+            "archive_digest": archive_digest, "recovery_epoch": 4,
+            "connector_recovery_id": str(uuid.uuid4()),
+            "compatibility_admission": admission,
+            "issued_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+        signed = {**document, "signature": {"algorithm": "Ed25519", "key_id": "test-key",
+            "value": base64.urlsafe_b64encode(private.sign(canonical_json(document))).decode().rstrip("=")}}
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            key = root / "pub.pem"
+            key.write_bytes(private.public_key().public_bytes(
+                serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
+            token = root / "token.json"
+            token.write_bytes(canonical_json(signed))
+            with patch("uvm.operations.startup_fence._runtime_package_digest", return_value=package_digest), \
+                    patch.dict("os.environ", {"UVM_G7_SCHEMA_MODE": "upgrade-verification"}):
+                verified = verify_startup_fence(str(token), str(key), deployment_id="g7-local",
+                    image_digest=image_digest, volume_ids=volume_ids, archive_digest=archive_digest,
+                    recovery_epoch=4, connector_recovery_id=document["connector_recovery_id"],
+                    key_id="test-key")
+            self.assertEqual(verified["compatibility_admission"]["from_schema"], "0058")
+
+    def test_schema_compatibility_admission_is_journaled_before_replay(self):
+        with tempfile.TemporaryDirectory() as temp:
+            controller = Controller.__new__(Controller)
+            controller.deployment = "g7-local"
+            controller.journal = Path(temp) / "controller-journal.json"
+            controller.state = {"schema_version": 1, "deployment_id": "g7-local",
+                "recovery_epoch_floor": 1, "schema_compatibility_admissions": {}}
+            admission = {"admission_id": str(uuid.uuid4()), "recovery_epoch": 1,
+                "source_image_digest": "sha256:" + "a" * 64,
+                "source_package_manifest_digest": "sha256:" + "b" * 64,
+                "target_image_digest": "sha256:" + "c" * 64,
+                "target_package_manifest_digest": "sha256:" + "d" * 64,
+                "archive_digest": "sha256:" + "e" * 64,
+                "from_schema": "0058", "to_schema": "0059",
+                "volume_ids": {"postgres_cluster": "pg", "ce_media": "media", "uvm_state": "uvm"}}
+            saved = controller.journal_schema_compatibility_admission(admission)
+            retained = json.loads(controller.journal.read_text())
+            self.assertEqual(retained["schema_compatibility_admissions"]["1"], admission)
+            replay = {**admission, "admission_id": str(uuid.uuid4())}
+            self.assertEqual(controller.journal_schema_compatibility_admission(replay), admission)
+            conflicting = {**replay, "target_image_digest": "sha256:" + "f" * 64}
+            with self.assertRaises(RecoveryError):
+                controller.journal_schema_compatibility_admission(conflicting)
+            self.assertEqual(saved, admission)
+
+    def test_development_rollback_request_requires_journal_bound_measured_inventory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            controller = Controller.__new__(Controller)
+            controller.deployment = "g7-local"
+            controller.journal = Path(temp) / "controller-journal.json"
+            controller.state = {"schema_version": 1, "deployment_id": "g7-local",
+                "recovery_epoch_floor": 1}
+            request = {"request_id": str(uuid.uuid4()), "state": "development_rollback_requested",
+                "recovery_epoch": 1, "archive_id": str(uuid.uuid4()),
+                "archive_digest": "sha256:" + "a" * 64,
+                "source_image_digest": "sha256:" + "b" * 64,
+                "source_package_manifest_digest": "sha256:" + "c" * 64,
+                "upgraded_image_digest": "sha256:" + "d" * 64,
+                "target_package_manifest_digest": "sha256:" + "e" * 64,
+                "forward_volume_ids": {"postgres_cluster": "pg", "ce_media": "media", "uvm_state": "uvm"},
+                "schema_head": "0059", "inventory_attestation_id": str(uuid.uuid4()),
+                "inventory_attestation_digest": "sha256:" + "f" * 64, "product_write_count": 0,
+                "control_mutation_count": 4,
+                "unexpected_inventory_change_count": 0, "unresolved_external_effect_count": 0,
+                "ingress_fenced": True, "egress_fenced": True, "public_readback_match": True,
+                "requested_at": "2026-10-28T12:00:00Z"}
+            attestation={"attestation_id":request["inventory_attestation_id"],"recovery_epoch":1,
+                "forward_volume_ids":request["forward_volume_ids"],"source_digest":"sha256:"+"1"*64,
+                "candidate_digest":"sha256:"+"2"*64,"delta_digest":"sha256:"+"3"*64,
+                "archive_digest":request["archive_digest"],"source_image_digest":request["source_image_digest"],
+                "source_package_manifest_digest":request["source_package_manifest_digest"],
+                "upgraded_image_digest":request["upgraded_image_digest"],
+                "target_package_manifest_digest":request["target_package_manifest_digest"],
+                "product_mutation_count":0,"control_mutation_count":4,
+                "unexpected_inventory_change_count":0,
+                "unresolved_external_effect_count":0,"controller_journal_pre_digest":"sha256:"+"4"*64}
+            attestation["attestation_digest"]="sha256:"+hashlib.sha256(json.dumps(attestation,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+            controller.state["product_inventory_attestations"]={attestation["attestation_id"]:attestation}
+            request["inventory_attestation_digest"]=attestation["attestation_digest"]
+            with self.assertRaises(RecoveryError):
+                controller.journal_development_rollback_request({**request,"unresolved_external_effect_count":1})
+
+            self.assertEqual(controller.journal_development_rollback_request(request), request)
+            retained = json.loads(controller.journal.read_text())
+            self.assertEqual(retained["development_rollback_requests"]["1"], request)
+            with self.assertRaises(RecoveryError):
+                controller.journal_development_rollback_request({**request,
+                    "product_write_count": 1, "request_id": str(uuid.uuid4())})
+
+    def test_full_inventory_detects_same_count_payload_and_unrelated_table_changes(self):
+        before={"uvm":{"product":{"columns":[],"schema_sha256":"a","rows":[{"key":[1],"payload_sha256":"old"}],"row_count":1}},"ce":{"findings":{"columns":[],"schema_sha256":"b","rows":[],"row_count":0}},"media":[]}
+        payload={"uvm":{"product":{"columns":[],"schema_sha256":"a","rows":[{"key":[1],"payload_sha256":"new"}],"row_count":1}},"ce":before["ce"],"media":[]}
+        unrelated={"uvm":{"product":before["uvm"]["product"],"new_unrelated":{"columns":[],"schema_sha256":"c","rows":[],"row_count":0}},"ce":before["ce"],"media":[]}
+        self.assertEqual(compare_product_inventory(before,payload)["unexpected_inventory_change_count"],1)
+        self.assertEqual(compare_product_inventory(before,unrelated)["unexpected_inventory_change_count"],1)
+
+    def test_inventory_rejects_unjournaled_control_payload_revision_and_schema(self):
+        import copy
+        def table(payload):
+            from tools.g7_product_inventory import digest
+            return {"columns":[],"schema_sha256":"schema","rows":[{"key":["g7-local"],"payload_sha256":digest(payload)}],"row_count":1}
+        before={"uvm":{"g7_backup_state":table({"effective_revision":4}),"g7_backup_settings_revisions":table({"revision":4})},"ce":{},"media":[]}
+        expected=copy.deepcopy(before)
+        for name,field,value in (("g7_backup_state","rows",[{"key":["g7-local"],"payload_sha256":"arbitrary"}]),("g7_backup_settings_revisions","rows",before['uvm']['g7_backup_settings_revisions']['rows']+[{"key":["extra"],"payload_sha256":"extra"}]),("g7_backup_state","schema_sha256","unexpected")):
+            after=copy.deepcopy(expected); after['uvm'][name][field]=value
+            self.assertGreater(compare_product_inventory(before,after,expected)['unexpected_inventory_change_count'],0)
+
+    def test_verification_queue_validator_rejects_unknown_tasks_unresolved_and_failed_broker(self):
+        intent={"unresolved_count":0,"missing_expected_tables":[]}
+        obs=[{"name":n,"worker_ids":[],"exit_code":69,"expected_absent_worker_response":True,"stdout_bytes":0,"stderr_sha256":hashlib.sha256(b"Error: No nodes replied within time constraint\n").hexdigest(),"classification":"workers_absent"} for n in ("celery_active","celery_reserved","celery_scheduled")]
+        obs.append({"name":"valkey_db0_inventory","exit_code":0,"cardinality_errors":0,"key_count":0,"keys_digest":hashlib.sha256(b"[]").hexdigest()})
+        before={"unresolved":[],"tasks":[],"intent_inventory":intent}
+        expected={"celery_active did not produce a verifiable response","celery_reserved did not produce a verifiable response","celery_scheduled did not produce a verifiable response","Celery task snapshots do not identify the same single expected worker","Valkey DB0 contains unknown queue state or unverified binding contents"}
+        after={"unresolved":[],"classified_raw_unresolved":list(expected),"tasks":[],"intent_inventory":intent,"verification_mode":True,"worker_pid_files_absent":True,"worker_absence_proof":{"passed":True,"process_scan_exit":0,"worker_processes":[],"pid_files":[]},"observations":obs}
+        self.assertTrue(validate_verification_queue(before,after)["passed"])
+        raw={**after,"unresolved":list(expected)}
+        absence=after["worker_absence_proof"]
+        self.assertTrue(validate_verification_queue(before,classify_verification_queue(raw,absence))["passed"])
+        import copy
+        for exit_code in (137, 1, None, 0):
+            failed=copy.deepcopy(raw); failed['observations'][0]['exit_code']=exit_code
+            with self.assertRaises(ValueError):
+                validate_verification_queue(before,classify_verification_queue(failed,absence))
+        with self.assertRaises(ValueError):
+            classify_verification_queue(raw,{**absence,"worker_processes":["42"]})
+
+        for changed in ({**after,"tasks":[{"id":"unexpected"}]},{**after,"unresolved":["unknown"]}):
+            with self.assertRaises(ValueError): validate_verification_queue(before,changed)
+        failed={**after,"observations":obs[:-1]+[{**obs[-1],"exit_code":1}]}
+        with self.assertRaises(ValueError): validate_verification_queue(before,failed)
+
     def test_external_controller_resync_persists_authenticated_ack_and_sequence_floor(self):
         with tempfile.TemporaryDirectory() as temp:
             journal = Path(temp) / "journal.json"
@@ -147,6 +298,13 @@ class BackupSettingsValidationTests(unittest.TestCase):
                 "queue_inventory_digest": "sha256:" + "c" * 64,
                 "public_readback_digest": None, "failure_code": None,
                 "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+            invalid_verified = {**unsigned, "event_id": str(uuid.uuid4()),
+                "event_type": "verification_passed", "previous_epoch": 1,
+                "verification": {"uvm_public_api": "passed", "ce_public_api": "passed",
+                    "media_readback": "passed", "queue_reconciliation": "passed",
+                    "migration": "passed", "details_digest": None}}
+            with self.assertRaises(RecoveryError):
+                controller.submit_recovery_event(invalid_verified)
             def request(_path, body):
                 self.assertEqual(json.loads(journal.read_text())["pending_recovery_event"], body)
                 raw, _ = verify_signature(body, str(public_path), "test-key")
@@ -184,6 +342,32 @@ class BackupSettingsValidationTests(unittest.TestCase):
             "/api/v1/operations/backup-settings/g7-local/commands"), "method_not_allowed")
         self.assertEqual(uvm_recovery_request_decision("GET",
             "/api/v1/auth/login"), "not_found")
+
+    def test_epoch_two_readback_manifest_rejects_missing_or_mismatched_results(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            names=("rollback-public-readback.json", "rollback-uvm-group.json",
+                "rollback-uvm-audit.json", "rollback-ce-findings.json",
+                "rollback-volume-ids.json", "epoch-2-rollback-readback.json",
+                "restore-ce-media.txt", "restore-ce-engagement.json")
+            readbacks={}
+            for name in names:
+                data=("result:"+name).encode(); (root/name).write_bytes(data)
+                readbacks[name]=hashlib.sha256(data).hexdigest()
+            binding={"recovery_epoch":2,"target_image_digest":"sha256:"+"a"*64,
+                "new_volume_ids":{"postgres_cluster":"pg","ce_media":"media","uvm_state":"uvm"}}
+            raw=json.dumps(binding,sort_keys=True,separators=(",",":")).encode()
+            (root/"rollback-context-binding.json").write_bytes(raw)
+            readbacks["rollback-context-binding.json"]=hashlib.sha256(raw).hexdigest()
+            (root/"verification-readback-manifest.json").write_text(json.dumps(readbacks))
+            digest_value=validate_epoch_two_readbacks(root,readbacks,binding)
+            self.assertRegex(digest_value,r"^sha256:[0-9a-f]{64}$")
+            (root/"rollback-ce-findings.json").write_text("tampered")
+            with self.assertRaisesRegex(ValueError,"mismatched"):
+                validate_epoch_two_readbacks(root,readbacks,binding)
+            (root/"rollback-ce-findings.json").unlink()
+            with self.assertRaisesRegex(ValueError,"missing or mismatched"):
+                validate_epoch_two_readbacks(root,readbacks,binding)
 
     def test_recovery_control_listener_hides_all_product_routes(self):
         self.assertEqual(recovery_control_request_decision(

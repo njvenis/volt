@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
+import re
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -19,7 +21,8 @@ def verify_startup_fence(token_path: str, public_key_path: str, *, deployment_id
         parse_constant=_reject_constant)
     expected = {"schema_version", "deployment_id", "target_image_digest", "volume_ids",
         "archive_digest", "recovery_epoch", "connector_recovery_id", "issued_at", "signature"}
-    if (not isinstance(value, dict) or set(value) != expected
+    fields = set(value) if isinstance(value, dict) else set()
+    if (not isinstance(value, dict) or fields not in (expected, expected | {"compatibility_admission"})
             or type(value["schema_version"]) is not int or value["schema_version"] != 1):
         raise ValueError("startup token shape is invalid")
     if (set(volume_ids) != {"postgres_cluster", "ce_media", "uvm_state"} or
@@ -43,7 +46,37 @@ def verify_startup_fence(token_path: str, public_key_path: str, *, deployment_id
             or value["recovery_epoch"] != recovery_epoch
             or value["connector_recovery_id"] != connector_recovery_id):
         raise ValueError("startup token does not bind this restore target")
+    admission = value.get("compatibility_admission")
+    if admission is not None:
+        required = {"admission_id", "recovery_epoch", "source_image_digest", "source_package_manifest_digest",
+            "target_image_digest", "target_package_manifest_digest", "archive_digest",
+            "from_schema", "to_schema", "volume_ids"}
+        if (not isinstance(admission, dict) or set(admission) != required
+                or str(uuid.UUID(admission["admission_id"])) != admission["admission_id"]
+                or type(admission["recovery_epoch"]) is not int
+                or admission["recovery_epoch"] != recovery_epoch
+                or admission["target_image_digest"] != image_digest
+                or admission["archive_digest"] != archive_digest
+                or admission["volume_ids"] != volume_ids
+                or admission["from_schema"] != "0058" or admission["to_schema"] != "0059"
+                or admission["target_package_manifest_digest"] != _runtime_package_digest()):
+            raise ValueError("startup token compatibility admission is invalid")
+        for field in ("source_image_digest", "source_package_manifest_digest",
+                "target_image_digest", "target_package_manifest_digest", "archive_digest"):
+            if not isinstance(admission[field], str) or not re.fullmatch(
+                    r"sha256:[0-9a-f]{64}", admission[field]):
+                raise ValueError("startup token compatibility digest is invalid")
+    if os.getenv("UVM_G7_SCHEMA_MODE", "normal") == "upgrade-verification" and admission is None:
+        raise ValueError("upgrade verification lacks a compatibility admission")
     return value
+
+
+def _runtime_package_digest() -> str:
+    root = Path("/opt/uvm/app")
+    digest = hashlib.sha256()
+    for name in ("pyproject.toml", "uv.lock"):
+        digest.update(name.encode() + b"\0" + (root / name).read_bytes() + b"\0")
+    return "sha256:" + digest.hexdigest()
 
 
 def _unique_pairs(pairs):
@@ -120,6 +153,8 @@ def main() -> int:
             if not startup_admitted(sa.create_engine(os.environ["UVM_DB_URL"]), token,
                     released=any(flag in sys.argv for flag in ("--check-release", "--check-host-release", "--authorize-host-release"))):
                 return 1
+        if "--check-schema-admission" in sys.argv and token.get("compatibility_admission") is None:
+            return 1
         if "--authorize-host-release" in sys.argv:
             from uvm.operations.backup_host import canonical_json
             marker = Path("/run/uvm-g7/host-release")

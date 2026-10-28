@@ -103,7 +103,7 @@ class Controller:
         required = {"schema_version", "deployment_id", "controller_instance_id",
             "last_sequence", "recovery_epoch_floor", "last_intent", "last_ack"}
         if (not isinstance(value, dict) or set(value) - required - {"pending_ack", "pending_resync",
-                "last_resync", "pending_recovery_event", "last_recovery_event", "last_effective", "pending_quarantine", "quarantine_receipts", "pending_status", "last_status", "pending_policy", "last_policy", "desired_namespace", "namespace_history", "recovery_receipts"}
+                "last_resync", "pending_recovery_event", "last_recovery_event", "last_effective", "pending_quarantine", "quarantine_receipts", "pending_status", "last_status", "pending_policy", "last_policy", "desired_namespace", "namespace_history", "recovery_receipts", "schema_compatibility_admissions", "development_rollback_requests", "product_inventory_attestations", "submission_receipts", "inventory_delta_evidence"}
                 or not required.issubset(value)
                 or type(value.get("schema_version")) is not int or value.get("schema_version") != 1
                 or value.get("deployment_id") != self.deployment
@@ -112,6 +112,106 @@ class Controller:
                 or type(value.get("recovery_epoch_floor")) is not int):
             raise RecoveryError("external controller journal is invalid")
         return value
+
+    def journal_schema_compatibility_admission(self, admission: dict) -> dict:
+        """Durably journal the exact one-step image/schema transition before signing startup."""
+        fields = {"admission_id", "recovery_epoch", "source_image_digest",
+            "source_package_manifest_digest", "target_image_digest",
+            "target_package_manifest_digest", "archive_digest", "from_schema",
+            "to_schema", "volume_ids"}
+        digests = ("source_image_digest", "source_package_manifest_digest", "target_image_digest",
+            "target_package_manifest_digest", "archive_digest")
+        if (not isinstance(admission, dict) or set(admission) != fields
+                or str(uuid.UUID(admission["admission_id"])) != admission["admission_id"]
+                or type(admission["recovery_epoch"]) is not int
+                or admission["recovery_epoch"] != self.state["recovery_epoch_floor"]
+                or admission["from_schema"] != "0058" or admission["to_schema"] != "0059"
+                or not isinstance(admission["volume_ids"], dict)
+                or set(admission["volume_ids"]) != {"postgres_cluster", "ce_media", "uvm_state"}
+                or any(not isinstance(value, str) or not value for value in admission["volume_ids"].values())
+                or len(set(admission["volume_ids"].values())) != 3
+                or any(not isinstance(admission[name], str) or not re.fullmatch(
+                    r"sha256:[0-9a-f]{64}", admission[name]) for name in digests)):
+            raise RecoveryError("schema compatibility admission is invalid")
+        retained = self.state.setdefault("schema_compatibility_admissions", {})
+        epoch_key = str(admission["recovery_epoch"])
+        existing = retained.get(epoch_key)
+        context = {key: value for key, value in admission.items() if key != "admission_id"}
+        if existing is not None:
+            if {key: value for key, value in existing.items() if key != "admission_id"} != context:
+                raise RecoveryError("same-epoch schema compatibility admission conflicts")
+            return existing
+        retained[epoch_key] = admission
+        atomic_json(self.journal, self.state)
+        return admission
+
+    def journal_development_rollback_request(self, request: dict) -> dict:
+        fields = {"request_id", "state", "recovery_epoch", "archive_id", "archive_digest",
+            "source_image_digest", "source_package_manifest_digest", "upgraded_image_digest",
+            "target_package_manifest_digest", "forward_volume_ids", "schema_head",
+            "inventory_attestation_id", "inventory_attestation_digest", "product_write_count", "control_mutation_count", "unexpected_inventory_change_count",
+            "unresolved_external_effect_count", "ingress_fenced", "egress_fenced",
+            "public_readback_match", "requested_at"}
+        digests = ("archive_digest", "source_image_digest", "source_package_manifest_digest",
+            "upgraded_image_digest", "target_package_manifest_digest", "inventory_attestation_digest")
+        if (not isinstance(request, dict) or set(request) != fields
+                or str(uuid.UUID(request["request_id"])) != request["request_id"]
+                or request["state"] != "development_rollback_requested"
+                or type(request["recovery_epoch"]) is not int
+                or request["recovery_epoch"] != self.state["recovery_epoch_floor"]
+                or request["schema_head"] != "0059"
+                or any(type(request[name]) is not int or request[name] < 0 for name in
+                    ("product_write_count", "unexpected_inventory_change_count", "unresolved_external_effect_count"))
+                or any(request[name] is not True for name in
+                    ("ingress_fenced", "egress_fenced", "public_readback_match"))
+                or not isinstance(request["forward_volume_ids"], dict)
+                or set(request["forward_volume_ids"]) != {"postgres_cluster", "ce_media", "uvm_state"}
+                or any(not isinstance(value, str) or not value for value in request["forward_volume_ids"].values())
+                or len(set(request["forward_volume_ids"].values())) != 3
+                or any(not isinstance(request[name], str) or not re.fullmatch(
+                    r"sha256:[0-9a-f]{64}", request[name]) for name in digests)):
+            raise RecoveryError("development rollback request lacks clean fenced evidence")
+        attestation=(self.state.get("product_inventory_attestations") or {}).get(request["inventory_attestation_id"])
+        attestation_digest=("sha256:"+hashlib.sha256(json.dumps({k:v for k,v in attestation.items() if k!="attestation_digest"},sort_keys=True,separators=(",",":")).encode()).hexdigest()) if isinstance(attestation,dict) else None
+        if (not isinstance(attestation,dict) or attestation_digest != request["inventory_attestation_digest"]
+                or request["unresolved_external_effect_count"] != 0
+                or attestation.get("unresolved_external_effect_count") != request["unresolved_external_effect_count"]
+                or attestation.get("recovery_epoch") != request["recovery_epoch"]
+                or attestation.get("forward_volume_ids") != request["forward_volume_ids"]
+                or attestation.get("product_mutation_count") != request["product_write_count"]
+                or attestation.get("control_mutation_count") != request["control_mutation_count"]
+                or attestation.get("unexpected_inventory_change_count") != request["unexpected_inventory_change_count"]
+                or any(attestation.get(src)!=request[dst] for src,dst in (("archive_digest","archive_digest"),("source_image_digest","source_image_digest"),("source_package_manifest_digest","source_package_manifest_digest"),("upgraded_image_digest","upgraded_image_digest"),("target_package_manifest_digest","target_package_manifest_digest")))
+                or attestation.get("unexpected_inventory_change_count") != 0):
+            raise RecoveryError("development rollback request is not bound to a clean complete inventory attestation")
+        retained = self.state.setdefault("development_rollback_requests", {})
+        epoch_key = str(request["recovery_epoch"])
+        existing = retained.get(epoch_key)
+        if existing is not None:
+            if existing != request:
+                raise RecoveryError("same-epoch development rollback request conflicts")
+            return existing
+        retained[epoch_key] = request
+        atomic_json(self.journal, self.state)
+        return request
+
+    def journal_product_inventory_attestation(self, attestation: dict) -> dict:
+        required={"attestation_id","recovery_epoch","forward_volume_ids","source_digest","candidate_digest","delta_digest","archive_digest","source_image_digest","source_package_manifest_digest","upgraded_image_digest","target_package_manifest_digest","product_mutation_count","control_mutation_count","unexpected_inventory_change_count","unresolved_external_effect_count","controller_journal_pre_digest"}
+        if (not isinstance(attestation,dict) or set(attestation)!=required
+            or str(uuid.UUID(attestation["attestation_id"]))!=attestation["attestation_id"]
+            or attestation["recovery_epoch"]!=self.state["recovery_epoch_floor"]
+            or any(type(attestation[k]) is not int or attestation[k]<0 for k in ("product_mutation_count","control_mutation_count","unexpected_inventory_change_count","unresolved_external_effect_count"))
+            or attestation["unexpected_inventory_change_count"]!=0 or attestation["unresolved_external_effect_count"]!=0
+            or attestation["product_mutation_count"]!=0
+            or not isinstance(attestation["forward_volume_ids"],dict)
+            or set(attestation["forward_volume_ids"])!={"postgres_cluster","ce_media","uvm_state"}
+            or any(not isinstance(attestation[k],str) or not re.fullmatch(r"sha256:[0-9a-f]{64}",attestation[k]) for k in ("source_digest","candidate_digest","delta_digest","archive_digest","source_image_digest","source_package_manifest_digest","upgraded_image_digest","target_package_manifest_digest","controller_journal_pre_digest"))):
+            raise RecoveryError("complete product inventory attestation is invalid")
+        retained=self.state.setdefault("product_inventory_attestations",{})
+        key=attestation["attestation_id"]
+        stored={**attestation,"attestation_digest":"sha256:"+hashlib.sha256(json.dumps(attestation,sort_keys=True,separators=(",",":")).encode()).hexdigest()}
+        if key in retained and retained[key]!=stored: raise RecoveryError("product inventory attestation identity conflicts")
+        retained[key]=stored; atomic_json(self.journal,self.state); return stored
 
     def resynchronize(self, *, database_epoch_seen: int, database_sequence_seen: int,
             checkpoint_epoch_floor: int, force: bool = False) -> dict:
@@ -248,6 +348,15 @@ class Controller:
             "public_readback_digest", "failure_code", "observed_at"}
         if not isinstance(unsigned_event, dict) or set(unsigned_event) != required:
             raise RecoveryError("recovery event fixture has an invalid exact shape")
+        if unsigned_event.get("event_type") == "verification_passed":
+            verification = unsigned_event.get("verification")
+            expected_verification = {"uvm_public_api", "ce_public_api", "media_readback",
+                "queue_reconciliation", "migration", "details_digest"}
+            if (not isinstance(verification, dict) or set(verification) != expected_verification
+                    or any(verification.get(key) != "passed" for key in expected_verification - {"details_digest"})
+                    or not isinstance(verification.get("details_digest"), str)
+                    or not re.fullmatch(r"sha256:[0-9a-f]{64}", verification["details_digest"])):
+                raise RecoveryError("successful recovery verification lacks complete readback binding")
         retained = self.retained_recovery_ack(unsigned_event)
         if retained is not None:
             return retained
@@ -336,7 +445,11 @@ class Controller:
                 **({"Content-Type": "application/json"} if body is not None else {})},
             method="POST" if body is not None else "GET")
         with urllib.request.urlopen(request, context=self.tls, timeout=15) as response:
-            return json.loads(response.read())
+            result = json.loads(response.read())
+        if body is not None:
+            self.state.setdefault("submission_receipts", []).append({"path": path, "request": body, "response": result})
+            atomic_json(self.journal, self.state)
+        return result
 
     def reconcile_desired(self) -> dict:
         # Complete the journaled at-least-once acknowledgement first. UVM may
@@ -504,11 +617,23 @@ def main() -> None:
     parser.add_argument("--resync-checkpoint-epoch", type=int)
     parser.add_argument("--force-resync", action="store_true")
     parser.add_argument("--recovery-event-json", type=Path)
+    parser.add_argument("--schema-compatibility-admission-json", type=Path)
+    parser.add_argument("--development-rollback-request-json", type=Path)
     parser.add_argument("--status-json", type=Path)
     args = parser.parse_args()
     if not 1 <= args.poll_seconds <= 3600:
         raise RecoveryError("poll interval is outside host-owned bounds")
     controller = Controller(load_config(args.config))
+    if args.schema_compatibility_admission_json is not None:
+        admission = json.loads(args.schema_compatibility_admission_json.read_text(encoding="utf-8"))
+        print(json.dumps(controller.journal_schema_compatibility_admission(admission),
+            sort_keys=True, separators=(",", ":")))
+        return
+    if args.development_rollback_request_json is not None:
+        request = json.loads(args.development_rollback_request_json.read_text(encoding="utf-8"))
+        print(json.dumps(controller.journal_development_rollback_request(request),
+            sort_keys=True, separators=(",", ":")))
+        return
     if args.status_json is not None:
         print(json.dumps(controller.submit_status(json.loads(args.status_json.read_text())), separators=(",", ":")))
         return

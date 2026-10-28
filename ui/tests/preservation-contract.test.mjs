@@ -28,5 +28,38 @@ test('scope cancellation prevents an evidence download after the body arrives',a
  const controller=new AbortController(),prior=globalThis.fetch,bytes=new TextEncoder().encode('synthetic');
  const {createHash}=await import('node:crypto');
  globalThis.fetch=async()=>{const response=new Response(bytes,{headers:{'content-type':'application/octet-stream','content-length':String(bytes.length),'content-disposition':'attachment; filename="opaque.bin"','x-content-type-options':'nosniff','content-digest':'sha-256=:'+createHash('sha256').update(bytes).digest('base64')+':'}});response.arrayBuffer=async()=>{controller.abort();return bytes.buffer;};return response;};
- try{await assert.rejects(api.downloadEvidence('/api/v1/operations/preservation/evidence/22222222-2222-4222-8222-222222222222',controller.signal),{name:'AbortError'});}finally{globalThis.fetch=prior;}
+ try{await assert.rejects(api.downloadEvidence('/api/v1/operations/preservation/evidence/22222222-2222-4222-8222-222222222222',createHash('sha256').update(bytes).digest('hex'),controller.signal),{name:'AbortError'});}finally{globalThis.fetch=prior;}
 });
+for(const reason of ['record_missing','receipt_changed','bytes_changed','unexpected_member'])test('audit member anomaly remains a gap with matching event and receipt counters: '+reason,()=>{
+ const s=fixture(),a=s.classes[1];a.state='gap';a.reasons=[reason];a.verified_records=1;a.missing_records=1;a.audit_copy.state='gap';a.audit_copy.reasons=[reason];s.uncovered_classes=[classIds[1]];
+ assert.deepEqual(api.parseSummary(s,scope),s);
+ a.audit_copy.pending_receipts=1;a.audit_copy.reasons=[reason,'source_checkpoint_missing'].sort();assert.deepEqual(api.parseSummary(s,scope),s);
+ a.audit_copy.state='verified';assert.throws(()=>api.parseSummary(s,scope),{code:'invalid_response'});
+});
+for(const [name,mutate] of [
+ ['class mask without envelope',s=>{s.audit_authority_fingerprint=digest;s.mask_reasons=[];}],
+ ['class mask without fingerprint masking',s=>s.audit_authority_fingerprint=digest],
+ ['class mask without envelope reason',s=>s.mask_reasons=[]],
+ ['envelope mask without class mask',s=>{s.classes[1]=fixture().classes[1];s.uncovered_classes=[];}],
+ ['copy mask without class mask',s=>{s.classes[1].reasons=['baseline_missing'];s.audit_authority_fingerprint=digest;s.mask_reasons=[];}],
+])test('rejects inconsistent '+name,()=>{const s=masked();mutate(s);assert.throws(()=>api.parseSummary(s,scope),{code:'invalid_response'});});
+test('wholly verified report requires signed observation times',()=>{const s=fixture();s.checked_at=s.valid_until=null;assert.throws(()=>api.parseSummary(s,scope),{code:'invalid_response'});});
+test('partially unknown report may lack composite observation times',()=>{const s=fixture();s.classes[0]=unknown().classes[0];s.uncovered_classes=[classIds[0]];s.checked_at=s.valid_until=null;assert.deepEqual(api.parseSummary(s,scope),s);});
+test('download rejects wrong bytes with their own matching header, without preparing an attachment',async()=>{
+ const {createHash}=await import('node:crypto');const admitted=createHash('sha256').update('admitted bytes').digest('hex'),wrong=new TextEncoder().encode('different self-consistent evidence');
+ const priorFetch=globalThis.fetch,priorDocument=globalThis.document;let prepared=false;
+ globalThis.document={createElement:()=>{prepared=true;return {click(){prepared=true;}};}};
+ globalThis.fetch=async()=>new Response(wrong,{headers:{'content-type':'application/octet-stream','content-length':String(wrong.length),'content-disposition':'attachment; filename="opaque.bin"','x-content-type-options':'nosniff','content-digest':'sha-256=:'+createHash('sha256').update(wrong).digest('base64')+':'}});
+ try{await assert.rejects(api.downloadEvidence('/api/v1/operations/preservation/evidence/22222222-2222-4222-8222-222222222222',admitted),{code:'evidence_changed'});assert.equal(prepared,false);}finally{globalThis.fetch=priorFetch;globalThis.document=priorDocument;}
+});
+test('download rejects wrong body under the admitted header',async()=>{
+ const {createHash}=await import('node:crypto');const admitted=createHash('sha256').update('admitted bytes'),hex=admitted.copy().digest('hex'),wrong=new TextEncoder().encode('different bytes');const prior=globalThis.fetch;
+ globalThis.fetch=async()=>new Response(wrong,{headers:{'content-type':'application/octet-stream','content-length':String(wrong.length),'content-disposition':'attachment; filename="opaque.bin"','x-content-type-options':'nosniff','content-digest':'sha-256=:'+admitted.digest('base64')+':'}});
+ try{await assert.rejects(api.downloadEvidence('/api/v1/operations/preservation/evidence/22222222-2222-4222-8222-222222222222','sha256:'+hex),{code:'evidence_changed'});}finally{globalThis.fetch=prior;}
+});
+test('download without an admitted raw digest fails before issuing a request',async()=>{
+ const prior=globalThis.fetch;let requested=false;globalThis.fetch=async()=>{requested=true;throw new Error('must not fetch');};
+ try{await assert.rejects(api.downloadEvidence('/api/v1/operations/preservation/evidence/22222222-2222-4222-8222-222222222222',null),{code:'invalid_response'});assert.equal(requested,false);}finally{globalThis.fetch=prior;}
+});
+
+test('matching event and receipt counters cannot verify the copy when an established audit member is missing',()=>{const s=fixture(),a=s.classes[1];a.state='gap';a.reasons=['record_missing'];a.verified_records=1;a.missing_records=1;s.uncovered_classes=[classIds[1]];assert.throws(()=>api.parseSummary(s,scope),{code:'invalid_response'});});

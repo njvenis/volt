@@ -71,7 +71,9 @@ function parseCopy(raw:unknown):AuditCopy {
  const complete=allCounts(raw,copyCounts);const c=raw as AuditCopy;
  if(complete){
   requireValue(c.expected_events===c.matching_events!+c.missing_events!+c.changed_events!&&c.expected_receipts===c.matching_receipts!+c.missing_receipts!+c.changed_receipts!);
-  const gap=[c.missing_events,c.changed_events,c.unexpected_events,c.missing_receipts,c.changed_receipts,c.unexpected_receipts].some(n=>n!>0);
+  // Event/receipt counters do not count every established attribution or anchor member.
+  const anomalyReasons=['record_missing','bytes_changed','bytes_unreadable','receipt_missing','receipt_changed','sink_record_missing','sink_record_changed','unexpected_member','evidence_missing','evidence_changed','evidence_unreadable'];
+  const gap=[c.missing_events,c.changed_events,c.unexpected_events,c.missing_receipts,c.changed_receipts,c.unexpected_receipts].some(n=>n!>0)||c.reasons.some(r=>anomalyReasons.includes(r));
   requireValue(c.checked_at!==null&&c.state===(gap?'gap':c.pending_receipts!>0?'unknown':'verified'));
   if(c.pending_receipts!>0&&!gap)requireValue(c.reasons.includes('source_checkpoint_missing'));
  }else requireValue(['unknown','failed'].includes(c.state));
@@ -90,7 +92,7 @@ function parseClass(raw:unknown):PreservationClass {
   requireValue(c.baseline_digest!==null&&c.expected_records===c.verified_records!+c.missing_records!+c.changed_records!+c.unreadable_records!);
   const gap=[c.missing_records,c.changed_records,c.unreadable_records,c.unexpected_records].some(n=>n!>0)||c.audit_copy?.state==='gap';
   requireValue(c.state===(gap?'gap':c.audit_copy?.state==='unknown'?'unknown':'verified'));
-  if(c.audit_copy)requireValue(c.audit_copy.expected_events!==null&&c.audit_copy.state!=='failed');
+  if(c.audit_copy)requireValue(c.audit_copy.expected_events!==null&&c.audit_copy.state!=='failed'&&(!gap||c.audit_copy.state==='gap'));
  }else{
   requireValue(['unknown','failed'].includes(c.state)&&c.oldest_retained_at===null);
   if(c.audit_copy)requireValue(c.audit_copy.expected_events===null);
@@ -111,7 +113,9 @@ export function parseSummary(raw:unknown,scope:Scope):Summary {
  requireValue((s.checked_at===null)===(s.valid_until===null));
  if(s.checked_at!==null&&s.valid_until!==null)requireValue(Date.parse(s.checked_at)<=Date.parse(s.valid_until));
  const audit=classes.find(c=>c.class_id==='product.audit_history')!;
- if(s.audit_authority_fingerprint===null||s.mask_reasons.includes('audit_scope_incomplete'))requireValue(s.audit_authority_fingerprint===null&&s.mask_reasons.includes('audit_scope_incomplete')&&audit.reasons.includes('audit_scope_incomplete'));
+ const auditMasked=audit.reasons.includes('audit_scope_incomplete');
+ requireValue((s.audit_authority_fingerprint===null)===auditMasked&&s.mask_reasons.includes('audit_scope_incomplete')===auditMasked&&audit.audit_copy!.reasons.includes('audit_scope_incomplete')===auditMasked);
+ if(classes.every(c=>c.state==='verified'))requireValue(s.checked_at!==null&&s.valid_until!==null);
  if(s.environment===null)requireValue(classes.every(c=>c.state==='unknown'&&c.expected_records===null&&c.reasons.includes('environment_unlabelled')));
  if(s.valid_until!==null&&Date.parse(s.valid_until)<Date.parse(s.response_at))requireValue(classes.every(c=>c.state==='unknown'&&c.expected_records===null&&c.reasons.includes('report_expired')));
  return s;
@@ -148,15 +152,19 @@ async function get(path:string,signal?:AbortSignal):Promise<unknown>{
 export const readSummary=async(scope:Scope,signal?:AbortSignal)=>parseSummary(await get('/api/v1/operations/preservation?'+new URLSearchParams(scope),signal),scope);
 export const readRecords=async(snapshot:string,classId:ClassId,cursor:string|null,signal?:AbortSignal)=>parsePage(await get('/api/v1/operations/preservation/records?'+new URLSearchParams({snapshot_id:snapshot,class_id:classId,limit:'50',...(cursor?{cursor}:{})}),signal),snapshot,classId);
 // Fetch only after an explicit click; never render or retain private payload text.
-export async function downloadEvidence(path:string,signal?:AbortSignal):Promise<void>{
- if(!safeEvidencePath(path))throw new PreservationError('invalid_response');
+export async function downloadEvidence(path:string,admittedRawDigest:string|null,signal?:AbortSignal):Promise<void>{
+ if(!safeEvidencePath(path)||!digest(admittedRawDigest))throw new PreservationError('invalid_response');
  const response=await sessionFetch(path,{signal:signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(30000),headers:{Accept:'application/octet-stream'}});
  if(!response.ok){const code=await response.json().then(errorCode).catch(()=>'unavailable');throw new PreservationError(Object.hasOwn(messages,code)?code:response.status===404?'not_found':'unavailable',response.status);}
  const disposition=response.headers.get('content-disposition')??'';
  requireValue(response.headers.get('content-type')==='application/octet-stream'&&response.headers.get('x-content-type-options')==='nosniff'&&/^attachment;/.test(disposition)&&/^sha-256=:[A-Za-z0-9+/]{43}=:$/ .test(response.headers.get('content-digest')??''));
+ // This digest was admitted with the selected report item, independently of this response.
+ const admittedHex=admittedRawDigest!.replace(/^sha256:/,'');
+ const admittedHeader='sha-256=:'+btoa(String.fromCharCode(...admittedHex.match(/../g)!.map(byte=>parseInt(byte,16))))+':';
+ if(response.headers.get('content-digest')!==admittedHeader)throw new PreservationError('evidence_changed');
  const bytes=await response.arrayBuffer();requireValue(response.headers.get('content-length')===String(bytes.byteLength));
  signal?.throwIfAborted();
- const hash=new Uint8Array(await crypto.subtle.digest('SHA-256',bytes));requireValue('sha-256=:'+btoa(String.fromCharCode(...hash))+':'===response.headers.get('content-digest'));
+ const hash=new Uint8Array(await crypto.subtle.digest('SHA-256',bytes));if('sha-256=:'+btoa(String.fromCharCode(...hash))+':'!==admittedHeader)throw new PreservationError('evidence_changed');
  signal?.throwIfAborted();
  const url=URL.createObjectURL(new Blob([bytes],{type:'application/octet-stream'}));const link=document.createElement('a');link.href=url;link.download='evidence-'+path.split('/').pop()+'.bin';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 }

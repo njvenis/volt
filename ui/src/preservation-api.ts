@@ -80,7 +80,7 @@ function parseCopy(raw:unknown):AuditCopy {
  if(c.state==='verified')requireValue(c.reasons.length===0);else requireValue(c.reasons.length>0);
  return c;
 }
-function parseClass(raw:unknown):PreservationClass {
+function parseClass(raw:unknown,environmentUnlabelled:boolean):PreservationClass {
  requireValue(exact(raw,['class_id','minimum_period','state','reasons',...countFields,'oldest_retained_at','baseline_digest','audit_copy'])&&classIds.includes(raw.class_id as ClassId)&&state(raw.state)&&reasons(raw.reasons)&&nullable(raw.oldest_retained_at,time)&&nullable(raw.baseline_digest,baseline));
  const c=raw as PreservationClass;requireValue(c.minimum_period===(c.class_id==='operational.scanner_collection'?'P3M':'P1Y'));
  if(c.class_id==='product.audit_history'){c.audit_copy=parseCopy(c.audit_copy);}else requireValue(c.audit_copy===null);
@@ -99,13 +99,17 @@ function parseClass(raw:unknown):PreservationClass {
  }
  if(c.state==='verified')requireValue(c.reasons.length===0);
  if(c.state!=='verified')requireValue(c.reasons.length>0);
- if(c.reasons.includes('audit_scope_incomplete'))requireValue(c.class_id==='product.audit_history'&&c.state==='unknown'&&!complete&&c.baseline_digest===null&&c.audit_copy?.state==='unknown'&&c.audit_copy.checked_at===null&&c.reasons.length===1&&c.audit_copy.reasons.length===1&&c.audit_copy.reasons[0]==='audit_scope_incomplete');
+ if(c.reasons.includes('audit_scope_incomplete')){
+  // Missing environment and masked authority apply together without disclosing audit members.
+  const maskReasons=environmentUnlabelled?['audit_scope_incomplete','environment_unlabelled']:['audit_scope_incomplete'];
+  requireValue(c.class_id==='product.audit_history'&&c.state==='unknown'&&!complete&&c.baseline_digest===null&&c.audit_copy?.state==='unknown'&&c.audit_copy.checked_at===null&&JSON.stringify(c.reasons)===JSON.stringify(maskReasons)&&JSON.stringify(c.audit_copy.reasons)===JSON.stringify(maskReasons));
+ }
  return c;
 }
 export function parseSummary(raw:unknown,scope:Scope):Summary {
  requireValue(exact(raw,['schema_version','scope','snapshot_id','checked_at','response_at','valid_until','authority_fingerprint','audit_authority_fingerprint','mask_reasons','environment','classes','uncovered_classes','elapsed_preservation']));
  requireValue(raw.schema_version===1&&validScope(raw.scope)&&scopeKey(raw.scope)===scopeKey(scope)&&nullable(raw.snapshot_id,uuid)&&nullable(raw.checked_at,time)&&time(raw.response_at)&&nullable(raw.valid_until,time)&&digest(raw.authority_fingerprint)&&nullable(raw.audit_authority_fingerprint,digest)&&reasons(raw.mask_reasons)&&nullable(raw.environment,v=>safeText(v,256))&&raw.elapsed_preservation==='unverified');
- requireValue(Array.isArray(raw.classes)&&raw.classes.length===3);const classes=raw.classes.map(parseClass);
+ requireValue(Array.isArray(raw.classes)&&raw.classes.length===3);const classes=raw.classes.map(c=>parseClass(c,raw.environment===null));
  requireValue(new Set(classes.map(c=>c.class_id)).size===3&&sortedUnique(raw.uncovered_classes,classIds));
  requireValue(JSON.stringify(raw.uncovered_classes)===JSON.stringify(classes.filter(c=>c.state!=='verified').map(c=>c.class_id).sort()));
  const s={...raw,classes} as Summary;

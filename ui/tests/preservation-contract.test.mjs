@@ -1,7 +1,7 @@
 import {test,after} from 'node:test';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
-import {mkdtemp,rm} from 'node:fs/promises';
+import {mkdtemp,rm,readFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {createRequire} from 'node:module';
@@ -83,4 +83,38 @@ for(const [name,mutate] of [
 });
 test('audit class still rejects otherwise valid evidence registrations',()=>{
  const p=page();p.class_id='product.audit_history';assert.throws(()=>api.parsePage(p,snapshot,p.class_id),{code:'invalid_response'});
+});
+
+// Actual serialized preservation_summary route response: synthetic SQLite native-policy
+// missing-report regression, with an empty configured environment normalized to null.
+// No report/status mocks. Source: /tmp/volt-g7-ui-unlabelled-mask-corrected/actual-summary.json.
+const unlabelledMasked=JSON.parse(await readFile(new URL('./fixtures/g7-unlabelled-masked-summary.json',import.meta.url),'utf8'));
+test('actual missing-report DTO permits jointly applicable unlabelled environment and audit masking',()=>{
+ const s=structuredClone(unlabelledMasked);
+ assert.equal(s.environment,null);
+ assert.deepEqual(api.parseSummary(s,s.scope),unlabelledMasked);
+});
+for(const [name,mutate] of [
+ ['empty environment',s=>s.environment=''],
+ ['joint reasons under configured environment',s=>s.environment='Synthetic fixture'],
+ ['missing class environment reason',s=>s.classes[1].reasons=['audit_scope_incomplete']],
+ ['missing copy environment reason',s=>s.classes[1].audit_copy.reasons=['audit_scope_incomplete']],
+ ['copy environment reason alone',s=>s.classes[1].audit_copy.reasons=['environment_unlabelled']],
+ ['class environment reason alone',s=>s.classes[1].reasons=['environment_unlabelled']],
+ ['source lacks environment reason',s=>s.classes[0].reasons=['baseline_missing']],
+ ['scanner lacks environment reason',s=>s.classes[2].reasons=['baseline_missing']],
+ ['unrelated baseline reason on masked class and copy',s=>{s.classes[1].reasons.splice(1,0,'baseline_missing');s.classes[1].audit_copy.reasons.splice(1,0,'baseline_missing');}],
+ ['member existence reason on masked class and copy',s=>{s.classes[1].reasons.push('record_missing');s.classes[1].audit_copy.reasons.push('record_missing');}],
+ ['class falsely verified',s=>s.classes[1].state='verified'],
+ ['copy falsely verified',s=>s.classes[1].audit_copy.state='verified'],
+ ['audit fingerprint exposed',s=>s.audit_authority_fingerprint=digest],
+ ['envelope mask absent',s=>s.mask_reasons=[]],
+ ['baseline provenance exposed',s=>s.classes[1].baseline_digest=digest],
+ ['retained time exposed',s=>s.classes[1].oldest_retained_at=s.response_at],
+ ['signed copy time exposed',s=>s.classes[1].audit_copy.checked_at=s.response_at],
+ ...countFields.map(key=>['masked class '+key+' replaced with zero',s=>s.classes[1][key]=0]),
+ ...['expected_events','matching_events','missing_events','changed_events','unexpected_events','expected_receipts','matching_receipts','missing_receipts','changed_receipts','unexpected_receipts','pending_receipts'].map(key=>['masked copy '+key+' replaced with zero',s=>s.classes[1].audit_copy[key]=0]),
+])test('unlabelled masked actual DTO rejects '+name,()=>{
+ const s=structuredClone(unlabelledMasked);mutate(s);
+ assert.throws(()=>api.parseSummary(s,s.scope),{code:'invalid_response'});
 });

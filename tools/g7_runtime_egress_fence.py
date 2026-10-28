@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Remove the admitted container's default IPv4 route after recovery release."""
+"""Fence external IPv4 egress before recovery startup; retain local control."""
 from __future__ import annotations
 
 import json
+import sys
+from datetime import datetime, timezone
 import socket
 import struct
 from pathlib import Path
@@ -14,6 +16,10 @@ def routes() -> list[list[str]]:
 
 def remove_default_route() -> dict:
     defaults = [route for route in routes() if route[1] == "00000000"]
+    if not defaults:
+        connected = [r for r in routes() if r[1] != "00000000"]
+        if not connected: raise RuntimeError("local control route is absent")
+        return {"default_route_removed":True,"connected_route_retained":True,"already_fenced":True}
     if len(defaults) != 1:
         raise RuntimeError(f"expected one default route, found {len(defaults)}")
     route = defaults[0]
@@ -48,4 +54,19 @@ def remove_default_route() -> dict:
 
 
 if __name__ == "__main__":
-    print(json.dumps(remove_default_route(), sort_keys=True, separators=(",", ":")))
+    if "--verify" in sys.argv:
+        if any(r[1] == "00000000" for r in routes()):
+            raise RuntimeError("external IPv4 default route exists")
+        result={"default_route_absent":True}
+    else:
+        result=remove_default_route()
+    ipv6=Path("/proc/net/ipv6_route").read_text().splitlines()
+    if any(r.split()[0] == "0"*32 and r.split()[1] == "00" and r.split()[-1] != "lo" for r in ipv6):
+        raise RuntimeError("external IPv6 default route exists")
+    probe=socket.socket(); probe.settimeout(2)
+    try: status=probe.connect_ex(("203.0.113.1",443))
+    finally: probe.close()
+    if status != 101: raise RuntimeError("external probe is not ENETUNREACH")
+    result.update(external_probe_errno=status,ipv6_default_absent=True,
+        observed_at=datetime.now(timezone.utc).isoformat(),namespace=str(Path("/proc/self/ns/net").readlink()))
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))

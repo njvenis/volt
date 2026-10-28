@@ -23,6 +23,36 @@ def validate_epoch_two_readbacks(root: Path, readbacks: dict, context_binding: d
     digest=hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(",",":")).encode()).hexdigest()
     return "sha256:"+digest
 
+def classify_verification_queue(raw: dict, absence: dict) -> dict:
+    """Only EX_UNAVAILABLE with Celery's exact no-node response means absence."""
+    import copy
+    result = copy.deepcopy(raw)
+    if (absence.get("passed") is not True or absence.get("process_scan_exit") != 0
+            or absence.get("worker_processes") != [] or absence.get("pid_files") != []):
+        raise ValueError("worker absence was not independently demonstrated")
+    for name in ("celery_active", "celery_reserved", "celery_scheduled"):
+        found = [v for v in result.get("observations", []) if v.get("name") == name]
+        if len(found) != 1 or not expected_absence(found[0]):
+            raise ValueError("Celery read failed instead of reporting absent workers")
+        found[0]["classification"] = "workers_absent"
+    result["classified_raw_unresolved"] = result["unresolved"]
+    result["unresolved"] = []
+    result["verification_mode"] = True
+    result["worker_pid_files_absent"] = True
+    result["worker_absence_proof"] = absence
+    return result
+
+
+def expected_absence(observation: dict) -> bool:
+    return (observation.get("exit_code") == 69
+        and observation.get("expected_absent_worker_response") is True
+        and observation.get("stdout_bytes") == 0
+        and observation.get("stderr_sha256") == hashlib.sha256(
+            b"Error: No nodes replied within time constraint\n").hexdigest()
+        and observation.get("worker_ids") == []
+        and "error_type" not in observation)
+
+
 def validate_verification_queue(before: dict, after: dict) -> dict:
     if before.get("unresolved") != [] or before.get("tasks") != []:
         raise ValueError("signed pre-capture queue inventory was not drained")
@@ -35,6 +65,10 @@ def validate_verification_queue(before: dict, after: dict) -> dict:
     if tasks != []: raise ValueError("verification runtime contains unknown queued tasks")
     if after.get("verification_mode") is not True or after.get("worker_pid_files_absent") is not True:
         raise ValueError("verification runtime mode or worker absence was not proved")
+    absence=after.get("worker_absence_proof", {})
+    if (absence.get("passed") is not True or absence.get("process_scan_exit") != 0
+            or absence.get("worker_processes") != [] or absence.get("pid_files") != []):
+        raise ValueError("independent worker absence proof is missing")
     expected_unresolved={"celery_active did not produce a verifiable response","celery_reserved did not produce a verifiable response","celery_scheduled did not produce a verifiable response","Celery task snapshots do not identify the same single expected worker","Valkey DB0 contains unknown queue state or unverified binding contents"}
     if set(after.get("classified_raw_unresolved",[])) != expected_unresolved:
         raise ValueError("verification runtime contains an unexplained or missing classified queue observation")
@@ -46,7 +80,7 @@ def validate_verification_queue(before: dict, after: dict) -> dict:
         v=found[0]
         if v.get("worker_ids") != []:
             raise ValueError("verification runtime Celery observation is unknown or active")
-        if v.get("classification") != "workers_absent" or v.get("read_succeeded") is not True:
+        if v.get("classification") != "workers_absent" or not expected_absence(v):
             raise ValueError("verification runtime Celery observation lacks explicit absent-worker classification")
     broker_observations=[v for v in observations if isinstance(v,dict) and v.get("name")=="valkey_db0_inventory"]
     if len(broker_observations)!=1: raise ValueError("verification runtime broker observation missing or duplicated")

@@ -103,7 +103,7 @@ class Controller:
         required = {"schema_version", "deployment_id", "controller_instance_id",
             "last_sequence", "recovery_epoch_floor", "last_intent", "last_ack"}
         if (not isinstance(value, dict) or set(value) - required - {"pending_ack", "pending_resync",
-                "last_resync", "pending_recovery_event", "last_recovery_event", "last_effective", "pending_quarantine", "quarantine_receipts", "pending_status", "last_status", "pending_policy", "last_policy", "desired_namespace", "namespace_history", "recovery_receipts", "schema_compatibility_admissions", "development_rollback_requests", "product_inventory_attestations"}
+                "last_resync", "pending_recovery_event", "last_recovery_event", "last_effective", "pending_quarantine", "quarantine_receipts", "pending_status", "last_status", "pending_policy", "last_policy", "desired_namespace", "namespace_history", "recovery_receipts", "schema_compatibility_admissions", "development_rollback_requests", "product_inventory_attestations", "submission_receipts", "inventory_delta_evidence"}
                 or not required.issubset(value)
                 or type(value.get("schema_version")) is not int or value.get("schema_version") != 1
                 or value.get("deployment_id") != self.deployment
@@ -174,6 +174,8 @@ class Controller:
         attestation=(self.state.get("product_inventory_attestations") or {}).get(request["inventory_attestation_id"])
         attestation_digest=("sha256:"+hashlib.sha256(json.dumps({k:v for k,v in attestation.items() if k!="attestation_digest"},sort_keys=True,separators=(",",":")).encode()).hexdigest()) if isinstance(attestation,dict) else None
         if (not isinstance(attestation,dict) or attestation_digest != request["inventory_attestation_digest"]
+                or request["unresolved_external_effect_count"] != 0
+                or attestation.get("unresolved_external_effect_count") != request["unresolved_external_effect_count"]
                 or attestation.get("recovery_epoch") != request["recovery_epoch"]
                 or attestation.get("forward_volume_ids") != request["forward_volume_ids"]
                 or attestation.get("product_mutation_count") != request["product_write_count"]
@@ -443,7 +445,11 @@ class Controller:
                 **({"Content-Type": "application/json"} if body is not None else {})},
             method="POST" if body is not None else "GET")
         with urllib.request.urlopen(request, context=self.tls, timeout=15) as response:
-            return json.loads(response.read())
+            result = json.loads(response.read())
+        if body is not None:
+            self.state.setdefault("submission_receipts", []).append({"path": path, "request": body, "response": result})
+            atomic_json(self.journal, self.state)
+        return result
 
     def reconcile_desired(self) -> dict:
         # Complete the journaled at-least-once acknowledgement first. UVM may

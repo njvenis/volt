@@ -72,6 +72,49 @@ class RecoverySafetyTests(unittest.TestCase):
         return {**body, 'signature': {'algorithm': 'Ed25519', 'key_id': 'test-key',
             'value': base64.urlsafe_b64encode(self.key.sign(canonical_json(body))).decode().rstrip('=')}}
 
+    def test_inventory_expectation_replays_exact_admitted_policy_fields(self):
+        import copy
+        from tools.g7_inventory_expectation import expected_inventory
+        from tools.g7_product_inventory import canon, digest as inventory_digest, compare
+        from uvm.persistence.connector_schema import connectors
+        connectors.create(self.engine)
+        with self.engine.begin() as c:
+            c.execute(g7_backup_state.update().values(host_policy_key_id='test-key'))
+            c.execute(g7_backup_host_records.insert().values(record_id=str(uuid.uuid4()),
+                deployment_id='local',record_kind='policy',record_digest='baseline',
+                document={'controller_instance_id':self.instance},response={},received_at=self.now))
+        baseline={'uvm':{},'ce':{},'media':[]}
+        with self.engine.connect() as c:
+            for table in (g7_backup_state,g7_backup_host_records,g7_backup_settings_revisions,
+                    g7_backup_connector_quarantine,assessment_policy,connectors):
+                rows=[]
+                for row in c.execute(sa.select(table)).mappings():
+                    payload=canon(dict(row)); rows.append({'key':[payload[col.name] for col in table.primary_key.columns],
+                        'payload':payload,'payload_sha256':inventory_digest(payload)})
+                baseline['uvm'][table.name]={'columns':[],'schema_sha256':'baseline','rows':rows,'row_count':len(rows)}
+        baseline['uvm']['alembic_version']={'columns':[],'schema_sha256':'baseline',
+            'rows':[{'key':['0058'],'payload_sha256':inventory_digest({'version_num':'0058'})}],'row_count':1}
+        policy={**self.policy,'revision':5}
+        policy['digest']='sha256:'+digest({k:v for k,v in policy.items() if k!='digest'})
+        request=self.signed({'schema_version':1,'deployment_id':'local','report_id':str(uuid.uuid4()),
+            'sequence':2,'controller_instance_id':self.instance,'report_kind':'policy','host_policy':policy,
+            **{k:None for k in ('desired','settings_application','completed_archive','freshness','restore_verification','recovery_epoch')},
+            'observed_at':self.now.isoformat(),'fresh_until':(self.now+timedelta(seconds=300)).isoformat()})
+        response=self.endpoint('/reports')('local',request,None,self.identity)
+        receipts=[{'path':'reports','request':request,'response':response}]
+        expected=expected_inventory(baseline,receipts,self.public)
+        state=expected['uvm']['g7_backup_state']['rows'][0]['payload']
+        self.assertEqual(state['host_policy_revision'],5)
+        self.assertEqual(state['latest_sequence'],2)
+        self.assertEqual(state['host_policy_document'],policy)
+        self.assertEqual(expected['uvm']['g7_backup_settings_revisions'],baseline['uvm']['g7_backup_settings_revisions'])
+        self.assertEqual(compare(baseline,expected,expected)['unexpected_inventory_change_count'],0)
+        altered=copy.deepcopy(expected)
+        altered['uvm']['g7_backup_state']['rows'][0]['payload_sha256']='unexplained'
+        self.assertGreater(compare(baseline,altered,expected)['unexpected_inventory_change_count'],0)
+        wrong=copy.deepcopy(receipts);wrong[0]['response']['sequence']=99
+        with self.assertRaises(ValueError): expected_inventory(baseline,wrong,self.public)
+
     def test_expired_policy_allows_fresh_authenticated_renewal(self):
         policy = {**self.policy, 'revision': 5}
         policy['digest'] = 'sha256:' + digest({k: v for k, v in policy.items() if k != 'digest'})

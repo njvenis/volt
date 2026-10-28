@@ -22,7 +22,7 @@ from uvm.operations.startup_fence import verify_startup_fence
 from uvm.operations.api import _discovery_cursor, _read_discovery_cursor
 from tools.g7_backup_recovery import RecoveryError, restore_new_volumes, verify_archive
 from tools.g7_backup_controller import Controller, _last_intent_revision
-from tools.g7_upgrade_assertions import validate_verification_queue, validate_epoch_two_readbacks
+from tools.g7_upgrade_assertions import validate_verification_queue, validate_epoch_two_readbacks, classify_verification_queue
 from tools.g7_product_inventory import compare as compare_product_inventory
 from uvm.api.recovery_readonly import (recovery_control_request_decision,
     recovery_request_decision as uvm_recovery_request_decision)
@@ -187,6 +187,9 @@ class BackupSettingsValidationTests(unittest.TestCase):
             attestation["attestation_digest"]="sha256:"+hashlib.sha256(json.dumps(attestation,sort_keys=True,separators=(",",":")).encode()).hexdigest()
             controller.state["product_inventory_attestations"]={attestation["attestation_id"]:attestation}
             request["inventory_attestation_digest"]=attestation["attestation_digest"]
+            with self.assertRaises(RecoveryError):
+                controller.journal_development_rollback_request({**request,"unresolved_external_effect_count":1})
+
             self.assertEqual(controller.journal_development_rollback_request(request), request)
             retained = json.loads(controller.journal.read_text())
             self.assertEqual(retained["development_rollback_requests"]["1"], request)
@@ -201,14 +204,36 @@ class BackupSettingsValidationTests(unittest.TestCase):
         self.assertEqual(compare_product_inventory(before,payload)["unexpected_inventory_change_count"],1)
         self.assertEqual(compare_product_inventory(before,unrelated)["unexpected_inventory_change_count"],1)
 
+    def test_inventory_rejects_unjournaled_control_payload_revision_and_schema(self):
+        import copy
+        def table(payload):
+            from tools.g7_product_inventory import digest
+            return {"columns":[],"schema_sha256":"schema","rows":[{"key":["g7-local"],"payload_sha256":digest(payload)}],"row_count":1}
+        before={"uvm":{"g7_backup_state":table({"effective_revision":4}),"g7_backup_settings_revisions":table({"revision":4})},"ce":{},"media":[]}
+        expected=copy.deepcopy(before)
+        for name,field,value in (("g7_backup_state","rows",[{"key":["g7-local"],"payload_sha256":"arbitrary"}]),("g7_backup_settings_revisions","rows",before['uvm']['g7_backup_settings_revisions']['rows']+[{"key":["extra"],"payload_sha256":"extra"}]),("g7_backup_state","schema_sha256","unexpected")):
+            after=copy.deepcopy(expected); after['uvm'][name][field]=value
+            self.assertGreater(compare_product_inventory(before,after,expected)['unexpected_inventory_change_count'],0)
+
     def test_verification_queue_validator_rejects_unknown_tasks_unresolved_and_failed_broker(self):
         intent={"unresolved_count":0,"missing_expected_tables":[]}
-        obs=[{"name":n,"worker_ids":[],"classification":"workers_absent","read_succeeded":True} for n in ("celery_active","celery_reserved","celery_scheduled")]
+        obs=[{"name":n,"worker_ids":[],"exit_code":69,"expected_absent_worker_response":True,"stdout_bytes":0,"stderr_sha256":hashlib.sha256(b"Error: No nodes replied within time constraint\n").hexdigest(),"classification":"workers_absent"} for n in ("celery_active","celery_reserved","celery_scheduled")]
         obs.append({"name":"valkey_db0_inventory","exit_code":0,"cardinality_errors":0,"key_count":0,"keys_digest":hashlib.sha256(b"[]").hexdigest()})
         before={"unresolved":[],"tasks":[],"intent_inventory":intent}
         expected={"celery_active did not produce a verifiable response","celery_reserved did not produce a verifiable response","celery_scheduled did not produce a verifiable response","Celery task snapshots do not identify the same single expected worker","Valkey DB0 contains unknown queue state or unverified binding contents"}
-        after={"unresolved":[],"classified_raw_unresolved":list(expected),"tasks":[],"intent_inventory":intent,"verification_mode":True,"worker_pid_files_absent":True,"observations":obs}
+        after={"unresolved":[],"classified_raw_unresolved":list(expected),"tasks":[],"intent_inventory":intent,"verification_mode":True,"worker_pid_files_absent":True,"worker_absence_proof":{"passed":True,"process_scan_exit":0,"worker_processes":[],"pid_files":[]},"observations":obs}
         self.assertTrue(validate_verification_queue(before,after)["passed"])
+        raw={**after,"unresolved":list(expected)}
+        absence=after["worker_absence_proof"]
+        self.assertTrue(validate_verification_queue(before,classify_verification_queue(raw,absence))["passed"])
+        import copy
+        for exit_code in (137, 1, None, 0):
+            failed=copy.deepcopy(raw); failed['observations'][0]['exit_code']=exit_code
+            with self.assertRaises(ValueError):
+                validate_verification_queue(before,classify_verification_queue(failed,absence))
+        with self.assertRaises(ValueError):
+            classify_verification_queue(raw,{**absence,"worker_processes":["42"]})
+
         for changed in ({**after,"tasks":[{"id":"unexpected"}]},{**after,"unresolved":["unknown"]}):
             with self.assertRaises(ValueError): validate_verification_queue(before,changed)
         failed={**after,"observations":obs[:-1]+[{**obs[-1],"exit_code":1}]}

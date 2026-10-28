@@ -232,6 +232,9 @@ def observe_queue_state(container: str, *, network_fenced: bool = False,
                 "stderr_bytes": len(stderr.encode()),
                 "stderr_sha256": hashlib.sha256(stderr.encode()).hexdigest()}
             if name.startswith("celery_"):
+                summary["expected_absent_worker_response"] = (result.returncode == 69
+                    and stdout.strip() == ""
+                    and stderr.strip() == "Error: No nodes replied within time constraint")
                 summary["explicit_empty_task_response"] = bool(re.search(
                     r"(?m)^\s*(?:\* empty \*|- empty -)\s*$", stdout))
                 summary["worker_ids"] = sorted(set(re.findall(

@@ -122,7 +122,8 @@ class AuditAnchorAuthority:
             finally:
                 conn.close()
 
-    def inventory(self, sink_id: str | None = None) -> list[dict[str, Any]]:
+    def inventory(self, sink_id: str | None = None, *, watermark: int | None = None,
+                  expected_event_ids=()) -> list[dict[str, Any]]:
         query = """SELECT deployment_id, sink_id, event_id, event_sequence,
                    payload_sha256, sink_receipt, affected_scope, anchored_at,
                    contract_version FROM uvm_audit_anchor.inventory
@@ -131,6 +132,11 @@ class AuditAnchorAuthority:
         if sink_id is not None:
             query += " AND sink_id=%s"
             params += (sink_id,)
+        if watermark is not None:
+            if type(watermark) is not int or watermark < 0:
+                raise ValueError("invalid audit inventory watermark")
+            query += " AND (event_sequence<=%s OR event_id=ANY(%s::uuid[]))"
+            params += (watermark, list(expected_event_ids))
         query += " ORDER BY event_sequence, event_id"
         with self._connect(self.dsn, row_factory=dict_row) as conn:
             return [dict(row) for row in conn.execute(query, params).fetchall()]

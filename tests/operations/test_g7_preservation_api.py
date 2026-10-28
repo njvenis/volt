@@ -167,6 +167,47 @@ class PreservationApiTest(unittest.TestCase):
             self.assertEqual(changed_error.exception.status_code, 400)
             self.assertEqual(changed_error.exception.detail["code"], "invalid_cursor")
 
+    def test_pending_only_audit_pages_keep_authority_freshness_and_cursor_checks(self):
+        import importlib.util,json
+        from pathlib import Path
+        from datetime import timedelta
+        from uvm.api.app import create_app
+        from uvm.operations import preservation_api
+        path=Path(__file__).with_name('test_g7_preservation_negative_states.py')
+        spec=importlib.util.spec_from_file_location('pending_fixture',path);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        rows=[module.member('audit_attribution',f'audit_attribution:event-{n}:deployment-v1') for n in range(3)]
+        dto=module.audit_dto('unknown',reasons=['source_checkpoint_missing'],verified=3,expected_events=1,matching_events=1,pending=1)
+        snapshot='00000000-0000-4000-8000-000000000041'
+        payload={'snapshot_id':snapshot,'deployment_id':'g7-local','valid_until':(datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat(),
+            'classes':[{'class_id':'product.audit_history','minimum_period':'P1Y','dto':dto,'members':rows,'audit_targets':[{'kind':'deployment'}]}]}
+        app=create_app(self.engine,principals={},cursor_secret='pending-cursor-secret')
+        route=next(r for r in app.routes if getattr(r,'path',None)=='/api/v1/operations/preservation/records')
+        request=Request({'type':'http','method':'GET','path':route.path,'query_string':b'','headers':[], 'scheme':'http','server':('test',80),'client':('127.0.0.1',1),'root_path':'','app':app})
+        principal={'name':'alice','scopes':(self.scope,),'context':self.context}
+        def read(cursor=None):return route.endpoint(request,snapshot_id=snapshot,class_id='product.audit_history',limit=1,cursor=cursor,principal=principal)
+        with patch.object(preservation_api,'_find_snapshot',return_value=(payload,self.scope)),patch.object(preservation_api,'load_report',return_value=(payload,'')):
+            first=read();second=read(first['next_cursor']);third=read(second['next_cursor'])
+            self.assertEqual([p['items'][0]['record_key'] for p in (first,second,third)],[r['record_key'] for r in rows])
+            self.assertIsNone(third['next_cursor']);self.assertEqual(dto['state'],'unknown')
+            with self.assertRaises(HTTPException) as invalid:read(first['next_cursor']+'tamper')
+            self.assertEqual(invalid.exception.status_code,400)
+            payload['valid_until']='2020-01-01T00:00:00Z'
+            with self.assertRaises(HTTPException) as expired:read()
+            self.assertEqual(expired.exception.status_code,409)
+            payload['valid_until']='2999-01-01T00:00:00Z'
+            for reasons in (['audit_scope_incomplete'],['baseline_untrusted']):
+                dto['reasons']=reasons;dto['audit_copy']['reasons']=reasons
+                with self.assertRaises(HTTPException) as incomplete:read()
+                self.assertEqual(incomplete.exception.status_code,404)
+            dto['reasons']=['source_checkpoint_missing'];dto['audit_copy']['reasons']=['source_checkpoint_missing']
+            from uvm.persistence.assessment_schema import assessment_policy
+            with self.engine.begin() as c:
+                policy=c.execute(sa.select(assessment_policy.c.document)).scalar_one()
+                policy['denies']=[{'deny_id':'pending-audit-deny','principal_id':'alice','actions':['audit.read.deployment'],'target_ids':['*']}]
+                c.execute(assessment_policy.update().values(document=policy))
+            with self.assertRaises(HTTPException) as denied:read()
+            self.assertEqual(denied.exception.status_code,404)
+
     def test_record_projection_is_allowlisted_and_keeps_metadata_hashes_null(self):
         from uvm.operations.preservation_api import _record_item
         member = {"record_key": "observation:opaque", "record_kind": "observation",

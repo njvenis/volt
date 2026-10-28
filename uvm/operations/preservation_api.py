@@ -484,11 +484,21 @@ def install_preservation_routes(app, engine, auth, cursor_secret: bytes):
         entry = next((item for item in payload.get("classes", [])
             if isinstance(item, dict) and item.get("class_id") == class_id), None)
         validated = class_map(payload, scope).get(class_id, {})
-        if validated.get("state") not in {"verified", "gap"}:
+        audit = validated.get("audit_copy")
+        pending_only = (class_id == "product.audit_history"
+            and validated.get("state") == "unknown"
+            and validated.get("expected_records") is not None
+            and validated.get("reasons") == ["source_checkpoint_missing"]
+            and isinstance(audit, dict) and audit.get("state") == "unknown"
+            and audit.get("reasons") == ["source_checkpoint_missing"]
+            and type(audit.get("pending_receipts")) is int and audit["pending_receipts"] > 0
+            and all(audit.get(name) == 0 for name in ("missing_events", "changed_events",
+                "unexpected_events", "missing_receipts", "changed_receipts", "unexpected_receipts")))
+        if validated.get("state") not in {"verified", "gap"} and not pending_only:
             _error(404, "not_found", "Preservation class not found")
         if entry is None or not isinstance(entry.get("members"), list):
             _error(404, "not_found", "Preservation class not found")
-        if not isinstance(entry.get("dto"), dict) or entry["dto"].get("state") not in {"verified", "gap"}:
+        if not isinstance(entry.get("dto"), dict) or entry["dto"].get("state") != validated.get("state"):
             _error(404, "not_found", "Preservation class not found")
         try:
             snapshot_expiry = datetime.fromisoformat(payload["valid_until"].replace("Z", "+00:00"))

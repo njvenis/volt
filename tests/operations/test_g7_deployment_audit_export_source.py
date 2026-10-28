@@ -83,6 +83,52 @@ class DeploymentAuditExportSourceTest(unittest.TestCase):
             self.assertEqual(connection.execute(sa.select(sa.func.count()).select_from(
                 assessment_sink_export_receipts)).scalar_one(), 0)
 
+    def test_final_reconciliation_excludes_later_receipts_and_rejects_context_changes(self):
+        payload=self.source.list_authorised_audit_page(1)[0]
+        later=str(uuid.uuid4())
+        with self.engine.begin() as c:
+            c.execute(assessment_audit_events.insert().values(**{**payload,'event_id':later,'event_sequence':3}))
+            for event_id in (self.events[0],later):
+                c.execute(assessment_sink_export_receipts.insert().values(event_id=event_id,sink_id='g7-siem',
+                    sink_receipt='receipt:'+event_id,acknowledged_at=datetime.now(timezone.utc)))
+        with self.source.reconciliation_operation('g7-siem') as (connection,receipts):
+            self.assertTrue(connection.in_transaction())
+            self.assertEqual(receipts,{self.events[0]:'receipt:'+self.events[0]})
+        self.source.authority_fingerprint='original-policy'
+        self.source._authorize=lambda:'changed-policy'
+        with self.assertRaises(PermissionError):
+            with self.source.reconciliation_operation('g7-siem'):pass
+
+    def test_actual_audit_state_consumer_keeps_captured_watermark_after_append(self):
+        from tools import g7_container_audit_export as tool
+        from unittest.mock import patch,MagicMock
+        import contextlib,io,json,os,sys
+        from uvm.audit_export.exporter import _event_payload
+        original=self.source.list_authorised_audit_page
+        def page(*args):
+            rows=original(*args)
+            for row in rows:
+                for field in ('occurred_at','received_at'):row[field]=row[field].replace(tzinfo=timezone.utc)
+            return rows
+        self.source.list_authorised_audit_page=page
+        rows=page(100)
+        with self.engine.begin() as c:
+            c.execute(assessment_audit_events.insert().values(**{**rows[0],'event_id':str(uuid.uuid4()),'event_sequence':3}))
+        sink=MagicMock();sink.__enter__.return_value.execute.return_value.fetchall.return_value=[(row['event_id'],_event_payload(row)) for row in rows]
+        authority=MagicMock();authority.inventory.return_value=[]
+        output=io.StringIO()
+        with patch.object(tool,'configure_source',return_value=self.source),patch('psycopg.connect',return_value=sink),patch(
+                'uvm.audit_export.integrity.AuditAnchorAuthority',return_value=authority),patch.object(tool,'event_attribution',return_value={'kind':'deployment'}),patch.dict(
+                os.environ,{'G7_SIEM_DSN':'offline','G7_AUDIT_ANCHOR_SIGNER_DSN':'offline','UVM_G7_RECOVERY_EPOCH':'1'}),patch.object(
+                sys,'argv',['test','audit-state']),contextlib.redirect_stdout(output):
+            self.assertEqual(tool.main(),0)
+        result=json.loads(output.getvalue())
+        self.assertEqual(result['context']['source_watermark'],2)
+        self.assertEqual(result['dto']['audit_copy']['expected_events'],2)
+        self.assertEqual(result['dto']['audit_copy']['pending_receipts'],2)
+        self.assertEqual(sink.__enter__.return_value.execute.call_args.args[1],(2,[]))
+        authority.inventory.assert_called_once_with('g7-siem',watermark=2,expected_event_ids=set())
+
     def test_deployment_receipt_is_idempotent_and_revalidated(self):
         event_id = self.events[0]
         receipt = "postgres:uvm_audit_export.events:" + event_id

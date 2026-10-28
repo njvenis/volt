@@ -334,22 +334,6 @@ def main() -> int:
         source_map = {event["event_id"]: event for event in source_events}
         def text_value(value):
             return value.decode("utf-8", errors="strict") if isinstance(value, bytes) else value
-        source.authorize()
-        with source.engine.connect() as connection:
-            receipts = {str(row.event_id): text_value(row.sink_receipt) for row in connection.execute(
-                sa.select(assessment_sink_export_receipts.c.event_id,
-                    assessment_sink_export_receipts.c.sink_receipt).where(
-                    assessment_sink_export_receipts.c.sink_id == args.sink_id)).all()}
-            final_total = int(connection.execute(sa.select(sa.func.count()).select_from(
-                assessment_audit_events)).scalar_one())
-        if final_total != total:
-            raise RuntimeError("deployment audit source changed during reconciliation")
-        with psycopg.connect(sink_dsn) as connection:
-            sink_rows = connection.execute("SELECT event_id,payload FROM uvm_audit_export.events").fetchall()
-        sink_map = {str(text_value(event_id)): payload for event_id, payload in sink_rows}
-        anchor_rows = authority.inventory(args.sink_id)
-        anchor_map = {str(text_value(row["event_id"])):
-            {key: text_value(value) for key, value in row.items()} for row in anchor_rows}
         scope = tuple(os.environ.get(name) for name in (
             "G7_AUDIT_SOURCE_FAMILY", "G7_AUDIT_SOURCE_ACCOUNT", "G7_AUDIT_SCOPE_KEY"))
         from uvm.operations.preservation_streams import read_stream, namespace, INVENTORY, reconcile_members
@@ -361,12 +345,26 @@ def main() -> int:
             expected_inventory = baseline["content"]
         except (KeyError, FileNotFoundError):
             pass
-        with source.engine.begin() as connection:
-            attributions = {event_id: captured_attribution(event, expected_inventory, scope)
-                or event_attribution(connection, event, scope) for event_id, event in source_map.items()}
         expected_event_ids = {item["member"]["record_key"].split(":")[1]
             for item in (expected_inventory or {}).get("members", [])
             if item["member"]["record_kind"] == "audit_event"}
+        # The captured source operation rechecks membership/digests and current
+        # policy on the same locked connection used for receipt/attribution reads.
+        # Source -> sink/anchor reads retain the established lock order.
+        with source.reconciliation_operation(args.sink_id,
+                expected_event_ids=expected_event_ids) as (connection, receipts):
+            receipts = {key: text_value(value) for key, value in receipts.items()}
+            with psycopg.connect(sink_dsn) as sink_connection:
+                sink_rows = sink_connection.execute("""SELECT event_id,payload FROM uvm_audit_export.events
+                    WHERE (payload->>'event_sequence')::bigint<=%s OR event_id=ANY(%s::uuid[])""",
+                    (source.watermark, list(expected_event_ids))).fetchall()
+            sink_map = {str(text_value(event_id)): payload for event_id, payload in sink_rows}
+            anchor_rows = authority.inventory(args.sink_id, watermark=source.watermark,
+                expected_event_ids=expected_event_ids)
+            anchor_map = {str(text_value(row["event_id"])):
+                {key: text_value(value) for key, value in row.items()} for row in anchor_rows}
+            attributions = {event_id: captured_attribution(event, expected_inventory, scope)
+                or event_attribution(connection, event, scope) for event_id, event in source_map.items()}
         foreign = {event_id for event_id, attribution in attributions.items()
             if attribution and attribution["kind"] == "foreign_source" and event_id not in expected_event_ids}
         # A new event proven to belong only to another tuple is outside this

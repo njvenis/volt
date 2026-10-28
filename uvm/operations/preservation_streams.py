@@ -226,7 +226,7 @@ def admitted_evidence(root, public_key, deployment, scope, evidence_id, *, key_i
     return matches[0]
 
 
-def reconcile_members(expected, observed):
+def reconcile_members(expected, observed, *, byte_observations=None):
     current = {item["record_key"]: item for item in observed}
     result = []
     for original in expected:
@@ -244,12 +244,28 @@ def reconcile_members(expected, observed):
         if now is None:
             now = {**before, "state": "missing", "reasons": ["record_missing"],
                 "actual_sha256": None, "record_sha256": None}
-        elif now["state"] not in {"missing", "unreadable"} and (now["record_sha256"] != before["record_sha256"]
+        elif now["state"] not in {"missing", "unreadable"}:
+            reasons = set(now["reasons"])
+            metadata_changed = (now["record_sha256"] != before["record_sha256"]
                 or now["expected_sha256"] != before["expected_sha256"]
-                or now["retained_at"] != before["retained_at"]):
-            now = {**now, "state": "changed", "reasons": sorted(set(now["reasons"]) | {"bytes_changed"}
-                if before["byte_bearing"] and now["actual_sha256"] != before["expected_sha256"]
-                else set(now["reasons"]) | {"evidence_changed"}), "expected_sha256": before["expected_sha256"]}
+                or now["retained_at"] != before["retained_at"]
+                or now["evidence_id"] != before["evidence_id"])
+            observation = (byte_observations or {}).get(before["record_key"])
+            if before["byte_bearing"] and observation is not None:
+                # Only actual bytes matching the admitted digest AND size can
+                # supersede an earlier metadata-relative byte reason.
+                if observation == (before["expected_sha256"], original["byte_size"]):
+                    metadata_changed = metadata_changed or "bytes_changed" in reasons
+                    reasons.discard("bytes_changed")
+                else:
+                    reasons.add("bytes_changed")
+            elif before["byte_bearing"] and now["actual_sha256"] != before["expected_sha256"]:
+                reasons.add("bytes_changed")
+            if metadata_changed:
+                reasons.add("evidence_changed")
+            now = {**now, "state": "changed" if reasons else "verified",
+                "reasons": sorted(reasons), "expected_sha256": before["expected_sha256"],
+                "evidence_id": before["evidence_id"]}
         result.append(now)
     result.extend({**item, "state": "unexpected", "reasons": ["unexpected_member"],
         "expected_sha256": None} for item in current.values())

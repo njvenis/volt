@@ -53,6 +53,41 @@ class PreservationStoreMutationTests(unittest.TestCase):
         self.assertEqual(set(before),set(after))
         self.assertTrue(any(before[key]!=after[key] for key in before))
 
+    def test_metadata_digest_and_size_tamper_preserve_verified_expected_bytes(self):
+        from tools import g7_preservation_inventory as producer
+        from uvm.operations import preservation_source, preservation, preservation_streams
+        import base64
+        original_wire=preservation_source._wire
+        def sqlite_wire(value):
+            return original_wire(value.replace(tzinfo=timezone.utc) if isinstance(value,datetime) and value.tzinfo is None else value)
+        def read(*args):
+            return 200,self.raw,{'content-digest':'sha-256=:'+base64.b64encode(hashlib.sha256(self.raw).digest()).decode()+':'}
+        with patch.object(preservation_source,'_wire',side_effect=sqlite_wire),patch.object(producer,'_request',side_effect=read):
+            with self.fixture.engine.connect() as c:
+                before=preservation_source._scanner_members(c,self.fixture.scope)
+            # This collector has no observations; its real registration is enough
+            # to exercise protected bytes versus independent registration facts.
+            if isinstance(before,tuple):before=before[0]
+            initial=producer._safe_members({'members':before},'fixture','offline')
+            expected=[{'member':m,'byte_size':len(self.raw) if m['byte_bearing'] else None} for m in initial]
+            for column,value in (('sha256','c'*64),('byte_size',len(self.raw)+1)):
+                with self.subTest(column=column):
+                    with self.fixture.engine.begin() as c:
+                        c.execute(ingestion_evidence.update().values(sha256=hashlib.sha256(self.raw).hexdigest(),byte_size=len(self.raw)))
+                        c.execute(ingestion_evidence.update().values(**{column:value}))
+                    with self.fixture.engine.connect() as c:current=preservation_source._scanner_members(c,self.fixture.scope)
+                    if isinstance(current,tuple):current=current[0]
+                    observations={}
+                    observed=producer._safe_members({'members':current},'fixture','offline',{'members':expected},byte_observations=observations)
+                    members=preservation_streams.reconcile_members(expected,observed,byte_observations=observations)
+                    dto=producer._counts(producer._dto('operational.scanner_collection','P3M',initial,self.now.isoformat().replace('+00:00','Z')),members)
+                    public=preservation.class_map({'classes':[{'class_id':'operational.scanner_collection','minimum_period':'P3M','dto':dto,'members':members}]},self.fixture.scope)['operational.scanner_collection']
+                    self.assertEqual(public['state'],'gap')
+                    changed=[m for m in members if m['state']=='changed'];self.assertTrue(changed)
+                    for m in changed:
+                        self.assertEqual(m['expected_sha256'],m['actual_sha256'])
+                        self.assertEqual(m['reasons'],['evidence_changed'])
+
     def test_joint_byte_and_registration_tamper_cannot_pass_independent_expectation(self):
         from uvm.api.app import create_app
         fixture=self.fixture

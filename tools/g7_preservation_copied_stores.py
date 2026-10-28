@@ -155,6 +155,8 @@ def main():
         '--mount',f'type=bind,src={root/"secrets/registry.json"},dst=/copied-registry.json,readonly',
         '--entrypoint','/bin/sh',args.image,'-c',
         'cp /copied-registry.json /copied-secrets/registry.json && chown -R 1800:1800 /copied-secrets && find /copied-secrets -type d -exec chmod 0700 {} + && find /copied-secrets -type f -exec chmod 0600 {} +')
+    source_ports=json.loads(docker('inspect',args.source_container,'--format','{{json .NetworkSettings.Ports}}'))
+    ui_origin='http://127.0.0.1:'+source_ports['8000/tcp'][0]['HostPort']
     anchor_ip=docker('inspect',args.anchor_container,'--format',
         '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}').decode().strip()
     sql(args.anchor_container,'postgres',f"CREATE ROLE {role} LOGIN PASSWORD '{copy_password}'; CREATE ROLE {writer_role} LOGIN PASSWORD '{copy_password}';")
@@ -178,6 +180,9 @@ def main():
     sql(args.anchor_container,dbs['base_anchor'],'GRANT USAGE ON SCHEMA uvm_audit_anchor TO anchor_signer,exporter_ro; GRANT SELECT,INSERT ON uvm_audit_anchor.inventory,uvm_audit_anchor.incidents TO anchor_signer; GRANT SELECT ON uvm_audit_anchor.inventory TO exporter_ro; GRANT SELECT,INSERT ON uvm_audit_anchor.incidents TO exporter_ro;')
     cases=[
         ('source_collection_lost',{source_class:'gap',scanner_class:'gap'},'source'),
+        ('source_digest_metadata_changed',{source_class:'gap',scanner_class:'gap'},'source'),
+        ('source_size_metadata_changed',{source_class:'gap'},'source-adapter-metadata-fault'),
+        ('later_audit_append',{scanner_class:'gap'},'addition'),
         ('source_content_changed',{source_class:'gap',scanner_class:'gap'},'source'),
         ('reservation_changed',{scanner_class:'gap'},'source'),
         ('evidence_missing',{source_class:'gap',scanner_class:'gap'},'bytes'),
@@ -239,6 +244,8 @@ def main():
                 sql(args.anchor_container,dbs['source'],'DELETE FROM ingestion_evidence; DELETE FROM run_pages; DELETE FROM run_attempts; DELETE FROM collection_request_reservations; DELETE FROM expected_run_events; DELETE FROM collection_runs;')
             elif case=='source_content_changed':
                 sql(args.anchor_container,dbs['source'],"UPDATE collection_runs SET provenance_snapshot=jsonb_set(provenance_snapshot::jsonb,'{observations}',COALESCE((SELECT jsonb_agg(jsonb_set(item,'{source_rating}','\"changed-copy\"'::jsonb)) FROM jsonb_array_elements((provenance_snapshot::jsonb)->'observations') item),'[]'::jsonb));")
+            elif case=='source_digest_metadata_changed':
+                sql(args.anchor_container,dbs['source'],"UPDATE collection_runs SET provenance_snapshot=jsonb_set(provenance_snapshot::jsonb,'{observations}',COALESCE((SELECT jsonb_agg(jsonb_set(item,'{raw_evidence_sha256}',to_jsonb(repeat('c',64)))) FROM jsonb_array_elements((provenance_snapshot::jsonb)->'observations') item),'[]'::jsonb));")
             elif case=='reservation_changed':
                 sql(args.anchor_container,dbs['source'],"UPDATE collection_request_reservations SET request_identity_sha256=repeat('f',64);")
             elif case in {'evidence_missing','evidence_changed','evidence_and_registration_changed','evidence_unavailable'}:
@@ -268,7 +275,7 @@ def main():
             if case=='sink_timestamp_equivalent':
                 sql(args.anchor_container,dbs['sink'],"UPDATE uvm_audit_export.events SET payload=jsonb_set(jsonb_set(payload::jsonb,'{occurred_at}',to_jsonb(replace(payload->>'occurred_at','+00:00','Z'))),'{received_at}',to_jsonb(replace(payload->>'received_at','+00:00','Z')));")
             if case=='unexpected_sink_only':
-                sql(args.anchor_container,dbs['sink'],"INSERT INTO uvm_audit_export.events(event_id,payload,committed_at) SELECT '00000000-0000-4000-8000-000000000099'::uuid,jsonb_set(jsonb_set(payload::jsonb,'{event_id}','\"00000000-0000-4000-8000-000000000099\"'::jsonb),'{event_sequence}',to_jsonb((SELECT max((payload->>'event_sequence')::bigint)+1 FROM uvm_audit_export.events))),clock_timestamp() FROM uvm_audit_export.events ORDER BY event_id LIMIT 1;")
+                sql(args.anchor_container,dbs['sink'],"INSERT INTO uvm_audit_export.events(event_id,payload,committed_at) SELECT '00000000-0000-4000-8000-000000000099'::uuid,jsonb_set(jsonb_set(payload::jsonb,'{event_id}','\"00000000-0000-4000-8000-000000000099\"'::jsonb),'{event_sequence}',to_jsonb((SELECT max((payload->>'event_sequence')::bigint) FROM uvm_audit_export.events))),clock_timestamp() FROM uvm_audit_export.events ORDER BY event_id LIMIT 1;")
             if case in {'legitimate_source_addition','pending_first_receipt'}:
                 _STAGE=case+':actual_scanner_writer'
                 writer_env={**base_env,'UVM_DB_URL':f'postgresql+psycopg://{writer_role}:{copy_password}@{anchor_ip}:5432/{dbs["source"]}'}
@@ -301,6 +308,13 @@ def main():
                 '--mount',f'type=bind,src={bytes_copy},dst=/opt/uvm/state/source-evidence,readonly',
                 '--mount',f'type=bind,src={copy_root/"api-secrets"},dst=/run/uvm-g7-secrets,readonly',
                 '--entrypoint','/opt/uvm/venv/bin/python',args.image,'-c',
+                ("from uvm.operations import preservation_source as source\n"
+                 "native_member=source._member\n"
+                 "def metadata_fault(*args,**kwargs):\n"
+                 "    member=native_member(*args,**kwargs)\n"
+                 "    if args[0]=='product.source_evidence' and member['record_kind']=='observation' and member['byte_size'] is not None: member['byte_size']+=1\n"
+                 "    return member\n"
+                 "source._member=metadata_fault\n" if case=='source_size_metadata_changed' else "") +
                 "from uvm.api.app import app\n"
                 "app.router.on_startup.clear(); app.router.on_shutdown.clear()\n"
                 "async def fenced(scope, receive, send):\n"
@@ -381,6 +395,7 @@ def main():
                 'G7_AUDIT_ANCHOR_DSN':f'postgresql://exporter_ro:{(root/"host/exporter-ro-password").read_text().strip()}@{anchor_ip}:5432/{dbs["anchor"]}',
                 'G7_SIEM_DSN':f'postgresql://siem_exporter:{(root/"host/siem-exporter-password").read_text().strip()}@{anchor_ip}:5432/{dbs["sink"]}',
                 'G7_AUDIT_ANCHOR_SIGNER_DSN':f'postgresql://anchor_signer:{(root/"host/anchor-signer-password").read_text().strip()}@{anchor_ip}:5432/{dbs["anchor"]}'}
+            if case=='later_audit_append':export_env['G7_WATERMARK_WRITER_DATABASE_URL']=f'postgresql+psycopg://{writer_role}:{copy_password}@{anchor_ip}:5432/{dbs["source"]}'
             if case=='sink_unavailable': export_env['G7_SIEM_DSN']='postgresql://unavailable:unavailable@127.0.0.1:9/unavailable?connect_timeout=2'
             export_env_file=copy_root/'export.env';export_env_file.write_text('\n'.join(k+'='+v for k,v in export_env.items())+'\n');export_env_file.chmod(0o600)
             if case in {'legitimate_source_addition','sink_timestamp_equivalent'}:
@@ -397,6 +412,19 @@ def main():
             command=['docker','exec','--env-file',str(export_env_file),api_id,
                 '/opt/uvm/venv/bin/python','/opt/uvm/app/tools/g7_container_audit_export.py','audit-state','--limit','5000']
             if case in {'legitimate_source_addition','pending_first_receipt'}:command.append('--admit-new-members')
+            if case=='later_audit_append':
+                docker('cp',ROOT/'tools/g7_preservation_addition_fixture.py',api_id+':/tmp/addition.py')
+                for rejected_mode in ('watermark-authority-change','watermark-context-change'):
+                    rejected=subprocess.run(['docker','exec','--env-file',str(export_env_file),api_id,
+                        '/opt/uvm/venv/bin/python','/tmp/addition.py',rejected_mode],capture_output=True)
+                    safe=rejected.stderr
+                    for value in _DIAGNOSTIC_SECRETS+[export_env['G7_WATERMARK_WRITER_DATABASE_URL']]:
+                        if value:safe=safe.replace(value.encode(),b'[REDACTED]')
+                    (evidence/(rejected_mode+'-redacted.stderr')).write_bytes(safe)
+                    (evidence/(rejected_mode+'-exit.json')).write_text(json.dumps({'exit':rejected.returncode,'stdout_bytes':len(rejected.stdout),'original_stderr_sha256':hashlib.sha256(rejected.stderr).hexdigest(),'redacted_stderr_sha256':hashlib.sha256(safe).hexdigest()})+'\n')
+                    if rejected.returncode==0 or rejected.stdout or b'PermissionError' not in rejected.stderr:raise RuntimeError('watermark_context_change_did_not_reject:'+rejected_mode)
+                command=['docker','exec','--env-file',str(export_env_file),api_id,
+                    '/opt/uvm/venv/bin/python','/tmp/addition.py','watermark-consumer']
             outcome=subprocess.run(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
             audit_file.write_bytes(outcome.stdout);audit_file.chmod(0o600)
             diagnostics=outcome.stderr
@@ -410,6 +438,12 @@ def main():
             if case=='sink_unavailable':
                 if outcome.returncode==0 or outcome.stdout:raise RuntimeError('sink_outage_did_not_fail_closed')
             elif outcome.returncode: raise RuntimeError('copied_audit_reconciliation_failed:'+case)
+            if case in {'source_digest_metadata_changed','source_size_metadata_changed'}:
+                body=json.dumps({'schema_version':1,'scope':{'source_family':'local','source_account_id':'g7-local','scope_key':'all'},'class_ids':[source_class,audit_class,scanner_class]}).encode()
+                status,raw=request(origin,'/internal/g7/preservation/source-snapshot',token,body)
+                if status!=200:raise RuntimeError('metadata_source_snapshot_failed')
+                (evidence/(case+'-actual-source-snapshot.json')).write_bytes(raw)
+                (evidence/(case+'-fault-boundary.json')).write_text(json.dumps({'source_registration_and_bytes_unchanged':True,'fault':'copied provenance raw digest' if case=='source_digest_metadata_changed' else 'test-only source adapter byte_size output; native record hash and registration unchanged','signed_report_mutated':False})+'\n')
             capture=[str(ROOT/'.venv/bin/python'),str(ROOT/'tools/g7_preservation_inventory.py'),
                 '--origin',origin,'--token-file',str(root/'secrets/g7_preservation_source_token'),
                 '--signing-key-file',str(root/'host/ed25519.pem'),'--trust-dir',str(trust),
@@ -417,6 +451,7 @@ def main():
                 '--recovery-epoch','1','--storage-generation',base_env['UVM_G7_STORAGE_GENERATION'],
                 '--freshness-seconds','900','--volume-set-digest',base_env['UVM_G7_VOLUME_SET_DIGEST'],'--schema-head-digest',args.schema_head_digest,
                 '--key-valid-from',args.key_valid_from,'--key-valid-until',args.key_valid_until,
+                '--metadata-output',str(evidence/(case+'-source-metadata.json')),
                 '--environment','local-copied-postgresql-stores','--source-family','local','--source-account-id','g7-local','--scope-key','all']
             capture += ['--audit-state-failure-reason','sink_unavailable'] if case=='sink_unavailable' else ['--audit-state-file',str(audit_file)]
             if case in {'legitimate_source_addition','pending_first_receipt'}:capture.append('--admit-new-members')
@@ -445,6 +480,8 @@ def main():
                 'nullCountClasses':[key for key,value in expected_states.items() if value=='failed']}
             for key,value in expected_states.items():
                 if value=='gap': expected['recordClass']=key; break
+            if case=='pending_first_receipt':expected.update(recordClass=audit_class,paginateAll=True,renderedPending=True,uiOrigin=ui_origin,reportPath=str(report_file),metadataPath=str(evidence/(case+'-source-metadata.json')),browserEvidence=str(evidence/'pending-rendered-browser'))
+            if case in {'source_digest_metadata_changed','source_size_metadata_changed'}:expected.update(recordClass=source_class,recordState='changed',recordReason='evidence_changed',rawHashesEqual=True,noByteChangedReason=True)
             if case=='pending_first_receipt':expected['auditCopy']={'pending_receipts':1,'missing_receipts':0,'changed_receipts':0,'unexpected_receipts':0};expected['reasons']={audit_class:'source_checkpoint_missing'}
             if case=='unexpected_sink_only':expected['auditCopy']={'unexpected_events':1,'pending_receipts':0};expected['recordClass']=audit_class;expected['recordState']='unexpected';expected['recordReason']='unexpected_member'
             expected_path=evidence/(case+'-public-expect.json');expected_path.write_text(json.dumps(expected)+'\n')

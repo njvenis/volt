@@ -92,7 +92,7 @@ def _dto(class_id: str, period: str, members: list[dict], checked_at: str) -> di
         "baseline_digest": "sha256:" + baseline, "audit_copy": None}
 
 
-def _safe_members(source_class: dict, token: str, origin: str, expected_inventory=None) -> list[dict]:
+def _safe_members(source_class: dict, token: str, origin: str, expected_inventory=None, *, byte_observations=None) -> list[dict]:
     members = source_class.get("members")
     if not isinstance(members, list):
         raise ValueError("source_member_list_invalid")
@@ -147,6 +147,8 @@ def _safe_members(source_class: dict, token: str, origin: str, expected_inventor
                 else:
                     raise RuntimeError("evidence_readback_unavailable")
             actual_digest, actual_size = verified_bytes[evidence_id]
+            if byte_observations is not None:
+                byte_observations[kind + ":" + stable_key] = (actual_digest, actual_size)
         elif evidence_id is not None or byte_size is not None:
             raise ValueError("metadata_byte_fields_conflict")
         result.append({"record_key": kind + ":" + stable_key,
@@ -328,7 +330,7 @@ def _provision_controller(args, private_key):
         os.close(lock_fd)
 
 
-def _bind_streams(args, payload, private_key, byte_sizes):
+def _bind_streams(args, payload, private_key, byte_sizes, byte_observations=None):
     from uvm.operations.preservation_streams import (INVENTORY, REPORT,
         namespace, publish, read_stream, digest, snapshot_id)
     root, public_path = _prepare_trust(args, private_key)
@@ -378,7 +380,7 @@ def _bind_streams(args, payload, private_key, byte_sizes):
             if class_id == "product.audit_history":
                 entry["audit_targets"] = baseline["audit_targets"]
             if entry["dto"]["state"] in {"verified", "gap"} or entry["dto"].get("expected_records") is not None:
-                entry["members"] = _reconcile(baseline["members"], observed)
+                entry["members"] = _reconcile(baseline["members"], observed, byte_observations=byte_observations)
                 entry["dto"] = _counts(entry["dto"], entry["members"])
                 entry["dto"]["baseline_digest"] = "sha256:" + inventory_head["digest"]
                 if class_id == "product.audit_history":
@@ -457,6 +459,7 @@ def capture(args: argparse.Namespace) -> dict:
     classes = []
     class_checked_at = {class_id: utc_timestamp(source_checked) for class_id, _ in CLASSES}
     byte_sizes: dict[str, int] = {}
+    byte_observations = {}
     for class_id, period in CLASSES:
         source = by_class[class_id]
         if class_id == "product.audit_history":
@@ -529,7 +532,7 @@ def capture(args: argparse.Namespace) -> dict:
                 expected_inventory = previous_inventory["content"]
             except FileNotFoundError:
                 pass
-            members = _safe_members(source, token, args.origin, expected_inventory)
+            members = _safe_members(source, token, args.origin, expected_inventory, byte_observations=byte_observations)
         except RuntimeError:
             dto = unknown_class(class_id, period, "evidence_unreadable")
             dto["state"] = "failed"
@@ -557,7 +560,7 @@ def capture(args: argparse.Namespace) -> dict:
     if not valid_from <= checked < valid_until:
         raise ValueError("signing_key_outside_validity")
     payload["valid_until"] = utc_timestamp(min(valid_until, checked + timedelta(seconds=args.freshness_seconds)))
-    _bind_streams(args, payload, private_key, byte_sizes)
+    _bind_streams(args, payload, private_key, byte_sizes, byte_observations)
     signed = b"VOLT-G7-PRESERVATION\0readcheck-report-v1\0" + canonical_json(payload)
     signature = base64.b64encode(private_key.sign(signed)).decode("ascii")
     document = {"payload": payload, "signature": {

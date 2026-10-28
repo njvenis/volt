@@ -16,6 +16,39 @@ def main():
     url=sa.engine.make_url(os.environ['UVM_DB_URL'])
     if os.environ.get('UVM_G7_DISPOSABLE_MODE')!='1' or not (url.database or '').startswith('g7_copy_'):
         raise RuntimeError('addition_fixture_requires_disposable_copy')
+    if mode in {'watermark-consumer','watermark-authority-change','watermark-context-change'}:
+        import contextlib,subprocess
+        from tools import g7_container_audit_export as tool
+        source=tool.configure_source()
+        captured={'source_watermark':source.watermark,'context_id':source.context_id,
+            'authority_fingerprint':source.authority_fingerprint}
+        if mode=='watermark-consumer':
+            writer=sa.engine.make_url(os.environ['G7_WATERMARK_WRITER_DATABASE_URL'])
+            if writer.database!=url.database:raise RuntimeError('watermark_writer_copy_mismatch')
+            result=subprocess.run([sys.executable,__file__,'pending'],env={**os.environ,'UVM_DB_URL':str(writer.render_as_string(hide_password=False))},capture_output=True)
+            if result.returncode:raise RuntimeError('watermark_actual_scanner_writer_failed')
+            captured['actual_scanner_writer']=json.loads(result.stdout)
+            # Actual later export and anchoring must also be excluded by old W.
+            with contextlib.redirect_stdout(sys.stderr):
+                for operation in ('siem-export','anchor-history'):
+                    sys.argv=[__file__,operation,'--limit','5000'];tool.main()
+            current=tool.configure_source()
+            captured['later_source_watermark']=current.watermark
+            if current.watermark<=source.watermark:raise RuntimeError('watermark_fixture_did_not_append')
+        elif mode=='watermark-authority-change':
+            configured=json.loads(os.environ['UVM_API_PRINCIPALS'])
+            configured[os.environ['UVM_G7_SOURCE_ADAPTER_PRINCIPAL']]['token']='fixture-rotated-after-capture'
+            os.environ['UVM_API_PRINCIPALS']=json.dumps(configured)
+        else:
+            configured=json.loads(os.environ['UVM_API_PRINCIPALS'])
+            # A current session ceiling/context change, without product bypasses.
+            configured[os.environ['UVM_G7_SOURCE_ADAPTER_PRINCIPAL']]['service_grants'][0]['grant_id']+='-fixture-context-change'
+            os.environ['UVM_API_PRINCIPALS']=json.dumps(configured)
+        print(json.dumps({'test_only_watermark_interleaving':captured,'mode':mode}),file=sys.stderr)
+        tool.configure_source=lambda:source
+        sys.argv=[__file__,'audit-state','--limit','5000']
+        tool.main()
+        return
     if mode=='complete':
         runpy.run_path('/fixture/seed.py',run_name='__main__')
         return

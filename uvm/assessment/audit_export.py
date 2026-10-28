@@ -471,6 +471,29 @@ class DeploymentAuditExportSource:
                 raise ValueError('captured audit membership changed')
             return len(self._expected)
 
+    @contextmanager
+    def reconciliation_operation(self, sink_id: str, *, expected_event_ids=()):
+        """Final captured-membership and receipt read under current policy.
+
+        Prior independently admitted identities remain observable even if the
+        current source lost their rows and its captured watermark fell back.
+        """
+        if sink_id != self.sink_id:
+            raise PermissionError('sink differs from export context')
+        with self._operation() as connection:
+            count = connection.execute(sa.select(sa.func.count()).select_from(assessment_audit_events)
+                .where(assessment_audit_events.c.event_sequence <= self.watermark)).scalar_one()
+            if count != len(self._expected):
+                raise ValueError('captured audit membership changed')
+            for event_id in self._expected:
+                self._checked_event(connection, event_id)
+            receipts = connection.execute(sa.select(assessment_sink_export_receipts.c.event_id,
+                assessment_sink_export_receipts.c.sink_receipt).where(
+                    assessment_sink_export_receipts.c.sink_id == sink_id,
+                    assessment_sink_export_receipts.c.event_id.in_(
+                        set(self._expected) | set(expected_event_ids)))).all()
+            yield connection, {str(row.event_id): row.sink_receipt for row in receipts}
+
     def get_sink_receipt(self, event_id, sink_id: str) -> str | None:
         if sink_id != self.sink_id:
             raise PermissionError('sink differs from export context')

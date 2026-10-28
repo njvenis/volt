@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from uvm.ingestion.run import (AttemptFact, CollectionRunV1, CollectionScheduleV1,
                                ExpectedRunV1, PageFact)
 from uvm.persistence.ingestion_schema import (collection_runs, collection_schedules,
-    expected_run_events, expected_runs, import_context_revisions, ingestion_evidence,
+    collection_request_reservations, expected_run_events, expected_runs, import_context_revisions, ingestion_evidence,
     run_attempts, run_pages)
 from uvm.persistence.engine_operation_schema import (ce_context_registrations,
     ce_context_verifications, ce_context_test_bindings)
@@ -151,19 +151,39 @@ class IngestionStore:
             coverage_status=q[1].status, coverage_reasons=list(q[1].reason_codes),
             freshness_status=q[2].status, freshness_reasons=list(q[2].reason_codes), created_at=created_at)
 
-    def save_run_transition(self, run: CollectionRunV1, attempts=(), pages=(), evidence=(), created_at=None):
+    def save_run_transition(self, run: CollectionRunV1, attempts=(), pages=(), evidence=(), created_at=None,
+                            reservation=None):
         """Insert one immutable run revision and its local facts atomically."""
         created_at = _instant(created_at or run.started_at, "created_at")
         attempts = tuple(attempts); pages = tuple(pages); evidence = tuple(evidence)
+        reservation_row = None
+        if reservation is not None:
+            if (not isinstance(reservation, dict)
+                    or set(reservation) != {"attempt_no", "page_ordinal", "request_identity_sha256", "reserved_at"}
+                    or type(reservation["attempt_no"]) is not int or reservation["attempt_no"] < 1
+                    or type(reservation["page_ordinal"]) is not int or reservation["page_ordinal"] < 1
+                    or not isinstance(reservation["request_identity_sha256"], str)
+                    or len(reservation["request_identity_sha256"]) != 64
+                    or any(ch not in "0123456789abcdef" for ch in reservation["request_identity_sha256"])):
+                raise IngestionWriteError("request reservation shape is invalid")
+            reservation_row = dict(reservation_id=str(uuid.uuid5(uuid.UUID(run.run_id),
+                    f"request-reservation:{reservation['attempt_no']}")),
+                run_id=run.run_id, run_revision=run.revision,
+                attempt_no=reservation["attempt_no"], page_ordinal=reservation["page_ordinal"],
+                request_identity_sha256=reservation["request_identity_sha256"],
+                reserved_at=_instant(reservation["reserved_at"], "reserved_at"))
         expected_attempts = tuple(run.attempts)
         expected_pages = tuple(run.pages.values())
         if attempts != expected_attempts:
             raise IngestionWriteError("supplied attempts do not equal evaluated run facts")
         if pages != expected_pages:
             raise IngestionWriteError("supplied pages do not equal evaluated run facts")
-        if any(len(e) != 3 for e in evidence):
-            raise IngestionWriteError("evidence is (id, ref, digest)")
-        evidence_by_ref_digest = {(e[1], e[2]): e[0] for e in evidence}
+        if any(len(e) not in (3, 4) for e in evidence):
+            raise IngestionWriteError("evidence is (id, ref, digest[, byte_size])")
+        if any(len(e) == 4 and (type(e[3]) is not int or not 0 <= e[3] <= 16 * 1024 * 1024)
+                for e in evidence):
+            raise IngestionWriteError("evidence byte size exceeds the bounded range")
+        evidence_by_ref_digest = {(e[1], e[2]): (e[0], e[3] if len(e) == 4 else None) for e in evidence}
         if len(evidence_by_ref_digest) != len(evidence):
             raise IngestionWriteError("evidence entries must be exact (id, ref, digest) tuples")
         for p in pages:
@@ -234,12 +254,28 @@ class IngestionStore:
                     raise IngestionConflictError("run revision differs")
                 if existing["facts_snapshot"] != values["facts_snapshot"]:
                     raise IngestionConflictError("run facts differ")
+                if reservation_row is not None:
+                    prior_reservation = c.execute(sa.select(collection_request_reservations).where(
+                        collection_request_reservations.c.run_id == run.run_id,
+                        collection_request_reservations.c.attempt_no == reservation_row["attempt_no"])).mappings().one_or_none()
+                    if prior_reservation is None or any(prior_reservation[key] != value
+                            for key, value in reservation_row.items() if key != "reservation_id"):
+                        raise IngestionConflictError("request reservation replay differs")
                 return "duplicate"
             if history and run.revision != history[-1]["revision"] + 1:
                 raise IngestionConflictError("run revisions must be strictly ordered")
             if not history and run.revision != 1:
                 raise IngestionConflictError("first run revision must be one")
             c.execute(collection_runs.insert().values(**values))
+            if reservation_row is not None:
+                prior_reservation = c.execute(sa.select(collection_request_reservations).where(
+                    collection_request_reservations.c.run_id == run.run_id,
+                    collection_request_reservations.c.attempt_no == reservation_row["attempt_no"])).mappings().one_or_none()
+                if prior_reservation is None:
+                    c.execute(collection_request_reservations.insert().values(**reservation_row))
+                elif any(prior_reservation[key] != value for key, value in reservation_row.items()
+                         if key != "reservation_id"):
+                    raise IngestionConflictError("request reservation replay differs")
             if run.expected_run_id:
                 history_rows = c.execute(sa.select(expected_run_events.c.event_id).where(
                     expected_run_events.c.expected_run_id == run.expected_run_id).limit(1)).first()
@@ -266,16 +302,17 @@ class IngestionStore:
                     page_ref=p.page_ref, attempt_no=p.attempt_no, response_class=p.response_class, record_count=p.record_count,
                     evidence_digest=p.evidence_digest, next_cursor=p.next_cursor, is_terminal=p.is_terminal,
                     failed=p.failed, request_identity=p.request_identity, report_id=p.report_id, query_scope=p.query_scope,
-                    evidence_ref=evidence_by_ref_digest[(p.page_ref, p.evidence_digest)])
+                    evidence_ref=evidence_by_ref_digest[(p.page_ref, p.evidence_digest)][0])
                 c.execute(run_pages.insert().values(**pv))
             for e in evidence:
-                if len(e) != 3: raise IngestionWriteError("evidence is (id, ref, digest)")
-                eid, ref, digest = e
+                if len(e) not in (3, 4): raise IngestionWriteError("evidence is (id, ref, digest[, byte_size])")
+                eid, ref, digest = e[:3]
+                byte_size = e[3] if len(e) == 4 else None
                 if len(digest) != 64 or digest.lower() != digest or any(ch not in "0123456789abcdef" for ch in digest):
                     raise IngestionWriteError("evidence digest must be lowercase sha256")
                 c.execute(ingestion_evidence.insert().values(evidence_id=_id(eid, "evidence_id"), schema_version=1,
                     run_id=run.run_id, run_revision=run.revision, evidence_ref=ref, sha256=digest,
-                    kind="page", registered_at=created_at))
+                    byte_size=byte_size, kind="page", registered_at=created_at))
         return "created"
 
     def read_run(self, run_id, revision=None):
@@ -289,6 +326,14 @@ class IngestionStore:
             pages = c.execute(sa.select(run_pages).where(run_pages.c.run_id == run_id, run_pages.c.run_revision == row.revision).order_by(run_pages.c.ordinal)).mappings().all()
             evidence = c.execute(sa.select(ingestion_evidence).where(ingestion_evidence.c.run_id == run_id, ingestion_evidence.c.run_revision == row.revision).order_by(ingestion_evidence.c.evidence_id)).mappings().all()
             return {"run": dict(row), "attempts": [dict(x) for x in attempts], "pages": [dict(x) for x in pages], "evidence": [dict(x) for x in evidence]}
+
+    def read_request_reservations(self, run_id):
+        _id(run_id, "run_id")
+        with self.engine.connect() as connection:
+            rows = connection.execute(sa.select(collection_request_reservations).where(
+                collection_request_reservations.c.run_id == run_id).order_by(
+                    collection_request_reservations.c.attempt_no)).mappings().all()
+        return [dict(row) for row in rows]
 
     def save_import_context(self, values: dict):
         required = ("context_key", "revision", "source_family", "source_account_id", "scope_key", "parser_config_version", "product_ref", "engagement_ref", "mapping_history", "registered_at")

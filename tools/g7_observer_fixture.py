@@ -36,7 +36,8 @@ def run(args: argparse.Namespace) -> None:
     if args.command == "create":
         names = ("uvm_db_password", "ce_db_password", "ce_admin_password",
             "ce_secret_key", "ce_credential_key", "uvm_cursor_secret",
-            "oidc_client_secret", "oidc_sync_secret", "oidc_operator_secret")
+            "oidc_client_secret", "oidc_sync_secret", "oidc_operator_secret",
+            "g7_preservation_source_token")
         values = {name: secrets.token_urlsafe(32) for name in names}
         for name, value in values.items():
             path = secrets_dir / name
@@ -48,6 +49,9 @@ def run(args: argparse.Namespace) -> None:
         (root / "anchor-password").chmod(0o644)
         (host_dir / "anchor-ro-password").write_text(secrets.token_hex(32), encoding="ascii")
         (host_dir / "anchor-ro-password").chmod(0o600)
+        for role_password in ("anchor-signer-password", "exporter-ro-password", "siem-exporter-password"):
+            (host_dir / role_password).write_text(secrets.token_hex(32), encoding="ascii")
+            (host_dir / role_password).chmod(0o600)
         private = host_dir / "ed25519.pem"
         subprocess.run(["openssl", "genpkey", "-algorithm", "Ed25519", "-out", str(private)],
             check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -89,32 +93,58 @@ def run(args: argparse.Namespace) -> None:
             "host_principal_id": "g7-host-b", "verification_key_file": "/run/uvm-g7-host-pub.pem"}],
             separators=(",", ":")), encoding="utf-8")
         (secrets_dir / "registry.json").chmod(0o644)
-        oidc = f"http://127.0.0.1:{args.oidc_port}"
-        api = "http://127.0.0.1:8000"
+        oidc = f"http://{args.oidc_host}:{args.oidc_port}"
+        api = f"http://127.0.0.1:{args.api_port}"
+        internal_oidc = "http://127.0.0.1:9000"
         config = {"schema_version": 1, "provider_id": "g7-synthetic", "issuer": oidc,
-            "discovery_url": oidc + "/.well-known/openid-configuration",
+            "discovery_url": (internal_oidc if args.oidc_internal else oidc) + "/.well-known/openid-configuration",
             "client_id": "g7-local-client", "callback_url": api + "/api/v1/auth/callback",
             "client_secret_file": "/run/uvm-g7-secrets/oidc_client_secret",
             "sync_secret_file": "/run/uvm-g7-secrets/oidc_sync_secret",
             "operator_secret_file": "/run/uvm-g7-secrets/oidc_operator_secret",
             "operator_actor_id": "g7-fixture-operator", "allowed_algorithms": ["RS256"],
-            "allowed_endpoint_origins": [api, oidc], "source_scope_ceilings": [],
+            "allowed_endpoint_origins": sorted({api, oidc, *( [internal_oidc] if args.oidc_internal else [] )}),
+            "source_scope_ceilings": [],
             "group_mappings": {}, "mapping_revision": 1,
             "session_ttl_seconds": 3600, "heartbeat_max_age_seconds": 120}
         identities = [{"subject": "g7-actor-subject", "groups": []}]
+        g7_scope = ("local", "g7-local", "all")
+        service_principals = {
+            "g7-host": {"token": values["uvm_cursor_secret"], "scopes": [],
+                "actor_kind": "service", "origin": "g7-host-controller"},
+            "g7-preservation-source": {"token": values["g7_preservation_source_token"],
+                "scopes": [{"source_family": g7_scope[0], "source_account_id": g7_scope[1],
+                    "scope_key": g7_scope[2]}], "actor_kind": "service",
+                "origin": "g7-preservation-source-adapter",
+                "service_grants": [
+                    {"grant_id": "g7-source-preservation-read-v1", "action": "preservation.read",
+                        "source_scopes": [{"source_family": g7_scope[0], "source_account_id": g7_scope[1], "scope_key": g7_scope[2]}],
+                        "deployment_scopes": []},
+                    {"grant_id": "g7-source-evidence-read-v1", "action": "preservation.evidence.read",
+                        "source_scopes": [{"source_family": g7_scope[0], "source_account_id": g7_scope[1], "scope_key": g7_scope[2]}],
+                        "deployment_scopes": []},
+                    {"grant_id": "g7-source-deployment-audit-read-v1", "action": "audit.read.deployment",
+                        "source_scopes": [{"source_family": g7_scope[0], "source_account_id": g7_scope[1], "scope_key": g7_scope[2]}],
+                        "deployment_scopes": ["g7-local"]},
+                    {"grant_id": "g7-source-deployment-audit-export-v1", "action": "audit.export.deployment",
+                        "source_scopes": [{"source_family": g7_scope[0], "source_account_id": g7_scope[1], "scope_key": g7_scope[2]}],
+                        "deployment_scopes": ["g7-local"]}]}}
         env = {
             "UVM_AUTH_MODE": "oidc", "UVM_OIDC_CONFIG": json.dumps(config, separators=(",", ":")),
             "UVM_OIDC_FIXTURE_SUBJECT": "g7-actor-subject",
             "UVM_OIDC_FIXTURE_IDENTITIES": json.dumps(identities, separators=(",", ":")),
             "UVM_OIDC_PROVIDER_PORT": "9000", "UVM_G7_DISPOSABLE_MODE": "1",
+            "UVM_OIDC_BROWSER_AUTHORIZATION_ORIGIN": oidc if args.oidc_internal else "",
+            "UVM_OIDC_INTERNAL_ENDPOINT_ORIGIN": internal_oidc if args.oidc_internal else "",
             "UVM_G3_BOOTSTRAP_PRINCIPAL": "g7-actor",
             "UVM_NATIVE_BOOTSTRAP_PRINCIPALS": "g7-actor",
-            "UVM_API_PRINCIPALS": json.dumps({"g7-host": {"token": values["uvm_cursor_secret"],
-                "scopes": [], "actor_kind": "service", "origin": "g7-host-controller"}},
-                separators=(",", ":")),
+            "UVM_API_PRINCIPALS": json.dumps(service_principals, separators=(",", ":")),
+            "UVM_G7_SOURCE_ADAPTER_PRINCIPAL": "g7-preservation-source",
             "UVM_NATIVE_GRANTABLE_ENVELOPE": json.dumps({
                 "actions": ["observer.timing.read", "observer.timing.configure",
-                    "backup.settings.read", "backup.settings.configure", "assessment.read", "audit.read"],
+                    "backup.settings.read", "backup.settings.configure", "assessment.read", "audit.read",
+                    "preservation.read", "preservation.evidence.read", "audit.read.deployment",
+                    "audit.export.deployment"],
                 "target_scope": {"group_ids": ["*"], "source_families": ["*"],
                     "environments": ["*"], "service_ids": ["*"], "membership_mode": "all_current"},
                 "limits": {"maximum_acceptance_days": None, "maximum_severity": None,
@@ -150,35 +180,74 @@ def run(args: argparse.Namespace) -> None:
             "display_label": "Synthetic G7 Operator", "rationale": "Disposable observer settings journey fixture",
             "evidence_ref": "g7-observer-journey-fixture"}, separators=(",", ":")), encoding="utf-8")
         (secrets_dir / "operator-link.json").chmod(0o600)
+        (secrets_dir / "source-operator-link.json").write_text(json.dumps({
+            "issuer": oidc, "subject": "g7-preservation-source-subject",
+            "principal_id": "g7-preservation-source",
+            "display_label": "Synthetic G7 Preservation Source Adapter",
+            "rationale": "Provision the separately credentialled local source inventory adapter",
+            "evidence_ref": "g7-preservation-source-adapter-fixture"},
+            separators=(",", ":")), encoding="utf-8")
+        (secrets_dir / "source-operator-link.json").chmod(0o600)
         return
 
     if args.command == "anchor-init":
         ro_password = (host_dir / "anchor-ro-password").read_text(encoding="ascii").strip()
-        subprocess.run(["docker", "exec", "volt-g7-observer-anchor", "bash", "-lc",
+        signer_password = (host_dir / "anchor-signer-password").read_text(encoding="ascii").strip()
+        exporter_password = (host_dir / "exporter-ro-password").read_text(encoding="ascii").strip()
+        sink_password = (host_dir / "siem-exporter-password").read_text(encoding="ascii").strip()
+        if not all(value.isalnum() for value in (ro_password, signer_password, exporter_password, sink_password)):
+            raise RuntimeError("invalid generated anchor credential")
+        anchor_container = args.container or "volt-g7-observer-anchor"
+        subprocess.run(["docker", "exec", anchor_container, "bash", "-lc",
             "for i in $(seq 1 60); do /usr/lib/postgresql/18/bin/pg_isready -h 127.0.0.1 -p 5432 >/dev/null && exit 0; sleep 1; done; exit 1"], check=True)
         sql = "CREATE ROLE host_ro LOGIN PASSWORD '" + ro_password + "';"
-        subprocess.run(["docker", "exec", "volt-g7-observer-anchor",
+        subprocess.run(["docker", "exec", anchor_container,
             "/usr/lib/postgresql/18/bin/psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", sql],
             check=True, stdout=subprocess.DEVNULL)
-        subprocess.run(["docker", "exec", "volt-g7-observer-anchor",
+        subprocess.run(["docker", "exec", anchor_container,
             "/usr/lib/postgresql/18/bin/createdb", "-U", "postgres", "-O", "postgres", "audit_anchor"],
             check=True, stdout=subprocess.DEVNULL)
-        table_sql = ("CREATE SCHEMA uvm_audit_anchor;"
-            "CREATE TABLE uvm_audit_anchor.inventory (event_id uuid NOT NULL, payload_sha256 text NOT NULL,"
-            "sink_receipt text NOT NULL, anchored_at timestamptz NOT NULL, deployment_id text NOT NULL, sink_id text NOT NULL,"
-            "PRIMARY KEY(deployment_id,sink_id,event_id));"
-            "GRANT USAGE ON SCHEMA uvm_audit_anchor TO host_ro;"
-            "GRANT SELECT ON uvm_audit_anchor.inventory TO host_ro;")
-        subprocess.run(["docker", "exec", "volt-g7-observer-anchor",
+        subprocess.run(["docker", "exec", anchor_container,
+            "/usr/lib/postgresql/18/bin/createdb", "-U", "postgres", "-O", "postgres", "audit_sink"],
+            check=True, stdout=subprocess.DEVNULL)
+        table_sql = ("CREATE ROLE anchor_signer LOGIN PASSWORD '" + signer_password + "';"
+            "CREATE ROLE exporter_ro LOGIN PASSWORD '" + exporter_password + "';"
+            "CREATE ROLE siem_exporter LOGIN PASSWORD '" + sink_password + "';"
+            "CREATE SCHEMA uvm_audit_anchor;"
+            "CREATE TABLE uvm_audit_anchor.inventory (deployment_id text NOT NULL, sink_id text NOT NULL,"
+            "event_id uuid NOT NULL, event_sequence bigint NOT NULL, payload_sha256 text NOT NULL,"
+            "sink_receipt text NOT NULL, affected_scope text NOT NULL, anchored_at timestamptz NOT NULL,"
+            "contract_version text NOT NULL, PRIMARY KEY(deployment_id,sink_id,event_id));"
+            "CREATE TABLE uvm_audit_anchor.incidents (incident_id uuid PRIMARY KEY, deployment_id text NOT NULL,"
+            "sink_id text NOT NULL, event_id uuid NOT NULL, condition text NOT NULL, detected_at timestamptz NOT NULL,"
+            "observed_at timestamptz NOT NULL, state text NOT NULL, evidence jsonb NOT NULL, contract_version text NOT NULL);"
+            "GRANT USAGE ON SCHEMA uvm_audit_anchor TO host_ro,anchor_signer,exporter_ro;"
+            "GRANT SELECT ON uvm_audit_anchor.inventory TO host_ro,exporter_ro;"
+            "GRANT SELECT,INSERT ON uvm_audit_anchor.inventory TO anchor_signer;"
+            "GRANT SELECT,INSERT ON uvm_audit_anchor.incidents TO anchor_signer,exporter_ro;"
+            "GRANT SELECT ON uvm_audit_anchor.incidents TO host_ro;")
+        subprocess.run(["docker", "exec", anchor_container,
             "/usr/lib/postgresql/18/bin/psql", "-U", "postgres", "-d", "audit_anchor", "-v", "ON_ERROR_STOP=1", "-c", table_sql],
             check=True, stdout=subprocess.DEVNULL)
-        print("anchor_schema=ready; host_ro=SELECT-only")
+        sink_sql = ("CREATE SCHEMA uvm_audit_export;"
+            "CREATE TABLE uvm_audit_export.events (event_id uuid PRIMARY KEY, payload jsonb NOT NULL, committed_at timestamptz NOT NULL);"
+            "GRANT USAGE ON SCHEMA uvm_audit_export TO siem_exporter;"
+            "GRANT SELECT,INSERT ON uvm_audit_export.events TO siem_exporter;")
+        subprocess.run(["docker", "exec", anchor_container,
+            "/usr/lib/postgresql/18/bin/psql", "-U", "postgres", "-d", "audit_sink", "-v", "ON_ERROR_STOP=1", "-c", sink_sql],
+            check=True, stdout=subprocess.DEVNULL)
+        print("anchor_schema=ready; sink_schema=ready; host_ro=SELECT-only; exporter_ro=anchor-read/incident-insert; anchor_signer=insert-only-inventory; siem_exporter=sink-read-insert")
         return
 
     if args.command == "link-actor":
-        subprocess.run(["docker", "exec", "volt-g7-observer-journey", "bash", "-lc",
+        container = args.container or "volt-g7-observer-journey"
+        subprocess.run(["docker", "exec", container, "bash", "-lc",
             "curl --fail --silent --show-error -H 'Authorization: Bearer '$(cat /run/uvm-g7-secrets/oidc_operator_secret) "
             "-H 'Content-Type: application/json' --data-binary @/run/secrets/operator-link.json "
+            "http://127.0.0.1:8000/api/v1/auth/operator/links"], check=True)
+        subprocess.run(["docker", "exec", container, "bash", "-lc",
+            "curl --fail --silent --show-error -H 'Authorization: Bearer '$(cat /run/uvm-g7-secrets/oidc_operator_secret) "
+            "-H 'Content-Type: application/json' --data-binary @/run/secrets/source-operator-link.json "
             "http://127.0.0.1:8000/api/v1/auth/operator/links"], check=True)
         print("oidc_fixture_link=created")
         return
@@ -210,7 +279,7 @@ def run(args: argparse.Namespace) -> None:
         signed["signature"] = {"algorithm": "Ed25519",
             "key_id": "g7-host-controller-key", "value": signed["signature"]}
         token = (secrets_dir / "uvm_cursor_secret").read_text(encoding="utf-8").strip()
-        request = urllib.request.Request("https://127.0.0.1:8002/recovery-control/v1/g7-local/reports",
+        request = urllib.request.Request(f"https://127.0.0.1:{args.recovery_port}/recovery-control/v1/g7-local/reports",
             data=json.dumps(signed, sort_keys=True, separators=(",", ":")).encode(),
             headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
             method="POST")
@@ -249,7 +318,7 @@ def run(args: argparse.Namespace) -> None:
         policy = {"schema_version": 1, "deployment_id": "g7-local", "revision": 1,
             "bounds": bounds, "freshness_seconds": 60, "poll_seconds": 1,
             "controller_request_timeout_seconds": 8, "apply_deadline_seconds": 35,
-            "endpoint": "http://127.0.0.1:8000", "token_file": str(token_file),
+            "endpoint": f"http://127.0.0.1:{args.api_port}", "token_file": str(token_file),
             "sink_id": "g7-local-fixture", "anchor_read_dsn":
                 "postgresql://host_ro:" + password + "@127.0.0.1:" + str(args.anchor_port) + "/audit_anchor",
             "signing_key_file": str(host_dir / "ed25519.pem"),
@@ -279,7 +348,7 @@ def run(args: argparse.Namespace) -> None:
         if not isinstance(accepted_policy, dict):
             raise SystemExit("accepted backup host policy is unavailable")
         config = {"schema_version": 1, "deployment_id": "g7-local",
-            "endpoint": "https://127.0.0.1:8002", "token_file": str(host_dir / "api-token"),
+            "endpoint": f"https://127.0.0.1:{args.recovery_port}", "token_file": str(host_dir / "api-token"),
             "client_cert_file": str(host_dir / "recovery-client.crt"),
             "client_key_file": str(host_dir / "recovery-client.key"),
             "server_ca_file": str(secrets_dir / "recovery-ca.crt"),
@@ -475,7 +544,12 @@ def main() -> int:
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--image", default="")
     parser.add_argument("--anchor-port", type=int, default=5433)
+    parser.add_argument("--container")
     parser.add_argument("--oidc-port", type=int, default=9000)
+    parser.add_argument("--oidc-host", default="127.0.0.1")
+    parser.add_argument("--oidc-internal", action="store_true")
+    parser.add_argument("--api-port", type=int, default=8000)
+    parser.add_argument("--recovery-port", type=int, default=8002)
     args = parser.parse_args()
     run(args)
     return 0

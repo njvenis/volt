@@ -6,6 +6,14 @@ from sqlalchemy import CheckConstraint, Column, ForeignKeyConstraint, UniqueCons
 
 from uvm.persistence.ingestion_schema import ALL_INGESTION_TABLES
 
+# 0011 is historical.  Its original revision predates the G7 reservation
+# table and evidence byte-size column; later revisions own those additions.
+# Keep this set stable even though the live metadata now contains both.
+_TABLES_0011 = tuple(
+    table for table in ALL_INGESTION_TABLES
+    if table.name != "collection_request_reservations"
+)
+
 revision = "0011"
 down_revision = "0010"
 branch_labels = None
@@ -17,7 +25,8 @@ def _dialect():
         raise CommandError(f"0011 does not support {name}")
 
 def _create(table):
-    cols = [column.copy() for column in table.columns]
+    cols = [column.copy() for column in table.columns
+            if not (table.name == "ingestion_evidence" and column.name == "byte_size")]
     original_constraints = tuple(table.constraints)
     constraints = [constraint.copy() for constraint in original_constraints
                    if not isinstance(constraint, (UniqueConstraint, CheckConstraint, ForeignKeyConstraint))]
@@ -31,7 +40,7 @@ def upgrade():
     if context.is_offline_mode():
         raise CommandError("0011 upgrade requires an online additive migration")
     _dialect()
-    for table in ALL_INGESTION_TABLES:
+    for table in _TABLES_0011:
         _create(table)
 
 def downgrade():
@@ -39,8 +48,8 @@ def downgrade():
         raise CommandError("0011 downgrade requires online ingestion-data safety checks")
     _dialect()
     bind = op.get_bind()
-    for table in reversed(ALL_INGESTION_TABLES):
+    for table in reversed(_TABLES_0011):
         if bind.execute(table.select().limit(1)).first() is not None:
             raise CommandError(f"refusing 0011 downgrade: {table.name} contains data")
-    for table in reversed(ALL_INGESTION_TABLES):
+    for table in reversed(_TABLES_0011):
         op.drop_table(table.name)

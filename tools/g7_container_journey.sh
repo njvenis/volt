@@ -3,20 +3,31 @@ set -Eeuo pipefail
 umask 077
 
 MODE=${1-}
-if [[ ( $MODE != --observer-settings-only && $MODE != --backup-recovery-only && $MODE != --upgrade-rollback-only ) || $# != 1 ]]; then
-  echo 'usage: G7_EVIDENCE_DIR=/absolute/path bash tools/g7_container_journey.sh (--observer-settings-only|--backup-recovery-only|--upgrade-rollback-only)' >&2
+if [[ ( $MODE != --observer-settings-only && $MODE != --backup-recovery-only && $MODE != --upgrade-rollback-only && $MODE != --data-preservation-audit-only ) || $# != 1 ]]; then
+  echo 'usage: G7_EVIDENCE_DIR=/absolute/path bash tools/g7_container_journey.sh (--observer-settings-only|--backup-recovery-only|--upgrade-rollback-only|--data-preservation-audit-only)' >&2
   exit 64
 fi
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
+
 export UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/volt-g7-uv-cache}
 mkdir -p "$UV_CACHE_DIR"
 EVIDENCE=${G7_EVIDENCE_DIR:?G7_EVIDENCE_DIR must name an evidence directory}
 [[ $EVIDENCE == /* && $EVIDENCE != "$ROOT"/* ]] || { echo 'evidence must be outside the source tree' >&2; exit 64; }
 mkdir -p "$EVIDENCE"
 chmod 700 "$EVIDENCE"
+RUN_STARTED_AT=$(date -u +'%Y-%m-%dT%H:%M:%S.%NZ')
+RUN_STARTED_MONOTONIC_NS=$(python3 -c 'import time;print(time.monotonic_ns())')
+python3 - "$EVIDENCE/journey-timing.json" "$RUN_STARTED_AT" "$RUN_STARTED_MONOTONIC_NS" <<'JSTART'
+import json,sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({'started_at_utc':sys.argv[2],
+ 'started_monotonic_ns':int(sys.argv[3])},sort_keys=True,separators=(',',':'))+'\n')
+JSTART
 RUN_ROOT=$(mktemp -d /tmp/volt-g7-observer-run.XXXXXX)
 RUN_ID=${RUN_ROOT##*.}
+DATA_PRESERVATION_MODE=0
+if [[ $MODE == --data-preservation-audit-only ]]; then DATA_PRESERVATION_MODE=1; fi
 UPGRADE_ROLLBACK_MODE=0
 if [[ $MODE == --upgrade-rollback-only ]]; then
   UPGRADE_ROLLBACK_MODE=1
@@ -27,6 +38,12 @@ elif [[ $MODE == --backup-recovery-only ]]; then
   CONTAINER=volt-g7-observer-journey
   ANCHOR_CONTAINER=volt-g7-observer-anchor
   IMAGE="volt-g7-backup-recovery-dev:$(git -C "$ROOT" rev-parse --short HEAD)"
+  CANDIDATE_IMAGE=$IMAGE
+  RESTORE_IMAGE=$IMAGE
+elif (( DATA_PRESERVATION_MODE )); then
+  CONTAINER="volt-g7-preservation-app-$RUN_ID"
+  ANCHOR_CONTAINER="volt-g7-preservation-anchor-$RUN_ID"
+  IMAGE="volt-g7-preservation-dev:$RUN_ID"
   CANDIDATE_IMAGE=$IMAGE
   RESTORE_IMAGE=$IMAGE
 else
@@ -40,8 +57,10 @@ IS_BACKUP_MODE=0
 if [[ $MODE == --backup-recovery-only || $MODE == --upgrade-rollback-only ]]; then IS_BACKUP_MODE=1; fi
 SCHEMA_MODE_ARGS=()
 if (( UPGRADE_ROLLBACK_MODE )); then SCHEMA_MODE_ARGS=(--env UVM_G7_SCHEMA_MODE=upgrade-verification); fi
-CONTAINER=volt-g7-observer-journey
-ANCHOR_CONTAINER=volt-g7-observer-anchor
+if (( ! DATA_PRESERVATION_MODE )); then
+  CONTAINER=volt-g7-observer-journey
+  ANCHOR_CONTAINER=volt-g7-observer-anchor
+fi
 ANCHOR_PORT=$(python3 - <<'PYPORT'
 import socket
 for port in (15433, 25433, 35433, 45433, 55433, 65433):
@@ -67,6 +86,24 @@ for port in (18000,19000,29000,39000,49000,59000):
 else: raise SystemExit('no preapproved OIDC loopback port available')
 PYOIDCPORT
 )
+API_PORT=8000
+RECOVERY_PORT=8002
+OIDC_PROXY_PORT=9000
+if (( DATA_PRESERVATION_MODE )); then
+  choose_port() {
+    python3 - "$@" <<'PICKPORT'
+import socket,sys
+for port in map(int,sys.argv[1:]):
+    sock=socket.socket()
+    try: sock.bind(('127.0.0.1',port)); print(port); sock.close(); break
+    except OSError: sock.close()
+else: raise SystemExit('no unique disposable journey port available')
+PICKPORT
+  }
+  API_PORT=$(choose_port 18080 28080 38080 48080 58080)
+  RECOVERY_PORT=$(choose_port 18082 28082 38082 48082 58082)
+  OIDC_PROXY_PORT=$(choose_port 19090 29090 39090 49090 59090)
+fi
 STARTED_CONTAINER=0
 STARTED_ANCHOR=0
 CREATED_IMAGE=0
@@ -81,6 +118,7 @@ RESTORE_CONTAINER=volt-g7-backup-restored
 RESTORE_CONTAINER_ID=''
 RESTORE_STARTED=0
 RECOVERY_NETWORK=''
+FAULT_PROXY_PID=''
 RESTORE_IP=''
 RESTORE_VOLUMES_JSON=''
 UPGRADE_VOLUMES_JSON=''
@@ -89,6 +127,10 @@ RESTORE_IMAGE_DIGEST=''
 SOURCE_PACKAGE_DIGEST=''
 CANDIDATE_PACKAGE_DIGEST=''
 PRESERVE_UPGRADE_VOLUMES=$UPGRADE_ROLLBACK_MODE
+PRESERVATION_VOLUME_NAMES=()
+PRESERVATION_MOUNTS=()
+PRESERVATION_STORAGE_GENERATION=''
+PRESERVATION_VOLUME_SET_DIGEST=''
 
 # Each blocking host command gets only the operation's remaining durable
 # budget. The watchdog also interrupts loops; cleanup runs outside the budget.
@@ -154,6 +196,13 @@ cleanup() {
   local cleanup_rc=0 container_removed=0 anchor_removed=0 container_rm_exit=not_started anchor_rm_exit=not_started
   trap - EXIT
   set +e
+  if [[ -n $FAULT_PROXY_PID ]]; then
+    kill "$FAULT_PROXY_PID" 2>/dev/null
+    wait "$FAULT_PROXY_PID" 2>/dev/null
+    printf 'pid=%s\nprocess_removed=%s\n' "$FAULT_PROXY_PID" "$(( $? == 0 ))" \
+      >"$EVIDENCE/evidence-fault-proxy-cleanup.txt"
+    chmod 0600 "$EVIDENCE/evidence-fault-proxy-cleanup.txt"
+  fi
   remove_owned_volume() {
     local volume=$1 tag=$2 rm_rc inspect_rc absent=0
     docker volume rm "$volume" >"$EVIDENCE/owned-volume-$tag-rm.stdout" 2>"$EVIDENCE/owned-volume-$tag-rm.stderr"
@@ -179,6 +228,10 @@ PVCLEAN
     sed -E 's/([[:alnum:]_-]*(PASSWORD|SECRET|TOKEN|KEY)[[:alnum:]_-]*[:=][[:space:]]*)[^[:space:]]+/\1[redacted]/Ig' \
       "$RUN_ROOT/host/$log_name.log" >"$EVIDENCE/host-$log_name-redacted.log"
   done
+  if [[ -f "$RUN_ROOT/host/oidc-proxy.log" ]]; then
+    cp "$RUN_ROOT/host/oidc-proxy.log" "$EVIDENCE/oidc-proxy.log" || cleanup_rc=1
+    chmod 600 "$EVIDENCE/oidc-proxy.log" || cleanup_rc=1
+  fi
   if (( STARTED_ANCHOR )); then
     docker inspect "$ANCHOR_CONTAINER" >"$EVIDENCE/anchor-container-inspect.json" 2>/dev/null || true
     docker logs "$ANCHOR_CONTAINER" 2>&1 | sed -E \
@@ -267,6 +320,18 @@ PYVOLS
   elif [[ $keep_restore_volumes == 1 || ( -n $UPGRADE_VOLUMES_JSON && -f $UPGRADE_VOLUMES_JSON && $PRESERVE_UPGRADE_VOLUMES == 1 ) ]]; then
     restore_volumes_removed=preserved_for_reconciliation
   fi
+  if (( DATA_PRESERVATION_MODE )); then
+    volume_index=0
+    preservation_volumes_removed=1
+    for volume in "${PRESERVATION_VOLUME_NAMES[@]}"; do
+      [[ -n $volume ]] || continue
+      volume_index=$((volume_index+1))
+      remove_owned_volume "$volume" "preservation-$volume_index" || preservation_volumes_removed=0
+    done
+    (( preservation_volumes_removed == 1 )) || cleanup_rc=1
+  else
+    preservation_volumes_removed=not_created
+  fi
   if [[ -n $RECOVERY_NETWORK ]]; then docker network rm "$RECOVERY_NETWORK" >/dev/null 2>&1 || true; fi
   if (( STARTED_ANCHOR )) && [[ -n $ANCHOR_ID ]]; then
     docker rm -fv "$ANCHOR_ID" >/dev/null 2>&1
@@ -315,11 +380,21 @@ PHSCRUB
   [[ ! -e "$RUN_ROOT" ]] || cleanup_rc=1
   if (( CREATED_IMAGE )); then docker image rm "$IMAGE" >/dev/null 2>&1; fi
   if (( CREATED_CANDIDATE_IMAGE )); then docker image rm "$CANDIDATE_IMAGE" >/dev/null 2>&1; fi
-  printf 'container_id=%s\ncontainer_remove_exit=%s\ncontainer_absence_verified=%s\nrestore_container_id=%s\nrestore_container_remove_exit=%s\nrestore_container_absence_verified=%s\nrestore_volumes_absence_verified=%s\nanchor_id=%s\nanchor_remove_exit=%s\nanchor_absence_verified=%s\nrunner_exit=%s\ncleanup_exit=%s\n' \
+  printf 'container_id=%s\ncontainer_remove_exit=%s\ncontainer_absence_verified=%s\nrestore_container_id=%s\nrestore_container_remove_exit=%s\nrestore_container_absence_verified=%s\nrestore_volumes_absence_verified=%s\npreservation_volumes_absence_verified=%s\nanchor_id=%s\nanchor_remove_exit=%s\nanchor_absence_verified=%s\nrunner_exit=%s\ncleanup_exit=%s\n' \
     "${CONTAINER_ID:-unknown}" "$container_rm_exit" "$container_removed" \
-    "${RESTORE_CONTAINER_ID:-not_started}" "$restore_container_rm_exit" "$restore_container_removed" "$restore_volumes_removed" \
+    "${RESTORE_CONTAINER_ID:-not_started}" "$restore_container_rm_exit" "$restore_container_removed" "$restore_volumes_removed" "$preservation_volumes_removed" \
     "${ANCHOR_ID:-unknown}" "$anchor_rm_exit" "$anchor_removed" "$rc" "$cleanup_rc" \
     >"$EVIDENCE/owned-resource-cleanup.txt"
+  python3 - "$EVIDENCE/journey-timing.json" "$RUN_STARTED_AT" "$RUN_STARTED_MONOTONIC_NS" <<'JEND'
+import json,sys,time
+from datetime import datetime,timezone
+from pathlib import Path
+p=Path(sys.argv[1]); data=json.loads(p.read_text())
+end_ns=time.monotonic_ns()
+data.update({'ended_at_utc':datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z'),
+ 'ended_monotonic_ns':end_ns,'duration_monotonic_ns':end_ns-int(sys.argv[3])})
+p.write_text(json.dumps(data,sort_keys=True,separators=(',',':'))+'\n')
+JEND
   if (( cleanup_rc != 0 && rc == 0 )); then rc=70; fi
   exit "$rc"
 }
@@ -343,14 +418,22 @@ PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright node -e \
   "process.stdout.write(require('./ui/node_modules/playwright/package.json').version+'\\n')" \
   >"$EVIDENCE/playwright-version.txt"
 df -Pk /tmp >"$EVIDENCE/tmp-space-preflight.txt"
-for port in 8000 8002 9000 "$OIDC_PORT" "$ANCHOR_PORT"; do
+for port in "$API_PORT" "$RECOVERY_PORT" "$OIDC_PROXY_PORT" "$OIDC_PORT" "$ANCHOR_PORT"; do
   if (echo >/dev/tcp/127.0.0.1/$port) >/dev/null 2>&1; then
     echo "required local port $port is occupied" >&2; exit 69
   fi
 done
-printf 'anchor_loopback_port=%s\noidc_proxy_loopback_port=9000\noidc_backend_loopback_port=%s\n' \
-  "$ANCHOR_PORT" "$OIDC_PORT" >"$EVIDENCE/runtime-ports.txt"
+printf 'api_loopback_port=%s\nrecovery_loopback_port=%s\nanchor_loopback_port=%s\noidc_proxy_loopback_port=%s\noidc_backend_loopback_port=%s\n' \
+  "$API_PORT" "$RECOVERY_PORT" "$ANCHOR_PORT" "$OIDC_PROXY_PORT" "$OIDC_PORT" >"$EVIDENCE/runtime-ports.txt"
 docker version --format 'engine={{.Server.Version}}' >"$EVIDENCE/docker-version.txt"
+DOCKER_BRIDGE_SUBNET=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Subnet}}')
+python3 - "$DOCKER_BRIDGE_SUBNET" <<'CHECKBRIDGE'
+import ipaddress,sys
+network=ipaddress.ip_network(sys.argv[1], strict=True)
+if network.version != 4 or not network.is_private:
+    raise SystemExit('default Docker bridge must be a private IPv4 subnet')
+CHECKBRIDGE
+printf 'docker_bridge_subnet=%s\n' "$DOCKER_BRIDGE_SUBNET" >>"$EVIDENCE/runtime-ports.txt"
 for name in "$CONTAINER" "$ANCHOR_CONTAINER"; do
   if docker inspect "$name" >/dev/null 2>&1; then
     echo "owned journey container name already exists: $name" >&2; exit 69
@@ -361,7 +444,46 @@ if [[ $CANDIDATE_IMAGE != "$IMAGE" ]] && ! docker image inspect "$CANDIDATE_IMAG
   CREATED_CANDIDATE_IMAGE=1
 fi
 
-uv run python "$ROOT/tools/g7_observer_fixture.py" create --root "$RUN_ROOT" --image "$IMAGE" --oidc-port 9000
+FIXTURE_OIDC_ARGS=(--oidc-port "$OIDC_PROXY_PORT")
+if (( DATA_PRESERVATION_MODE )); then FIXTURE_OIDC_ARGS=(--oidc-port "$OIDC_PORT" --oidc-internal); fi
+uv run python "$ROOT/tools/g7_observer_fixture.py" create --root "$RUN_ROOT" --image "$IMAGE" \
+  "${FIXTURE_OIDC_ARGS[@]}" --api-port "$API_PORT" --recovery-port "$RECOVERY_PORT"
+if (( DATA_PRESERVATION_MODE )); then
+  PRESERVATION_VOLUME_NAMES=("volt-g7-preservation-$RUN_ID-postgres" "volt-g7-preservation-$RUN_ID-media" "volt-g7-preservation-$RUN_ID-state")
+  for volume in "${PRESERVATION_VOLUME_NAMES[@]}"; do
+    docker volume create --label uvm.g7.data-preservation-check=true --label "uvm.g7.run-id=$RUN_ID" "$volume" \
+      >>"$EVIDENCE/preservation-volumes.stdout"
+  done
+  PRESERVATION_STORAGE_GENERATION=$(python3 -c 'import uuid;print(uuid.uuid4())')
+  PRESERVATION_VOLUME_SET_DIGEST=$(python3 - "${PRESERVATION_VOLUME_NAMES[@]}" <<'PRESVOL'
+import hashlib,json,subprocess,sys
+rows=[]
+for kind,name in zip(('postgres_cluster','ce_media','uvm_state'),sys.argv[1:]):
+    value=json.loads(subprocess.check_output(['docker','volume','inspect',name],text=True))[0]
+    rows.append({'kind':kind,'name':value['Name'],'driver':value['Driver'],'labels':value.get('Labels') or {}})
+print(hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(',',':')).encode()).hexdigest())
+PRESVOL
+)
+  printf '%s\n' "${PRESERVATION_VOLUME_NAMES[@]}" >"$EVIDENCE/preservation-volume-names.txt"
+  mkdir -p "$RUN_ROOT/host/preservation-reports"
+  chmod 755 "$RUN_ROOT/host/preservation-reports"
+  cat >>"$RUN_ROOT/container.env" <<PRESENV
+UVM_G7_DEPLOYMENT_ID=g7-local
+UVM_G7_RECOVERY_EPOCH=1
+UVM_G7_STORAGE_GENERATION=$PRESERVATION_STORAGE_GENERATION
+UVM_G7_VOLUME_SET_DIGEST=$PRESERVATION_VOLUME_SET_DIGEST
+UVM_G7_PRESERVATION_PUBLIC_KEY_FILE=/run/uvm-g7-host-pub.pem
+UVM_G7_PRESERVATION_KEY_ID=g7-preservation-fixture
+UVM_G7_PRESERVATION_REPORT_DIR=/run/uvm-g7-preservation-reports
+UVM_G7_PRESERVATION_MAX_FUTURE_SKEW_SECONDS=30
+PRESENV
+  PRESERVATION_MOUNTS=(
+    --mount "type=volume,src=${PRESERVATION_VOLUME_NAMES[0]},dst=/var/lib/postgresql/data"
+    --mount "type=volume,src=${PRESERVATION_VOLUME_NAMES[1]},dst=/app/media"
+    --mount "type=volume,src=${PRESERVATION_VOLUME_NAMES[2]},dst=/opt/uvm/state"
+    --mount "type=bind,src=$RUN_ROOT/host/preservation-reports,dst=/run/uvm-g7-preservation-reports,readonly"
+  )
+fi
 if [[ $MODE == --backup-recovery-only || $MODE == --upgrade-rollback-only ]]; then
   printf '\nUVM_G7_QUIESCE_NO_KILL=1\nUVM_G7_QUIESCE_TIMEOUT_SECONDS=300\n' >>"$RUN_ROOT/container.env"
 fi
@@ -421,12 +543,13 @@ else
 fi
 
 STARTED_ANCHOR=1
-docker run -d --name "$ANCHOR_CONTAINER" --label uvm.g7.observer-journey=true \
+docker run -d --name "$ANCHOR_CONTAINER" --label uvm.g7.observer-journey=true --label "uvm.g7.run-id=$RUN_ID" \
   -p "127.0.0.1:$ANCHOR_PORT:5432" \
   --tmpfs /var/lib/postgresql/data:rw,uid=101,gid=103,mode=0700 \
   --mount "type=bind,src=$RUN_ROOT/anchor-password,dst=/run/secrets/anchor-password,readonly" \
+  --env "G7_DOCKER_BRIDGE_SUBNET=$DOCKER_BRIDGE_SUBNET" \
   --user postgres --entrypoint /bin/bash "$IMAGE" -lc \
-  'if [[ ! -s /var/lib/postgresql/data/PG_VERSION ]]; then /usr/lib/postgresql/18/bin/initdb -D /var/lib/postgresql/data --auth-local=trust --auth-host=scram-sha-256 --pwfile=/run/secrets/anchor-password >/dev/null; fi; exec /usr/lib/postgresql/18/bin/postgres -D /var/lib/postgresql/data -h 0.0.0.0 -p 5432' \
+  'if [[ ! -s /var/lib/postgresql/data/PG_VERSION ]]; then /usr/lib/postgresql/18/bin/initdb -D /var/lib/postgresql/data --auth-local=trust --auth-host=scram-sha-256 --pwfile=/run/secrets/anchor-password >/dev/null; fi; printf "host all all %s scram-sha-256\\n" "$G7_DOCKER_BRIDGE_SUBNET" >>/var/lib/postgresql/data/pg_hba.conf; exec /usr/lib/postgresql/18/bin/postgres -D /var/lib/postgresql/data -h 0.0.0.0 -p 5432' \
   >"$EVIDENCE/anchor-container-id.txt"
 ANCHOR_ID=$(cat "$EVIDENCE/anchor-container-id.txt")
 for _ in $(seq 1 60); do
@@ -449,12 +572,42 @@ if (( ! anchor_ready )); then
   echo 'independent audit anchor did not accept connections; see retained container evidence' >&2
   exit 70
 fi
-uv run python "$ROOT/tools/g7_observer_fixture.py" anchor-init --root "$RUN_ROOT" \
+uv run python "$ROOT/tools/g7_observer_fixture.py" anchor-init --root "$RUN_ROOT" --container "$ANCHOR_CONTAINER" \
   >"$EVIDENCE/anchor-fixture.stdout" 2>"$EVIDENCE/anchor-fixture.stderr"
+preservation_role_denial() {
+  local label=$1 role=$2 database=$3 statement=$4
+  if docker exec "$ANCHOR_CONTAINER" psql -X -U postgres -d "$database" -v ON_ERROR_STOP=1 \
+      -c "SET ROLE $role; $statement" \
+      >"$EVIDENCE/role-$label.stdout" 2>"$EVIDENCE/role-$label.stderr"; then
+    echo "least-privilege role unexpectedly changed protected history: $label" >&2
+    return 1
+  fi
+  if ! grep -qi 'permission denied' "$EVIDENCE/role-$label.stderr"; then
+    echo "role fence failed for an unexpected reason: $label" >&2
+    return 1
+  fi
+  printf 'role=%s\ndatabase=%s\nprotected_write=denied\n' "$role" "$database" \
+    >"$EVIDENCE/role-$label-result.txt"
+  chmod 0600 "$EVIDENCE/role-$label.stdout" "$EVIDENCE/role-$label.stderr" \
+    "$EVIDENCE/role-$label-result.txt"
+}
+preservation_role_denial siem-update siem_exporter audit_sink \
+  'UPDATE uvm_audit_export.events SET committed_at=committed_at WHERE false'
+preservation_role_denial siem-delete siem_exporter audit_sink \
+  'DELETE FROM uvm_audit_export.events WHERE false'
+preservation_role_denial anchor-update anchor_signer audit_anchor \
+  'UPDATE uvm_audit_anchor.inventory SET sink_receipt=sink_receipt WHERE false'
+preservation_role_denial anchor-delete anchor_signer audit_anchor \
+  'DELETE FROM uvm_audit_anchor.inventory WHERE false'
+preservation_role_denial exporter-insert exporter_ro audit_anchor \
+  'INSERT INTO uvm_audit_anchor.inventory SELECT * FROM uvm_audit_anchor.inventory LIMIT 0'
+preservation_role_denial host-update host_ro audit_anchor \
+  'UPDATE uvm_audit_anchor.incidents SET state=state WHERE false'
 
 STARTED_CONTAINER=1
-docker run -d --name "$CONTAINER" --label uvm.g7.observer-journey=true \
-  -p 127.0.0.1:8000:8000 -p 127.0.0.1:8002:8002 -p "127.0.0.1:$OIDC_PORT:9000" \
+docker run -d --name "$CONTAINER" --label uvm.g7.observer-journey=true --label "uvm.g7.run-id=$RUN_ID" \
+  -p "127.0.0.1:$API_PORT:8000" -p "127.0.0.1:$RECOVERY_PORT:8002" -p "127.0.0.1:$OIDC_PORT:9000" \
+  "${PRESERVATION_MOUNTS[@]}" \
   --mount "type=bind,src=$RUN_ROOT/secrets,dst=/run/secrets,readonly" \
   --mount "type=bind,src=$RUN_ROOT/secrets/registry.json,dst=/run/uvm-g7-registry.json,readonly" \
   --mount "type=bind,src=$RUN_ROOT/secrets/host-pub.pem,dst=/run/uvm-g7-host-pub.pem,readonly" \
@@ -477,7 +630,8 @@ if (( ! ready )); then
   echo 'disposable application did not become healthy; see retained redacted startup evidence' >&2
   exit 70
 fi
-curl --fail --silent --show-error http://127.0.0.1:8000/openapi.json >/dev/null
+curl --fail --silent --show-error "http://127.0.0.1:$API_PORT/openapi.json" >/dev/null
+if (( ! DATA_PRESERVATION_MODE )); then
 cat >"$RUN_ROOT/host/oidc-loopback-proxy.mjs" <<'NODEPROXY'
 import net from 'node:net';
 const upstreamPort=Number(process.env.OIDC_UPSTREAM_PORT);
@@ -486,17 +640,399 @@ const server=net.createServer(client=>{
  client.pipe(upstream); upstream.pipe(client);
  client.on('error',()=>upstream.destroy()); upstream.on('error',()=>client.destroy());
 });
-server.listen(9000,'127.0.0.1');
+server.listen(Number(process.env.OIDC_PROXY_PORT),'127.0.0.1');
 NODEPROXY
-OIDC_UPSTREAM_PORT=$OIDC_PORT node "$RUN_ROOT/host/oidc-loopback-proxy.mjs" \
+OIDC_UPSTREAM_PORT=$OIDC_PORT OIDC_PROXY_PORT=$OIDC_PROXY_PORT node "$RUN_ROOT/host/oidc-loopback-proxy.mjs" \
   >"$RUN_ROOT/host/oidc-proxy.log" 2>&1 &
 OIDC_PROXY_PID=$!
 printf '%s\n' "$OIDC_PROXY_PID" >"$RUN_ROOT/host/oidc-proxy.pid"
 for _ in $(seq 1 30); do
-  if curl --fail --silent --show-error --max-time 2 http://127.0.0.1:9000/healthz >/dev/null; then break; fi
+  if curl --fail --silent --max-time 2 "http://127.0.0.1:$OIDC_PROXY_PORT/healthz" >/dev/null 2>&1; then break; fi
+  if ! kill -0 "$OIDC_PROXY_PID" 2>/dev/null; then
+    cp "$RUN_ROOT/host/oidc-proxy.log" "$EVIDENCE/oidc-proxy-startup.log" 2>/dev/null || true
+    echo 'G7 local OIDC forwarding proxy exited during startup' >&2
+    exit 70
+  fi
   sleep 1
 done
-curl --fail --silent --show-error --max-time 2 http://127.0.0.1:9000/healthz >/dev/null
+if ! curl --fail --silent --show-error --max-time 2 "http://127.0.0.1:$OIDC_PROXY_PORT/healthz" >/dev/null; then
+  cp "$RUN_ROOT/host/oidc-proxy.log" "$EVIDENCE/oidc-proxy-startup.log" 2>/dev/null || true
+  echo 'G7 local OIDC forwarding proxy health request failed' >&2
+  exit 70
+fi
+fi
+
+if (( DATA_PRESERVATION_MODE )); then
+  uv run python "$ROOT/tools/g7_observer_fixture.py" link-actor --root "$RUN_ROOT" \
+    --container "$CONTAINER" >"$EVIDENCE/preservation-oidc-link.stdout" \
+    2>"$EVIDENCE/preservation-oidc-link.stderr"
+  PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
+    node "$ROOT/tools/g7_preservation_authority_browser.mjs" \
+      --origin "http://127.0.0.1:$API_PORT" \
+      --storage-state "$RUN_ROOT/host/preservation-session.json" \
+      >"$EVIDENCE/preservation-authority.stdout" 2>"$EVIDENCE/preservation-authority.stderr"
+  docker cp "$ROOT/tools/g7_preservation_seed_source.py" \
+    "$CONTAINER:/tmp/g7_preservation_seed_source.py" >/dev/null
+  docker exec -u uvm "$CONTAINER" /opt/uvm/venv/bin/python \
+    /tmp/g7_preservation_seed_source.py >"$EVIDENCE/preservation-source-seed.stdout" \
+    2>"$EVIDENCE/preservation-source-seed.stderr"
+  ANCHOR_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$ANCHOR_CONTAINER")
+  [[ $ANCHOR_IP =~ ^[0-9.]+$ ]] || { echo 'independent audit sidecar address is unavailable' >&2; exit 70; }
+  SIEM_PASSWORD=$(cat "$RUN_ROOT/host/siem-exporter-password")
+  EXPORTER_ANCHOR_PASSWORD=$(cat "$RUN_ROOT/host/exporter-ro-password")
+  SIGNER_ANCHOR_PASSWORD=$(cat "$RUN_ROOT/host/anchor-signer-password")
+  DEPLOYMENT_AUDIT_TOKEN=$(cat "$RUN_ROOT/secrets/g7_preservation_source_token")
+  docker exec \
+    --env G7_DEPLOYMENT_AUDIT_TOKEN="$DEPLOYMENT_AUDIT_TOKEN" \
+    --env G7_AUDIT_SOURCE_FAMILY=local --env G7_AUDIT_SOURCE_ACCOUNT=g7-local \
+    --env G7_AUDIT_SCOPE_KEY=all --env G7_AUDIT_AUTH_ORIGIN=http://127.0.0.1:8000 \
+    --env G7_AUDIT_DEPLOYMENT_ID=g7-local \
+    --env "G7_SIEM_DSN=postgresql://siem_exporter:$SIEM_PASSWORD@$ANCHOR_IP:5432/audit_sink" \
+    --env "G7_AUDIT_ANCHOR_DSN=postgresql://exporter_ro:$EXPORTER_ANCHOR_PASSWORD@$ANCHOR_IP:5432/audit_anchor" \
+    --env "G7_AUDIT_ANCHOR_SIGNER_DSN=postgresql://anchor_signer:$SIGNER_ANCHOR_PASSWORD@$ANCHOR_IP:5432/audit_anchor" \
+    "$CONTAINER" /opt/uvm/venv/bin/python /opt/uvm/app/tools/g7_container_audit_export.py \
+    siem-export --limit 5000 --sink-id g7-siem >"$EVIDENCE/preservation-audit-export.stdout" \
+    2>"$EVIDENCE/preservation-audit-export.stderr"
+  docker exec \
+    --env G7_DEPLOYMENT_AUDIT_TOKEN="$DEPLOYMENT_AUDIT_TOKEN" \
+    --env G7_AUDIT_SOURCE_FAMILY=local --env G7_AUDIT_SOURCE_ACCOUNT=g7-local \
+    --env G7_AUDIT_SCOPE_KEY=all --env G7_AUDIT_AUTH_ORIGIN=http://127.0.0.1:8000 \
+    --env G7_AUDIT_DEPLOYMENT_ID=g7-local \
+    --env "G7_SIEM_DSN=postgresql://siem_exporter:$SIEM_PASSWORD@$ANCHOR_IP:5432/audit_sink" \
+    --env "G7_AUDIT_ANCHOR_SIGNER_DSN=postgresql://anchor_signer:$SIGNER_ANCHOR_PASSWORD@$ANCHOR_IP:5432/audit_anchor" \
+    "$CONTAINER" /opt/uvm/venv/bin/python /opt/uvm/app/tools/g7_container_audit_export.py \
+    anchor-history --limit 5000 --sink-id g7-siem >"$EVIDENCE/preservation-audit-anchor.stdout" \
+    2>"$EVIDENCE/preservation-audit-anchor.stderr"
+  docker exec \
+    --env G7_DEPLOYMENT_AUDIT_TOKEN="$DEPLOYMENT_AUDIT_TOKEN" \
+    --env G7_AUDIT_SOURCE_FAMILY=local --env G7_AUDIT_SOURCE_ACCOUNT=g7-local \
+    --env G7_AUDIT_SCOPE_KEY=all --env G7_AUDIT_AUTH_ORIGIN=http://127.0.0.1:8000 \
+    --env G7_AUDIT_DEPLOYMENT_ID=g7-local \
+    --env "G7_SIEM_DSN=postgresql://siem_exporter:$SIEM_PASSWORD@$ANCHOR_IP:5432/audit_sink" \
+    --env "G7_AUDIT_ANCHOR_SIGNER_DSN=postgresql://anchor_signer:$SIGNER_ANCHOR_PASSWORD@$ANCHOR_IP:5432/audit_anchor" \
+    "$CONTAINER" /opt/uvm/venv/bin/python /opt/uvm/app/tools/g7_container_audit_export.py \
+    audit-state --limit 5000 --sink-id g7-siem >"$EVIDENCE/preservation-audit-state.json" \
+    2>"$EVIDENCE/preservation-audit-state.stderr"
+  chmod 600 "$EVIDENCE/preservation-audit-state.json" "$EVIDENCE/preservation-audit-state.stderr"
+  unset SIEM_PASSWORD EXPORTER_ANCHOR_PASSWORD SIGNER_ANCHOR_PASSWORD DEPLOYMENT_AUDIT_TOKEN
+  uv run python "$ROOT/tools/g7_preservation_inventory.py" \
+    --origin "http://127.0.0.1:$API_PORT" \
+    --token-file "$RUN_ROOT/secrets/g7_preservation_source_token" \
+    --signing-key-file "$RUN_ROOT/host/ed25519.pem" \
+    --report-dir "$RUN_ROOT/host/preservation-reports" \
+    --key-id g7-preservation-fixture --deployment-id g7-local --recovery-epoch 1 \
+    --storage-generation "$PRESERVATION_STORAGE_GENERATION" --environment local \
+    --source-family local --source-account-id g7-local --scope-key all \
+    --audit-state-file "$EVIDENCE/preservation-audit-state.json" \
+    --metadata-output "$EVIDENCE/preservation-source-metadata.json" \
+    >"$EVIDENCE/preservation-signed-inventory.stdout" \
+    2>"$EVIDENCE/preservation-signed-inventory.stderr"
+  report_source=$(find "$RUN_ROOT/host/preservation-reports" -maxdepth 1 -type f -name '*.json' -print -quit)
+  if [[ -z $report_source || ! -f $report_source ]]; then
+    echo 'signed preservation report missing after producer success' >&2
+    exit 70
+  fi
+  install -m 0600 "$report_source" "$EVIDENCE/preservation-signed-report.json"
+  PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
+  node "$ROOT/tools/g7_preservation_live_readback.mjs" \
+      --origin "http://127.0.0.1:$API_PORT" \
+      --storage-state "$RUN_ROOT/host/preservation-session.json" \
+      --output "$EVIDENCE/preservation-public-readback.json" \
+      >"$EVIDENCE/preservation-public-readback.stdout" \
+      2>"$EVIDENCE/preservation-public-readback.stderr"
+  mkdir -m 0700 "$EVIDENCE/preservation-negative"
+  mkdir -m 0755 "$RUN_ROOT/host/preservation-reports-sink-unavailable"
+  ANCHOR_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$ANCHOR_CONTAINER")
+  SIGNER_ANCHOR_PASSWORD=$(cat "$RUN_ROOT/host/anchor-signer-password")
+  DEPLOYMENT_AUDIT_TOKEN=$(cat "$RUN_ROOT/secrets/g7_preservation_source_token")
+  if docker exec \
+      --env G7_DEPLOYMENT_AUDIT_TOKEN="$DEPLOYMENT_AUDIT_TOKEN" \
+      --env G7_AUDIT_SOURCE_FAMILY=local --env G7_AUDIT_SOURCE_ACCOUNT=g7-local \
+      --env G7_AUDIT_SCOPE_KEY=all --env G7_AUDIT_AUTH_ORIGIN=http://127.0.0.1:8000 \
+      --env G7_AUDIT_DEPLOYMENT_ID=g7-local \
+      --env G7_SIEM_DSN=postgresql://unavailable:unavailable@127.0.0.1:1/audit_sink \
+      --env "G7_AUDIT_ANCHOR_SIGNER_DSN=postgresql://anchor_signer:$SIGNER_ANCHOR_PASSWORD@$ANCHOR_IP:5432/audit_anchor" \
+      "$CONTAINER" /opt/uvm/venv/bin/python /opt/uvm/app/tools/g7_container_audit_export.py \
+      audit-state --limit 5000 --sink-id g7-siem \
+      >"$EVIDENCE/preservation-sink-unavailable.stdout" \
+      2>"$EVIDENCE/preservation-sink-unavailable.stderr"; then
+    echo 'audit-state unexpectedly succeeded with an unavailable sink' >&2; exit 70
+  fi
+  [[ ! -s "$EVIDENCE/preservation-sink-unavailable.stdout" ]] || {
+    echo 'audit-state emitted partial state after sink failure' >&2; exit 70;
+  }
+  chmod 0600 "$EVIDENCE/preservation-sink-unavailable.stdout" \
+    "$EVIDENCE/preservation-sink-unavailable.stderr"
+  unset SIGNER_ANCHOR_PASSWORD DEPLOYMENT_AUDIT_TOKEN
+  uv run python "$ROOT/tools/g7_preservation_inventory.py" \
+    --origin "http://127.0.0.1:$API_PORT" \
+    --token-file "$RUN_ROOT/secrets/g7_preservation_source_token" \
+    --signing-key-file "$RUN_ROOT/host/ed25519.pem" \
+    --report-dir "$RUN_ROOT/host/preservation-reports-sink-unavailable" \
+    --key-id g7-preservation-fixture --deployment-id g7-local --recovery-epoch 1 \
+    --storage-generation "$PRESERVATION_STORAGE_GENERATION" --environment local \
+    --audit-state-failure-reason sink_unavailable \
+    --source-family local --source-account-id g7-local --scope-key all \
+    --metadata-output "$EVIDENCE/preservation-sink-unavailable-source-metadata.json" \
+    >"$EVIDENCE/preservation-sink-unavailable-inventory.stdout" \
+    2>"$EVIDENCE/preservation-sink-unavailable-inventory.stderr"
+  chmod 0600 "$EVIDENCE/preservation-sink-unavailable-inventory.stdout" \
+    "$EVIDENCE/preservation-sink-unavailable-inventory.stderr" \
+    "$EVIDENCE/preservation-sink-unavailable-source-metadata.json"
+  mkdir -m 0755 "$RUN_ROOT/host/preservation-reports-evidence-unavailable"
+  EVIDENCE_PROXY_PORT=$(choose_port 19091 29091 39091 49091 59091)
+  command node "$ROOT/tools/g7_preservation_evidence_fault_proxy.mjs" \
+    --listen "$EVIDENCE_PROXY_PORT" --upstream "$API_PORT" \
+    >"$EVIDENCE/evidence-fault-proxy.stdout" 2>"$EVIDENCE/evidence-fault-proxy.stderr" &
+  FAULT_PROXY_PID=$!
+  printf '%s\n' "$FAULT_PROXY_PID" >"$EVIDENCE/evidence-fault-proxy-pid.txt"
+  proxy_ready=0
+  for _ in $(seq 1 30); do
+    if curl --fail --silent --max-time 2 "http://127.0.0.1:$EVIDENCE_PROXY_PORT/healthz" >/dev/null 2>&1; then
+      proxy_ready=1; break
+    fi
+    sleep 1
+  done
+  (( proxy_ready )) || { echo 'evidence fault proxy did not become ready' >&2; exit 70; }
+  uv run python "$ROOT/tools/g7_preservation_inventory.py" \
+    --origin "http://127.0.0.1:$EVIDENCE_PROXY_PORT" \
+    --token-file "$RUN_ROOT/secrets/g7_preservation_source_token" \
+    --signing-key-file "$RUN_ROOT/host/ed25519.pem" \
+    --report-dir "$RUN_ROOT/host/preservation-reports-evidence-unavailable" \
+    --key-id g7-preservation-fixture --deployment-id g7-local --recovery-epoch 1 \
+    --storage-generation "$PRESERVATION_STORAGE_GENERATION" --environment local \
+    --audit-state-file "$EVIDENCE/preservation-audit-state.json" \
+    --source-family local --source-account-id g7-local --scope-key all \
+    --metadata-output "$EVIDENCE/preservation-evidence-unavailable-source-metadata.json" \
+    >"$EVIDENCE/preservation-evidence-unavailable-inventory.stdout" \
+    2>"$EVIDENCE/preservation-evidence-unavailable-inventory.stderr"
+  curl --fail --silent --show-error "http://127.0.0.1:$EVIDENCE_PROXY_PORT/__g7_fault_status" \
+    >"$EVIDENCE/evidence-fault-proxy-status.json"
+  UV_CACHE_DIR="$UV_CACHE_DIR" uv run --frozen python - "$EVIDENCE/evidence-fault-proxy-status.json" \
+      "$EVIDENCE/preservation-evidence-unavailable-inventory.stdout" <<'EVIDENCEFAULTASSERT'
+import json,sys
+status=json.load(open(sys.argv[1])); report=json.load(open(sys.argv[2]))
+assert status['snapshot_requests']==1 and status['evidence_requests']>0
+assert report['class_states']=={'operational.scanner_collection':'failed',
+ 'product.audit_history':'verified','product.source_evidence':'failed'}
+assert report['class_members']['product.source_evidence'] is None
+assert report['class_members']['operational.scanner_collection'] is None
+print(json.dumps({'source_snapshot_requests':status['snapshot_requests'],
+ 'evidence_downloads_denied':status['evidence_requests'],
+ 'failed_classes':['product.source_evidence','operational.scanner_collection']},sort_keys=True))
+EVIDENCEFAULTASSERT
+  chmod 0600 "$EVIDENCE/evidence-fault-proxy.stdout" "$EVIDENCE/evidence-fault-proxy.stderr" \
+    "$EVIDENCE/evidence-fault-proxy-pid.txt" "$EVIDENCE/evidence-fault-proxy-status.json" \
+    "$EVIDENCE/preservation-evidence-unavailable-inventory.stdout" \
+    "$EVIDENCE/preservation-evidence-unavailable-inventory.stderr" \
+    "$EVIDENCE/preservation-evidence-unavailable-source-metadata.json"
+  uv run python "$ROOT/tools/g7_preservation_report_failure_matrix.py" \
+    --report "$report_source" --key "$RUN_ROOT/host/ed25519.pem" \
+    --origin "http://127.0.0.1:$API_PORT" \
+    --storage-state "$RUN_ROOT/host/preservation-session.json" \
+    --evidence "$EVIDENCE/preservation-negative" \
+    --sink-unavailable-report "$RUN_ROOT/host/preservation-reports-sink-unavailable/$(basename "$report_source")" \
+    --evidence-unavailable-report "$RUN_ROOT/host/preservation-reports-evidence-unavailable/$(basename "$report_source")" \
+    >"$EVIDENCE/preservation-negative-matrix.stdout" \
+    2>"$EVIDENCE/preservation-negative-matrix.stderr"
+  chmod 0600 "$EVIDENCE/preservation-negative-matrix.stdout" \
+    "$EVIDENCE/preservation-negative-matrix.stderr"
+  docker stop --time 30 "$CONTAINER" >"$EVIDENCE/preservation-source-outage-stop.stdout"
+  if uv run python "$ROOT/tools/g7_preservation_inventory.py" \
+      --origin "http://127.0.0.1:$API_PORT" \
+      --token-file "$RUN_ROOT/secrets/g7_preservation_source_token" \
+      --signing-key-file "$RUN_ROOT/host/ed25519.pem" \
+      --report-dir "$RUN_ROOT/host/preservation-reports-source-unavailable" \
+      --key-id g7-preservation-fixture --deployment-id g7-local --recovery-epoch 1 \
+      --storage-generation "$PRESERVATION_STORAGE_GENERATION" --environment local \
+      --source-family local --source-account-id g7-local --scope-key all \
+      >"$EVIDENCE/preservation-source-unavailable.stdout" \
+      2>"$EVIDENCE/preservation-source-unavailable.stderr"; then
+    docker start "$CONTAINER" >"$EVIDENCE/preservation-source-outage-restart.stdout"
+    echo 'source inventory unexpectedly succeeded while the app service was stopped' >&2; exit 70
+  fi
+  [[ ! -e "$RUN_ROOT/host/preservation-reports-source-unavailable/$(basename "$report_source")" ]] || {
+    docker start "$CONTAINER" >"$EVIDENCE/preservation-source-outage-restart.stdout"
+    echo 'source outage published a report' >&2; exit 70;
+  }
+  docker start "$CONTAINER" >"$EVIDENCE/preservation-source-outage-restart.stdout"
+  source_restored=0
+  for _ in $(seq 1 300); do
+    if [[ $(docker inspect "$CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null) == healthy ]]; then
+      source_restored=1; break
+    fi
+    sleep 2
+  done
+  (( source_restored )) || { echo 'source app did not recover after outage probe' >&2; exit 70; }
+  chmod 0600 "$EVIDENCE/preservation-source-outage-stop.stdout" \
+    "$EVIDENCE/preservation-source-outage-restart.stdout" \
+    "$EVIDENCE/preservation-source-unavailable.stdout" \
+    "$EVIDENCE/preservation-source-unavailable.stderr"
+  printf '%s\n' "$CONTAINER_ID" >"$EVIDENCE/pre-replacement-container-id.txt"
+  PRESERVATION_STORAGE_GENERATION=$(python3 -c 'import uuid;print(uuid.uuid4())')
+  REPLACEMENT_REPORT_DIR="$RUN_ROOT/host/preservation-reports-replacement"
+  mkdir -m 0755 "$REPLACEMENT_REPORT_DIR"
+  python3 - "$RUN_ROOT/container.env" "$PRESERVATION_STORAGE_GENERATION" \
+      "$REPLACEMENT_REPORT_DIR" <<'PRESENVUPDATE'
+import sys
+from pathlib import Path
+path=Path(sys.argv[1]); text=path.read_text()
+for key,value in (("UVM_G7_STORAGE_GENERATION",sys.argv[2]),
+                  ("UVM_G7_PRESERVATION_REPORT_DIR","/run/uvm-g7-preservation-reports-replacement")):
+    prefix=key+"="; matches=[line for line in text.splitlines() if line.startswith(prefix)]
+    if len(matches)!=1: raise SystemExit("replacement environment binding is ambiguous")
+    text=text.replace(matches[0],prefix+value,1)
+path.write_text(text)
+PRESENVUPDATE
+  PRESERVATION_MOUNTS=(
+    --mount "type=volume,src=${PRESERVATION_VOLUME_NAMES[0]},dst=/var/lib/postgresql/data"
+    --mount "type=volume,src=${PRESERVATION_VOLUME_NAMES[1]},dst=/app/media"
+    --mount "type=volume,src=${PRESERVATION_VOLUME_NAMES[2]},dst=/opt/uvm/state"
+    --mount "type=bind,src=$REPLACEMENT_REPORT_DIR,dst=/run/uvm-g7-preservation-reports-replacement,readonly"
+  )
+  docker stop --time 30 "$CONTAINER" >"$EVIDENCE/pre-replacement-stop.txt"
+  docker rm "$CONTAINER" >"$EVIDENCE/pre-replacement-remove.txt"
+  docker run -d --name "$CONTAINER" --label uvm.g7.observer-journey=true \
+    --label "uvm.g7.run-id=$RUN_ID" \
+    -p "127.0.0.1:$API_PORT:8000" -p "127.0.0.1:$RECOVERY_PORT:8002" \
+    -p "127.0.0.1:$OIDC_PORT:9000" \
+    "${PRESERVATION_MOUNTS[@]}" \
+    --mount "type=bind,src=$RUN_ROOT/secrets,dst=/run/secrets,readonly" \
+    --mount "type=bind,src=$RUN_ROOT/secrets/registry.json,dst=/run/uvm-g7-registry.json,readonly" \
+    --mount "type=bind,src=$RUN_ROOT/secrets/host-pub.pem,dst=/run/uvm-g7-host-pub.pem,readonly" \
+    --mount "type=bind,src=$RUN_ROOT/scheduler,dst=/run/uvm-g7-scheduler" \
+    --env-file "$RUN_ROOT/container.env" "$IMAGE" >"$EVIDENCE/replacement-container-id.txt"
+  CONTAINER_ID=$(cat "$EVIDENCE/replacement-container-id.txt")
+  docker inspect "$CONTAINER" --format '{{.Id}} {{.Image}} {{.State.Status}}' \
+    >"$EVIDENCE/replacement-container-inspect.txt"
+  ready=0
+  for _ in $(seq 1 300); do
+    if [[ $(docker inspect "$CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null) == healthy ]]; then
+      ready=1; break
+    fi
+    if [[ $(docker inspect "$CONTAINER" --format '{{.State.Status}}' 2>/dev/null) != running ]]; then break; fi
+    sleep 2
+  done
+  if (( ! ready )); then
+    docker inspect "$CONTAINER" --format '{{.State.Status}} {{.State.ExitCode}} {{.State.Health.Status}}' \
+      >"$EVIDENCE/replacement-container-state.txt" || true
+    docker logs "$CONTAINER" 2>&1 | sed -E \
+      "s/(Webhook Secret:[[:space:]]*)[[:alnum:]-]+/\\1[redacted]/Ig; s/(PASSWORD[[:space:]]+')([^']+)(')/\\1[redacted]\\3/Ig; s/([[:alnum:]_-]*(PASSWORD|SECRET|TOKEN|KEY)[[:alnum:]_-]*[:=][[:space:]]*)[^[:space:]]+/\\1[redacted]/Ig" \
+      >"$EVIDENCE/replacement-startup-redacted.log" || true
+    echo 'replacement application did not become healthy; see redacted startup evidence' >&2
+    exit 70
+  fi
+  [[ $(cat "$EVIDENCE/pre-replacement-container-id.txt") != "$CONTAINER_ID" ]] || {
+    echo 'replacement reused the original container identity' >&2; exit 70;
+  }
+  printf 'replacement_storage_generation=%s\n' "$PRESERVATION_STORAGE_GENERATION" \
+    >"$EVIDENCE/replacement-generation.txt"
+  ANCHOR_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$ANCHOR_CONTAINER")
+  SIEM_PASSWORD=$(cat "$RUN_ROOT/host/siem-exporter-password")
+  EXPORTER_ANCHOR_PASSWORD=$(cat "$RUN_ROOT/host/exporter-ro-password")
+  SIGNER_ANCHOR_PASSWORD=$(cat "$RUN_ROOT/host/anchor-signer-password")
+  DEPLOYMENT_AUDIT_TOKEN=$(cat "$RUN_ROOT/secrets/g7_preservation_source_token")
+  docker exec \
+    --env G7_DEPLOYMENT_AUDIT_TOKEN="$DEPLOYMENT_AUDIT_TOKEN" \
+    --env G7_AUDIT_SOURCE_FAMILY=local --env G7_AUDIT_SOURCE_ACCOUNT=g7-local \
+    --env G7_AUDIT_SCOPE_KEY=all --env G7_AUDIT_AUTH_ORIGIN=http://127.0.0.1:8000 \
+    --env G7_AUDIT_DEPLOYMENT_ID=g7-local \
+    --env "G7_SIEM_DSN=postgresql://siem_exporter:$SIEM_PASSWORD@$ANCHOR_IP:5432/audit_sink" \
+    --env "G7_AUDIT_ANCHOR_DSN=postgresql://exporter_ro:$EXPORTER_ANCHOR_PASSWORD@$ANCHOR_IP:5432/audit_anchor" \
+    --env "G7_AUDIT_ANCHOR_SIGNER_DSN=postgresql://anchor_signer:$SIGNER_ANCHOR_PASSWORD@$ANCHOR_IP:5432/audit_anchor" \
+    "$CONTAINER" /opt/uvm/venv/bin/python /opt/uvm/app/tools/g7_container_audit_export.py \
+    audit-state --limit 5000 --sink-id g7-siem >"$EVIDENCE/replacement-audit-state.json" \
+    2>"$EVIDENCE/replacement-audit-state.stderr"
+  chmod 600 "$EVIDENCE/replacement-audit-state.json" "$EVIDENCE/replacement-audit-state.stderr"
+  unset SIEM_PASSWORD EXPORTER_ANCHOR_PASSWORD SIGNER_ANCHOR_PASSWORD DEPLOYMENT_AUDIT_TOKEN
+  uv run python "$ROOT/tools/g7_preservation_inventory.py" \
+    --origin "http://127.0.0.1:$API_PORT" \
+    --token-file "$RUN_ROOT/secrets/g7_preservation_source_token" \
+    --signing-key-file "$RUN_ROOT/host/ed25519.pem" \
+    --previous-report "$EVIDENCE/preservation-signed-report.json" \
+    --report-dir "$REPLACEMENT_REPORT_DIR" \
+    --key-id g7-preservation-fixture --deployment-id g7-local --recovery-epoch 1 \
+    --storage-generation "$PRESERVATION_STORAGE_GENERATION" --environment local \
+    --source-family local --source-account-id g7-local --scope-key all \
+    --audit-state-file "$EVIDENCE/replacement-audit-state.json" \
+    --metadata-output "$EVIDENCE/preservation-replacement-source-metadata.json" \
+    >"$EVIDENCE/preservation-replacement-signed-inventory.stdout" \
+    2>"$EVIDENCE/preservation-replacement-signed-inventory.stderr"
+  report_source=$(find "$REPLACEMENT_REPORT_DIR" -maxdepth 1 -type f -name '*.json' -print -quit)
+  [[ -n $report_source && -f $report_source ]] || {
+    echo 'replacement signed report missing after continuity-checked publication' >&2; exit 70;
+  }
+  install -m 0600 "$report_source" "$EVIDENCE/preservation-replacement-signed-report.json"
+  python3 - "$EVIDENCE/preservation-signed-report.json" \
+      "$EVIDENCE/preservation-replacement-signed-report.json" \
+      "$EVIDENCE/preservation-inventory-continuity.json" <<'PRESERVATIONCONTINUITY'
+import hashlib,json,sys
+old,new=(json.load(open(path,encoding='utf-8'))['payload'] for path in sys.argv[1:3])
+def identities(payload):
+    result={}
+    for entry in payload['classes']:
+        rows=[]
+        for member in entry['members']:
+            timestamp=member.get('retained_at')
+            if timestamp and timestamp.endswith('+00:00'): timestamp=timestamp[:-6]+'Z'
+            fields=[member['record_kind'],member['record_key'],member.get('expected_sha256'),
+                timestamp,member.get('byte_bearing'),member.get('evidence_id')]
+            if entry['class_id']=='product.audit_history':
+                fields.extend([member.get('state'),member.get('reasons'),member.get('legacy_payload_sha256'),
+                    member.get('canonicalization_version'),member.get('representation_metadata')])
+            else:
+                fields.append(member['record_sha256'])
+            rows.append(fields)
+        result[entry['class_id']]=hashlib.sha256(json.dumps(rows,sort_keys=True,
+            separators=(',',':')).encode()).hexdigest()
+    return result
+a,b=identities(old),identities(new)
+if (old['snapshot_id']==new['snapshot_id'] or old['storage_generation']==new['storage_generation']
+        or old['scope']!=new['scope'] or a!=b):
+    raise SystemExit('replacement_inventory_continuity_assertion_failed')
+json.dump({'schema_version':1,'old_snapshot_id':old['snapshot_id'],
+ 'replacement_snapshot_id':new['snapshot_id'],'old_storage_generation':old['storage_generation'],
+ 'replacement_storage_generation':new['storage_generation'],'member_identity_digests':b,
+ 'preserved':True},open(sys.argv[3],'x',encoding='utf-8'),sort_keys=True,separators=(',',':'))
+PRESERVATIONCONTINUITY
+  PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
+    node "$ROOT/tools/g7_preservation_live_readback.mjs" \
+      --origin "http://127.0.0.1:$API_PORT" \
+      --storage-state "$RUN_ROOT/host/preservation-session.json" \
+      --output "$EVIDENCE/preservation-replacement-public-readback.json" \
+      >"$EVIDENCE/preservation-replacement-public-readback.stdout" \
+      2>"$EVIDENCE/preservation-replacement-public-readback.stderr"
+  python3 - "$EVIDENCE/preservation-public-readback.json" \
+      "$EVIDENCE/preservation-replacement-public-readback.json" \
+      "$EVIDENCE/preservation-replacement-comparison.json" \
+      <<'PRESERVATIONREPLACEMENT'
+import json,sys
+before,after=(json.load(open(path,encoding='utf-8')) for path in sys.argv[1:3])
+fields=('scope','class_states','class_counts','audit_copy','record_pages','evidence','denied_scope_status','write_methods_observed')
+if any(before.get(key)!=after.get(key) for key in fields):
+    raise SystemExit('replacement_public_readback_changed')
+if before.get('snapshot_id')==after.get('snapshot_id'):
+    raise SystemExit('replacement_report_snapshot_not_advanced')
+if after.get('write_methods_observed') is not False:
+    raise SystemExit('replacement_readback_observed_write')
+json.dump({'schema_version':1,'same_snapshot':False,'same_class_states':True,
+ 'same_audit_union':True,'same_evidence_digest_and_size':True,
+ 'denied_scope_status':after['denied_scope_status'],'write_methods_observed':False},
+ open(sys.argv[3],'w',encoding='utf-8'),sort_keys=True,separators=(',',':'))
+PRESERVATIONREPLACEMENT
+  CHROMIUM_EXECUTABLE_PATH=/home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome \
+    node "$ROOT/tools/g7_preservation_browser_handoff.mjs" \
+      --origin "http://127.0.0.1:$API_PORT" \
+      --storage-state "$RUN_ROOT/host/preservation-session.json" \
+      --signed-report "$EVIDENCE/preservation-replacement-signed-report.json" \
+      --source-metadata "$EVIDENCE/preservation-replacement-source-metadata.json" \
+      --evidence "$EVIDENCE/browser" \
+      >"$EVIDENCE/preservation-browser-handoff.stdout" \
+      2>"$EVIDENCE/preservation-browser-handoff.stderr"
+  echo 'PASS: signed source evidence, deployment audit union and scanner history remained readable after application container replacement' \
+    | tee "$EVIDENCE/result.txt"
+  exit 0
+fi
 
 if (( IS_BACKUP_MODE )); then
   CE_ADMIN_PASSWORD=$(cat "$RUN_ROOT/secrets/ce_admin_password")
@@ -558,12 +1094,14 @@ PYSOURCECE
 fi
 
 uv run python "$ROOT/tools/g7_observer_fixture.py" link-actor --root "$RUN_ROOT" \
+  --container "$CONTAINER" \
   >"$EVIDENCE/oidc-link.stdout" 2>"$EVIDENCE/oidc-link.stderr"
-uv run python "$ROOT/tools/g7_observer_fixture.py" host-config --root "$RUN_ROOT" --image "$IMAGE" --anchor-port "$ANCHOR_PORT" \
+uv run python "$ROOT/tools/g7_observer_fixture.py" host-config --root "$RUN_ROOT" --image "$IMAGE" \
+  --anchor-port "$ANCHOR_PORT" --api-port "$API_PORT" --recovery-port "$RECOVERY_PORT" \
   >"$EVIDENCE/host-config.stdout" 2>"$EVIDENCE/host-config.stderr"
 PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
   node "$ROOT/tools/g7_observer_journey_browser.mjs" \
-  --origin http://127.0.0.1:8000 --evidence "$EVIDENCE" --fixture-root "$RUN_ROOT" \
+  --origin "http://127.0.0.1:$API_PORT" --evidence "$EVIDENCE" --fixture-root "$RUN_ROOT" \
   $([[ $IS_BACKUP_MODE == 1 ]] && printf '%s' '--backup-seed-only') \
   >"$EVIDENCE/browser-journey.stdout" 2>"$EVIDENCE/browser-journey.stderr"
 

@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+import secrets
+import stat
 import time
 import uuid
 from dataclasses import dataclass
@@ -34,6 +37,7 @@ from uvm.ingestion.run import (
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_PARTIAL,
+    RUN_RUNNING,
 )
 from uvm.persistence.ingestion_schema import collection_schedules
 from uvm.persistence.ingestion_store import IngestionConflictError
@@ -89,19 +93,91 @@ class FileFixtureEvidenceSink:
     def _path(self, ref: str) -> Path:
         return self.root / hashlib.sha256(ref.encode("utf-8")).hexdigest()
 
+    def _open_root(self) -> int:
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        info = os.fstat(directory)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o700):
+            os.close(directory)
+            raise ValueError("fixture evidence directory is unsafe")
+        return directory
+
     def put(self, ref: str, raw: bytes, digest: str) -> None:
+        if not isinstance(raw, bytes) or len(raw) > 16 * 1024 * 1024:
+            raise ValueError("fixture evidence exceeds the bounded byte limit")
         if _digest(raw) != digest:
             raise ValueError("fixture evidence digest does not match bytes")
-        path = self._path(ref)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            if path.read_bytes() != raw:
-                raise ValueError(f"conflicting fixture evidence for {ref}")
-            return
-        path.write_bytes(raw)
+        directory = self._open_root()
+        final_name = self._path(ref).name
+        temporary = ".stage-" + secrets.token_hex(16)
+        try:
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600, dir_fd=directory)
+            try:
+                view = memoryview(raw)
+                while view:
+                    written = os.write(fd, view)
+                    if written <= 0:
+                        raise OSError("short evidence write")
+                    view = view[written:]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            try:
+                os.link(temporary, final_name, src_dir_fd=directory,
+                    dst_dir_fd=directory, follow_symlinks=False)
+            except FileExistsError:
+                existing = os.open(final_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+                try:
+                    info = os.fstat(existing)
+                    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size != len(raw)):
+                        raise ValueError("conflicting or unsafe fixture evidence object")
+                    chunks, remaining = [], len(raw) + 1
+                    while remaining:
+                        part = os.read(existing, min(65536, remaining))
+                        if not part:
+                            break
+                        chunks.append(part); remaining -= len(part)
+                    if b"".join(chunks) != raw:
+                        raise ValueError("conflicting fixture evidence object")
+                finally:
+                    os.close(existing)
+            os.unlink(temporary, dir_fd=directory)
+            os.fsync(directory)
+        except BaseException:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+            raise
+        finally:
+            os.close(directory)
 
     def read(self, ref: str, digest: str) -> bytes:
-        raw = self._path(ref).read_bytes()
+        directory = self._open_root()
+        try:
+            fd = os.open(self._path(ref).name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+            try:
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                        or stat.S_IMODE(info.st_mode) != 0o600
+                        or info.st_size > 16 * 1024 * 1024):
+                    raise ValueError("fixture evidence object is unsafe")
+                chunks, remaining = [], info.st_size + 1
+                while remaining:
+                    part = os.read(fd, min(65536, remaining))
+                    if not part:
+                        break
+                    chunks.append(part); remaining -= len(part)
+                raw = b"".join(chunks)
+                if len(raw) != info.st_size:
+                    raise ValueError("fixture evidence object changed while reading")
+            finally:
+                os.close(fd)
+        finally:
+            os.close(directory)
         if _digest(raw) != digest:
             raise ValueError(f"fixture evidence digest mismatch for {ref}")
         return raw
@@ -409,18 +485,23 @@ class ScheduledCollector:
                     time.sleep(remaining)
         return self.clock().astimezone(UTC) <= deadline
 
-    def _checkpoint(self, run, evidence, *, at: datetime, advance: bool = True) -> None:
+    def _checkpoint(self, run, evidence, *, at: datetime, advance: bool = True,
+                    reservation: dict | None = None) -> None:
         """Persist the current revision before another request or parsing."""
         # A byte reference/digest identifies the retained source bytes, but it
         # is not the identity of an immutable registration.  Every checkpoint
         # is a new run revision and therefore needs its own evidence row ID;
         # keeping the ref/digest stable preserves replay and conflict checks.
-        revision_evidence = tuple(
-            (_uuid(f"evidence:{run.run_id}:revision:{run.revision}:{ref}:{digest}"), ref, digest)
-            for _, ref, digest in evidence
-        )
+        revision_evidence = []
+        for item in evidence:
+            _, ref, digest = item[:3]
+            size = item[3] if len(item) == 4 else len(self.evidence_sink.read(ref, digest))
+            revision_evidence.append((_uuid(
+                f"evidence:{run.run_id}:revision:{run.revision}:{ref}:{digest}"), ref, digest, size))
+        revision_evidence = tuple(revision_evidence)
         self.store.save_run_transition(
-            run, run.attempts, run.pages.values(), revision_evidence, at
+            run, run.attempts, run.pages.values(), revision_evidence, at,
+            reservation=reservation,
         )
         if advance:
             run.revision += 1
@@ -485,6 +566,8 @@ class ScheduledCollector:
             (_uuid(f"evidence:{run_id}:{page.page_ref}:{page.evidence_digest}"), page.page_ref, page.evidence_digest)
             for page in sorted(run.pages.values(), key=lambda item: item.ordinal)
         ]
+        reservations = (self.store.read_request_reservations(run_id)
+            if hasattr(self.store, "read_request_reservations") else [])
         raw_pages = []
         for page in sorted(run.pages.values(), key=lambda item: item.ordinal):
             if not page.failed:
@@ -531,7 +614,9 @@ class ScheduledCollector:
                 (page.attempt_no for page in run.pages.values()
                  if not page.failed and page.ordinal < ordinal), default=0,
             )
-            page_attempt = len(run.attempts) - previous_attempt if pending is not None else 0
+            prior_reserved = sum(1 for item in reservations if item["page_ordinal"] == ordinal
+                and item["attempt_no"] > previous_attempt)
+            page_attempt = max(len(run.attempts) - previous_attempt, prior_reserved) if pending is not None else prior_reserved
             if pending is not None and page_attempt:
                 last_attempt = run.attempts[-1]
                 if last_attempt.attempt_no != pending.attempt_no:
@@ -547,33 +632,51 @@ class ScheduledCollector:
                     failed = True
                     break
                 page_attempt += 1
-                attempt_no = len(run.attempts) + 1
+                attempt_no = max([len(run.attempts), *(int(item["attempt_no"]) for item in reservations)], default=0) + 1
                 attempt_started = self.clock().astimezone(UTC)
+                request_identity = json.dumps({"source_family": run.source_family,
+                    "source_account_id": run.source_account_id, "scope_key": run.scope_key,
+                    "run_id": run.run_id, "run_revision": run.revision,
+                    "schedule_revision": run.schedule.revision, "page_ordinal": ordinal,
+                    "cursor": cursor}, sort_keys=True, separators=(",", ":"),
+                    ensure_ascii=False, allow_nan=False).encode("utf-8")
+                reservation = {"attempt_no": attempt_no, "page_ordinal": ordinal,
+                    "request_identity_sha256": hashlib.sha256(request_identity).hexdigest(),
+                    "reserved_at": attempt_started}
+                self._checkpoint(run, evidence, at=attempt_started, reservation=reservation)
+                reservations.append({**reservation, "run_revision": run.revision - 1})
+                received_response = True
                 try:
                     response = self.client.fetch(cursor)
-                except Exception as error:  # fixture configuration failure is retained
-                    response = FixtureResponse(str(error).encode(), "fixture-error", error_code=type(error).__name__, success=False)
+                except Exception:  # no received HTTP object exists on transport failure
+                    received_response = False
+                    response = FixtureResponse(b"", "transport_error",
+                        error_code="other", success=False)
                 attempt_finished = self.clock().astimezone(UTC)
-                digest = _digest(response.raw)
-                attempt_ref = f"fixture://{self.schedule.source_family}/{run_id}/page/{ordinal}/attempt/{attempt_no}/{digest}"
-                self.evidence_sink.put(attempt_ref, response.raw, digest)
                 run.record_attempt(AttemptFact(
                     attempt_no, attempt_started, attempt_finished,
                     response.response_class, response.success,
                     retry_after=response.retry_after, error_code=response.error_code,
                 ))
+                if not received_response:
+                    self._checkpoint(run, evidence, at=attempt_finished)
+                    failed = True
+                    break
+                digest = _digest(response.raw)
+                attempt_ref = f"fixture://{self.schedule.source_family}/{run_id}/page/{ordinal}/attempt/{attempt_no}/{digest}"
+                self.evidence_sink.put(attempt_ref, response.raw, digest)
                 ref = attempt_ref
                 self.evidence_sink.put(ref, response.raw, digest)
                 prior_page = run.pages.get((ordinal, cursor))
                 if prior_page is not None:
                     evidence = [item for item in evidence if item[1] != prior_page.page_ref]
-                evidence.append((_uuid(f"evidence:{run_id}:{ref}:{digest}"), ref, digest))
+                evidence.append((_uuid(f"evidence:{run_id}:{ref}:{digest}"), ref, digest, len(response.raw)))
                 # A received response is first recorded as a pending/failed
                 # page.  Parsing and pagination interpretation happen only
                 # after this immutable receipt checkpoint.
                 receipt_page = PageFact(
                     ordinal, cursor, ref, attempt_no, response.response_class, 0,
-                    digest, failed=True, request_identity=f"cursor:{cursor or '<start>'}",
+                    digest, failed=True, request_identity=hashlib.sha256(request_identity).hexdigest(),
                     report_id=response.report_id, query_scope=response.query_scope,
                 )
                 self._replace_pending_page(run, receipt_page)
@@ -596,7 +699,7 @@ class ScheduledCollector:
                     page = PageFact(
                         ordinal, cursor, ref, attempt_no, response.response_class,
                         len(records), digest, next_cursor=next_cursor,
-                        is_terminal=terminal, request_identity=f"cursor:{cursor or '<start>'}",
+                        is_terminal=terminal, request_identity=hashlib.sha256(request_identity).hexdigest(),
                         report_id=response.report_id, query_scope=response.query_scope,
                     )
                     self._replace_pending_page(run, page)
@@ -634,7 +737,10 @@ class ScheduledCollector:
             pending = None
 
         ended = self.clock().astimezone(UTC)
-        status = "partial" if failed else "success"
+        recorded_attempts = {item.attempt_no for item in run.attempts}
+        unresolved_reservation = any(int(item["attempt_no"]) not in recorded_attempts
+            for item in reservations)
+        status = "partial" if failed or unresolved_reservation else "success"
         row_ordinal = 1
         run.observations = []
         for _, ref, digest, records in raw_pages:
@@ -644,8 +750,8 @@ class ScheduledCollector:
                     digest=digest, collected_at=ended, status=status,
                 ))
                 row_ordinal += 1
-        run.ended_at = ended
-        run.state = RUN_PARTIAL if failed else RUN_COMPLETED
+        run.ended_at = None if unresolved_reservation else ended
+        run.state = RUN_RUNNING if unresolved_reservation else (RUN_PARTIAL if failed else RUN_COMPLETED)
         self._checkpoint(run, evidence, at=ended, advance=False)
         return run
 

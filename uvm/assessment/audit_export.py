@@ -408,6 +408,86 @@ class AuditExportSource:
         return count_unexported_audit_events(self.engine, principal_id=self.principal_id)
 
 
+class DeploymentAuditExportSource:
+    """All-event exporter source guarded by the exact deployment service grant.
+
+    This is deliberately separate from the legacy group-scoped G3 source. The
+    callback revalidates current deployment authority before every source read
+    or acknowledgement, so the deployment path cannot inherit a broader
+    browser/group projection.
+    """
+
+    def __init__(self, engine: Engine, authorize):
+        self.engine = engine
+        self._authorize = authorize
+
+    def authorize(self):
+        self._authorize()
+
+    def list_authorised_audit_page(self, limit: int, after_sequence: int = 0) -> list[dict]:
+        if isinstance(limit, bool) or not 1 <= limit <= 5000 or after_sequence < 0:
+            raise ValueError("invalid deployment audit page bounds")
+        self.authorize()
+        fields = ("event_id", "event_sequence", "actor_id", "actor_kind", "origin", "action",
+            "target_id", "before_value", "after_value", "membership_ids", "membership_revision",
+            "rationale", "evidence_ref", "policy_revision", "identity_revision", "occurred_at",
+            "received_at", "correlation_id", "command_id", "authorization_context")
+        query = (sa.select(*(assessment_audit_events.c[name] for name in fields))
+            .where(assessment_audit_events.c.event_sequence > after_sequence)
+            .order_by(assessment_audit_events.c.event_sequence).limit(limit))
+        with self.engine.connect() as connection:
+            return [dict(row) for row in connection.execute(query).mappings().all()]
+
+    def count_authorised_audit_events(self) -> int:
+        self.authorize()
+        with self.engine.connect() as connection:
+            return int(connection.execute(sa.select(sa.func.count()).select_from(
+                assessment_audit_events)).scalar_one())
+
+    def get_sink_receipt(self, event_id, sink_id: str) -> str | None:
+        self.authorize()
+        with self.engine.connect() as connection:
+            return connection.execute(sa.select(assessment_sink_export_receipts.c.sink_receipt)
+                .where(assessment_sink_export_receipts.c.event_id == str(event_id),
+                    assessment_sink_export_receipts.c.sink_id == sink_id)).scalar_one_or_none()
+
+    def acknowledge_sink_export(self, event_id, sink_id: str, sink_receipt: str,
+                                acknowledged_at: datetime) -> bool:
+        self.authorize()
+        if not sink_id.strip() or not sink_receipt.strip():
+            raise ValueError("sink_id and sink_receipt must be non-empty")
+        table = assessment_sink_export_receipts
+        with self.engine.begin() as connection:
+            event_exists = connection.execute(sa.select(assessment_audit_events.c.event_id)
+                .where(assessment_audit_events.c.event_id == str(event_id))).scalar_one_or_none()
+            if event_exists is None:
+                raise PermissionError("deployment audit event is unavailable")
+            inserted = connection.execute(pg_insert(table).values(event_id=str(event_id),
+                sink_id=sink_id, sink_receipt=sink_receipt,
+                acknowledged_at=acknowledged_at.astimezone(timezone.utc))
+                .on_conflict_do_nothing(index_elements=[table.c.event_id, table.c.sink_id])
+                .returning(table.c.event_id)).scalar_one_or_none()
+            if inserted is not None:
+                return True
+            existing = connection.execute(sa.select(table.c.sink_receipt).where(
+                table.c.event_id == str(event_id), table.c.sink_id == sink_id)).scalar_one_or_none()
+            if existing != sink_receipt:
+                raise ValueError("deployment audit receipt conflicts with the established receipt")
+            return False
+
+    def sink_backlog_count(self, sink_id: str) -> int:
+        self.authorize()
+        event, receipt = assessment_audit_events, assessment_sink_export_receipts
+        query = sa.select(sa.func.count()).select_from(event.outerjoin(receipt, sa.and_(
+            receipt.c.event_id == event.c.event_id, receipt.c.sink_id == sink_id))).where(
+                receipt.c.event_id.is_(None))
+        with self.engine.connect() as connection:
+            return int(connection.execute(query).scalar_one())
+
+    def backlog_count(self) -> int:
+        return self.sink_backlog_count("g7-siem")
+
+
 def _source_engine(database_url: str) -> Engine:
     """Use the project's pinned psycopg3 driver for scheme-only PostgreSQL DSNs."""
     url = sa.engine.make_url(database_url)

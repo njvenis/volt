@@ -10,7 +10,7 @@ from pathlib import Path
 def validate_heads(*, declared_head: str, heads: list[str], mode: str,
         empty_cluster: bool = False, compatibility_admitted: bool = False) -> None:
     """Accept only the image's exact runtime head, except an admitted 0058→0059 check."""
-    if declared_head not in {"0058", "0059"}:
+    if declared_head not in {"0058", "0059", "0061"}:
         raise ValueError("image schema declaration is invalid")
     if empty_cluster:
         if heads or mode != "normal":
@@ -24,6 +24,10 @@ def validate_heads(*, declared_head: str, heads: list[str], mode: str,
             and mode == "upgrade-verification" and compatibility_admitted):
         return
     if (declared_head == "0059" and heads == ["0058"]
+            and mode == "upgrade-verification" and compatibility_admitted):
+        return
+    if (declared_head == "0061" and len(heads) == 1
+            and heads[0] in {"0059", "0060", "0061"}
             and mode == "upgrade-verification" and compatibility_admitted):
         return
     raise ValueError("database schema is incompatible with this image and startup mode")

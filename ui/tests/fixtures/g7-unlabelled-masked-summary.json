@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "scope": {
+    "source_family": "synthetic",
+    "source_account_id": "account-a",
+    "scope_key": "scope-a"
+  },
+  "snapshot_id": null,
+  "checked_at": null,
+  "response_at": "2026-10-28T22:09:17.817098Z",
+  "valid_until": null,
+  "authority_fingerprint": "b4b03df270c3ca5629f609caa7ceb08274472694b8bf068f1fe687924f55d673",
+  "audit_authority_fingerprint": null,
+  "mask_reasons": [
+    "audit_scope_incomplete"
+  ],
+  "environment": null,
+  "classes": [
+    {
+      "class_id": "product.source_evidence",
+      "minimum_period": "P1Y",
+      "state": "unknown",
+      "reasons": [
+        "baseline_missing",
+        "environment_unlabelled"
+      ],
+      "expected_records": null,
+      "verified_records": null,
+      "missing_records": null,
+      "changed_records": null,
+      "unreadable_records": null,
+      "unexpected_records": null,
+      "oldest_retained_at": null,
+      "baseline_digest": null,
+      "audit_copy": null
+    },
+    {
+      "class_id": "product.audit_history",
+      "minimum_period": "P1Y",
+      "state": "unknown",
+      "reasons": [
+        "audit_scope_incomplete",
+        "environment_unlabelled"
+      ],
+      "expected_records": null,
+      "verified_records": null,
+      "missing_records": null,
+      "changed_records": null,
+      "unreadable_records": null,
+      "unexpected_records": null,
+      "oldest_retained_at": null,
+      "baseline_digest": null,
+      "audit_copy": {
+        "state": "unknown",
+        "reasons": [
+          "audit_scope_incomplete",
+          "environment_unlabelled"
+        ],
+        "expected_events": null,
+        "matching_events": null,
+        "missing_events": null,
+        "changed_events": null,
+        "unexpected_events": null,
+        "expected_receipts": null,
+        "matching_receipts": null,
+        "missing_receipts": null,
+        "changed_receipts": null,
+        "unexpected_receipts": null,
+        "pending_receipts": null,
+        "checked_at": null
+      }
+    },
+    {
+      "class_id": "operational.scanner_collection",
+      "minimum_period": "P3M",
+      "state": "unknown",
+      "reasons": [
+        "baseline_missing",
+        "environment_unlabelled"
+      ],
+      "expected_records": null,
+      "verified_records": null,
+      "missing_records": null,
+      "changed_records": null,
+      "unreadable_records": null,
+      "unexpected_records": null,
+      "oldest_retained_at": null,
+      "baseline_digest": null,
+      "audit_copy": null
+    }
+  ],
+  "uncovered_classes": [
+    "operational.scanner_collection",
+    "product.audit_history",
+    "product.source_evidence"
+  ],
+  "elapsed_preservation": "unverified"
+}

@@ -434,6 +434,7 @@ _ACTIONS = (
     "integration.health.read",
     "observer.timing.read", "observer.timing.configure",
     "backup.settings.read", "backup.settings.configure",
+    "preservation.read", "preservation.evidence.read", "audit.read.deployment",
 )
 _LOG = logging.getLogger("uvm.assessment.api")
 _TRUSTED_COMMAND_ORIGIN: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -1782,7 +1783,7 @@ def _envelope_allows(envelope: dict, role: dict) -> bool:
             return False
     if inner.get("membership_mode") == "all_current" and outer.get("membership_mode") != "all_current":
         return False
-    observer_actions = {"observer.timing.read", "observer.timing.configure"}
+    observer_actions = {"observer.timing.read", "observer.timing.configure", "audit.read.deployment"}
     if observer_actions.intersection(role.get("actions", [])):
         allowed_deployments = envelope.get("deployment_scopes", [])
         requested_deployments = role.get("deployment_scopes", [])
@@ -2544,7 +2545,7 @@ def install_assessment_routes(app: FastAPI) -> None:
                 item = {"action": action,
                     "target_scope": copy.deepcopy(envelope.get("target_scope", _EMPTY_SCOPE)),
                     "limits": copy.deepcopy(envelope.get("limits", _LIMIT_DEFAULTS))}
-                if action in {"observer.timing.read", "observer.timing.configure"}:
+                if action in {"observer.timing.read", "observer.timing.configure", "audit.read.deployment"}:
                     item["deployment_scopes"] = copy.deepcopy(envelope.get("deployment_scopes", []))
                 selectable.append(item)
             return {"schema_version": 1, "authority_mode": state.get("mode", "legacy"),

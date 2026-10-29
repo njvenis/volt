@@ -14,8 +14,9 @@ NATIVE_ACTIONS = {
     "ownership.team.create", "ownership.team.update", "ownership.team.membership.set",
 }
 OBSERVER_TIMING_ACTIONS = {"observer.timing.read", "observer.timing.configure"}
+DEPLOYMENT_AUDIT_ACTIONS = {"audit.read.deployment"}
 BACKUP_SETTINGS_ACTIONS = {"backup.settings.read", "backup.settings.configure"}
-DEPLOYMENT_SETTINGS_ACTIONS = OBSERVER_TIMING_ACTIONS | BACKUP_SETTINGS_ACTIONS
+DEPLOYMENT_SETTINGS_ACTIONS = OBSERVER_TIMING_ACTIONS | BACKUP_SETTINGS_ACTIONS | DEPLOYMENT_AUDIT_ACTIONS
 ACCESS_ACTIONS = {"native.authority.activate", "access_group.create", "access_group.update",
     "access_group.membership.set"}
 OWNERSHIP_ACTIONS = {"ownership.team.create", "ownership.team.update",

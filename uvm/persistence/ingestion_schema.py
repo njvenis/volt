@@ -68,6 +68,26 @@ expected_run_events = Table(
     Index("ix_expected_run_event_context", "expected_run_id", "effective_at", "recorded_at"),
 )
 
+# Durable pre-request checkpoints bind an outbound attempt to a stable run
+# revision before the scanner can answer or fail. Request material itself is
+# never retained; only its SHA-256 identity is.
+collection_request_reservations = Table(
+    "collection_request_reservations", uvm_metadata,
+    Column("reservation_id", _ID, primary_key=True),
+    Column("run_id", _ID, nullable=False),
+    Column("run_revision", Integer, nullable=False),
+    Column("attempt_no", Integer, nullable=False),
+    Column("page_ordinal", Integer, nullable=False),
+    Column("request_identity_sha256", String(64), nullable=False),
+    Column("reserved_at", _TZ, nullable=False),
+    ForeignKeyConstraint(["run_id", "run_revision"],
+        ["collection_runs.run_id", "collection_runs.revision"],
+        name="fk_collection_request_reservation_run"),
+    UniqueConstraint("run_id", "attempt_no", name="uq_collection_request_reservation_attempt"),
+    CheckConstraint("attempt_no > 0 AND page_ordinal > 0", name="collection_request_reservation_position_valid"),
+    CheckConstraint("length(request_identity_sha256) = 64", name="collection_request_reservation_digest_valid"),
+)
+
 collection_runs = Table(
     "collection_runs", uvm_metadata,
     Column("run_id", _ID, nullable=False),
@@ -135,6 +155,7 @@ ingestion_evidence = Table(
     Column("evidence_id", _ID, primary_key=True), Column("schema_version", Integer, nullable=False),
     Column("run_id", _ID, nullable=False), Column("run_revision", Integer, nullable=False),
     Column("evidence_ref", String, nullable=False), Column("sha256", String, nullable=False),
+    Column("byte_size", BigInteger, nullable=True),
     Column("kind", String, nullable=False), Column("registered_at", _TZ, nullable=False),
     ForeignKeyConstraint(["run_id", "run_revision"], ["collection_runs.run_id", "collection_runs.revision"], name="fk_ingestion_evidence_run"),
     UniqueConstraint("run_id", "run_revision", "evidence_ref", "sha256", name="uq_ingestion_evidence_exact"),
@@ -162,5 +183,5 @@ import_context_revisions = Table(
 )
 
 ALL_INGESTION_TABLES = (collection_schedules, expected_runs, collection_runs,
-                        run_attempts, run_pages, ingestion_evidence,
+                        collection_request_reservations, run_attempts, run_pages, ingestion_evidence,
                         import_context_revisions)

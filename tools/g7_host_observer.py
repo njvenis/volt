@@ -449,7 +449,7 @@ def read_anchor_inventory(dsn: str, deployment_id: str, sink_id: str,
             options=("-c default_transaction_read_only=on "
                 f"-c statement_timeout={timeout_seconds * 1000}")) as connection:
         rows = connection.execute("""SELECT event_id, payload_sha256, sink_receipt,
-            anchored_at FROM uvm_audit_anchor.inventory
+            anchored_at, contract_version FROM uvm_audit_anchor.inventory
             WHERE deployment_id=%s AND sink_id=%s AND event_id = ANY(%s)""",
             (deployment_id, sink_id, event_ids)).fetchall()
     return {str(row["event_id"]): dict(row) for row in rows}
@@ -494,7 +494,7 @@ def measure_lag(telemetry: dict, anchors: dict[str, dict], values: dict,
         if not isinstance(receipt, str) or not receipt:
             anchor_missing_receipt_count += 1
         valid_anchor = bool(anchor and receipt and anchor.get("sink_receipt") == receipt
-            and anchor.get("payload_sha256") == event.get("event_digest"))
+            and anchor.get("payload_sha256") == event.get("event_digest_v2" if anchor.get("contract_version") == "g7-audit-anchor/v2" else "event_digest"))
         received = _timestamp(event.get("received_at"))
         if valid_anchor:
             anchored = _timestamp(anchor.get("anchored_at"))
@@ -516,7 +516,7 @@ def measure_lag(telemetry: dict, anchors: dict[str, dict], values: dict,
             else:
                 anchor_pending_ages.append(max(0.0, (now - received).total_seconds()))
             if anchor and (receipt is None or anchor.get("sink_receipt") != receipt
-                    or anchor.get("payload_sha256") != event.get("event_digest")):
+                    or anchor.get("payload_sha256") != event.get("event_digest_v2" if anchor.get("contract_version") == "g7-audit-anchor/v2" else "event_digest")):
                 anchor_mismatch_count += 1
     anchor_pending_lag = max(anchor_pending_ages, default=0.0) if audit_complete else None
     anchor_export_lag = (max(anchor_export_lags, default=0.0)

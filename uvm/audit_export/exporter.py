@@ -154,13 +154,18 @@ class AuditExporter:
             if anchor is not None:
                 sink_payload = self._read_sink_record(event_id)
                 mismatch = []
-                if event_digest(payload) != anchor["payload_sha256"]:
+                digest_payload = lambda item: event_digest(item, anchor["contract_version"])
+                if anchor["contract_version"] == "g7-audit-anchor/v1" and hasattr(self._source, "preservation_legacy_metadata"):
+                    from .integrity import legacy_event_digest
+                    metadata = self._source.preservation_legacy_metadata(event_id)
+                    digest_payload = lambda item: legacy_event_digest(item, metadata)
+                if digest_payload(payload) != anchor["payload_sha256"]:
                     mismatch.append("source_content_changed")
                 if receipt != anchor["sink_receipt"]:
                     mismatch.append("source_receipt_missing_or_changed")
                 if sink_payload is None:
                     mismatch.append("siem_record_missing")
-                elif event_digest(sink_payload) != anchor["payload_sha256"]:
+                elif digest_payload(sink_payload) != anchor["payload_sha256"]:
                     mismatch.append("siem_content_changed")
                 if mismatch:
                     condition = ("source_integrity" if any(reason in mismatch for reason in
@@ -181,9 +186,12 @@ class AuditExporter:
                 self._verify_receipted_sink_record(payload)
                 return "deduplicated"
             was_inserted = self._persist(payload)
+            self._verify_receipted_sink_record(payload)
             receipt_value = f"postgres:uvm_audit_export.events:{event_id}"
             self._source.acknowledge_sink_export(UUID(event_id), sink_id,
-                receipt_value, datetime.now(timezone.utc))
+                receipt_value, datetime.now(timezone.utc),
+                **(self._source.acknowledgement_binding(payload)
+                    if hasattr(self._source, "acknowledgement_binding") else {}))
             return "inserted" if was_inserted else "acknowledged"
 
     def _read_sink_record(self, event_id: str) -> dict[str, Any] | None:
@@ -212,7 +220,7 @@ class AuditExporter:
             raise RuntimeError(
                 f"SIEM integrity anomaly: source receipt exists but sink record is missing: {payload['event_id']}"
             )
-        if row[0] != payload:
+        if event_digest(row[0], "g7-audit-anchor/v2") != event_digest(payload, "g7-audit-anchor/v2"):
             raise ValueError(f"event ID {payload['event_id']} was reused with different content")
 
     def _persist(self, payload: dict[str, Any]) -> bool:

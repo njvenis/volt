@@ -160,8 +160,51 @@ def _decode_config(raw: str | None) -> dict[str, dict[str, Any]]:
                 or len(set(role_ids)) != len(role_ids)
                 or (actor_kind != "service" and role_ids)):
             raise RuntimeError("role_ids must be unique non-empty strings on service principals only")
+        service_grants = config.get("service_grants", [])
+        allowed_service_actions = {"preservation.read", "preservation.evidence.read",
+            "audit.read", "audit.read.deployment", "audit.export.deployment"}
+        if (not isinstance(service_grants, list)
+                or (actor_kind != "service" and service_grants)):
+            raise RuntimeError("service_grants are only valid on service principals")
+        normalized_service_grants = []
+        seen_service_grants = set()
+        for grant in service_grants:
+            if (not isinstance(grant, dict)
+                    or set(grant) != {"grant_id", "action", "source_scopes", "deployment_scopes"}
+                    or not isinstance(grant.get("grant_id"), str) or not grant["grant_id"]
+                    or len(grant["grant_id"]) > 128
+                    or any(ord(char) < 33 for char in grant["grant_id"])
+                    or grant["grant_id"] in seen_service_grants
+                    or grant.get("action") not in allowed_service_actions
+                    or not isinstance(grant.get("source_scopes"), list)
+                    or not grant["source_scopes"]
+                    or not isinstance(grant.get("deployment_scopes"), list)):
+                raise RuntimeError("invalid configured service grant")
+            grant_scopes = []
+            for scope in grant["source_scopes"]:
+                if (not isinstance(scope, dict)
+                        or set(scope) != {"source_family", "source_account_id", "scope_key"}
+                        or any(not isinstance(scope.get(key), str) or not scope[key]
+                            for key in ("source_family", "source_account_id", "scope_key"))):
+                    raise RuntimeError("invalid configured service grant scope")
+                grant_scopes.append({key: scope[key] for key in
+                    ("source_family", "source_account_id", "scope_key")})
+            deployments = grant["deployment_scopes"]
+            if (any(not isinstance(item, str) or not item or len(item) > 256
+                    or any(ord(char) < 32 for char in item) for item in deployments)
+                    or len(set(deployments)) != len(deployments)
+                    or (grant["action"] in {"audit.read.deployment", "audit.export.deployment"}
+                        and not deployments)
+                    or (grant["action"] not in {"audit.read.deployment", "audit.export.deployment"}
+                        and deployments)):
+                raise RuntimeError("invalid configured service deployment scope")
+            seen_service_grants.add(grant["grant_id"])
+            normalized_service_grants.append({"grant_id": grant["grant_id"],
+                "action": grant["action"], "source_scopes": grant_scopes,
+                "deployment_scopes": list(deployments)})
         result[principal] = {"token": config["token"], "scopes": tuple(scopes),
-            "actor_kind": actor_kind, "origin": origin, "role_ids": tuple(role_ids)}
+            "actor_kind": actor_kind, "origin": origin, "role_ids": tuple(role_ids),
+            "service_grants": tuple(normalized_service_grants)}
     return result
 
 
@@ -336,6 +379,10 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
             return JSONResponse(status_code=404, content={"schema_version": 1,
                 "error": {"code": "not_found", "message": "Route not found"}})
         response = await call_next(request)
+        if (request.url.path.startswith("/api/v1/operations/preservation")
+                or "/revisions/" in request.url.path and request.url.path.startswith("/api/v1/ingestion/runs/")):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["X-Content-Type-Options"] = "nosniff"
         if "/installation/" in request.url.path:
             response.headers["Referrer-Policy"] = "no-referrer"
             response.headers["Cache-Control"] = "no-store"
@@ -521,8 +568,10 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
             context = auth_service.resolve_request(request)
             if not context.source_scopes:
                 raise HTTPException(403, {"code": "scope_forbidden", "message": "Access forbidden"})
+            configured = principals.get(context.principal_id, {})
             return {"name": context.principal_id, "scopes": context.source_scopes,
-                    "context": context}
+                    "context": context,
+                    "service_grants": configured.get("service_grants", ())}
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(401, {"code": "authentication_required", "message": "Authentication required"})
         supplied = authorization[7:]
@@ -532,7 +581,8 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
             if hmac.compare_digest(supplied, principal["token"]):
                 if not principal["scopes"]:
                     raise HTTPException(403, {"code": "scope_forbidden", "message": "Access forbidden"})
-                return {"name": name, "scopes": principal["scopes"]}
+                return {"name": name, "scopes": principal["scopes"],
+                    "service_grants": principal.get("service_grants", ())}
         raise HTTPException(401, {"code": "authentication_required", "message": "Authentication required"})
 
     def paging(limit, cursor):
@@ -815,6 +865,8 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
     install_read_diagnostics(app, engine)
     from uvm.assessment.d08_transport_diagnostics import install as install_d08_transport_diagnostics
     install_d08_transport_diagnostics(app)
+    from uvm.operations.preservation_api import install_preservation_routes
+    install_preservation_routes(app, engine, auth, secret)
     # Registered last: API handlers retain authority, and reserved service paths
     # never resolve to the SPA. Resolve paths before checking the static root.
     ui_root = os.getenv("UVM_UI_ROOT")

@@ -59,8 +59,12 @@ def discovery():
     issuer, _client_id, _callback, _subject = _config()
     if (_failure_mode or os.environ.get("UVM_G7_PROVIDER_FAILURE")) == "discovery":
         return JSONResponse({"error": "synthetic provider unavailable"}, status_code=503)
-    return {"issuer": issuer, "authorization_endpoint": issuer + "/authorize",
-        "token_endpoint": issuer + "/token", "jwks_uri": issuer + "/jwks",
+    browser_origin = os.environ.get("UVM_OIDC_BROWSER_AUTHORIZATION_ORIGIN", "").rstrip("/")
+    internal_origin = os.environ.get("UVM_OIDC_INTERNAL_ENDPOINT_ORIGIN", "").rstrip("/")
+    return {"issuer": issuer,
+        "authorization_endpoint": (browser_origin or issuer) + "/authorize",
+        "token_endpoint": (internal_origin or issuer) + "/token",
+        "jwks_uri": (internal_origin or issuer) + "/jwks",
         "response_types_supported": ["code"], "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["RS256"],
         "token_endpoint_auth_methods_supported": ["client_secret_basic"]}

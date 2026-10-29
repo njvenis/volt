@@ -6,12 +6,21 @@ FROM ${CE_IMAGE} AS uvm-build
 USER root
 RUN python -m pip install --no-cache-dir uv==0.12.18
 WORKDIR /build
+ENV UV_PROJECT_ENVIRONMENT=/opt/uvm/venv
+RUN install -d -m 0755 /opt/uvm
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 COPY uvm ./uvm
 COPY migrations ./migrations
 COPY alembic.ini ./
 RUN uv sync --frozen --no-dev
+# uv uses a symlink to the builder interpreter by default. After the venv is
+# copied into the runtime image, that symlink resolves outside the venv and
+# CPython skips pyvenv.cfg. Keep a venv-local executable so pinned runtime
+# dependencies and generated console-script shebangs resolve consistently.
+RUN cp -L /opt/uvm/venv/bin/python /opt/uvm/venv/bin/python-uvm \
+    && chmod 0755 /opt/uvm/venv/bin/python-uvm \
+    && ln -sfn python-uvm /opt/uvm/venv/bin/python
 
 FROM node:24.15.0-bookworm-slim@sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d AS ui-build
 WORKDIR /ui
@@ -100,7 +109,7 @@ COPY --from=valkey-bin /lib/libc.musl-x86_64.so.1 /opt/valkey/lib/libc.musl-x86_
 COPY --from=valkey-bin /usr/lib/libssl.so.3 /opt/valkey/lib/libssl.so.3
 COPY --from=valkey-bin /usr/lib/libcrypto.so.3 /opt/valkey/lib/libcrypto.so.3
 WORKDIR /opt/uvm/app
-COPY --from=uvm-build --chown=uvm:uvm /build/.venv /opt/uvm/venv
+COPY --from=uvm-build --chown=uvm:uvm /opt/uvm/venv /opt/uvm/venv
 COPY --from=uvm-build --chown=uvm:uvm /build/uvm ./uvm
 COPY --chown=1001:1337 docker/g7/beat_progress_scheduler.py /app/beat_progress_scheduler.py
 COPY --chown=1001:1337 docker/g7/verification_middleware.py /app/g7_verification_middleware.py

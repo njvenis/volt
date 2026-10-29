@@ -3,7 +3,7 @@ import type {AdminCatalogue,Grantable,NativeLimits,NativePermission,SourceScope}
 
 // Form validation of the server's explicit ceilings. This does not grant authority:
 // the command endpoint still authorises the actor and rechecks current revisions.
-export const isDeploymentSettingsAction=(action:string)=>['observer.timing.read','observer.timing.configure','backup.settings.read','backup.settings.configure'].includes(action);
+export const isDeploymentSettingsAction=(action:string)=>['observer.timing.read','observer.timing.configure','backup.settings.read','backup.settings.configure','audit.read.deployment'].includes(action);
 export const isObserverTimingAction=(action:string)=>['observer.timing.read','observer.timing.configure'].includes(action);
 // Deployment IDs are opaque exact matches. Even "*" is not a wildcard here.
 export function validDeploymentScopes(value:unknown):value is string[] {

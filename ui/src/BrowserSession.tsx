@@ -1,24 +1,25 @@
+import {sessionCandidates, type Scope} from './preservation-api';
 import {useCallback, useEffect, useState} from 'react';
 import {errorCode, pauseBrowserSession, SESSION_EVENT, sessionFetch, setBrowserSession} from './session';
 import {forbiddenState, sessionCopy, type SessionState as State} from './session-copy';
 export function useBrowserSession() {
   const [state, setState] = useState<State>('loading');
-  const [session, updateSession] = useState({name:'', token:''});
+  const [session, updateSession] = useState<{name:string;token:string;candidates:Scope[]}>({name:'',token:'',candidates:[]});
   const [signedOut, setSignedOut] = useState(false);
   const bootstrap = useCallback(async () => {
-    setState('loading'); setBrowserSession(); updateSession({name:'', token:''});
+    setState('loading'); setBrowserSession(); updateSession({name:'', token:'',candidates:[]});
     try {
       const response = await fetch('/api/v1/auth/session', {credentials:'same-origin', cache:'no-store', headers:{Accept:'application/json'}, signal:AbortSignal.timeout(15000)});
       const body = await response.json();
       if (!response.ok) { setState(response.status===401?'signed_out':response.status===403?forbiddenState(errorCode(body)):'unavailable'); return; }
       if (body.schema_version!==1 || body.authenticated!==true || body.credential_mode!=='oidc_session' || typeof body.principal_id!=='string' || typeof body.csrf_token!=='string' || !body.csrf_token) throw new Error('Unsupported session');
-      setBrowserSession(body.csrf_token); updateSession({name:body.principal_id, token:body.csrf_token}); setState('signed_in'); setSignedOut(false);
+      setBrowserSession(body.csrf_token); updateSession({name:body.principal_id, token:body.csrf_token,candidates:sessionCandidates(body)}); setState('signed_in'); setSignedOut(false);
     } catch { setState('unavailable'); }
   }, []);
   useEffect(() => {
     const failure = (event: Event) => {
       const {status,code} = (event as CustomEvent<{status:number;code:string}>).detail;
-      if(status===401)setBrowserSession(); else pauseBrowserSession(); updateSession(prior=>({name:status===401?'':prior.name, token:''}));
+      if(status===401)setBrowserSession(); else pauseBrowserSession(); updateSession(prior=>({name:status===401?'':prior.name, token:'',candidates:[]}));
       setState(status===401?'expired':status===403?forbiddenState(code):'unavailable');
     };
     addEventListener(SESSION_EVENT, failure);
@@ -36,7 +37,7 @@ export function useBrowserSession() {
       if (!response.ok) { const code=errorCode(await response.json()); if(response.status!==401)throw new Error(code); }
       const check = await fetch('/api/v1/auth/session', {credentials:'same-origin', cache:'no-store'});
       if (check.status!==401) throw new Error('Logout not confirmed');
-      setBrowserSession(); updateSession({name:'', token:''}); setSignedOut(true); setState('signed_out');
+      setBrowserSession(); updateSession({name:'', token:'',candidates:[]}); setSignedOut(true); setState('signed_out');
     } catch { setBrowserSession(); updateSession(prior=>({...prior, token:''})); setState('unavailable'); }
   }
   return {session, state, signedOut, bootstrap, logout};

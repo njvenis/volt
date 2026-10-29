@@ -45,6 +45,24 @@ config = context.config
 target_metadata = uvm_metadata
 
 
+def _migration_fault_callbacks():
+    """Allow disposable PostgreSQL tests to fail inside a named revision txn."""
+    target = os.environ.get("UVM_G7_TEST_FAIL_AFTER_REVISION")
+    if target is None:
+        return []
+    if target not in {"0059", "0060", "0061"}:
+        raise RuntimeError("unsupported G7 migration test fault boundary")
+
+    def fail_after_revision(*, ctx, step, heads, run_args):
+        if target in step.up_revision_ids:
+            raise RuntimeError("G7_TEST_MIGRATION_BOUNDARY_FAILURE revision=" + target)
+
+    return [fail_after_revision]
+
+
+_MIGRATION_FAULT_CALLBACKS = _migration_fault_callbacks()
+
+
 def _resolve_url() -> str:
     """Committed alembic.ini keeps the URL blank; per-environment it
     comes from ``sqlalchemy.url`` or the ``UVM_DB_URL`` environment
@@ -88,6 +106,7 @@ def run_migrations_online() -> None:
             connection.commit()
             context.configure(connection=connection,
                               target_metadata=target_metadata,
+                              on_version_apply=_MIGRATION_FAULT_CALLBACKS,
                               transactional_ddl=True)
             try:
                 with context.begin_transaction():
@@ -106,7 +125,8 @@ def run_migrations_online() -> None:
                 connection.commit()
         else:
             context.configure(connection=connection,
-                              target_metadata=target_metadata)
+                              target_metadata=target_metadata,
+                              on_version_apply=_MIGRATION_FAULT_CALLBACKS)
             with context.begin_transaction():
                 context.run_migrations()
 

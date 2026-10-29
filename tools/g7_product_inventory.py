@@ -24,13 +24,14 @@ def database_inventory(url):
             conn.execute(text("SET TRANSACTION READ ONLY"))
             meta=MetaData(); meta.reflect(bind=conn, schema="public")
             for table in sorted((t for t in meta.tables.values() if t.schema in (None,"public")),key=lambda t:t.name):
-                columns=[{"name":c.name,"type":str(c.type),"nullable":c.nullable,"primary_key":c.primary_key,"default":str(getattr(c.server_default,"arg",c.server_default)) if c.server_default else None} for c in table.columns]
+                from sqlalchemy.dialects import postgresql
+                columns=[{"name":c.name,"type":c.type.compile(dialect=postgresql.dialect()) if str(c.type).upper().startswith("TIMESTAMP") else str(c.type),"nullable":c.nullable,"primary_key":c.primary_key,"default":str(getattr(c.server_default,"arg",c.server_default)) if c.server_default else None} for c in table.columns]
                 rows=[]
                 for row in conn.execute(select(table)).mappings():
                     item={k:canon(v) for k,v in row.items()}
                     pk=[item[c.name] for c in table.primary_key.columns]
                     record={"key":pk,"payload_sha256":digest(item)}
-                    if table.name in {"g7_backup_state","g7_backup_host_records","g7_backup_settings_revisions","g7_backup_connector_quarantine","assessment_policy","g7_connectors"}:
+                    if table.name in {"g7_backup_state","g7_backup_host_records","g7_backup_settings_revisions","g7_backup_connector_quarantine","assessment_policy","g7_connectors","ingestion_evidence"}:
                         record["payload"] = item
                     rows.append(record)
                 rows.sort(key=lambda r:json.dumps(r["key"],sort_keys=True,separators=(",",":")))

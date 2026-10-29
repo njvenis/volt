@@ -59,6 +59,10 @@ def validate_verification_queue(before: dict, after: dict) -> dict:
     left, right=before.get("intent_inventory"), after.get("intent_inventory")
     if not isinstance(left,dict) or not isinstance(right,dict) or left != right:
         raise ValueError("post-upgrade durable effect-intent inventory changed")
+    held = left.get("held_intents")
+    if not isinstance(held, list) or any(not isinstance(item, dict)
+            or item.get("state") != "uncertain" for item in held):
+        raise ValueError("pre-capture uncertain effect intents are not explicitly retained as held")
     if right.get("unresolved_count") != 0 or right.get("missing_expected_tables") != []:
         raise ValueError("post-upgrade durable effect-intent inventory is unresolved or incomplete")
     tasks=after.get("tasks")
@@ -90,4 +94,8 @@ def validate_verification_queue(before: dict, after: dict) -> dict:
     if after.get("unresolved") != []: raise ValueError("verification runtime has unresolved task, broker, or read state")
     return {"passed":True,"workers_disabled":True,"broker_empty":True,
       "effect_inventory_sha256":"sha256:"+hashlib.sha256(json.dumps(right,sort_keys=True,separators=(",",":")).encode()).hexdigest(),
+      "pre_capture_held_intent_count":len(held),
+      "pre_capture_held_intent_sha256":"sha256:"+hashlib.sha256(json.dumps(held,sort_keys=True,separators=(",",":")).encode()).hexdigest(),
+      "pre_capture_held_intents_retained":True,
+      "new_unresolved_external_effect_count":right["unresolved_count"],
       "unresolved_external_effect_count":right["unresolved_count"]}

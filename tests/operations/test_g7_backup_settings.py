@@ -103,7 +103,7 @@ class BackupSettingsValidationTests(unittest.TestCase):
             "source_package_manifest_digest": "sha256:" + "e" * 64,
             "target_image_digest": image_digest,
             "target_package_manifest_digest": package_digest,
-            "archive_digest": archive_digest, "from_schema": "0058", "to_schema": "0059",
+            "archive_digest": archive_digest, "from_schema": "0058", "to_schema": "0061",
             "volume_ids": volume_ids}
         document = {"schema_version": 1, "deployment_id": "g7-local",
             "target_image_digest": image_digest, "volume_ids": volume_ids,
@@ -121,12 +121,14 @@ class BackupSettingsValidationTests(unittest.TestCase):
             token = root / "token.json"
             token.write_bytes(canonical_json(signed))
             with patch("uvm.operations.startup_fence._runtime_package_digest", return_value=package_digest), \
+                    patch("uvm.operations.startup_fence._runtime_schema_head", return_value="0061"), \
                     patch.dict("os.environ", {"UVM_G7_SCHEMA_MODE": "upgrade-verification"}):
                 verified = verify_startup_fence(str(token), str(key), deployment_id="g7-local",
                     image_digest=image_digest, volume_ids=volume_ids, archive_digest=archive_digest,
                     recovery_epoch=4, connector_recovery_id=document["connector_recovery_id"],
                     key_id="test-key")
             self.assertEqual(verified["compatibility_admission"]["from_schema"], "0058")
+            self.assertEqual(verified["compatibility_admission"]["to_schema"], "0061")
 
     def test_schema_compatibility_admission_is_journaled_before_replay(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -141,7 +143,7 @@ class BackupSettingsValidationTests(unittest.TestCase):
                 "target_image_digest": "sha256:" + "c" * 64,
                 "target_package_manifest_digest": "sha256:" + "d" * 64,
                 "archive_digest": "sha256:" + "e" * 64,
-                "from_schema": "0058", "to_schema": "0059",
+                "from_schema": "0058", "to_schema": "0061",
                 "volume_ids": {"postgres_cluster": "pg", "ce_media": "media", "uvm_state": "uvm"}}
             saved = controller.journal_schema_compatibility_admission(admission)
             retained = json.loads(controller.journal.read_text())
@@ -168,7 +170,7 @@ class BackupSettingsValidationTests(unittest.TestCase):
                 "upgraded_image_digest": "sha256:" + "d" * 64,
                 "target_package_manifest_digest": "sha256:" + "e" * 64,
                 "forward_volume_ids": {"postgres_cluster": "pg", "ce_media": "media", "uvm_state": "uvm"},
-                "schema_head": "0059", "inventory_attestation_id": str(uuid.uuid4()),
+                "schema_head": "0061", "inventory_attestation_id": str(uuid.uuid4()),
                 "inventory_attestation_digest": "sha256:" + "f" * 64, "product_write_count": 0,
                 "control_mutation_count": 4,
                 "unexpected_inventory_change_count": 0, "unresolved_external_effect_count": 0,
@@ -186,6 +188,14 @@ class BackupSettingsValidationTests(unittest.TestCase):
                 "unresolved_external_effect_count":0,"controller_journal_pre_digest":"sha256:"+"4"*64}
             attestation["attestation_digest"]="sha256:"+hashlib.sha256(json.dumps(attestation,sort_keys=True,separators=(",",":")).encode()).hexdigest()
             controller.state["product_inventory_attestations"]={attestation["attestation_id"]:attestation}
+            controller.state["schema_compatibility_admissions"]={"1":{
+                "admission_id":str(uuid.uuid4()),"recovery_epoch":1,
+                "source_image_digest":request["source_image_digest"],
+                "source_package_manifest_digest":request["source_package_manifest_digest"],
+                "target_image_digest":request["upgraded_image_digest"],
+                "target_package_manifest_digest":request["target_package_manifest_digest"],
+                "archive_digest":request["archive_digest"],"from_schema":"0058",
+                "to_schema":"0061","volume_ids":request["forward_volume_ids"]}}
             request["inventory_attestation_digest"]=attestation["attestation_digest"]
             with self.assertRaises(RecoveryError):
                 controller.journal_development_rollback_request({**request,"unresolved_external_effect_count":1})
@@ -216,13 +226,18 @@ class BackupSettingsValidationTests(unittest.TestCase):
             self.assertGreater(compare_product_inventory(before,after,expected)['unexpected_inventory_change_count'],0)
 
     def test_verification_queue_validator_rejects_unknown_tasks_unresolved_and_failed_broker(self):
-        intent={"unresolved_count":0,"missing_expected_tables":[]}
+        held=[{"connector_id":"fixture-connector","intent_id":"held-intent-1","state":"uncertain"}]
+        intent={"unresolved_count":0,"missing_expected_tables":[],"held_intents":held}
         obs=[{"name":n,"worker_ids":[],"exit_code":69,"expected_absent_worker_response":True,"stdout_bytes":0,"stderr_sha256":hashlib.sha256(b"Error: No nodes replied within time constraint\n").hexdigest(),"classification":"workers_absent"} for n in ("celery_active","celery_reserved","celery_scheduled")]
         obs.append({"name":"valkey_db0_inventory","exit_code":0,"cardinality_errors":0,"key_count":0,"keys_digest":hashlib.sha256(b"[]").hexdigest()})
         before={"unresolved":[],"tasks":[],"intent_inventory":intent}
         expected={"celery_active did not produce a verifiable response","celery_reserved did not produce a verifiable response","celery_scheduled did not produce a verifiable response","Celery task snapshots do not identify the same single expected worker","Valkey DB0 contains unknown queue state or unverified binding contents"}
         after={"unresolved":[],"classified_raw_unresolved":list(expected),"tasks":[],"intent_inventory":intent,"verification_mode":True,"worker_pid_files_absent":True,"worker_absence_proof":{"passed":True,"process_scan_exit":0,"worker_processes":[],"pid_files":[]},"observations":obs}
-        self.assertTrue(validate_verification_queue(before,after)["passed"])
+        proof=validate_verification_queue(before,after)
+        self.assertTrue(proof["passed"])
+        self.assertTrue(proof["pre_capture_held_intents_retained"])
+        self.assertEqual(proof["pre_capture_held_intent_count"],1)
+        self.assertEqual(proof["new_unresolved_external_effect_count"],0)
         raw={**after,"unresolved":list(expected)}
         absence=after["worker_absence_proof"]
         self.assertTrue(validate_verification_queue(before,classify_verification_queue(raw,absence))["passed"])

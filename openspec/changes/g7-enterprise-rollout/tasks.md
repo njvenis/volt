@@ -10,7 +10,7 @@
 - [ ] 2.2 [AGENT] Verify VOLT-managed access groups, ownership teams, current authorization, approval eligibility and session revocation.
 - [ ] 2.3 [AGENT] Verify ingestion-based SLA, exception pause/resume, retained breach history and configurable expiry warnings.
 - [ ] 2.4 [AGENT] Verify application audit viewing, independent SIEM export receipts/reconciliation, data preservation classes and failure alerts.
-- [ ] 2.5 [AGENT] Verify one-container process supervision, network boundaries, durable state, coordinated backup/restore and upgrade rollback in a named disposable environment.
+- [ ] 2.5 [AGENT] Verify one-container process supervision, network boundaries, durable state, coordinated backup/restore and upgrade rollback in a named disposable environment. For G7-REC-01, retain separately labelled historical `0058→0059` evidence and current-main `0058→0061` evidence; bind the current image/package pair and source archive/image, prove control-only startup before migration, exact migration inventories and rollback on separate fresh volumes at a higher recovery epoch, fail closed on partial/unknown schema drift, and retain continuous effect fences and zero post-backup product writes.
 - [ ] 2.6 [AGENT] Run strict OpenSpec validation and the relevant integrated journey; record exact source, environment, commands, outputs, exits and cleanup; obtain independent review.
 
 ## 3. Release and external validation

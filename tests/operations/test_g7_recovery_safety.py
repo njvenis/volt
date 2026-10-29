@@ -76,6 +76,8 @@ class RecoverySafetyTests(unittest.TestCase):
         import copy
         from tools.g7_inventory_expectation import expected_inventory
         from tools.g7_product_inventory import canon, digest as inventory_digest, compare
+        from tools.g7_inventory_expectation import _migration_table_record
+        from uvm.persistence.ingestion_schema import ingestion_evidence
         from uvm.persistence.connector_schema import connectors
         connectors.create(self.engine)
         with self.engine.begin() as c:
@@ -94,6 +96,13 @@ class RecoverySafetyTests(unittest.TestCase):
                 baseline['uvm'][table.name]={'columns':[],'schema_sha256':'baseline','rows':rows,'row_count':len(rows)}
         baseline['uvm']['alembic_version']={'columns':[],'schema_sha256':'baseline',
             'rows':[{'key':['0058'],'payload_sha256':inventory_digest({'version_num':'0058'})}],'row_count':1}
+        ingestion = _migration_table_record(ingestion_evidence)
+        ingestion['columns'] = [c for c in ingestion['columns'] if c['name'] != 'byte_size']
+        ingestion['constraints']['checks'] = [c for c in ingestion['constraints']['checks']
+            if not c.startswith('byte_size ')]
+        ingestion['schema_sha256'] = inventory_digest({'columns': ingestion['columns'],
+            'constraints': ingestion['constraints']})
+        baseline['uvm']['ingestion_evidence'] = ingestion
         policy={**self.policy,'revision':5}
         policy['digest']='sha256:'+digest({k:v for k,v in policy.items() if k!='digest'})
         request=self.signed({'schema_version':1,'deployment_id':'local','report_id':str(uuid.uuid4()),

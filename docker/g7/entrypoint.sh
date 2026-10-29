@@ -459,7 +459,7 @@ if [[ ${UVM_G7_RECOVERY_STAGE:-} == control-only ]]; then
   echo 'G7_READINESS=recovery-control-only'
   # The host performs authenticated resync and quarantine while this is the
   # only application listener. Product APIs and CE stay stopped until the
-  # signed volumes_restored transition is durable in the restored UVM DB.
+  # signed restored transition and the admitted migration head are durable.
   for attempt in $(seq 1 "${UVM_G7_RECOVERY_GATE_TIMEOUT_SECONDS:-1800}"); do
     if PYTHONPATH=/opt/uvm/app /opt/uvm/venv/bin/python -m uvm.operations.startup_fence \
         --check-admission >"$STATE/recovery-gate.json" 2>"$STATE/recovery-gate-query.stderr"; then
@@ -474,6 +474,23 @@ if [[ ${UVM_G7_RECOVERY_STAGE:-} == control-only ]]; then
     [[ ! -s "$STATE/recovery-gate-query.stderr" ]] || sed -n '1,5p' "$STATE/recovery-gate-query.stderr" >&2
     exit 70
   }
+  if [[ -n ${UVM_G7_SCHEMA_MODE:-} && ${UVM_G7_SCHEMA_MODE} == upgrade-verification ]]; then
+    schema_ready=0
+    for attempt in $(seq 1 "${UVM_G7_RECOVERY_GATE_TIMEOUT_SECONDS:-1800}"); do
+      if PYTHONPATH=/opt/uvm/app /opt/uvm/venv/bin/python -m uvm.operations.startup_fence \
+          --check-schema-complete >"$STATE/schema-migration-gate.json" 2>"$STATE/schema-migration-gate-query.stderr"; then
+        schema_ready=1
+        break
+      fi
+      abort_if_shutdown
+      sleep 1
+    done
+    (( schema_ready == 1 )) || {
+      echo 'G7_RECOVERY_ERROR admitted migration head was not complete' >&2
+      [[ ! -s "$STATE/schema-migration-gate-query.stderr" ]] || sed -n '1,5p' "$STATE/schema-migration-gate-query.stderr" >&2
+      exit 70
+    }
+  fi
   recovery_control_gate_passed=1
   rm -f "$STATE/ready"
 fi

@@ -114,7 +114,7 @@ class Controller:
         return value
 
     def journal_schema_compatibility_admission(self, admission: dict) -> dict:
-        """Durably journal the exact one-step image/schema transition before signing startup."""
+        """Durably journal one explicitly supported image/schema transition."""
         fields = {"admission_id", "recovery_epoch", "source_image_digest",
             "source_package_manifest_digest", "target_image_digest",
             "target_package_manifest_digest", "archive_digest", "from_schema",
@@ -125,7 +125,8 @@ class Controller:
                 or str(uuid.UUID(admission["admission_id"])) != admission["admission_id"]
                 or type(admission["recovery_epoch"]) is not int
                 or admission["recovery_epoch"] != self.state["recovery_epoch_floor"]
-                or admission["from_schema"] != "0058" or admission["to_schema"] != "0059"
+                or admission["from_schema"] != "0058"
+                or admission["to_schema"] not in {"0059", "0061"}
                 or not isinstance(admission["volume_ids"], dict)
                 or set(admission["volume_ids"]) != {"postgres_cluster", "ce_media", "uvm_state"}
                 or any(not isinstance(value, str) or not value for value in admission["volume_ids"].values())
@@ -159,7 +160,7 @@ class Controller:
                 or request["state"] != "development_rollback_requested"
                 or type(request["recovery_epoch"]) is not int
                 or request["recovery_epoch"] != self.state["recovery_epoch_floor"]
-                or request["schema_head"] != "0059"
+                or request["schema_head"] != "0061"
                 or any(type(request[name]) is not int or request[name] < 0 for name in
                     ("product_write_count", "unexpected_inventory_change_count", "unresolved_external_effect_count"))
                 or any(request[name] is not True for name in
@@ -171,6 +172,17 @@ class Controller:
                 or any(not isinstance(request[name], str) or not re.fullmatch(
                     r"sha256:[0-9a-f]{64}", request[name]) for name in digests)):
             raise RecoveryError("development rollback request lacks clean fenced evidence")
+        admission = (self.state.get("schema_compatibility_admissions") or {}).get(
+            str(request["recovery_epoch"]))
+        if (not isinstance(admission, dict) or admission.get("from_schema") != "0058"
+                or admission.get("to_schema") != request["schema_head"]
+                or admission.get("target_image_digest") != request["upgraded_image_digest"]
+                or admission.get("target_package_manifest_digest") != request["target_package_manifest_digest"]
+                or admission.get("archive_digest") != request["archive_digest"]
+                or admission.get("source_image_digest") != request["source_image_digest"]
+                or admission.get("source_package_manifest_digest") != request["source_package_manifest_digest"]
+                or admission.get("volume_ids") != request["forward_volume_ids"]):
+            raise RecoveryError("development rollback request does not match its journaled schema admission")
         attestation=(self.state.get("product_inventory_attestations") or {}).get(request["inventory_attestation_id"])
         attestation_digest=("sha256:"+hashlib.sha256(json.dumps({k:v for k,v in attestation.items() if k!="attestation_digest"},sort_keys=True,separators=(",",":")).encode()).hexdigest()) if isinstance(attestation,dict) else None
         if (not isinstance(attestation,dict) or attestation_digest != request["inventory_attestation_digest"]

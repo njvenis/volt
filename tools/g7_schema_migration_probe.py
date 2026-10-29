@@ -133,6 +133,44 @@ INSERT INTO ingestion_evidence VALUES ('{evidence_id}', 1, '{run_id}', 1,
             "reservation_table": True, "byte_size": True, "row": expected_success_row}
         if state != expected_success:
             raise RuntimeError("successful Alembic transition changed old evidence or missed exact 0061 state")
+        run(["docker", "exec", name, "mkdir", "-p", "/tmp/tools"],
+            root, "create-inventory-probe-tools")
+        run(["docker", "cp", "tools/g7_product_inventory.py",
+            f"{name}:/tmp/tools/g7_product_inventory.py"], root, "copy-inventory-capture")
+        run(["docker", "cp", "tools/g7_inventory_expectation.py",
+            f"{name}:/tmp/tools/g7_inventory_expectation.py"], root, "copy-inventory-expectation")
+        type_probe = """import json,sys
+sys.path.insert(0,'/tmp')
+sys.path.insert(0,'/opt/uvm/app')
+from tools.g7_product_inventory import database_inventory
+from tools.g7_inventory_expectation import _migration_table_record
+from uvm.persistence.ingestion_schema import collection_request_reservations, ingestion_evidence
+url='postgresql+psycopg://postgres@127.0.0.1:5432/g7_probe_success'
+actual=database_inventory(url)
+expected={'collection_request_reservations':_migration_table_record(collection_request_reservations),
+ 'ingestion_evidence':_migration_table_record(ingestion_evidence)}
+columns=(('collection_request_reservations','reserved_at'),
+ ('ingestion_evidence','registered_at'),('ingestion_evidence','byte_size'))
+captured={}
+for table,column in columns:
+ actual_column=next(c for c in actual[table]['columns'] if c['name']==column)
+ expected_column=next(c for c in expected[table]['columns'] if c['name']==column)
+ actual_type=actual_column['type']; expected_type=expected_column['type']
+ captured[f'{table}.{column}']={'actual_type':actual_type,'expected_type':expected_type,
+  'actual_nullable':actual_column['nullable'],'expected_nullable':expected_column['nullable']}
+ if actual_type!=expected_type or actual_column['nullable']!=expected_column['nullable']:
+  raise SystemExit('PostgreSQL capture and migration expectation disagree on timezone semantics')
+ if column in ('reserved_at','registered_at') and actual_type!='TIMESTAMP WITH TIME ZONE':
+  raise SystemExit('PostgreSQL capture lost timestamp timezone semantics')
+json.dump({'passed':True,'types':captured},sys.stdout,sort_keys=True,separators=(',',':'))
+"""
+        captured_types = run(["docker", "exec", "--user", "uvm", name, "/opt/uvm/venv/bin/python",
+            "-c", type_probe], root, "actual-inventory-timezone-types")
+        type_value = json.loads(captured_types.stdout.decode())
+        if type_value.get("passed") is not True:
+            raise RuntimeError("actual inventory capture did not prove PostgreSQL timezone semantics")
+        (root / "actual-inventory-timezone-types.json").write_text(
+            json.dumps(type_value, sort_keys=True, separators=(",", ":")) + "\n")
         (root / "probe-result.json").write_text(json.dumps({"passed": True,
             "postgres_image_id": args.image, "tested_revision": "0058→0061",
             "failure_boundaries": ["0059", "0060", "0061"],

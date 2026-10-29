@@ -12,7 +12,6 @@ import re
 from unittest.mock import patch
 from pathlib import Path
 import sqlalchemy as sa
-from fastapi import FastAPI, Request
 from tools.g7_product_inventory import canon, digest
 
 REPLAY_TABLES = {"g7_backup_state", "g7_backup_host_records", "g7_backup_settings_revisions",
@@ -26,7 +25,8 @@ def _migration_table_record(table):
         if isinstance(value, sa.String): return "VARCHAR" + (f"({value.length})" if value.length else "")
         if isinstance(value, sa.BigInteger): return "BIGINT"
         if isinstance(value, sa.Integer): return "INTEGER"
-        if isinstance(value, sa.DateTime): return "TIMESTAMP"
+        if isinstance(value, sa.DateTime):
+            return "TIMESTAMP WITH TIME ZONE" if value.timezone else "TIMESTAMP WITHOUT TIME ZONE"
         return str(value).upper()
     columns = [{"name": column.name, "type": type_name(column.type),
         "nullable": column.nullable, "primary_key": column.primary_key,
@@ -59,10 +59,30 @@ def _migration_table_record(table):
 
 
 def _append_0061_byte_size_expectation(evidence):
-    if not isinstance(evidence, dict) or 'byte_size' in {c['name'] for c in evidence['columns']}:
+    if not isinstance(evidence, dict) or not isinstance(evidence.get('columns'), list) or \
+            not isinstance(evidence.get('constraints'), dict) or \
+            not isinstance(evidence.get('rows'), list) or 'byte_size' in {c['name'] for c in evidence['columns']}:
         raise ValueError('0058 baseline ingestion_evidence schema is unexpected')
-    if any('payload' not in row for row in evidence['rows']):
-        raise ValueError('0058 ingestion_evidence baseline lacks independently captured row payloads')
+    names = [c.get('name') for c in evidence['columns']]
+    if len(names) != len(set(names)) or any(not isinstance(n, str) for n in names):
+        raise ValueError('0058 ingestion_evidence baseline columns are ambiguous')
+    primary_key = [c['name'] for c in evidence['columns'] if c.get('primary_key')]
+    seen = set()
+    for row in evidence['rows']:
+        payload = row.get('payload')
+        if not isinstance(payload, dict) or set(payload) != set(names):
+            raise ValueError('0058 ingestion_evidence baseline lacks complete row payloads')
+        if digest(payload) != row.get('payload_sha256'):
+            raise ValueError('0058 ingestion_evidence baseline payload digest mismatch')
+        key = [payload[name] for name in primary_key]
+        if row.get('key') != key:
+            raise ValueError('0058 ingestion_evidence baseline primary-key binding mismatch')
+        encoded = json.dumps(key, sort_keys=True, separators=(',', ':'))
+        if encoded in seen:
+            raise ValueError('0058 ingestion_evidence baseline has duplicate primary keys')
+        seen.add(encoded)
+    if evidence.get('row_count') != len(evidence['rows']):
+        raise ValueError('0058 ingestion_evidence baseline row count mismatch')
     evidence['columns'].append({'name':'byte_size','type':'BIGINT','nullable':True,
         'primary_key':False,'default':None})
     evidence['constraints']['checks'] = sorted([*evidence['constraints']['checks'],
@@ -80,6 +100,7 @@ def _append_0061_byte_size_expectation(evidence):
 
 
 def expected_inventory(source, receipts, public_key):
+    from fastapi import FastAPI, Request
     from uvm.operations.api import install_observer_settings_routes
     from uvm.persistence.backup_settings_schema import (g7_backup_state, g7_backup_host_records,
         g7_backup_settings_revisions, g7_backup_connector_quarantine)

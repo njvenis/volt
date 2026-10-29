@@ -24,7 +24,8 @@ def database_inventory(url):
             conn.execute(text("SET TRANSACTION READ ONLY"))
             meta=MetaData(); meta.reflect(bind=conn, schema="public")
             for table in sorted((t for t in meta.tables.values() if t.schema in (None,"public")),key=lambda t:t.name):
-                columns=[{"name":c.name,"type":str(c.type),"nullable":c.nullable,"primary_key":c.primary_key,"default":str(getattr(c.server_default,"arg",c.server_default)) if c.server_default else None} for c in table.columns]
+                from sqlalchemy.dialects import postgresql
+                columns=[{"name":c.name,"type":c.type.compile(dialect=postgresql.dialect()) if str(c.type).upper().startswith("TIMESTAMP") else str(c.type),"nullable":c.nullable,"primary_key":c.primary_key,"default":str(getattr(c.server_default,"arg",c.server_default)) if c.server_default else None} for c in table.columns]
                 rows=[]
                 for row in conn.execute(select(table)).mappings():
                     item={k:canon(v) for k,v in row.items()}

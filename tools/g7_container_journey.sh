@@ -1349,9 +1349,9 @@ PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
   $([[ $EXCEPTION_WARNING_MODE == 1 ]] && printf '%s' '--exception-warning-only') \
   >"$EVIDENCE/browser-journey.stdout" 2>"$EVIDENCE/browser-journey.stderr"
 
-# Retain the authenticated settings DTO while the source OIDC sync heartbeat is
-# live. Verification-only restore deliberately stops identity sync until the
-# signed release, so the final status calculation uses this captured readback.
+# Retain backup settings only in backup recovery modes. Observer and warning
+# journeys deliberately revoke or never establish this backup session.
+if (( IS_BACKUP_MODE )); then
 python3 - "$EVIDENCE/recovery-auth-state.json" "$API_PORT" \
     "$EVIDENCE/source-backup-settings-readback.json" <<'PYSOURCEBACKUPSETTINGS'
 import json,sys,urllib.request
@@ -1366,6 +1366,7 @@ if not isinstance(value.get('desired'),dict) or not isinstance(value.get('status
     raise SystemExit('source backup-settings readback is incomplete')
 Path(sys.argv[3]).write_text(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
 PYSOURCEBACKUPSETTINGS
+fi
 
 if (( EXCEPTION_WARNING_MODE )); then
   for _ in $(seq 1 45); do
@@ -1850,6 +1851,7 @@ PYEXACTREPLAY
     done
     (( pre_migration_control_ready )) || { echo 'refreshed current-image control-only restore did not become healthy' >&2; exit 2; }
   fi
+  if (( UPGRADE_ROLLBACK_MODE )); then
   docker exec "$RESTORE_CONTAINER" bash -lc 'test "$(cat /run/uvm-g7/runtime-mode)" = control'
   docker exec "$RESTORE_CONTAINER" test ! -f /run/uvm-g7/pid-api
   docker exec "$RESTORE_CONTAINER" test ! -f /run/uvm-g7/pid-ce-web
@@ -1860,19 +1862,30 @@ PYEXACTREPLAY
   docker exec "$RESTORE_CONTAINER" bash -lc \
     'export UVM_DB_URL="postgresql+psycopg://uvm_app:$(cat /run/secrets/uvm_db_password)@127.0.0.1:5432/uvm"; exec /opt/uvm/venv/bin/python -m uvm.operations.startup_fence --check-admission' \
     >"$EVIDENCE/pre-migration-restored-context.json"
-  python3 - "$RESTORE_CONTAINER" "$EVIDENCE/pre-migration-control-only.json" <<'PYCONTROLONLY'
-import json,subprocess,sys
-container,out=sys.argv[1:]
-ports={}
-for name,port in (("uvm_api",8000),("ce_api",8081)):
- code=subprocess.run(["docker","exec",container,"bash","-lc",
-   f"/opt/uvm/venv/bin/python -c 'import socket;s=socket.socket();s.settimeout(1);raise SystemExit(0 if s.connect_ex((\"127.0.0.1\",{port})) else 1)'"] ,capture_output=True).returncode
- ports[name]={"listener_open":code==1,"probe_exit":code}
-if any(v["listener_open"] for v in ports.values()): raise SystemExit("product listener opened before admitted migration")
-json.dump({"passed":True,"runtime_mode":"control","product_listeners":ports,
- "product_api_pid_absent":True,"ce_web_pid_absent":True,"workers_absent":True,
- "restored_context_verified":True},open(out,"x"),sort_keys=True,separators=(",",":"))
+  for probe in uvm_api:8000 ce_api:8081; do
+    probe_name=${probe%%:*}; probe_port=${probe##*:}
+    set +e
+    uv run python -m tools.g7_listener_probe "$RESTORE_CONTAINER" "$probe_port" \
+      >"$EVIDENCE/pre-migration-listener-$probe_name.stdout" \
+      2>"$EVIDENCE/pre-migration-listener-$probe_name.stderr"
+    probe_exit=$?
+    set -e
+    printf '%s\n' "$probe_exit" >"$EVIDENCE/pre-migration-listener-$probe_name.exit"
+    (( probe_exit == 0 )) || { echo "listener probe failed for $probe_name" >&2; exit 2; }
+  done
+  python3 - "$RESTORE_CONTAINER" "$EVIDENCE" <<'PYCONTROLONLY'
+import json,sys
+from pathlib import Path
+container,root=sys.argv[1:]; root=Path(root); ports={}
+for name in ('uvm_api','ce_api'):
+ value=json.loads((root/f'pre-migration-listener-{name}.stdout').read_text())
+ ports[name]={'listener_open':value['listener']=='open','probe_exit':int((root/f'pre-migration-listener-{name}.exit').read_text())}
+if any(v['listener_open'] for v in ports.values()): raise SystemExit('product listener opened before admitted migration')
+json.dump({'passed':True,'runtime_mode':'control','product_listeners':ports,
+ 'product_api_pid_absent':True,'ce_web_pid_absent':True,'workers_absent':True,
+ 'restored_context_verified':True},open(root/'pre-migration-control-only.json','x'),sort_keys=True,separators=(',',':'))
 PYCONTROLONLY
+  fi
   if (( UPGRADE_ROLLBACK_MODE )); then
     docker exec "$RESTORE_CONTAINER" bash -lc \
       'export UVM_DB_URL="postgresql+psycopg://uvm_app:$(cat /run/secrets/uvm_db_password)@127.0.0.1:5432/uvm"; cd /opt/uvm/app; exec /opt/uvm/venv/bin/python -m alembic -c alembic.ini current' \
@@ -1932,8 +1945,7 @@ PYCONTROLONLY
   (( post_migration_ready )) || { echo 'post-migration verification listener unavailable' >&2; exit 2; }
   uv run python "$ROOT/tools/g7_recovery_public_readback.py" --evidence "$EVIDENCE" --phase post-migration \
     >"$EVIDENCE/post-migration-public-readback.json"
-  if (( UPGRADE_ROLLBACK_MODE )); then
-    restore_ce_ready=0
+  restore_ce_ready=0
     for _ in $(seq 1 90); do
       if docker exec "$RESTORE_CONTAINER" curl --fail --silent --show-error --max-time 5 \
           -u "admin:$CE_ADMIN_PASSWORD" 'http://127.0.0.1:8081/api/v2/findings/?limit=1' \
@@ -1942,7 +1954,7 @@ PYCONTROLONLY
       fi
       sleep 1
     done
-    (( restore_ce_ready )) || { echo 'CE reader did not start after schema 0061 migration and restored-context gate' >&2; exit 2; }
+  (( restore_ce_ready )) || { echo 'CE public reader did not start after restored-context admission' >&2; exit 2; }
     docker exec "$RESTORE_CONTAINER" curl --fail --silent --show-error --max-time 15 \
       -u "admin:$CE_ADMIN_PASSWORD" 'http://127.0.0.1:8081/api/v2/findings/?limit=100' \
       >"$EVIDENCE/restore-ce-findings.json"
@@ -1966,7 +1978,8 @@ PYRESTORECE
     docker exec "$RESTORE_CONTAINER" curl --fail --silent --show-error --max-time 15 -u "admin:$CE_ADMIN_PASSWORD" \
       "http://127.0.0.1:8081/api/v2/engagements/$ENGAGEMENT_ID/" >"$EVIDENCE/restore-ce-engagement.json"
     cmp "$EVIDENCE/source-ce-engagement.json" "$EVIDENCE/restore-ce-engagement.json"
-    chmod 600 "$EVIDENCE/restore-ce-findings.json" "$EVIDENCE/restore-ce-public-sentinel.json"
+  chmod 600 "$EVIDENCE/restore-ce-findings.json" "$EVIDENCE/restore-ce-public-sentinel.json"
+  if (( UPGRADE_ROLLBACK_MODE )); then
     docker cp "$ROOT/tools/g7_product_inventory.py" "$RESTORE_CONTAINER:/tmp/g7_product_inventory.py"
     docker exec "$RESTORE_CONTAINER" /opt/uvm/venv/bin/python /tmp/g7_product_inventory.py --output /tmp/forward-product-inventory.json
     docker cp "$RESTORE_CONTAINER:/tmp/forward-product-inventory.json" "$EVIDENCE/forward-product-inventory.json"
@@ -2258,11 +2271,13 @@ from tools.g7_upgrade_assertions import validate_epoch_two_readbacks
 from uvm.operations.backup_host import digest
 config=load_config(Path(sys.argv[1])); controller=Controller(config); root=Path(sys.argv[2])
 if (root/'explicit-migration.exit').read_text().strip()!='0': raise ValueError('explicit migration failed')
-if json.loads((root/'pre-migration-control-only.json').read_text()).get('passed') is not True: raise ValueError('pre-migration reader fence was not proved')
+upgrade=(root/'upgrade-rollback-mode.txt').exists()
+if upgrade and json.loads((root/'pre-migration-control-only.json').read_text()).get('passed') is not True: raise ValueError('pre-migration reader fence was not proved')
 if json.loads((root/'post-migration-public-readback.json').read_text()).get('passed') is not True: raise ValueError('post-migration public retained assertions missing')
 for name in ('media.txt','engagement.json'):
  if (root/('source-ce-'+name)).read_bytes() != (root/('restore-ce-'+name)).read_bytes(): raise ValueError('CE retained sentinel differs')
-files=['pre-migration-control-only.json','post-migration-public-readback.json','source-ce-public-sentinel.json','restore-ce-public-sentinel.json','source-ce-media.txt','restore-ce-media.txt','source-ce-engagement.json','restore-ce-engagement.json','source-backup-settings-readback.json','explicit-migration.exit','signed-drain-proof.json']
+files=['post-migration-public-readback.json','source-ce-public-sentinel.json','restore-ce-public-sentinel.json','source-ce-media.txt','restore-ce-media.txt','source-ce-engagement.json','restore-ce-engagement.json','source-backup-settings-readback.json','explicit-migration.exit','signed-drain-proof.json']
+if upgrade: files.append('pre-migration-control-only.json')
 if (root/'upgrade-rollback-mode.txt').exists():
  required=['rollback-public-readback.json','rollback-uvm-group.json','rollback-uvm-audit.json','rollback-ce-findings.json','rollback-volume-ids.json','restore-ce-media.txt','restore-ce-engagement.json']
  for name in required:

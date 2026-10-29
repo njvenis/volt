@@ -144,10 +144,11 @@ def run(args: argparse.Namespace) -> None:
                 "actions": ["observer.timing.read", "observer.timing.configure",
                     "backup.settings.read", "backup.settings.configure", "assessment.read", "audit.read",
                     "preservation.read", "preservation.evidence.read", "audit.read.deployment",
-                    "audit.export.deployment"],
+                    "audit.export.deployment", *( ["acceptance.submit", "acceptance.approve",
+                    "warning.route.manage", "warning.actor_link.manage"] if args.exception_warning else [] )],
                 "target_scope": {"group_ids": ["*"], "source_families": ["*"],
                     "environments": ["*"], "service_ids": ["*"], "membership_mode": "all_current"},
-                "limits": {"maximum_acceptance_days": None, "maximum_severity": None,
+                "limits": {"maximum_acceptance_days": 2 if args.exception_warning else None, "maximum_severity": None,
                     "whole_group_confirmation": True, "allowed_environments": ["*"],
                     "allowed_service_ids": ["*"],
                     "allowed_sla_clock_bases": ["elapsed_utc_seconds", "calendar_days_utc"],
@@ -157,8 +158,22 @@ def run(args: argparse.Namespace) -> None:
                     "maximum_deadline_extension_seconds": None,
                     "allowed_identity_scalar_fields": {}},
                 "separation_of_duties": {"approval_requires_distinct_actor": True,
-                    "prohibit_requester_approval": True, "required_approver_count": 1,
+                    "prohibit_requester_approval": not args.exception_warning, "required_approver_count": 1,
                     "prohibited_action_pairs": []},
+                **({"warning_route_scope": {
+                "installation_ids": ["fixture-installation"], "workspace_ids": ["T_FIXTURE"],
+                "channel_ids": ["C_FIXTURE_SUCCESS", "C_FIXTURE_FAILED", "C_FIXTURE_UNCERTAIN",
+                    "SMTP_FIXTURE_ACCEPTED", "SMTP_FIXTURE_RETRY", "SMTP_FIXTURE_UNCERTAIN",
+                    "SMTP_FIXTURE_PREDATA"],
+                "destination_refs": ["fixture-destination", "fixture-failed-destination",
+                    "fixture-uncertain-destination", "fixture-smtp-accepted",
+                    "fixture-smtp-retry", "fixture-smtp-uncertain",
+                    "fixture-smtp-predatadisconnect"],
+                "recipient_ids": ["g7-actor"], "channels": ["slack", "email"],
+                "access_group_ids": ["00000000-0000-4000-8000-000000000024"],
+                "failure_alert_group_ids": ["00000000-0000-4000-8000-000000000024"],
+                "finding_group_ids": [str(uuid.uuid5(uuid.NAMESPACE_URL, 'volt:g7:recovery-fixture:group'))]}}
+                    if args.exception_warning else {}),
                 "source_scopes": [{"source_family": "local", "source_account_id": "g7-local",
                     "scope_key": "all"}], "deployment_scopes": ["g7-local", "g7-other"]},
                 separators=(",", ":")),
@@ -550,6 +565,7 @@ def main() -> int:
     parser.add_argument("--oidc-internal", action="store_true")
     parser.add_argument("--api-port", type=int, default=8000)
     parser.add_argument("--recovery-port", type=int, default=8002)
+    parser.add_argument("--exception-warning", action="store_true")
     args = parser.parse_args()
     run(args)
     return 0

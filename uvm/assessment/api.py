@@ -77,6 +77,13 @@ _UTC = timezone.utc
 _FINDINGS_PROJECTION_LOCK = threading.Lock()
 
 
+def _warning_human_principal_is_enabled(connection, principal_id: str) -> bool:
+    """Resolve Slack human binding against persisted OIDC identity authority."""
+    enabled = connection.execute(sa.select(auth_principals.c.enabled).where(
+        auth_principals.c.principal_id == principal_id).with_for_update()).scalar_one_or_none()
+    return enabled is True
+
+
 def _parse_cursor_utc(value: str) -> datetime:
     """Parse a signed cursor UTC instant without lexical precision assumptions."""
     if not isinstance(value, str):
@@ -2184,6 +2191,11 @@ def install_assessment_routes(app: FastAPI) -> None:
         if not isinstance(usergroups, list) or any(not isinstance(value, str)
                 or not re.fullmatch(r"S[A-Z0-9]{2,30}", value) for value in usergroups):
             _error(422, "invalid_command", "Slack mention groups are invalid")
+        max_attempts = body.get("max_attempts", 5)
+        retry_base_seconds = body.get("retry_base_seconds", 60)
+        if (type(max_attempts) is not int or not 1 <= max_attempts <= 20
+                or type(retry_base_seconds) is not int or not 1 <= retry_base_seconds <= 3600):
+            _error(422, "invalid_command", "Warning retry bounds are invalid")
         uvm_link = body.get("link")
         email_recipient = body.get("email_recipient")
         if uvm_link is not None and (not isinstance(uvm_link, str) or len(uvm_link) > 2048
@@ -2248,6 +2260,7 @@ def install_assessment_routes(app: FastAPI) -> None:
                         "warning.route.manage", old_targets, request, str(uuid.uuid4()))
             revision = int(latest) + 1
             config = {"offset_seconds": sorted(set(body["offset_seconds"])),
+                "max_attempts": max_attempts, "retry_base_seconds": retry_base_seconds,
                 "failure_alert_group_ids": sorted(set(alert_groups)),
                 "finding_group_ids": sorted(set(target_group_ids)),
                 "usergroup_ids": usergroups, "channel": body["channel"],
@@ -2268,6 +2281,8 @@ def install_assessment_routes(app: FastAPI) -> None:
                         "destination_ref": body["destination_ref"],
                         "recipient_id": body["recipient_id"],
                         "offset_seconds": config["offset_seconds"],
+                        "max_attempts": config["max_attempts"],
+                        "retry_base_seconds": config["retry_base_seconds"],
                         "installation_id": body["installation_id"],
                         "workspace_id": body["workspace_id"], "channel_id": body["channel_id"],
                         "usergroup_ids": usergroups, "link": uvm_link,
@@ -2351,9 +2366,8 @@ def install_assessment_routes(app: FastAPI) -> None:
                         exception_warning_actor_links.c.revision == latest).with_for_update()).mappings().one()
                     if old_link["principal_id"] not in allowed_principals:
                         _error(403, "source_scope_forbidden", "Rebinding is outside the current warning administration envelope")
-            identity = policy.get("principals", {}).get(body["principal_id"])
-            if body["enabled"] and (not isinstance(identity, dict)
-                    or identity.get("actor_kind") != "principal" or identity.get("enabled") is False):
+            if body["enabled"] and not _warning_human_principal_is_enabled(
+                    connection, body["principal_id"]):
                 _error(422, "invalid_command", "Slack links require a configured human UVM principal")
             revision, link_id = int(latest) + 1, str(uuid.uuid4())
             connection.execute(exception_warning_actor_links.insert().values(
@@ -4436,7 +4450,8 @@ def install_assessment_routes(app: FastAPI) -> None:
                     "next_attempt_at": _utc_z(intent["next_attempt_at"]) if intent["next_attempt_at"] else None,
                     "acknowledged_at": _utc_z(intent["acknowledged_at"]) if intent["acknowledged_at"] else None,
                     "acknowledged_by": intent["acknowledged_by"],
-                    "attempts": [{"attempt_number": item["attempt_number"],
+                    "attempts": [{"attempt_id": item["attempt_id"],
+                        "attempt_number": item["attempt_number"],
                         "attempted_at": _utc_z(item["attempted_at"]),
                         "finished_at": _utc_z(item["finished_at"]) if item["finished_at"] else None,
                         "outcome": item["outcome"], "receipt": item["receipt"], "error": item["error"]}

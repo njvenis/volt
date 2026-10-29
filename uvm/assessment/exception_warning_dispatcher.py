@@ -162,7 +162,11 @@ def dispatch_due(engine, *, now: datetime | None = None, limit: int = 20,
             outcome, receipt, error = "failed", None, str(exc)
         except Exception as exc:  # unknown adapter failure can occur after a send
             outcome, receipt, error = "uncertain", None, f"adapter outcome uncertain ({type(exc).__name__})"
-        finished = datetime.now(UTC)
+        # Keep persisted completion/retry timestamps on the same clock as due
+        # selection. In disposable journeys that clock is explicitly advanced;
+        # mixing it with wall time can put a scheduled retry behind or ahead of
+        # the injected clock and make the maintained worker proof non-deterministic.
+        finished = now + timedelta(seconds=max(0.0, time.monotonic() - batch_monotonic))
         receipt_basis = None
         provider_channel_id = provider_message_id = None
         if outcome == "sent" and isinstance(receipt, str):

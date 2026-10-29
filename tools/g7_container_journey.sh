@@ -500,7 +500,7 @@ if (( EXCEPTION_WARNING_MODE )); then
   chmod 0644 "$RUN_ROOT/warning/smtp-key.pem" "$RUN_ROOT/warning/smtp-cert.pem"
   cp "$RUN_ROOT/warning/smtp-cert.pem" "$EVIDENCE/smtp-fixture-certificate.pem"
   cat >"$EVIDENCE/warning-fixture-config.json" <<'WARNINGCONFIG'
-{"clock_file":"/run/uvm-g7-scheduler/warning-clock.txt","slack":{"host":"127.0.0.1","port":18181,"channels":["C_FIXTURE_SUCCESS","C_FIXTURE_FAILED","C_FIXTURE_UNCERTAIN"],"secret_ref":"secret:slack-warning-token"},"smtp":{"host":"127.0.0.1","port":18465,"tls":"implicit","recipients":{"fixture-smtp-accepted":"accepted@fixture.invalid","fixture-smtp-retry":"retry@fixture.invalid","fixture-smtp-uncertain":"uncertain@fixture.invalid"},"secret_ref":"secret:smtp-warning-token"},"retry":{"smtp_base_seconds":1,"smtp_max_attempts":3,"slack_fixture_retry_not_advanced":true}}
+{"clock_file":"/run/uvm-g7-scheduler/warning-clock.txt","slack":{"host":"127.0.0.1","port":18181,"channels":["C_FIXTURE_SUCCESS","C_FIXTURE_FAILED","C_FIXTURE_UNCERTAIN"],"secret_ref":"secret:slack-warning-token"},"smtp":{"host":"127.0.0.1","port":18465,"tls":"implicit","recipients":{"fixture-smtp-accepted":"accepted@fixture.invalid","fixture-smtp-retry":"retry@fixture.invalid","fixture-smtp-uncertain":"uncertain@fixture.invalid","fixture-smtp-predatadisconnect":"predatadisconnect@fixture.invalid"},"secret_ref":"secret:smtp-warning-token"},"retry":{"smtp_base_seconds":1,"smtp_max_attempts":3,"slack_fixture_retry_not_advanced":true}}
 WARNINGCONFIG
   chmod 0600 "$EVIDENCE/warning-fixture-config.json"
   sha256sum "$EVIDENCE/warning-fixture-config.json" "$RUN_ROOT/warning/smtp-cert.pem" \
@@ -514,7 +514,7 @@ UVM_EXCEPTION_WARNING_APP_ID=fixture-app
 UVM_EXCEPTION_WARNING_SIGNING_SECRET_FILE=/run/uvm-g7-secrets/exception-warning/slack-signing-secret
 SSL_CERT_FILE=/run/uvm-g7-warning-fixture/smtp-cert.pem
 UVM_EXCEPTION_WARNING_USE_LOOPBACK_HTTP=1
-UVM_EXCEPTION_WARNING_DESTINATIONS={"fixture-destination":{"channel":"slack","secret_ref":"secret:slack-warning-token","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_SUCCESS"},"fixture-failed-destination":{"channel":"slack","secret_ref":"secret:slack-warning-token","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_FAILED"},"fixture-uncertain-destination":{"channel":"slack","secret_ref":"secret:slack-warning-token","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_UNCERTAIN"},"fixture-signing-reference":{"channel":"slack","secret_ref":"secret:slack-signing-secret","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_SUCCESS"},"fixture-smtp-accepted":{"channel":"email","secret_ref":"secret:smtp-warning-token","smtp_host":"127.0.0.1","smtp_port":18465,"smtp_user":"g7-fixture","sender":"uvm@fixture.invalid","recipient":"accepted@fixture.invalid","smtp_tls":"implicit"},"fixture-smtp-retry":{"channel":"email","secret_ref":"secret:smtp-warning-token","smtp_host":"127.0.0.1","smtp_port":18465,"smtp_user":"g7-fixture","sender":"uvm@fixture.invalid","recipient":"retry@fixture.invalid","smtp_tls":"implicit"},"fixture-smtp-uncertain":{"channel":"email","secret_ref":"secret:smtp-warning-token","smtp_host":"127.0.0.1","smtp_port":18465,"smtp_user":"g7-fixture","sender":"uvm@fixture.invalid","recipient":"uncertain@fixture.invalid","smtp_tls":"implicit"}}
+UVM_EXCEPTION_WARNING_DESTINATIONS={"fixture-destination":{"channel":"slack","secret_ref":"secret:slack-warning-token","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_SUCCESS"},"fixture-failed-destination":{"channel":"slack","secret_ref":"secret:slack-warning-token","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_FAILED"},"fixture-uncertain-destination":{"channel":"slack","secret_ref":"secret:slack-warning-token","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_UNCERTAIN"},"fixture-signing-reference":{"channel":"slack","secret_ref":"secret:slack-signing-secret","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_SUCCESS"},"fixture-smtp-accepted":{"channel":"email","secret_ref":"secret:smtp-warning-token","smtp_host":"127.0.0.1","smtp_port":18465,"smtp_user":"g7-fixture","sender":"uvm@fixture.invalid","recipient":"accepted@fixture.invalid","smtp_tls":"implicit"},"fixture-smtp-retry":{"channel":"email","secret_ref":"secret:smtp-warning-token","smtp_host":"127.0.0.1","smtp_port":18465,"smtp_user":"g7-fixture","sender":"uvm@fixture.invalid","recipient":"retry@fixture.invalid","smtp_tls":"implicit"},"fixture-smtp-uncertain":{"channel":"email","secret_ref":"secret:smtp-warning-token","smtp_host":"127.0.0.1","smtp_port":18465,"smtp_user":"g7-fixture","sender":"uvm@fixture.invalid","recipient":"uncertain@fixture.invalid","smtp_tls":"implicit"},"fixture-smtp-predatadisconnect":{"channel":"email","secret_ref":"secret:smtp-warning-token","smtp_host":"127.0.0.1","smtp_port":18465,"smtp_user":"g7-fixture","sender":"uvm@fixture.invalid","recipient":"predatadisconnect@fixture.invalid","smtp_tls":"implicit"}}
 WARNINGENV
   printf '%s\n' 'g7-warning-fixture-signing-secret' >"$RUN_ROOT/secrets/slack-signing-secret"
   chmod 0600 "$RUN_ROOT/secrets/slack-signing-secret"
@@ -1344,6 +1344,10 @@ if len(retry)!=2 or [row.get('result') for row in retry] != [
 uncertain=by_recipient.get('uncertain@fixture.invalid',[])
 if len(uncertain)!=1 or uncertain[0].get('result')!='connection_lost_after_data':
     raise SystemExit('SMTP fixture did not capture exactly one post-DATA ambiguous exchange')
+predata=by_recipient.get('predatadisconnect@fixture.invalid',[])
+if len(predata)!=2 or [row.get('result') for row in predata] != [
+        'connection_lost_before_data','accepted']:
+    raise SystemExit('SMTP fixture did not capture a safe pre-DATA disconnect and same-destination retry')
 if any(row.get('authenticated') is not True for row in rows):
     raise SystemExit('SMTP fixture received a submission without the synthetic credential')
 if retry[0].get('sender') != 'from:<uvm@fixture.invalid>' or \
@@ -1361,6 +1365,16 @@ if retry[1]['message_id'] != proof['retried_intent']['attempts'][1]['receipt'].s
 if proof['retried_intent']['retry']['attempts'] != 2:
     raise SystemExit('public warning readback does not show exactly two attempts for the retained intent')
 SMTPIDENTITY
+  python3 - "$EVIDENCE/warning-smtp-retry-proof.json" <<'PREDATAIDENTITY'
+import json,sys
+proof=json.load(open(sys.argv[1],encoding='utf-8'))
+rows=proof['pre_data_exchange']; intent=proof['pre_data_retried_intent']
+if rows[1]['message_id'] != intent['attempts'][1]['receipt'].split('|',2)[2]:
+    raise SystemExit('pre-DATA retry receipt does not match captured SMTP Message-ID')
+if [item['outcome'] for item in intent['attempts']] != ['failed','sent'] or \
+        [item['attempt_number'] for item in intent['attempts']] != [1,2]:
+    raise SystemExit('pre-DATA retry did not preserve the failed attempt and bounded second attempt')
+PREDATAIDENTITY
   python3 - "$RUN_ROOT/warning/provider-captures.json" <<'WARNACCEPT'
 import json,sys
 rows=json.load(open(sys.argv[1],encoding='utf-8'))

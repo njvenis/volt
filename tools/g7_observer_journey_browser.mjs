@@ -241,6 +241,7 @@ try {
     for(const destination of [
       {channel_id:'SMTP_FIXTURE_ACCEPTED',destination_ref:'fixture-smtp-accepted',email_recipient:'accepted@fixture.invalid'},
       {channel_id:'SMTP_FIXTURE_RETRY',destination_ref:'fixture-smtp-retry',email_recipient:'retry@fixture.invalid',retry_base_seconds:1},
+      {channel_id:'SMTP_FIXTURE_PREDATA',destination_ref:'fixture-smtp-predatadisconnect',email_recipient:'predatadisconnect@fixture.invalid',retry_base_seconds:1},
       {channel_id:'SMTP_FIXTURE_UNCERTAIN',destination_ref:'fixture-smtp-uncertain',email_recipient:'uncertain@fixture.invalid'}]){
       current=await api('/api/v1/assessment/administration/catalogue');
       const route=await api('/api/v1/assessment/exception-warning-routes',{method:'POST',write:true,
@@ -297,24 +298,29 @@ try {
     const sentUntil=Date.now()+45000;let warnings;
     while(Date.now()<sentUntil){
       warnings=await api(`/api/v1/assessment/groups/${findingId}/exception-warnings`);
-      if(warnings.status===200&&warnings.body.items?.length===6
+      if(warnings.status===200&&warnings.body.items?.length===7
           &&warnings.body.items.every(item=>['sent','failed','uncertain'].includes(item.status)))break;
       await page.waitForTimeout(500);
     }
-    if(warnings?.status!==200||warnings.body.items?.length!==6)
-      throw new Error(`warning worker did not durably record all six Slack/SMTP initial outcomes: ${JSON.stringify(warnings)}`);
+    if(warnings?.status!==200||warnings.body.items?.length!==7)
+      throw new Error(`warning worker did not durably record all seven Slack/SMTP initial outcomes: ${JSON.stringify(warnings)}`);
     if(!['sent','failed','uncertain'].every(status=>warnings.body.items.some(item=>item.status===status)))
       throw new Error(`warning worker did not exercise sent/failed/uncertain outcomes: ${JSON.stringify(warnings.body.items)}`);
     const smtpByDestination=Object.fromEntries(warnings.body.items.filter(item=>item.channel==='email')
       .map(item=>[item.destination_ref,item]));
     if(smtpByDestination['fixture-smtp-accepted']?.status!=='sent'
         ||smtpByDestination['fixture-smtp-retry']?.status!=='failed'
-        ||smtpByDestination['fixture-smtp-uncertain']?.status!=='uncertain')
+        ||smtpByDestination['fixture-smtp-uncertain']?.status!=='uncertain'
+        ||smtpByDestination['fixture-smtp-predatadisconnect']?.status!=='failed')
       throw new Error(`SMTP worker did not record accepted/rejected/uncertain outcomes: ${JSON.stringify(smtpByDestination)}`);
     const failedSmtp=smtpByDestination['fixture-smtp-retry'];
+    const preDataSmtp=smtpByDestination['fixture-smtp-predatadisconnect'];
     if(!failedSmtp.next_attempt_at||failedSmtp.attempts?.length!==1
         ||failedSmtp.attempts[0].outcome!=='failed'||failedSmtp.suppression_reason)
       throw new Error(`confirmed SMTP rejection did not retain one scheduled retry: ${JSON.stringify(failedSmtp)}`);
+    if(!preDataSmtp.next_attempt_at||preDataSmtp.attempts?.length!==1
+        ||preDataSmtp.attempts[0].outcome!=='failed'||preDataSmtp.suppression_reason)
+      throw new Error(`pre-DATA SMTP disconnect did not retain one scheduled retry: ${JSON.stringify(preDataSmtp)}`);
     const initialRetryClock=await readFile(path.join(fixtureRoot,'scheduler','warning-clock.txt'),'utf8');
     await writeFile(path.join(evidence,'warning-retry-clock-before.txt'),initialRetryClock,{mode:0o600});
     const initialRetryEpoch=Date.parse(warningClock);
@@ -331,29 +337,43 @@ try {
     while(Date.now()<retryUntil){
       retried=await api(`/api/v1/assessment/groups/${findingId}/exception-warnings`);
       const item=retried.body?.items?.find(row=>row.intent_id===failedSmtp.intent_id);
-      if(item?.status==='sent'&&item.attempts?.length===2)break;
+      const preDataItem=retried.body?.items?.find(row=>row.intent_id===preDataSmtp.intent_id);
+      if(item?.status==='sent'&&item.attempts?.length===2
+          &&preDataItem?.status==='sent'&&preDataItem.attempts?.length===2)break;
       await page.waitForTimeout(300);
     }
     const retriedSmtp=retried?.body?.items?.find(row=>row.intent_id===failedSmtp.intent_id);
+    const preDataRetried=retried?.body?.items?.find(row=>row.intent_id===preDataSmtp.intent_id);
     if(retriedSmtp?.status!=='sent'||retriedSmtp.attempts?.length!==2
         ||retriedSmtp.attempts[0].outcome!=='failed'||retriedSmtp.attempts[1].outcome!=='sent'
         ||retriedSmtp.attempts[0].attempt_number!==1||retriedSmtp.attempts[1].attempt_number!==2
         ||retriedSmtp.provider_receipt_basis!=='smtp_accepted')
       throw new Error(`scheduled SMTP retry did not preserve one intent with a bounded second attempt and SMTP acceptance: ${JSON.stringify(retriedSmtp)}`);
+    if(preDataRetried?.status!=='sent'||preDataRetried.attempts?.length!==2
+        ||preDataRetried.attempts[0].outcome!=='failed'||preDataRetried.attempts[1].outcome!=='sent'
+        ||preDataRetried.attempts[0].attempt_number!==1||preDataRetried.attempts[1].attempt_number!==2
+        ||preDataRetried.provider_receipt_basis!=='smtp_accepted')
+      throw new Error(`pre-DATA SMTP disconnect did not retry the same intent successfully: ${JSON.stringify(preDataRetried)}`);
     const smtpCaptures=JSON.parse(await readFile(path.join(fixtureRoot,'warning','smtp-captures.json'),'utf8'));
     const retryCaptures=smtpCaptures.filter(row=>row.recipient==='retry@fixture.invalid');
     if(retryCaptures.length!==2||retryCaptures[0].result!=='temporary_rcpt_rejection'
         ||retryCaptures[1].result!=='accepted'||retryCaptures[1].message_id!==retriedSmtp.attempts[1].receipt?.split('|')[2])
       throw new Error(`SMTP fixture did not capture one confirmed rejection and one accepted retry: ${JSON.stringify(retryCaptures)}`);
     const uncertainSmtp=smtpByDestination['fixture-smtp-uncertain'];
+    const preDataCaptures=smtpCaptures.filter(row=>row.recipient==='predatadisconnect@fixture.invalid');
     const uncertainCaptures=smtpCaptures.filter(row=>row.recipient==='uncertain@fixture.invalid');
     if(uncertainCaptures.length!==1||uncertainCaptures[0].result!=='connection_lost_after_data'
         ||uncertainSmtp.attempts?.length!==1||uncertainSmtp.status!=='uncertain'
         ||uncertainSmtp.next_attempt_at)
       throw new Error(`ambiguous SMTP outcome was not held without resend: ${JSON.stringify({uncertainSmtp,uncertainCaptures})}`);
+    if(preDataCaptures.length!==2||preDataCaptures[0].result!=='connection_lost_before_data'
+        ||preDataCaptures[1].result!=='accepted'
+        ||preDataRetried.attempts[1].receipt?.split('|')[2]!==preDataCaptures[1].message_id)
+      throw new Error(`pre-DATA disconnect proof did not match its durable retry receipt: ${JSON.stringify({preDataRetried,preDataCaptures})}`);
     await writeFile(path.join(evidence,'warning-smtp-retry-proof.json'),JSON.stringify({
-      initial_smtp_intents:[smtpByDestination['fixture-smtp-accepted'],failedSmtp,uncertainSmtp],
-      retried_intent:retriedSmtp,retry_exchange:retryCaptures,
+      initial_smtp_intents:[smtpByDestination['fixture-smtp-accepted'],failedSmtp,preDataSmtp,uncertainSmtp],
+      retried_intent:retriedSmtp,pre_data_retried_intent:preDataRetried,
+      retry_exchange:retryCaptures,pre_data_exchange:preDataCaptures,
       uncertain_exchange:uncertainCaptures,acceptance_semantics:'SMTP final 2xx after DATA only; no mailbox delivery claim'},null,2),{mode:0o600});
     warnings=retried;
     const warning=warnings.body.items.find(item=>item.channel==='slack'&&item.status==='sent');
@@ -447,9 +467,20 @@ try {
     if(!acknowledged.body.items?.some(item=>item.intent_id===warning.intent_id&&item.acknowledged_at))
       throw new Error('signed callback was not durably acknowledged by the worker');
     const alerts=await api(`/api/v1/assessment/groups/${findingId}/exception-warning-failure-alerts`);
-    if(alerts.status!==200||alerts.body.items?.length<3||
-      !['failed','uncertain'].every(status=>alerts.body.items.some(item=>item.status===status)))
-      throw new Error(`eligible warning failure-alert readback did not expose failed and uncertain attempts: ${JSON.stringify(alerts)}`);
+    const expectedFailureAlerts=acknowledged.body.items.flatMap(intent=>(intent.attempts||[])
+      .filter(attempt=>['failed','uncertain'].includes(attempt.outcome))
+      .map(attempt=>({intent_id:intent.intent_id,attempt_id:attempt.attempt_id,channel:intent.channel,
+        reason:attempt.outcome==='uncertain'?'uncertain_delivery_reconcile_before_retry':'transient_delivery_failure'})));
+    const assertFailureAlerts=rows=>expectedFailureAlerts.every(required=>rows.some(item=>
+      item.intent_id===required.intent_id&&item.attempt_id===required.attempt_id
+        &&item.channel===required.channel&&item.reason===required.reason));
+    if(alerts.status!==200||expectedFailureAlerts.length!==5||!assertFailureAlerts(alerts.body.items||[]))
+      throw new Error(`eligible warning failure-alert readback missed a failed/uncertain attempt identity: ${JSON.stringify({alerts,expectedFailureAlerts})}`);
+    for(const required of expectedFailureAlerts){
+      const withoutOne=(alerts.body.items||[]).filter(item=>item.attempt_id!==required.attempt_id);
+      if(assertFailureAlerts(withoutOne))
+        throw new Error(`failure-alert assertion accepted a response missing ${required.attempt_id}`);
+    }
     const afterAck=await api(`/api/v1/assessment/groups/${findingId}`);
     if(JSON.stringify({assessment:beforeAck.body.assessment,episodes:beforeAck.body.episodes})!==
        JSON.stringify({assessment:afterAck.body.assessment,episodes:afterAck.body.episodes}))

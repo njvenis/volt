@@ -4450,7 +4450,8 @@ def install_assessment_routes(app: FastAPI) -> None:
                     "next_attempt_at": _utc_z(intent["next_attempt_at"]) if intent["next_attempt_at"] else None,
                     "acknowledged_at": _utc_z(intent["acknowledged_at"]) if intent["acknowledged_at"] else None,
                     "acknowledged_by": intent["acknowledged_by"],
-                    "attempts": [{"attempt_number": item["attempt_number"],
+                    "attempts": [{"attempt_id": item["attempt_id"],
+                        "attempt_number": item["attempt_number"],
                         "attempted_at": _utc_z(item["attempted_at"]),
                         "finished_at": _utc_z(item["finished_at"]) if item["finished_at"] else None,
                         "outcome": item["outcome"], "receipt": item["receipt"], "error": item["error"]}

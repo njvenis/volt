@@ -93,12 +93,19 @@ class Handler(socketserver.StreamRequestHandler):
                     count = self.server.recipient_counts.get(self.recipient or "", 0) + 1
                     self.server.recipient_counts[self.recipient or ""] = count
                 self.count = count
+                if self.recipient == "predatadisconnect@fixture.invalid" and count == 1:
+                    self.server.retain({"recipient": self.recipient, "sender": self.sender,
+                        "result": "connection_lost_before_data", "authenticated": self.authenticated,
+                        "exchange_number": count})
+                    self.request.shutdown(2)
+                    self.request.close()
+                    return
                 if self.recipient == "retry@fixture.invalid" and count == 1:
                     self.line("451 4.3.0 temporary fixture rejection")
                     self.server.retain({"recipient": self.recipient, "sender": self.sender,
                         "result": "temporary_rcpt_rejection", "authenticated": self.authenticated,
                         "exchange_number": count})
-                elif self.recipient in {"accepted@fixture.invalid", "retry@fixture.invalid", "uncertain@fixture.invalid"}:
+                elif self.recipient in {"accepted@fixture.invalid", "retry@fixture.invalid", "uncertain@fixture.invalid", "predatadisconnect@fixture.invalid"}:
                     self.line("250 2.1.5 recipient ok")
                 else:
                     self.line("550 5.1.1 unknown fixture recipient")

@@ -203,23 +203,33 @@ class HttpAdapter:
         message.set_content(rendered["text"] + "\n")
         message.add_alternative(rendered["html"], subtype="html")
         client = None
+        stage = "connect"
         try:
             if target.smtp_tls == "implicit":
                 client = smtplib.SMTP_SSL(target.smtp_host, target.smtp_port, timeout=8,
                     context=ssl.create_default_context())
             else:
                 client = smtplib.SMTP(target.smtp_host, target.smtp_port, timeout=8)
+                stage = "greeting"
                 client.ehlo()
+                stage = "tls"
                 client.starttls(context=ssl.create_default_context())
                 client.ehlo()
             if secret:
+                stage = "login"
                 client.login(target.smtp_user, secret)
+            stage = "mail"
             code, _ = client.mail(target.sender)
             if code >= 400:
                 raise DeliveryError("SMTP sender rejected", permanent=code >= 500)
+            stage = "rcpt"
             code, _ = client.rcpt(target.recipient)
             if code >= 400:
                 raise DeliveryError("SMTP recipient rejected", permanent=code >= 500)
+            # Once DATA is invoked, an exception may mean the server accepted
+            # the message but its final response was lost. Earlier failures
+            # cannot have submitted message bytes and remain retryable.
+            stage = "data"
             code, _ = client.data(message.as_bytes(policy=SMTP))
             if code < 200 or code >= 300:
                 raise DeliveryError("SMTP DATA rejected", permanent=code >= 500)
@@ -237,6 +247,8 @@ class HttpAdapter:
                 raise DeliveryError("SMTP permanently rejected submission", permanent=True) from None
             raise DeliveryError("SMTP temporarily rejected submission") from None
         except Exception as exc:
+            if stage != "data":
+                raise DeliveryError(f"SMTP {stage} failed before DATA ({type(exc).__name__})") from None
             raise DeliveryUncertain(f"SMTP outcome uncertain ({type(exc).__name__})") from None
         finally:
             if client is not None:

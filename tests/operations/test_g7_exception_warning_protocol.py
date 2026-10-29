@@ -6,6 +6,7 @@ import hmac
 import json
 import time
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
@@ -90,6 +91,81 @@ class ExceptionWarningCallbackProtocolTests(unittest.TestCase):
             self.assertTrue(_warning_human_principal_is_enabled(connection, "fixture-human"))
             self.assertFalse(_warning_human_principal_is_enabled(connection, "fixture-disabled"))
             self.assertFalse(_warning_human_principal_is_enabled(connection, "not-configured"))
+
+
+class ExceptionWarningSMTPStageTests(unittest.TestCase):
+    def setUp(self):
+        from uvm.assessment.exception_warning_transports import Destination
+        self.target = Destination(channel="email", secret_ref="secret:fixture",
+            smtp_host="127.0.0.1", smtp_port=465, smtp_user="fixture",
+            sender="sender@fixture.invalid", recipient="recipient@fixture.invalid",
+            smtp_tls="implicit")
+        self.payload = {"intent_id":"intent-1", "rendered":{
+            "subject":"test", "text":"body", "html":"<p>body</p>"}}
+
+    def send_with(self, client=None, constructor_error=None):
+        from uvm.assessment.exception_warning_transports import HttpAdapter
+        with patch("uvm.assessment.exception_warning_transports.ssl.create_default_context", return_value=object()):
+            if constructor_error:
+                with patch("uvm.assessment.exception_warning_transports.smtplib.SMTP_SSL", side_effect=constructor_error):
+                    return HttpAdapter._send_email(self.target, "secret", self.payload)
+            with patch("uvm.assessment.exception_warning_transports.smtplib.SMTP_SSL", return_value=client):
+                return HttpAdapter._send_email(self.target, "secret", self.payload)
+
+    def test_pre_data_disconnects_are_known_retryable_failures(self):
+        from uvm.assessment.exception_warning_transports import DeliveryError
+
+        class Peer:
+            def __init__(self, stage): self.stage = stage
+            def login(self, *_):
+                if self.stage == "login": raise __import__("smtplib").SMTPServerDisconnected()
+            def mail(self, *_):
+                if self.stage == "mail": raise __import__("smtplib").SMTPServerDisconnected()
+                return 250, b"ok"
+            def rcpt(self, *_):
+                if self.stage == "rcpt": raise __import__("smtplib").SMTPServerDisconnected()
+                return 250, b"ok"
+            def data(self, *_): raise AssertionError("DATA must not run in a pre-DATA test")
+            def close(self): pass
+
+        for stage in ("connect", "login", "mail", "rcpt"):
+            with self.subTest(stage=stage), self.assertRaises(DeliveryError) as caught:
+                self.send_with(constructor_error=ConnectionRefusedError() if stage == "connect" else None,
+                    client=Peer(stage))
+            self.assertFalse(caught.exception.permanent)
+
+    def test_data_disconnect_is_uncertain_but_final_250_survives_quit_failure(self):
+        import smtplib
+        from uvm.assessment.exception_warning_transports import DeliveryUncertain
+
+        class Peer:
+            def __init__(self, data_error=None): self.data_error = data_error
+            def login(self, *_): pass
+            def mail(self, *_): return 250, b"ok"
+            def rcpt(self, *_): return 250, b"ok"
+            def data(self, *_):
+                if self.data_error: raise self.data_error
+                return 250, b"queued"
+            def quit(self): raise smtplib.SMTPServerDisconnected()
+            def close(self): pass
+
+        with self.assertRaises(DeliveryUncertain):
+            self.send_with(client=Peer(smtplib.SMTPServerDisconnected()))
+        self.assertTrue(self.send_with(client=Peer()).startswith("smtp_accepted|"))
+
+    def test_explicit_451_response_remains_a_retryable_rejection(self):
+        import smtplib
+        from uvm.assessment.exception_warning_transports import DeliveryError
+
+        class Peer:
+            def login(self, *_): pass
+            def mail(self, *_): return 250, b"ok"
+            def rcpt(self, *_): return 451, b"temporary"
+            def close(self): pass
+
+        with self.assertRaises(DeliveryError) as caught:
+            self.send_with(client=Peer())
+        self.assertFalse(caught.exception.permanent)
 
 
 if __name__ == "__main__":

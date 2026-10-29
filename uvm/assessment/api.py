@@ -77,6 +77,13 @@ _UTC = timezone.utc
 _FINDINGS_PROJECTION_LOCK = threading.Lock()
 
 
+def _warning_human_principal_is_enabled(connection, principal_id: str) -> bool:
+    """Resolve Slack human binding against persisted OIDC identity authority."""
+    enabled = connection.execute(sa.select(auth_principals.c.enabled).where(
+        auth_principals.c.principal_id == principal_id).with_for_update()).scalar_one_or_none()
+    return enabled is True
+
+
 def _parse_cursor_utc(value: str) -> datetime:
     """Parse a signed cursor UTC instant without lexical precision assumptions."""
     if not isinstance(value, str):
@@ -2351,9 +2358,8 @@ def install_assessment_routes(app: FastAPI) -> None:
                         exception_warning_actor_links.c.revision == latest).with_for_update()).mappings().one()
                     if old_link["principal_id"] not in allowed_principals:
                         _error(403, "source_scope_forbidden", "Rebinding is outside the current warning administration envelope")
-            identity = policy.get("principals", {}).get(body["principal_id"])
-            if body["enabled"] and (not isinstance(identity, dict)
-                    or identity.get("actor_kind") != "principal" or identity.get("enabled") is False):
+            if body["enabled"] and not _warning_human_principal_is_enabled(
+                    connection, body["principal_id"]):
                 _error(422, "invalid_command", "Slack links require a configured human UVM principal")
             revision, link_id = int(latest) + 1, str(uuid.uuid4())
             connection.execute(exception_warning_actor_links.insert().values(

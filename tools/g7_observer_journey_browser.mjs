@@ -4,6 +4,7 @@ import { readFile, mkdir, writeFile, unlink } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
+import { createHmac } from 'node:crypto';
 
 function arg(name) {
   const index = process.argv.indexOf(name);
@@ -13,7 +14,9 @@ function arg(name) {
 const origin = arg('--origin');
 const evidence = arg('--evidence');
 const fixtureRoot = arg('--fixture-root');
+const appContainer = process.argv.includes('--app-container') ? arg('--app-container') : 'volt-g7-observer-journey';
 const backupSeedOnly = process.argv.includes('--backup-seed-only');
+const warningOnly = process.argv.includes('--exception-warning-only');
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname),'..');
 await mkdir(evidence, {recursive:true, mode:0o700});
 const browser = await chromium.launch({headless:true});
@@ -185,14 +188,15 @@ try {
   const catalogue=await api('/api/v1/assessment/administration/catalogue');
   if(catalogue.status!==200)throw new Error(`administration catalogue failed with ${catalogue.status}`);
   const grant=catalogue.body.caller.grantable;
-  const groupId=crypto.randomUUID();
+  const groupId=warningOnly?'00000000-0000-4000-8000-000000000024':crypto.randomUUID();
   const scope={group_ids:['*'],source_families:['*'],environments:['*'],service_ids:['*'],membership_mode:'all_current'};
   const limits={...grant.limits,allowed_environments:grant.limits.allowed_environments?.length?grant.limits.allowed_environments:['*'],
     allowed_service_ids:grant.limits.allowed_service_ids?.length?grant.limits.allowed_service_ids:['*']};
   const duties=grant.separation_of_duties??{approval_requires_distinct_actor:true,prohibit_requester_approval:true,
     required_approver_count:1,prohibited_action_pairs:[]};
   const actions=['observer.timing.read','observer.timing.configure',
-    'backup.settings.read','backup.settings.configure','assessment.read','audit.read'];
+    'backup.settings.read','backup.settings.configure','assessment.read','audit.read',
+    ...(warningOnly?['acceptance.submit','acceptance.approve','warning.route.manage','warning.actor_link.manage']:[])];
   const permissions=actions.map(action=>({permission_id:crypto.randomUUID(),role_id:crypto.randomUUID(),action,
     target_scope:scope,limits,separation_of_duties:duties,
     ...(action.startsWith('observer.timing.')||action.startsWith('backup.settings.')?{deployment_scopes:['g7-local','g7-other']}: {})}));
@@ -215,6 +219,213 @@ try {
   if(membership.status!==200)throw new Error(`access-group membership failed with ${membership.status}: ${JSON.stringify(membership.body)}`);
   counts.membership=membership.status;
   await page.waitForTimeout(5500);
+
+  if (warningOnly) {
+    const seeded=JSON.parse(await readFile(path.join(evidence,'warning-fixture-ids.json'),'utf8'));
+    const findingId=seeded.group, occurrenceId=seeded.occurrence;
+    let current=await api('/api/v1/assessment/administration/catalogue');
+    for(const destination of [
+      {channel_id:'C_FIXTURE_SUCCESS',destination_ref:'fixture-destination'},
+      {channel_id:'C_FIXTURE_FAILED',destination_ref:'fixture-failed-destination'},
+      {channel_id:'C_FIXTURE_UNCERTAIN',destination_ref:'fixture-uncertain-destination'}]){
+      current=await api('/api/v1/assessment/administration/catalogue');
+      const route=await api('/api/v1/assessment/exception-warning-routes',{method:'POST',write:true,
+        body:JSON.stringify({route_id:crypto.randomUUID(),access_group_ids:[groupId],finding_group_ids:[findingId],
+          channel:'slack',installation_id:'fixture-installation',workspace_id:'T_FIXTURE',
+          ...destination,recipient_id:'g7-actor',offset_seconds:[60],enabled:true,
+          expected_policy_revision:current.body.policy_revision,expected_route_revision:null,
+          failure_alert_group_ids:[groupId],link:'https://uvm.example.test/assessment'})});
+      if(route.status!==200)throw new Error(`warning route setup failed ${route.status}: ${JSON.stringify(route.body)}`);
+    }
+    current=await api('/api/v1/assessment/administration/catalogue');
+    const actor=await api('/api/v1/assessment/exception-warning-actor-links',{method:'POST',write:true,
+      body:JSON.stringify({installation_id:'fixture-installation',workspace_id:'T_FIXTURE',
+        slack_user_id:'U_FIXTURE',principal_id:'g7-actor',access_group_ids:[groupId],
+        finding_group_ids:[findingId],expected_policy_revision:current.body.policy_revision,
+        expected_link_revision:0,enabled:true})});
+    if(actor.status!==200)throw new Error(`warning actor link setup failed ${actor.status}: ${JSON.stringify(actor.body)}`);
+    current=await api(`/api/v1/assessment/groups/${findingId}`);
+    if(current.status!==200)throw new Error(`warning finding read failed ${current.status}: ${JSON.stringify(current.body)}`);
+    await writeFile(path.join(evidence,'warning-precommand-readback.json'),JSON.stringify(current.body,null,2),{mode:0o600});
+    if(!Array.isArray(current.body.episodes)||current.body.episodes.length===0)
+      throw new Error(`warning finding has no public episode records: ${JSON.stringify(current.body)}`);
+    const episode=current.body.episodes[0];
+    const expectedExposures=[{exposure_id:episode.exposure_id,episode_id:episode.episode_id,state_revision:episode.state_revision}];
+    const expectedEvaluations=[{episode_id:seeded.episode,occurrence_id:occurrenceId,
+      evaluation_id:seeded.evaluation,revision:1}];
+    const expiry=new Date(Date.now()+120000).toISOString();
+    const submit=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+      command_id:crypto.randomUUID(),target_id:findingId,action:'acceptance.submit',membership_ids:[occurrenceId],
+      expected_revisions:{target:current.body.assessment.revision,policy:current.body.assessment.policy_revision,
+        authority:(await api('/api/v1/assessment/administration/catalogue')).body.authority_revision,
+        identity_membership:current.body.assessment.membership.revision,owners:current.body.assessment.owner_revision},
+      expected_exposures:expectedExposures,expected_evaluations:expectedEvaluations,
+      payload:{accountable_owner_id:'synthetic-owner',rationale:'Exercise G7 warning expiry workflow',
+        expires_at:expiry,continuity_allowed:false,
+        exception_contract_version:1,context:{environment:'local'},compensating_controls:'Synthetic local fixture controls.'}})});
+    if(submit.status!==200)throw new Error(`G7 exception submit failed ${submit.status}: ${JSON.stringify(submit.body)}`);
+    const fresh=await api(`/api/v1/assessment/groups/${findingId}`);
+    const acceptanceId=fresh.body.assessment.acceptances.find(item=>item.state==='pending')?.acceptance_id;
+    if(!acceptanceId)throw new Error(`public submit response did not create a pending acceptance: ${JSON.stringify(fresh.body.assessment.acceptances)}`);
+    const catalogueAfter=await api('/api/v1/assessment/administration/catalogue');
+    const approve=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+      command_id:crypto.randomUUID(),target_id:findingId,action:'acceptance.approve',membership_ids:[occurrenceId],
+      expected_revisions:{target:fresh.body.assessment.revision,policy:fresh.body.assessment.policy_revision,
+        authority:catalogueAfter.body.authority_revision,identity_membership:fresh.body.assessment.membership.revision,
+        owners:fresh.body.assessment.owner_revision},expected_exposures:expectedExposures,
+      expected_evaluations:expectedEvaluations,payload:{acceptance_id:acceptanceId,rationale:'Approve synthetic G7 warning exercise',
+        selected_expires_at:expiry,expected_request_revision:1}})});
+    if(approve.status!==200)throw new Error(`G7 exception approval failed ${approve.status}: ${JSON.stringify(approve.body)}`);
+    await writeFile(path.join(evidence,'warning-public-workflow.json'),JSON.stringify({
+      findingId,occurrenceId,acceptanceId,submit:submit.body,approve:approve.body},null,2),{mode:0o600});
+    const warningClock=new Date(Date.parse(expiry)-60000).toISOString();
+    await writeFile(path.join(fixtureRoot,'scheduler','warning-clock.txt'),warningClock+'\n',{mode:0o666});
+    const sentUntil=Date.now()+45000;let warnings;
+    while(Date.now()<sentUntil){
+      warnings=await api(`/api/v1/assessment/groups/${findingId}/exception-warnings`);
+      if(warnings.status===200&&warnings.body.items?.some(item=>item.status==='sent'))break;
+      await page.waitForTimeout(500);
+    }
+    if(warnings?.status!==200||!warnings.body.items?.some(item=>item.status==='sent'))
+      throw new Error(`warning worker did not durably record provider acceptance: ${JSON.stringify(warnings)}`);
+    if(!['sent','failed','uncertain'].every(status=>warnings.body.items.some(item=>item.status===status)))
+      throw new Error(`warning worker did not exercise sent/failed/uncertain outcomes: ${JSON.stringify(warnings.body.items)}`);
+    const warning=warnings.body.items.find(item=>item.status==='sent');
+    const successCapture=JSON.parse(await readFile(path.join(fixtureRoot,'warning','provider-captures.json'),'utf8'))
+      .find(row=>row.payload.channel==='C_FIXTURE_SUCCESS');
+    const token=successCapture.payload.blocks[1].elements[0].value;
+    const callbackPayload={api_app_id:'fixture-app',team:{id:'T_FIXTURE'},user:{id:'U_FIXTURE'},
+      container:{channel_id:'C_FIXTURE_SUCCESS'},message:{ts:'1720000000.000001'},
+      actions:[{action_id:'uvm_warning_ack',value:token}]};
+    const raw='payload='+encodeURIComponent(JSON.stringify(callbackPayload));
+    const timestamp=String(Math.floor(Date.now()/1000));
+    const signature='v0='+createHmac('sha256','g7-warning-fixture-signing-secret')
+      .update(`v0:${timestamp}:${raw}`).digest('hex');
+    const forged=await api('/api/v1/assessment/exception-warning-callback',{method:'POST',body:raw,
+      headers:{'Content-Type':'application/x-www-form-urlencoded','x-slack-request-timestamp':timestamp,
+        'x-slack-signature':'v0='+('0'.repeat(64))}});
+    if(forged.status!==401)throw new Error(`forged callback returned ${forged.status}`);
+    const staleStamp='1';
+    const staleSignature='v0='+createHmac('sha256','g7-warning-fixture-signing-secret')
+      .update(`v0:${staleStamp}:${raw}`).digest('hex');
+    const stale=await api('/api/v1/assessment/exception-warning-callback',{method:'POST',body:raw,
+      headers:{'Content-Type':'application/x-www-form-urlencoded','x-slack-request-timestamp':staleStamp,
+        'x-slack-signature':staleSignature}});
+    if(stale.status!==401)throw new Error(`stale callback returned ${stale.status}`);
+    const signPayload=async(payload)=>{
+      const body='payload='+encodeURIComponent(JSON.stringify(payload));
+      const stamp=String(Math.floor(Date.now()/1000));
+      const sig='v0='+createHmac('sha256','g7-warning-fixture-signing-secret')
+        .update(`v0:${stamp}:${body}`).digest('hex');
+      return api('/api/v1/assessment/exception-warning-callback',{method:'POST',body,
+        headers:{'Content-Type':'application/x-www-form-urlencoded','x-slack-request-timestamp':stamp,
+          'x-slack-signature':sig}});
+    };
+    const wrongActor=await signPayload({...callbackPayload,user:{id:'U_WRONG'}});
+    const wrongDestination=await signPayload({...callbackPayload,
+      container:{channel_id:'C_FIXTURE_FAILED'}});
+    if(wrongActor.status!==200||wrongDestination.status!==200)
+      throw new Error(`signed out-of-scope callback envelopes were not durably queued: ${JSON.stringify({wrongActor,wrongDestination})}`);
+    let callbackOutcomes=[];const deniedUntil=Date.now()+15000;
+    while(Date.now()<deniedUntil){
+      callbackOutcomes=JSON.parse(execFileSync('docker',['exec',appContainer,
+        '/opt/uvm/venv/bin/python','/opt/uvm/app/tools/g7_exception_warning_evidence.py',
+        wrongActor.body.inbox_id,wrongDestination.body.inbox_id],{encoding:'utf8'}));
+      if(callbackOutcomes.length===2&&callbackOutcomes.every(item=>item.state==='denied'))break;
+      await page.waitForTimeout(500);
+    }
+    if(callbackOutcomes.length!==2||callbackOutcomes.some(item=>item.state!=='denied'))
+      throw new Error(`wrong actor/destination callbacks were not rejected by the worker: ${JSON.stringify(callbackOutcomes)}`);
+    let linkCatalogue=await api('/api/v1/assessment/administration/catalogue');
+    const revokeLink=await api('/api/v1/assessment/exception-warning-actor-links',{method:'POST',write:true,
+      body:JSON.stringify({installation_id:'fixture-installation',workspace_id:'T_FIXTURE',
+        slack_user_id:'U_FIXTURE',principal_id:'g7-actor',access_group_ids:[groupId],
+        finding_group_ids:[findingId],expected_policy_revision:linkCatalogue.body.policy_revision,
+        expected_link_revision:1,enabled:false})});
+    if(revokeLink.status!==200)throw new Error(`actor link revoke failed ${revokeLink.status}: ${JSON.stringify(revokeLink.body)}`);
+    const revokedCallback=await signPayload({...callbackPayload,trigger_id:'after-actor-link-revocation'});
+    if(revokedCallback.status!==200)throw new Error(`revoked actor callback was not durably queued: ${JSON.stringify(revokedCallback)}`);
+    let revokedOutcome=[];const revokedUntil=Date.now()+12000;
+    while(Date.now()<revokedUntil){
+      revokedOutcome=JSON.parse(execFileSync('docker',['exec',appContainer,
+        '/opt/uvm/venv/bin/python','/opt/uvm/app/tools/g7_exception_warning_evidence.py',
+        revokedCallback.body.inbox_id],{encoding:'utf8'}));
+      if(revokedOutcome[0]?.state==='denied')break;
+      await page.waitForTimeout(500);
+    }
+    if(revokedOutcome[0]?.state!=='denied')
+      throw new Error(`revoked actor link was not rejected: ${JSON.stringify(revokedOutcome)}`);
+    linkCatalogue=await api('/api/v1/assessment/administration/catalogue');
+    const restoreLink=await api('/api/v1/assessment/exception-warning-actor-links',{method:'POST',write:true,
+      body:JSON.stringify({installation_id:'fixture-installation',workspace_id:'T_FIXTURE',
+        slack_user_id:'U_FIXTURE',principal_id:'g7-actor',access_group_ids:[groupId],
+        finding_group_ids:[findingId],expected_policy_revision:linkCatalogue.body.policy_revision,
+        expected_link_revision:2,enabled:true})});
+    if(restoreLink.status!==200)throw new Error(`actor link restore failed ${restoreLink.status}: ${JSON.stringify(restoreLink.body)}`);
+    const beforeAck=await api(`/api/v1/assessment/groups/${findingId}`);
+    const ack=await api('/api/v1/assessment/exception-warning-callback',{method:'POST',body:raw,
+      headers:{'Content-Type':'application/x-www-form-urlencoded','x-slack-request-timestamp':timestamp,
+        'x-slack-signature':signature}});
+    const replay=await api('/api/v1/assessment/exception-warning-callback',{method:'POST',body:raw,
+      headers:{'Content-Type':'application/x-www-form-urlencoded','x-slack-request-timestamp':timestamp,
+        'x-slack-signature':signature}});
+    if(ack.status!==200||replay.status!==200||replay.body.duplicate!==true)
+      throw new Error(`signed acknowledgement/replay failed: ${JSON.stringify({ack,replay})}`);
+    let acknowledged;
+    const ackUntil=Date.now()+15000;
+    while(Date.now()<ackUntil){
+      acknowledged=await api(`/api/v1/assessment/groups/${findingId}/exception-warnings`);
+      if(acknowledged.body.items?.some(item=>item.intent_id===warning.intent_id&&item.acknowledged_at))break;
+      await page.waitForTimeout(300);
+    }
+    if(!acknowledged.body.items?.some(item=>item.intent_id===warning.intent_id&&item.acknowledged_at))
+      throw new Error('signed callback was not durably acknowledged by the worker');
+    const alerts=await api(`/api/v1/assessment/groups/${findingId}/exception-warning-failure-alerts`);
+    if(alerts.status!==200||alerts.body.items?.length!==2||
+      !['failed','uncertain'].every(status=>alerts.body.items.some(item=>item.status===status)))
+      throw new Error(`eligible warning failure-alert readback did not expose failed and uncertain attempts: ${JSON.stringify(alerts)}`);
+    const afterAck=await api(`/api/v1/assessment/groups/${findingId}`);
+    if(JSON.stringify({assessment:beforeAck.body.assessment,episodes:beforeAck.body.episodes})!==
+       JSON.stringify({assessment:afterAck.body.assessment,episodes:afterAck.body.episodes}))
+      throw new Error('warning acknowledgement mutated assessment or episode state');
+    await writeFile(path.join(evidence,'warning-callback-proof.json'),JSON.stringify({
+      forged_status:forged.status,stale_status:stale.status,ack:ack.body,replay:replay.body,
+      wrong_actor_status:wrongActor.status,wrong_destination_status:wrongDestination.status,
+      wrong_actor_and_destination_worker_outcomes:callbackOutcomes,
+      revoked_actor_link_worker_outcome:revokedOutcome,
+      warning_items:acknowledged.body.items,failure_alerts:alerts.body.items,
+      assessment_nonmutation:true},null,2),{mode:0o600});
+    const restart=execFileSync('docker',['restart',appContainer],{encoding:'utf8'}).trim();
+    const until=Date.now()+90000;let healthy=false;
+    while(Date.now()<until){
+      try{const ready=await fetch(origin+'/openapi.json');if(ready.ok){healthy=true;break;}}catch{}
+      await page.waitForTimeout(1000);
+    }
+    if(!healthy)throw new Error('app container did not recover after warning persistence restart');
+    await page.goto(origin+'/api/v1/auth/login',{waitUntil:'domcontentloaded'});
+    await page.waitForFunction(async()=>{const r=await fetch('/api/v1/auth/session');if(!r.ok)return false;return (await r.json()).authenticated===true;},null,{timeout:30000});
+    const afterRestart=await api(`/api/v1/assessment/groups/${findingId}/exception-warnings`);
+    if(afterRestart.status!==200||!afterRestart.body.items?.some(item=>item.intent_id===warning.intent_id&&item.acknowledged_at))
+      throw new Error('warning delivery and acknowledgement state did not persist across app restart');
+    await writeFile(path.join(evidence,'warning-restart-proof.json'),JSON.stringify({
+      restarted_container:appContainer,restart_result:restart,persisted_warning_items:afterRestart.body.items},null,2),{mode:0o600});
+    await page.goto(origin+'/#findings?group='+encodeURIComponent(findingId),{waitUntil:'domcontentloaded'});
+    await page.waitForTimeout(2500);
+    await writeFile(path.join(evidence,'warning-ui-debug.json'),JSON.stringify({
+      title:await page.title(),url:page.url(),body:(await page.locator('body').innerText()).slice(0,5000),
+      buttons:await page.getByRole('button').allTextContents(),errors:counts},null,2),{mode:0o600});
+    await page.getByRole('button',{name:'Exceptions',exact:true}).waitFor({state:'visible',timeout:20000});
+    await page.getByRole('button',{name:'Exceptions',exact:true}).click();
+    await page.locator('.exception-warnings').waitFor({state:'visible',timeout:20000});
+    await page.getByRole('heading',{name:'Exception warnings'}).waitFor({state:'visible'});
+    await page.getByText('Acknowledged',{exact:true}).first().waitFor({state:'visible',timeout:10000});
+    await page.screenshot({path:path.join(evidence,'warning-browser.png'),fullPage:true});
+    await writeFile(path.join(evidence,'warning-browser.json'),JSON.stringify({
+      page_title:await page.title(),url:page.url(),authenticated:true,
+      rendered_warning_panel:true,acknowledgement_visible:true,workflow:'public_api_submit_and_approve'},null,2),{mode:0o600});
+    process.stdout.write(JSON.stringify({warningWorkflow:'approved',findingId,acceptanceId})+'\n');
+    process.exit(0);
+  }
 
   const cross=await api('/api/v1/operations/observer-settings/g7-other');
   if(cross.status!==404)throw new Error(`registered deployment B read returned ${cross.status}: ${JSON.stringify(cross.body)}`);

@@ -115,6 +115,8 @@ COPY --chown=1001:1337 docker/g7/beat_progress_scheduler.py /app/beat_progress_s
 COPY --chown=1001:1337 docker/g7/verification_middleware.py /app/g7_verification_middleware.py
 COPY --chown=uvm:uvm tools/g7_container_audit_export.py /opt/uvm/app/tools/g7_container_audit_export.py
 COPY --chown=uvm:uvm tools/g7_recovery_retained_fixture.py /opt/uvm/app/tools/g7_recovery_retained_fixture.py
+COPY --chown=uvm:uvm tools/g7_exception_warning_provider.py /opt/uvm/app/tools/g7_exception_warning_provider.py
+COPY --chown=uvm:uvm tools/g7_exception_warning_evidence.py /opt/uvm/app/tools/g7_exception_warning_evidence.py
 COPY --chown=uvm:uvm tools/g7_network_assert.py /opt/uvm/app/tools/g7_network_assert.py
 COPY --from=uvm-build --chown=uvm:uvm /build/migrations ./migrations
 COPY --from=uvm-build --chown=uvm:uvm /build/alembic.ini ./alembic.ini

@@ -11,9 +11,14 @@ from uvm.persistence.ingestion_schema import collection_runs
 from uvm.persistence.assessment_schema import (assessment_group_state,
     assessment_audit_events, assessment_projection_intents, assessment_command_receipts)
 from uvm.persistence.g4_schema import github_repositories, github_group_issues
+from uvm.persistence.exception_sla_schema import (source_observation_receipts,
+    sla_episode_contracts, sla_ingest_receipts)
+from uvm.persistence.metrics_schema import (g7_sla_evaluations, sla_policy_heads,
+    sla_policy_versions)
 
 
 def seed(engine):
+    warning_fixture = os.environ.get('UVM_G7_WARNING_FIXTURE') == '1'
     ids = {name: str(uuid.uuid5(uuid.NAMESPACE_URL, 'volt:g7:recovery-fixture:' + name))
         for name in ('group', 'workload', 'incarnation', 'exposure', 'occurrence',
             'run', 'observation', 'event', 'command', 'decision', 'intent')}
@@ -53,13 +58,69 @@ def seed(engine):
         c.execute(assessment_command_receipts.insert().values(command_id=ids['command'], principal_id='g7-actor',
             action='severity.override', target_id=ids['group'], request_digest='b'*64, decision_id=ids['decision'],
             audit_event_id=ids['event'], intent_id=ids['intent'],
-            result={'command_id': ids['command'], 'decision_id': ids['decision'], 'audit_event_id': ids['event'], 'outcome': 'committed'}, created_at=now))
-        c.execute(github_repositories.insert().values(repository_id='synthetic-recovery-repo', github_host='github.example.invalid',
+            result=({'schema_version': 1, 'command_id': ids['command'],
+                'decision_id': ids['decision'], 'audit_event_id': ids['event'],
+                'intent_id': ids['intent'], 'committed_revision': 2,
+                'projection': 'pending', 'outcome': 'committed'} if warning_fixture else
+                {'command_id': ids['command'], 'decision_id': ids['decision'],
+                    'audit_event_id': ids['event'], 'outcome': 'committed'}), created_at=now))
+        repository_id = '777777' if warning_fixture else 'synthetic-recovery-repo'
+        c.execute(github_repositories.insert().values(repository_id=repository_id, github_host='github.example.invalid',
             owner='synthetic', name='recovery', enabled=False, audience_revision=1, audience_document={}, updated_at=now))
-        c.execute(github_group_issues.insert().values(group_id=ids['group'], repository_id='synthetic-recovery-repo',
+        c.execute(github_group_issues.insert().values(group_id=ids['group'], repository_id=repository_id,
             issue_node_id='synthetic-node', issue_number=7, issue_url='https://github.example.invalid/synthetic/recovery/issues/7',
             state='uncertain', desired_revision=2, applied_revision=1, audience_revision=1,
             discrepancy_codes=['restore_uncertain_effect'], document={}, updated_at=now))
+        if warning_fixture:
+            # Retain a real G7 starting point for the warning journey. The exception
+            # itself is always created later through the public submit/approve API.
+            policy_id = 'g7-warning-fixture-v1'
+            policy = {'policy_id': policy_id, 'version': 1,
+                'effective_from': (now.replace(year=now.year - 1)).isoformat().replace('+00:00', 'Z'),
+                'effective_until': None, 'scope': {'group_ids': [ids['group']],
+                    'environments': ['local'], 'service_ids': ['*']},
+                'eligibility': {'included_severities': ['high'], 'excluded_classifications': []},
+                'classification': {'source_rating_map': {'low': 'high'}},
+                'duration_seconds_by_severity': {'high': 7200},
+                'clock_basis': 'elapsed_utc_seconds', 'deadline_reference_rules': {'bindings': []},
+                'backfill': {'mode': 'prospective'}, 'start_source': 'uvm_ingest_commit_v1'}
+            head = c.execute(sa.select(sla_policy_heads).where(
+                sla_policy_heads.c.head_id == 1).with_for_update()).mappings().one_or_none()
+            head_revision = (int(head['revision']) + 1) if head else 1
+            if head:
+                c.execute(sla_policy_heads.update().where(sla_policy_heads.c.head_id == 1).values(
+                    revision=head_revision, updated_at=now))
+            else:
+                c.execute(sla_policy_heads.insert().values(head_id=1,
+                    revision=head_revision, updated_at=now))
+            policy_revision = int(c.execute(sa.select(sa.func.coalesce(
+                sa.func.max(sla_policy_versions.c.revision), 0) + 1)).scalar_one())
+            c.execute(sla_policy_versions.insert().values(policy_id=policy_id, version=1,
+                revision=policy_revision, document=policy, created_at=now, created_by='g7-fixture'))
+            receipt_id, operation_id = str(uuid.uuid4()), str(uuid.uuid4())
+            c.execute(source_observation_receipts.insert().values(receipt_id=receipt_id,
+                source_observation_id=ids['observation'], source_account_id='g7-local',
+                run_id=ids['run'], source_record_ordinal=0, retention_operation_id=operation_id,
+                retained_at=now, source_observed_at=now, source_collected_at=now, created_at=now))
+            episode_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                f"uvm-exposure-episode:{ids['exposure']}:1"))
+            c.execute(sla_episode_contracts.insert().values(episode_id=episode_id,
+                contract_version=7, start_source='uvm_ingest_commit_v1',
+                retention_receipt_id=receipt_id, policy_id=policy_id, policy_version=1,
+                pinned_at=now, created_at=now))
+            c.execute(sla_ingest_receipts.insert().values(receipt_id=str(uuid.uuid4()),
+                retention_receipt_id=receipt_id, episode_id=episode_id,
+                occurrence_id=ids['occurrence'], ingested_at=now,
+                source_observation_id=ids['observation'], source_observed_at=now,
+                source_collected_at=now, ingest_operation_id=operation_id,
+                policy_id=policy_id, policy_version=1, created_at=now))
+            from uvm.assessment.g7_clock import ensure_current_evaluation
+            evaluation = ensure_current_evaluation(c, episode_id=episode_id,
+                occurrence_id=ids['occurrence'], known_at=now, assessed_severity='high')
+            if not evaluation or evaluation.get('gap_reasons'):
+                raise RuntimeError(f'warning fixture G7 evaluation is not authoritative: {evaluation}')
+            ids['episode'] = episode_id
+            ids['evaluation'] = evaluation['evaluation_id']
     return ids
 
 

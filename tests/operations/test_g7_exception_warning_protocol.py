@@ -75,6 +75,22 @@ class ExceptionWarningCallbackProtocolTests(unittest.TestCase):
                 "select count(*) from exception_warning_callback_inbox")).scalar_one()
         self.assertEqual(count, 0)
 
+    def test_warning_actor_link_requires_a_persisted_enabled_human_principal(self):
+        from uvm.assessment.api import _warning_human_principal_is_enabled
+        from uvm.persistence.auth_schema import auth_principals
+        auth_principals.create(self.engine)
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as connection:
+            connection.execute(auth_principals.insert(), [
+                {"principal_id": "fixture-human", "display_label": "Fixture human",
+                    "enabled": True, "revision": 1, "created_at": now},
+                {"principal_id": "fixture-disabled", "display_label": "Disabled human",
+                    "enabled": False, "revision": 1, "created_at": now},
+            ])
+            self.assertTrue(_warning_human_principal_is_enabled(connection, "fixture-human"))
+            self.assertFalse(_warning_human_principal_is_enabled(connection, "fixture-disabled"))
+            self.assertFalse(_warning_human_principal_is_enabled(connection, "not-configured"))
+
 
 if __name__ == "__main__":
     unittest.main()

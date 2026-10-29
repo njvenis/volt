@@ -3,8 +3,8 @@ set -Eeuo pipefail
 umask 077
 
 MODE=${1-}
-if [[ ( $MODE != --observer-settings-only && $MODE != --backup-recovery-only && $MODE != --upgrade-rollback-only && $MODE != --data-preservation-audit-only ) || $# != 1 ]]; then
-  echo 'usage: G7_EVIDENCE_DIR=/absolute/path bash tools/g7_container_journey.sh (--observer-settings-only|--backup-recovery-only|--upgrade-rollback-only|--data-preservation-audit-only)' >&2
+if [[ ( $MODE != --observer-settings-only && $MODE != --backup-recovery-only && $MODE != --upgrade-rollback-only && $MODE != --data-preservation-audit-only && $MODE != --exception-warning-only ) || $# != 1 ]]; then
+  echo 'usage: G7_EVIDENCE_DIR=/absolute/path bash tools/g7_container_journey.sh (--observer-settings-only|--backup-recovery-only|--upgrade-rollback-only|--data-preservation-audit-only|--exception-warning-only)' >&2
   exit 64
 fi
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -29,6 +29,8 @@ RUN_ID=${RUN_ROOT##*.}
 DATA_PRESERVATION_MODE=0
 if [[ $MODE == --data-preservation-audit-only ]]; then DATA_PRESERVATION_MODE=1; fi
 UPGRADE_ROLLBACK_MODE=0
+EXCEPTION_WARNING_MODE=0
+if [[ $MODE == --exception-warning-only ]]; then EXCEPTION_WARNING_MODE=1; fi
 if [[ $MODE == --upgrade-rollback-only ]]; then
   UPGRADE_ROLLBACK_MODE=1
   IMAGE="volt-g7-upgrade-a-dev:$RUN_ID"
@@ -47,9 +49,15 @@ elif (( DATA_PRESERVATION_MODE )); then
   CANDIDATE_IMAGE=$IMAGE
   RESTORE_IMAGE=$IMAGE
 else
-  CONTAINER=volt-g7-observer-journey
-  ANCHOR_CONTAINER=volt-g7-observer-anchor
-  IMAGE="volt-g7-observer-dev:$(git -C "$ROOT" rev-parse --short HEAD)"
+  if (( EXCEPTION_WARNING_MODE )); then
+    CONTAINER="volt-g7-warning-app-$RUN_ID"
+    ANCHOR_CONTAINER="volt-g7-warning-anchor-$RUN_ID"
+    IMAGE="volt-g7-warning-dev:$RUN_ID"
+  else
+    CONTAINER=volt-g7-observer-journey
+    ANCHOR_CONTAINER=volt-g7-observer-anchor
+    IMAGE="volt-g7-observer-dev:$(git -C "$ROOT" rev-parse --short HEAD)"
+  fi
   CANDIDATE_IMAGE=$IMAGE
   RESTORE_IMAGE=$IMAGE
 fi
@@ -57,7 +65,7 @@ IS_BACKUP_MODE=0
 if [[ $MODE == --backup-recovery-only || $MODE == --upgrade-rollback-only ]]; then IS_BACKUP_MODE=1; fi
 SCHEMA_MODE_ARGS=()
 if (( UPGRADE_ROLLBACK_MODE )); then SCHEMA_MODE_ARGS=(--env UVM_G7_SCHEMA_MODE=upgrade-verification); fi
-if (( ! DATA_PRESERVATION_MODE )); then
+if (( ! DATA_PRESERVATION_MODE && ! EXCEPTION_WARNING_MODE )); then
   CONTAINER=volt-g7-observer-journey
   ANCHOR_CONTAINER=volt-g7-observer-anchor
 fi
@@ -457,8 +465,29 @@ fi
 
 FIXTURE_OIDC_ARGS=(--oidc-port "$OIDC_PROXY_PORT")
 if (( DATA_PRESERVATION_MODE )); then FIXTURE_OIDC_ARGS=(--oidc-port "$OIDC_PORT" --oidc-internal); fi
+if (( EXCEPTION_WARNING_MODE )); then FIXTURE_OIDC_ARGS+=(--exception-warning); fi
 uv run python "$ROOT/tools/g7_observer_fixture.py" create --root "$RUN_ROOT" --image "$IMAGE" \
   "${FIXTURE_OIDC_ARGS[@]}" --api-port "$API_PORT" --recovery-port "$RECOVERY_PORT"
+if (( EXCEPTION_WARNING_MODE )); then
+  mkdir -p "$RUN_ROOT/warning"
+  chmod 0777 "$RUN_ROOT/warning"
+  WARNING_NOW=$(date -u +'%Y-%m-%dT%H:%M:%S+00:00')
+  printf '%s\n' "$WARNING_NOW" >"$RUN_ROOT/scheduler/warning-clock.txt"
+  chmod 0666 "$RUN_ROOT/scheduler/warning-clock.txt"
+  printf '%s\n' 'g7-warning-fixture-token' >"$RUN_ROOT/secrets/slack-warning-token"
+  chmod 0600 "$RUN_ROOT/secrets/slack-warning-token"
+  cat >>"$RUN_ROOT/container.env" <<WARNINGENV
+UVM_G7_TEST_CLOCK_FILE=/run/uvm-g7-scheduler/warning-clock.txt
+UVM_EXCEPTION_WARNING_WORKER=1
+UVM_EXCEPTION_WARNING_POLL_SECONDS=1
+UVM_EXCEPTION_WARNING_INSTALLATION_ID=fixture-installation
+UVM_EXCEPTION_WARNING_APP_ID=fixture-app
+UVM_EXCEPTION_WARNING_SIGNING_SECRET_FILE=/run/uvm-g7-secrets/exception-warning/slack-signing-secret
+UVM_EXCEPTION_WARNING_DESTINATIONS={"fixture-destination":{"channel":"slack","secret_ref":"secret:slack-warning-token","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_SUCCESS"},"fixture-failed-destination":{"channel":"slack","secret_ref":"secret:slack-warning-token","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_FAILED"},"fixture-uncertain-destination":{"channel":"slack","secret_ref":"secret:slack-warning-token","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_UNCERTAIN"},"fixture-signing-reference":{"channel":"slack","secret_ref":"secret:slack-signing-secret","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_SUCCESS"}}
+WARNINGENV
+  printf '%s\n' 'g7-warning-fixture-signing-secret' >"$RUN_ROOT/secrets/slack-signing-secret"
+  chmod 0600 "$RUN_ROOT/secrets/slack-signing-secret"
+fi
 if (( DATA_PRESERVATION_MODE )); then
   PRESERVATION_VOLUME_NAMES=("volt-g7-preservation-$RUN_ID-postgres" "volt-g7-preservation-$RUN_ID-media" "volt-g7-preservation-$RUN_ID-state")
   for volume in "${PRESERVATION_VOLUME_NAMES[@]}"; do
@@ -629,13 +658,17 @@ preservation_role_denial host-update host_ro audit_anchor \
   'UPDATE uvm_audit_anchor.incidents SET state=state WHERE false'
 
 STARTED_CONTAINER=1
+APP_EXTRA_MOUNTS=()
+if (( EXCEPTION_WARNING_MODE )); then
+  APP_EXTRA_MOUNTS+=(--mount "type=bind,src=$RUN_ROOT/warning,dst=/run/uvm-g7-warning-fixture")
+fi
 docker run -d --name "$CONTAINER" --label uvm.g7.observer-journey=true --label "uvm.g7.run-id=$RUN_ID" \
   -p "127.0.0.1:$API_PORT:8000" -p "127.0.0.1:$RECOVERY_PORT:8002" -p "127.0.0.1:$OIDC_PORT:9000" \
   "${PRESERVATION_MOUNTS[@]}" \
   --mount "type=bind,src=$RUN_ROOT/secrets,dst=/run/secrets,readonly" \
   --mount "type=bind,src=$RUN_ROOT/secrets/registry.json,dst=/run/uvm-g7-registry.json,readonly" \
   --mount "type=bind,src=$RUN_ROOT/secrets/host-pub.pem,dst=/run/uvm-g7-host-pub.pem,readonly" \
-  --mount "type=bind,src=$RUN_ROOT/scheduler,dst=/run/uvm-g7-scheduler" \
+  --mount "type=bind,src=$RUN_ROOT/scheduler,dst=/run/uvm-g7-scheduler" "${APP_EXTRA_MOUNTS[@]}" \
   --env-file "$RUN_ROOT/container.env" "$IMAGE" >"$EVIDENCE/app-container-id.txt"
 CONTAINER_ID=$(cat "$EVIDENCE/app-container-id.txt")
 
@@ -655,6 +688,16 @@ if (( ! ready )); then
   exit 70
 fi
 curl --fail --silent --show-error "http://127.0.0.1:$API_PORT/openapi.json" >/dev/null
+if (( EXCEPTION_WARNING_MODE )); then
+  docker exec -d "$CONTAINER" /opt/uvm/venv/bin/python /opt/uvm/app/tools/g7_exception_warning_provider.py \
+    --host 127.0.0.1 --port 18181 --output /run/uvm-g7-warning-fixture/provider-captures.json \
+    --token g7-warning-fixture-token
+  for _ in $(seq 1 30); do
+    if docker exec "$CONTAINER" curl --fail --silent http://127.0.0.1:18181/healthz >/dev/null; then break; fi
+    sleep 1
+  done
+  docker exec "$CONTAINER" curl --fail --silent http://127.0.0.1:18181/healthz >/dev/null
+fi
 if (( ! DATA_PRESERVATION_MODE )); then
 cat >"$RUN_ROOT/host/oidc-loopback-proxy.mjs" <<'NODEPROXY'
 import net from 'node:net';
@@ -1162,6 +1205,12 @@ PYSOURCECE
     "$EVIDENCE/source-ce-findings.json" "$EVIDENCE/source-ce-public-sentinel.json"
 fi
 
+if (( EXCEPTION_WARNING_MODE )); then
+  docker exec -e UVM_G7_WARNING_FIXTURE=1 "$CONTAINER" \
+    /opt/uvm/venv/bin/python /opt/uvm/app/tools/g7_recovery_retained_fixture.py \
+    >"$EVIDENCE/warning-fixture-ids.json"
+  chmod 0600 "$EVIDENCE/warning-fixture-ids.json"
+fi
 uv run python "$ROOT/tools/g7_observer_fixture.py" link-actor --root "$RUN_ROOT" \
   --container "$CONTAINER" \
   >"$EVIDENCE/oidc-link.stdout" 2>"$EVIDENCE/oidc-link.stderr"
@@ -1171,8 +1220,44 @@ uv run python "$ROOT/tools/g7_observer_fixture.py" host-config --root "$RUN_ROOT
 PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
   node "$ROOT/tools/g7_observer_journey_browser.mjs" \
   --origin "http://127.0.0.1:$API_PORT" --evidence "$EVIDENCE" --fixture-root "$RUN_ROOT" \
+  --app-container "$CONTAINER" \
   $([[ $IS_BACKUP_MODE == 1 ]] && printf '%s' '--backup-seed-only') \
+  $([[ $EXCEPTION_WARNING_MODE == 1 ]] && printf '%s' '--exception-warning-only') \
   >"$EVIDENCE/browser-journey.stdout" 2>"$EVIDENCE/browser-journey.stderr"
+
+if (( EXCEPTION_WARNING_MODE )); then
+  for _ in $(seq 1 45); do
+    if [[ -s "$RUN_ROOT/warning/provider-captures.json" ]] && python3 - "$RUN_ROOT/warning/provider-captures.json" <<'WARMCAPTUREREADY'
+import json,sys
+rows=json.load(open(sys.argv[1],encoding='utf-8'))
+raise SystemExit(0 if {row.get('payload',{}).get('channel') for row in rows} >=
+    {'C_FIXTURE_SUCCESS','C_FIXTURE_FAILED','C_FIXTURE_UNCERTAIN'} else 1)
+WARMCAPTUREREADY
+    then break; fi
+    sleep 1
+  done
+  [[ -s "$RUN_ROOT/warning/provider-captures.json" ]] || {
+    echo 'warning worker produced no loopback Slack provider request' >&2; exit 70;
+  }
+  cp "$RUN_ROOT/warning/provider-captures.json" "$EVIDENCE/provider-captures.json"
+  python3 - "$EVIDENCE/provider-captures.json" <<'WARNACCEPT'
+import json,sys
+rows=json.load(open(sys.argv[1],encoding='utf-8'))
+channels={row.get('payload',{}).get('channel') for row in rows}
+if channels!={'C_FIXTURE_SUCCESS','C_FIXTURE_FAILED','C_FIXTURE_UNCERTAIN'}:
+    raise SystemExit(f'provider requests did not cover all synthetic outcomes: {channels}')
+if any(row.get('authorization_verified') is not True for row in rows):
+    raise SystemExit('provider fixture received a request with an invalid synthetic credential')
+payload=next(row['payload'] for row in rows if row['payload']['channel']=='C_FIXTURE_SUCCESS')
+if not payload.get('blocks'):
+    raise SystemExit('captured provider payload does not include the approved acknowledgement action')
+action=payload['blocks'][1]['elements'][0]
+if action.get('action_id')!='uvm_warning_ack' or not action.get('value'):
+    raise SystemExit('captured Slack acknowledgement action is incomplete')
+WARNACCEPT
+  echo 'G7 exception warning public workflow reached loopback provider acceptance' | tee "$EVIDENCE/result.txt"
+  exit 0
+fi
 
 
 if (( IS_BACKUP_MODE )); then

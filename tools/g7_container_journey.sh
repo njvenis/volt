@@ -3,8 +3,8 @@ set -Eeuo pipefail
 umask 077
 
 MODE=${1-}
-if [[ ( $MODE != --observer-settings-only && $MODE != --backup-recovery-only && $MODE != --upgrade-rollback-only && $MODE != --data-preservation-audit-only && $MODE != --exception-warning-only ) || $# != 1 ]]; then
-  echo 'usage: G7_EVIDENCE_DIR=/absolute/path bash tools/g7_container_journey.sh (--observer-settings-only|--backup-recovery-only|--upgrade-rollback-only|--data-preservation-audit-only|--exception-warning-only)' >&2
+if [[ ( $MODE != --observer-settings-only && $MODE != --backup-recovery-only && $MODE != --upgrade-rollback-only && $MODE != --data-preservation-audit-only && $MODE != --exception-warning-only && $MODE != --identity-access-ownership-only ) || $# != 1 ]]; then
+  echo 'usage: G7_EVIDENCE_DIR=/absolute/path bash tools/g7_container_journey.sh (--observer-settings-only|--backup-recovery-only|--upgrade-rollback-only|--data-preservation-audit-only|--exception-warning-only|--identity-access-ownership-only)' >&2
   exit 64
 fi
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -31,6 +31,8 @@ if [[ $MODE == --data-preservation-audit-only ]]; then DATA_PRESERVATION_MODE=1;
 UPGRADE_ROLLBACK_MODE=0
 EXCEPTION_WARNING_MODE=0
 if [[ $MODE == --exception-warning-only ]]; then EXCEPTION_WARNING_MODE=1; fi
+IDENTITY_MODE=0
+if [[ $MODE == --identity-access-ownership-only ]]; then IDENTITY_MODE=1; fi
 if [[ $MODE == --upgrade-rollback-only ]]; then
   UPGRADE_ROLLBACK_MODE=1
   IMAGE="volt-g7-upgrade-a-dev:$RUN_ID"
@@ -40,6 +42,12 @@ elif [[ $MODE == --backup-recovery-only ]]; then
   CONTAINER=volt-g7-observer-journey
   ANCHOR_CONTAINER=volt-g7-observer-anchor
   IMAGE="volt-g7-backup-recovery-dev:$(git -C "$ROOT" rev-parse --short HEAD)"
+  CANDIDATE_IMAGE=$IMAGE
+  RESTORE_IMAGE=$IMAGE
+elif (( IDENTITY_MODE )); then
+  CONTAINER="volt-g7-identity-app-$RUN_ID"
+  ANCHOR_CONTAINER="volt-g7-identity-anchor-$RUN_ID"
+  IMAGE="volt-g7-identity-dev:$RUN_ID"
   CANDIDATE_IMAGE=$IMAGE
   RESTORE_IMAGE=$IMAGE
 elif (( DATA_PRESERVATION_MODE )); then
@@ -65,7 +73,7 @@ IS_BACKUP_MODE=0
 if [[ $MODE == --backup-recovery-only || $MODE == --upgrade-rollback-only ]]; then IS_BACKUP_MODE=1; fi
 SCHEMA_MODE_ARGS=()
 if (( UPGRADE_ROLLBACK_MODE )); then SCHEMA_MODE_ARGS=(--env UVM_G7_SCHEMA_MODE=upgrade-verification); fi
-if (( ! DATA_PRESERVATION_MODE && ! EXCEPTION_WARNING_MODE )); then
+if (( ! DATA_PRESERVATION_MODE && ! EXCEPTION_WARNING_MODE && ! IDENTITY_MODE )); then
   CONTAINER=volt-g7-observer-journey
   ANCHOR_CONTAINER=volt-g7-observer-anchor
 fi
@@ -494,6 +502,7 @@ FIXTURE_OIDC_ARGS=(--oidc-port "$OIDC_PROXY_PORT" "${FIXTURE_OIDC_INTERNAL_ARGS[
 if (( EXCEPTION_WARNING_MODE )); then FIXTURE_OIDC_ARGS+=(--oidc-host "$OIDC_HOST"); fi
 if (( DATA_PRESERVATION_MODE )); then FIXTURE_OIDC_ARGS=(--oidc-port "$OIDC_PORT" --oidc-internal); fi
 if (( EXCEPTION_WARNING_MODE )); then FIXTURE_OIDC_ARGS+=(--exception-warning); fi
+if (( IDENTITY_MODE )); then FIXTURE_OIDC_ARGS+=(--identity-access-ownership); fi
 uv run python "$ROOT/tools/g7_observer_fixture.py" create --root "$RUN_ROOT" --image "$IMAGE" \
   "${FIXTURE_OIDC_ARGS[@]}" --api-port "$API_PORT" --recovery-port "$RECOVERY_PORT"
 if (( EXCEPTION_WARNING_MODE )); then
@@ -1340,6 +1349,18 @@ uv run python "$ROOT/tools/g7_observer_fixture.py" host-config --root "$RUN_ROOT
   --oidc-port "$OIDC_PROXY_PORT" \
   "${HOST_OIDC_INTERNAL_ARGS[@]}" \
   >"$EVIDENCE/host-config.stdout" 2>"$EVIDENCE/host-config.stderr"
+if (( IDENTITY_MODE )); then
+  uv run python "$ROOT/tools/g7_observer_fixture.py" link-identity-user --root "$RUN_ROOT" \
+    --container "$CONTAINER" >"$EVIDENCE/identity-user-link.stdout" \
+    2>"$EVIDENCE/identity-user-link.stderr"
+  PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
+    node "$ROOT/tools/g7_identity_access_ownership_browser.mjs" \
+      --origin "http://127.0.0.1:$API_PORT" --evidence "$EVIDENCE" \
+      --fixture-root "$RUN_ROOT" --oidc-proxy-port "$OIDC_PROXY_PORT" --app-container "$CONTAINER" \
+      >"$EVIDENCE/identity-browser.stdout" 2>"$EVIDENCE/identity-browser.stderr"
+  echo 'G7 local identity/access/ownership public lifecycle journey completed' | tee "$EVIDENCE/result.txt"
+  exit 0
+fi
 PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
   node "$ROOT/tools/g7_observer_journey_browser.mjs" \
   --origin "http://127.0.0.1:$API_PORT" --evidence "$EVIDENCE" --fixture-root "$RUN_ROOT" \

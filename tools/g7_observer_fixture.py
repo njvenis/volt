@@ -162,9 +162,12 @@ def run(args: argparse.Namespace) -> None:
                     "prohibited_action_pairs": []},
                 **({"warning_route_scope": {
                 "installation_ids": ["fixture-installation"], "workspace_ids": ["T_FIXTURE"],
-                "channel_ids": ["C_FIXTURE_SUCCESS", "C_FIXTURE_FAILED", "C_FIXTURE_UNCERTAIN"],
-                "destination_refs": ["fixture-destination", "fixture-failed-destination", "fixture-uncertain-destination"],
-                "recipient_ids": ["g7-actor"], "channels": ["slack"],
+                "channel_ids": ["C_FIXTURE_SUCCESS", "C_FIXTURE_FAILED", "C_FIXTURE_UNCERTAIN",
+                    "SMTP_FIXTURE_ACCEPTED", "SMTP_FIXTURE_RETRY", "SMTP_FIXTURE_UNCERTAIN"],
+                "destination_refs": ["fixture-destination", "fixture-failed-destination",
+                    "fixture-uncertain-destination", "fixture-smtp-accepted",
+                    "fixture-smtp-retry", "fixture-smtp-uncertain"],
+                "recipient_ids": ["g7-actor"], "channels": ["slack", "email"],
                 "access_group_ids": ["00000000-0000-4000-8000-000000000024"],
                 "failure_alert_group_ids": ["00000000-0000-4000-8000-000000000024"],
                 "finding_group_ids": [str(uuid.uuid5(uuid.NAMESPACE_URL, 'volt:g7:recovery-fixture:group'))]}}

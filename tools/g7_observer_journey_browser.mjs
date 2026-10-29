@@ -17,6 +17,7 @@ const fixtureRoot = arg('--fixture-root');
 const appContainer = process.argv.includes('--app-container') ? arg('--app-container') : 'volt-g7-observer-journey';
 const backupSeedOnly = process.argv.includes('--backup-seed-only');
 const warningOnly = process.argv.includes('--exception-warning-only');
+const oidcProxyPort = warningOnly ? arg('--oidc-proxy-port') : null;
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname),'..');
 await mkdir(evidence, {recursive:true, mode:0o700});
 const browser = await chromium.launch({headless:true});
@@ -237,6 +238,19 @@ try {
           failure_alert_group_ids:[groupId],link:'https://uvm.example.test/assessment'})});
       if(route.status!==200)throw new Error(`warning route setup failed ${route.status}: ${JSON.stringify(route.body)}`);
     }
+    for(const destination of [
+      {channel_id:'SMTP_FIXTURE_ACCEPTED',destination_ref:'fixture-smtp-accepted',email_recipient:'accepted@fixture.invalid'},
+      {channel_id:'SMTP_FIXTURE_RETRY',destination_ref:'fixture-smtp-retry',email_recipient:'retry@fixture.invalid',retry_base_seconds:1},
+      {channel_id:'SMTP_FIXTURE_UNCERTAIN',destination_ref:'fixture-smtp-uncertain',email_recipient:'uncertain@fixture.invalid'}]){
+      current=await api('/api/v1/assessment/administration/catalogue');
+      const route=await api('/api/v1/assessment/exception-warning-routes',{method:'POST',write:true,
+        body:JSON.stringify({route_id:crypto.randomUUID(),access_group_ids:[groupId],finding_group_ids:[findingId],
+          channel:'email',installation_id:'fixture-installation',workspace_id:'T_FIXTURE',
+          ...destination,recipient_id:'g7-actor',offset_seconds:[60],enabled:true,
+          expected_policy_revision:current.body.policy_revision,expected_route_revision:null,
+          max_attempts:3,failure_alert_group_ids:[groupId],link:'https://uvm.example.test/assessment'})});
+      if(route.status!==200)throw new Error(`SMTP warning route setup failed ${route.status}: ${JSON.stringify(route.body)}`);
+    }
     current=await api('/api/v1/assessment/administration/catalogue');
     const actor=await api('/api/v1/assessment/exception-warning-actor-links',{method:'POST',write:true,
       body:JSON.stringify({installation_id:'fixture-installation',workspace_id:'T_FIXTURE',
@@ -283,14 +297,66 @@ try {
     const sentUntil=Date.now()+45000;let warnings;
     while(Date.now()<sentUntil){
       warnings=await api(`/api/v1/assessment/groups/${findingId}/exception-warnings`);
-      if(warnings.status===200&&warnings.body.items?.some(item=>item.status==='sent'))break;
+      if(warnings.status===200&&warnings.body.items?.length===6
+          &&warnings.body.items.every(item=>['sent','failed','uncertain'].includes(item.status)))break;
       await page.waitForTimeout(500);
     }
-    if(warnings?.status!==200||!warnings.body.items?.some(item=>item.status==='sent'))
-      throw new Error(`warning worker did not durably record provider acceptance: ${JSON.stringify(warnings)}`);
+    if(warnings?.status!==200||warnings.body.items?.length!==6)
+      throw new Error(`warning worker did not durably record all six Slack/SMTP initial outcomes: ${JSON.stringify(warnings)}`);
     if(!['sent','failed','uncertain'].every(status=>warnings.body.items.some(item=>item.status===status)))
       throw new Error(`warning worker did not exercise sent/failed/uncertain outcomes: ${JSON.stringify(warnings.body.items)}`);
-    const warning=warnings.body.items.find(item=>item.status==='sent');
+    const smtpByDestination=Object.fromEntries(warnings.body.items.filter(item=>item.channel==='email')
+      .map(item=>[item.destination_ref,item]));
+    if(smtpByDestination['fixture-smtp-accepted']?.status!=='sent'
+        ||smtpByDestination['fixture-smtp-retry']?.status!=='failed'
+        ||smtpByDestination['fixture-smtp-uncertain']?.status!=='uncertain')
+      throw new Error(`SMTP worker did not record accepted/rejected/uncertain outcomes: ${JSON.stringify(smtpByDestination)}`);
+    const failedSmtp=smtpByDestination['fixture-smtp-retry'];
+    if(!failedSmtp.next_attempt_at||failedSmtp.attempts?.length!==1
+        ||failedSmtp.attempts[0].outcome!=='failed'||failedSmtp.suppression_reason)
+      throw new Error(`confirmed SMTP rejection did not retain one scheduled retry: ${JSON.stringify(failedSmtp)}`);
+    const initialRetryClock=await readFile(path.join(fixtureRoot,'scheduler','warning-clock.txt'),'utf8');
+    await writeFile(path.join(evidence,'warning-retry-clock-before.txt'),initialRetryClock,{mode:0o600});
+    const initialRetryEpoch=Date.parse(warningClock);
+    const mountedRetryEpoch=Date.parse(initialRetryClock.trim());
+    if(!Number.isFinite(initialRetryEpoch)||!Number.isFinite(mountedRetryEpoch)
+        ||mountedRetryEpoch!==initialRetryEpoch)
+      throw new Error(`mounted warning clock differs from the explicit due-time value: ${JSON.stringify({warningClock,initialRetryClock})}`);
+    const advancedRetryClock=new Date(initialRetryEpoch+3000).toISOString();
+    await writeFile(path.join(fixtureRoot,'scheduler','warning-clock.txt'),advancedRetryClock+'\n',{mode:0o666});
+    await writeFile(path.join(evidence,'warning-retry-clock-advancement.json'),JSON.stringify({
+      initial_clock:initialRetryClock.trim(),advanced_clock:advancedRetryClock,
+      advance_seconds:3,reason:'make the explicitly scheduled one-second SMTP retry due'},null,2),{mode:0o600});
+    const retryUntil=Date.now()+15000;let retried;
+    while(Date.now()<retryUntil){
+      retried=await api(`/api/v1/assessment/groups/${findingId}/exception-warnings`);
+      const item=retried.body?.items?.find(row=>row.intent_id===failedSmtp.intent_id);
+      if(item?.status==='sent'&&item.attempts?.length===2)break;
+      await page.waitForTimeout(300);
+    }
+    const retriedSmtp=retried?.body?.items?.find(row=>row.intent_id===failedSmtp.intent_id);
+    if(retriedSmtp?.status!=='sent'||retriedSmtp.attempts?.length!==2
+        ||retriedSmtp.attempts[0].outcome!=='failed'||retriedSmtp.attempts[1].outcome!=='sent'
+        ||retriedSmtp.attempts[0].attempt_number!==1||retriedSmtp.attempts[1].attempt_number!==2
+        ||retriedSmtp.provider_receipt_basis!=='smtp_accepted')
+      throw new Error(`scheduled SMTP retry did not preserve one intent with a bounded second attempt and SMTP acceptance: ${JSON.stringify(retriedSmtp)}`);
+    const smtpCaptures=JSON.parse(await readFile(path.join(fixtureRoot,'warning','smtp-captures.json'),'utf8'));
+    const retryCaptures=smtpCaptures.filter(row=>row.recipient==='retry@fixture.invalid');
+    if(retryCaptures.length!==2||retryCaptures[0].result!=='temporary_rcpt_rejection'
+        ||retryCaptures[1].result!=='accepted'||retryCaptures[1].message_id!==retriedSmtp.attempts[1].receipt?.split('|')[2])
+      throw new Error(`SMTP fixture did not capture one confirmed rejection and one accepted retry: ${JSON.stringify(retryCaptures)}`);
+    const uncertainSmtp=smtpByDestination['fixture-smtp-uncertain'];
+    const uncertainCaptures=smtpCaptures.filter(row=>row.recipient==='uncertain@fixture.invalid');
+    if(uncertainCaptures.length!==1||uncertainCaptures[0].result!=='connection_lost_after_data'
+        ||uncertainSmtp.attempts?.length!==1||uncertainSmtp.status!=='uncertain'
+        ||uncertainSmtp.next_attempt_at)
+      throw new Error(`ambiguous SMTP outcome was not held without resend: ${JSON.stringify({uncertainSmtp,uncertainCaptures})}`);
+    await writeFile(path.join(evidence,'warning-smtp-retry-proof.json'),JSON.stringify({
+      initial_smtp_intents:[smtpByDestination['fixture-smtp-accepted'],failedSmtp,uncertainSmtp],
+      retried_intent:retriedSmtp,retry_exchange:retryCaptures,
+      uncertain_exchange:uncertainCaptures,acceptance_semantics:'SMTP final 2xx after DATA only; no mailbox delivery claim'},null,2),{mode:0o600});
+    warnings=retried;
+    const warning=warnings.body.items.find(item=>item.channel==='slack'&&item.status==='sent');
     const successCapture=JSON.parse(await readFile(path.join(fixtureRoot,'warning','provider-captures.json'),'utf8'))
       .find(row=>row.payload.channel==='C_FIXTURE_SUCCESS');
     const token=successCapture.payload.blocks[1].elements[0].value;
@@ -381,7 +447,7 @@ try {
     if(!acknowledged.body.items?.some(item=>item.intent_id===warning.intent_id&&item.acknowledged_at))
       throw new Error('signed callback was not durably acknowledged by the worker');
     const alerts=await api(`/api/v1/assessment/groups/${findingId}/exception-warning-failure-alerts`);
-    if(alerts.status!==200||alerts.body.items?.length!==2||
+    if(alerts.status!==200||alerts.body.items?.length<3||
       !['failed','uncertain'].every(status=>alerts.body.items.some(item=>item.status===status)))
       throw new Error(`eligible warning failure-alert readback did not expose failed and uncertain attempts: ${JSON.stringify(alerts)}`);
     const afterAck=await api(`/api/v1/assessment/groups/${findingId}`);
@@ -402,13 +468,25 @@ try {
       await page.waitForTimeout(1000);
     }
     if(!healthy)throw new Error('app container did not recover after warning persistence restart');
+    execFileSync('docker',['exec','-d',appContainer,
+      '/opt/uvm/venv/bin/python','/opt/uvm/app/tools/g7_exception_warning_oidc_proxy.py',
+      '--host','0.0.0.0','--port',String(oidcProxyPort),'--upstream-port','9000'],
+      {encoding:'utf8',stdio:['ignore','pipe','pipe']});
+    let oidcReady=false;const oidcUntil=Date.now()+15000;
+    while(Date.now()<oidcUntil){
+      try{execFileSync('docker',['exec',appContainer,'curl','--fail','--silent','--max-time','2',
+        `http://127.0.0.1:${oidcProxyPort}/healthz`],{encoding:'utf8',stdio:['ignore','pipe','pipe']});oidcReady=true;break;}catch{}
+      await page.waitForTimeout(250);
+    }
+    if(!oidcReady)throw new Error('disposable OIDC relay did not recover after container restart');
     await page.goto(origin+'/api/v1/auth/login',{waitUntil:'domcontentloaded'});
     await page.waitForFunction(async()=>{const r=await fetch('/api/v1/auth/session');if(!r.ok)return false;return (await r.json()).authenticated===true;},null,{timeout:30000});
     const afterRestart=await api(`/api/v1/assessment/groups/${findingId}/exception-warnings`);
     if(afterRestart.status!==200||!afterRestart.body.items?.some(item=>item.intent_id===warning.intent_id&&item.acknowledged_at))
       throw new Error('warning delivery and acknowledgement state did not persist across app restart');
     await writeFile(path.join(evidence,'warning-restart-proof.json'),JSON.stringify({
-      restarted_container:appContainer,restart_result:restart,persisted_warning_items:afterRestart.body.items},null,2),{mode:0o600});
+      restarted_container:appContainer,restart_result:restart,oidc_relay_restarted:true,
+      persisted_warning_items:afterRestart.body.items},null,2),{mode:0o600});
     await page.goto(origin+'/#findings?group='+encodeURIComponent(findingId),{waitUntil:'domcontentloaded'});
     await page.waitForTimeout(2500);
     await writeFile(path.join(evidence,'warning-ui-debug.json'),JSON.stringify({

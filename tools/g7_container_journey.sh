@@ -69,6 +69,7 @@ if (( ! DATA_PRESERVATION_MODE && ! EXCEPTION_WARNING_MODE )); then
   CONTAINER=volt-g7-observer-journey
   ANCHOR_CONTAINER=volt-g7-observer-anchor
 fi
+OIDC_HOST=127.0.0.1
 ANCHOR_PORT=$(python3 - <<'PYPORT'
 import socket
 for port in (15433, 25433, 35433, 45433, 55433, 65433):
@@ -110,6 +111,18 @@ PICKPORT
   }
   API_PORT=$(choose_port 18080 28080 38080 48080 58080)
   RECOVERY_PORT=$(choose_port 18082 28082 38082 48082 58082)
+  OIDC_PROXY_PORT=$(choose_port 19090 29090 39090 49090 59090)
+elif (( EXCEPTION_WARNING_MODE )); then
+  choose_port() {
+    python3 - "$@" <<'PICKPORT'
+import socket,sys
+for port in map(int,sys.argv[1:]):
+    sock=socket.socket()
+    try: sock.bind(('127.0.0.1',port)); print(port); sock.close(); break
+    except OSError: sock.close()
+else: raise SystemExit('no unique disposable journey port available')
+PICKPORT
+  }
   OIDC_PROXY_PORT=$(choose_port 19090 29090 39090 49090 59090)
 fi
 STARTED_CONTAINER=0
@@ -442,8 +455,8 @@ for port in "$API_PORT" "$RECOVERY_PORT" "$OIDC_PROXY_PORT" "$OIDC_PORT" "$ANCHO
     echo "required local port $port is occupied" >&2; exit 69
   fi
 done
-printf 'api_loopback_port=%s\nrecovery_loopback_port=%s\nanchor_loopback_port=%s\noidc_proxy_loopback_port=%s\noidc_backend_loopback_port=%s\n' \
-  "$API_PORT" "$RECOVERY_PORT" "$ANCHOR_PORT" "$OIDC_PROXY_PORT" "$OIDC_PORT" >"$EVIDENCE/runtime-ports.txt"
+printf 'api_loopback_port=%s\nrecovery_loopback_port=%s\nanchor_loopback_port=%s\noidc_proxy_host=%s\noidc_proxy_port=%s\noidc_backend_loopback_port=%s\n' \
+  "$API_PORT" "$RECOVERY_PORT" "$ANCHOR_PORT" "$OIDC_HOST" "$OIDC_PROXY_PORT" "$OIDC_PORT" >"$EVIDENCE/runtime-ports.txt"
 docker version --format 'engine={{.Server.Version}}' >"$EVIDENCE/docker-version.txt"
 DOCKER_BRIDGE_SUBNET=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Subnet}}')
 python3 - "$DOCKER_BRIDGE_SUBNET" <<'CHECKBRIDGE'
@@ -464,6 +477,7 @@ if [[ $CANDIDATE_IMAGE != "$IMAGE" ]] && ! docker image inspect "$CANDIDATE_IMAG
 fi
 
 FIXTURE_OIDC_ARGS=(--oidc-port "$OIDC_PROXY_PORT")
+if (( EXCEPTION_WARNING_MODE )); then FIXTURE_OIDC_ARGS+=(--oidc-host "$OIDC_HOST"); fi
 if (( DATA_PRESERVATION_MODE )); then FIXTURE_OIDC_ARGS=(--oidc-port "$OIDC_PORT" --oidc-internal); fi
 if (( EXCEPTION_WARNING_MODE )); then FIXTURE_OIDC_ARGS+=(--exception-warning); fi
 uv run python "$ROOT/tools/g7_observer_fixture.py" create --root "$RUN_ROOT" --image "$IMAGE" \
@@ -476,6 +490,21 @@ if (( EXCEPTION_WARNING_MODE )); then
   chmod 0666 "$RUN_ROOT/scheduler/warning-clock.txt"
   printf '%s\n' 'g7-warning-fixture-token' >"$RUN_ROOT/secrets/slack-warning-token"
   chmod 0600 "$RUN_ROOT/secrets/slack-warning-token"
+  printf '%s\n' 'fixture-secret' >"$RUN_ROOT/secrets/smtp-warning-token"
+  chmod 0600 "$RUN_ROOT/secrets/smtp-warning-token"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+    -subj '/CN=g7-warning-smtp-fixture' \
+    -addext 'subjectAltName=IP:127.0.0.1,DNS:localhost' \
+    -keyout "$RUN_ROOT/warning/smtp-key.pem" -out "$RUN_ROOT/warning/smtp-cert.pem" \
+    >"$EVIDENCE/smtp-certificate.stdout" 2>"$EVIDENCE/smtp-certificate.stderr"
+  chmod 0644 "$RUN_ROOT/warning/smtp-key.pem" "$RUN_ROOT/warning/smtp-cert.pem"
+  cp "$RUN_ROOT/warning/smtp-cert.pem" "$EVIDENCE/smtp-fixture-certificate.pem"
+  cat >"$EVIDENCE/warning-fixture-config.json" <<'WARNINGCONFIG'
+{"clock_file":"/run/uvm-g7-scheduler/warning-clock.txt","slack":{"host":"127.0.0.1","port":18181,"channels":["C_FIXTURE_SUCCESS","C_FIXTURE_FAILED","C_FIXTURE_UNCERTAIN"],"secret_ref":"secret:slack-warning-token"},"smtp":{"host":"127.0.0.1","port":18465,"tls":"implicit","recipients":{"fixture-smtp-accepted":"accepted@fixture.invalid","fixture-smtp-retry":"retry@fixture.invalid","fixture-smtp-uncertain":"uncertain@fixture.invalid"},"secret_ref":"secret:smtp-warning-token"},"retry":{"smtp_base_seconds":1,"smtp_max_attempts":3,"slack_fixture_retry_not_advanced":true}}
+WARNINGCONFIG
+  chmod 0600 "$EVIDENCE/warning-fixture-config.json"
+  sha256sum "$EVIDENCE/warning-fixture-config.json" "$RUN_ROOT/warning/smtp-cert.pem" \
+    >"$EVIDENCE/warning-fixture-config.sha256"
   cat >>"$RUN_ROOT/container.env" <<WARNINGENV
 UVM_G7_TEST_CLOCK_FILE=/run/uvm-g7-scheduler/warning-clock.txt
 UVM_EXCEPTION_WARNING_WORKER=1
@@ -483,7 +512,9 @@ UVM_EXCEPTION_WARNING_POLL_SECONDS=1
 UVM_EXCEPTION_WARNING_INSTALLATION_ID=fixture-installation
 UVM_EXCEPTION_WARNING_APP_ID=fixture-app
 UVM_EXCEPTION_WARNING_SIGNING_SECRET_FILE=/run/uvm-g7-secrets/exception-warning/slack-signing-secret
-UVM_EXCEPTION_WARNING_DESTINATIONS={"fixture-destination":{"channel":"slack","secret_ref":"secret:slack-warning-token","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_SUCCESS"},"fixture-failed-destination":{"channel":"slack","secret_ref":"secret:slack-warning-token","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_FAILED"},"fixture-uncertain-destination":{"channel":"slack","secret_ref":"secret:slack-warning-token","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_UNCERTAIN"},"fixture-signing-reference":{"channel":"slack","secret_ref":"secret:slack-signing-secret","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_SUCCESS"}}
+SSL_CERT_FILE=/run/uvm-g7-warning-fixture/smtp-cert.pem
+UVM_EXCEPTION_WARNING_USE_LOOPBACK_HTTP=1
+UVM_EXCEPTION_WARNING_DESTINATIONS={"fixture-destination":{"channel":"slack","secret_ref":"secret:slack-warning-token","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_SUCCESS"},"fixture-failed-destination":{"channel":"slack","secret_ref":"secret:slack-warning-token","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_FAILED"},"fixture-uncertain-destination":{"channel":"slack","secret_ref":"secret:slack-warning-token","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_UNCERTAIN"},"fixture-signing-reference":{"channel":"slack","secret_ref":"secret:slack-signing-secret","endpoint":"http://127.0.0.1:18181/api/chat.postMessage","installation_id":"fixture-installation","workspace_id":"T_FIXTURE","channel_id":"C_FIXTURE_SUCCESS"},"fixture-smtp-accepted":{"channel":"email","secret_ref":"secret:smtp-warning-token","smtp_host":"127.0.0.1","smtp_port":18465,"smtp_user":"g7-fixture","sender":"uvm@fixture.invalid","recipient":"accepted@fixture.invalid","smtp_tls":"implicit"},"fixture-smtp-retry":{"channel":"email","secret_ref":"secret:smtp-warning-token","smtp_host":"127.0.0.1","smtp_port":18465,"smtp_user":"g7-fixture","sender":"uvm@fixture.invalid","recipient":"retry@fixture.invalid","smtp_tls":"implicit"},"fixture-smtp-uncertain":{"channel":"email","secret_ref":"secret:smtp-warning-token","smtp_host":"127.0.0.1","smtp_port":18465,"smtp_user":"g7-fixture","sender":"uvm@fixture.invalid","recipient":"uncertain@fixture.invalid","smtp_tls":"implicit"}}
 WARNINGENV
   printf '%s\n' 'g7-warning-fixture-signing-secret' >"$RUN_ROOT/secrets/slack-signing-secret"
   chmod 0600 "$RUN_ROOT/secrets/slack-signing-secret"
@@ -659,11 +690,14 @@ preservation_role_denial host-update host_ro audit_anchor \
 
 STARTED_CONTAINER=1
 APP_EXTRA_MOUNTS=()
+APP_EXTRA_PORTS=()
 if (( EXCEPTION_WARNING_MODE )); then
   APP_EXTRA_MOUNTS+=(--mount "type=bind,src=$RUN_ROOT/warning,dst=/run/uvm-g7-warning-fixture")
+  APP_EXTRA_PORTS+=( -p "127.0.0.1:$OIDC_PROXY_PORT:$OIDC_PROXY_PORT" )
 fi
 docker run -d --name "$CONTAINER" --label uvm.g7.observer-journey=true --label "uvm.g7.run-id=$RUN_ID" \
   -p "127.0.0.1:$API_PORT:8000" -p "127.0.0.1:$RECOVERY_PORT:8002" -p "127.0.0.1:$OIDC_PORT:9000" \
+  "${APP_EXTRA_PORTS[@]}" \
   "${PRESERVATION_MOUNTS[@]}" \
   --mount "type=bind,src=$RUN_ROOT/secrets,dst=/run/secrets,readonly" \
   --mount "type=bind,src=$RUN_ROOT/secrets/registry.json,dst=/run/uvm-g7-registry.json,readonly" \
@@ -692,13 +726,36 @@ if (( EXCEPTION_WARNING_MODE )); then
   docker exec -d "$CONTAINER" /opt/uvm/venv/bin/python /opt/uvm/app/tools/g7_exception_warning_provider.py \
     --host 127.0.0.1 --port 18181 --output /run/uvm-g7-warning-fixture/provider-captures.json \
     --token g7-warning-fixture-token
+  docker exec -d "$CONTAINER" /opt/uvm/venv/bin/python /opt/uvm/app/tools/g7_exception_warning_smtp.py \
+    --host 127.0.0.1 --port 18465 \
+    --cert /run/uvm-g7-warning-fixture/smtp-cert.pem \
+    --key /run/uvm-g7-warning-fixture/smtp-key.pem \
+    --output /run/uvm-g7-warning-fixture/smtp-captures.json
   for _ in $(seq 1 30); do
-    if docker exec "$CONTAINER" curl --fail --silent http://127.0.0.1:18181/healthz >/dev/null; then break; fi
+    if docker exec "$CONTAINER" curl --fail --silent http://127.0.0.1:18181/healthz >/dev/null \
+        && docker exec "$CONTAINER" /opt/uvm/venv/bin/python -c 'import socket; socket.create_connection(("127.0.0.1",18465),timeout=1).close()' 2>/dev/null; then break; fi
     sleep 1
   done
   docker exec "$CONTAINER" curl --fail --silent http://127.0.0.1:18181/healthz >/dev/null
+  docker exec "$CONTAINER" /opt/uvm/venv/bin/python -c \
+    'import os,ssl,smtplib; path=os.environ.get("SSL_CERT_FILE"); print("trust_file="+str(path)+" exists="+str(bool(path and os.path.isfile(path)))); print("trust_store="+str(ssl.create_default_context().cert_store_stats())); client=smtplib.SMTP_SSL("127.0.0.1",18465,timeout=5,context=ssl.create_default_context()); print("tls_cipher="+str(client.sock.cipher()[0])); client.quit()' \
+    >"$EVIDENCE/smtp-tls-probe.stdout" 2>"$EVIDENCE/smtp-tls-probe.stderr" || {
+      echo 'disposable SMTP TLS trust/hostname probe failed; see retained probe output' >&2; exit 70;
+    }
 fi
-if (( ! DATA_PRESERVATION_MODE )); then
+if (( EXCEPTION_WARNING_MODE )); then
+  docker exec -d "$CONTAINER" /opt/uvm/venv/bin/python /opt/uvm/app/tools/g7_exception_warning_oidc_proxy.py \
+    --host 0.0.0.0 --port "$OIDC_PROXY_PORT" --upstream-port 9000
+  for _ in $(seq 1 30); do
+    if docker exec "$CONTAINER" curl --fail --silent --max-time 2 \
+        "http://127.0.0.1:$OIDC_PROXY_PORT/healthz" >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
+  docker exec "$CONTAINER" curl --fail --silent --show-error --max-time 2 \
+    "http://127.0.0.1:$OIDC_PROXY_PORT/healthz" >"$EVIDENCE/oidc-proxy-health.txt"
+  curl --fail --silent --show-error --max-time 2 \
+    "http://127.0.0.1:$OIDC_PROXY_PORT/healthz" >/dev/null
+elif (( ! DATA_PRESERVATION_MODE )); then
 cat >"$RUN_ROOT/host/oidc-loopback-proxy.mjs" <<'NODEPROXY'
 import net from 'node:net';
 const upstreamPort=Number(process.env.OIDC_UPSTREAM_PORT);
@@ -707,14 +764,14 @@ const server=net.createServer(client=>{
  client.pipe(upstream); upstream.pipe(client);
  client.on('error',()=>upstream.destroy()); upstream.on('error',()=>client.destroy());
 });
-server.listen(Number(process.env.OIDC_PROXY_PORT),'127.0.0.1');
+server.listen(Number(process.env.OIDC_PROXY_PORT),process.env.OIDC_PROXY_HOST);
 NODEPROXY
-OIDC_UPSTREAM_PORT=$OIDC_PORT OIDC_PROXY_PORT=$OIDC_PROXY_PORT node "$RUN_ROOT/host/oidc-loopback-proxy.mjs" \
+OIDC_UPSTREAM_PORT=$OIDC_PORT OIDC_PROXY_PORT=$OIDC_PROXY_PORT OIDC_PROXY_HOST=$OIDC_HOST node "$RUN_ROOT/host/oidc-loopback-proxy.mjs" \
   >"$RUN_ROOT/host/oidc-proxy.log" 2>&1 &
 OIDC_PROXY_PID=$!
 printf '%s\n' "$OIDC_PROXY_PID" >"$RUN_ROOT/host/oidc-proxy.pid"
 for _ in $(seq 1 30); do
-  if curl --fail --silent --max-time 2 "http://127.0.0.1:$OIDC_PROXY_PORT/healthz" >/dev/null 2>&1; then break; fi
+  if curl --fail --silent --max-time 2 "http://$OIDC_HOST:$OIDC_PROXY_PORT/healthz" >/dev/null 2>&1; then break; fi
   if ! kill -0 "$OIDC_PROXY_PID" 2>/dev/null; then
     cp "$RUN_ROOT/host/oidc-proxy.log" "$EVIDENCE/oidc-proxy-startup.log" 2>/dev/null || true
     echo 'G7 local OIDC forwarding proxy exited during startup' >&2
@@ -722,7 +779,7 @@ for _ in $(seq 1 30); do
   fi
   sleep 1
 done
-if ! curl --fail --silent --show-error --max-time 2 "http://127.0.0.1:$OIDC_PROXY_PORT/healthz" >/dev/null; then
+if ! curl --fail --silent --show-error --max-time 2 "http://$OIDC_HOST:$OIDC_PROXY_PORT/healthz" >/dev/null; then
   cp "$RUN_ROOT/host/oidc-proxy.log" "$EVIDENCE/oidc-proxy-startup.log" 2>/dev/null || true
   echo 'G7 local OIDC forwarding proxy health request failed' >&2
   exit 70
@@ -1222,6 +1279,7 @@ PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
   --origin "http://127.0.0.1:$API_PORT" --evidence "$EVIDENCE" --fixture-root "$RUN_ROOT" \
   --app-container "$CONTAINER" \
   $([[ $IS_BACKUP_MODE == 1 ]] && printf '%s' '--backup-seed-only') \
+  $([[ $EXCEPTION_WARNING_MODE == 1 ]] && printf '%s %s' '--oidc-proxy-port' "$OIDC_PROXY_PORT") \
   $([[ $EXCEPTION_WARNING_MODE == 1 ]] && printf '%s' '--exception-warning-only') \
   >"$EVIDENCE/browser-journey.stdout" 2>"$EVIDENCE/browser-journey.stderr"
 
@@ -1239,8 +1297,71 @@ WARMCAPTUREREADY
   [[ -s "$RUN_ROOT/warning/provider-captures.json" ]] || {
     echo 'warning worker produced no loopback Slack provider request' >&2; exit 70;
   }
-  cp "$RUN_ROOT/warning/provider-captures.json" "$EVIDENCE/provider-captures.json"
-  python3 - "$EVIDENCE/provider-captures.json" <<'WARNACCEPT'
+  python3 - "$RUN_ROOT/warning/provider-captures.json" "$EVIDENCE/provider-captures.json" \
+      "$EVIDENCE/provider-capture-redaction.json" <<'REDACTPROVIDER'
+import copy,hashlib,json,sys
+source=json.load(open(sys.argv[1],encoding='utf-8'))
+rows=copy.deepcopy(source)
+proof=[]
+for row in rows:
+    payload=row.get('payload',{})
+    blocks=payload.get('blocks',[])
+    if len(blocks)<2 or not blocks[1].get('elements'):
+        continue
+    action=blocks[1]['elements'][0]
+    token=action.get('value')
+    if not isinstance(token,str) or not token:
+        raise SystemExit('captured Slack acknowledgement action lacks its opaque value')
+    digest=hashlib.sha256(token.encode()).hexdigest()
+    action['value']='sha256:'+digest
+    row['action_value_redacted']=True
+    proof.append({'channel':payload.get('channel'),'action_value_sha256':digest})
+if not proof:
+    raise SystemExit('no Slack acknowledgement actions were available for safe evidence')
+json.dump(rows,open(sys.argv[2],'w',encoding='utf-8'),sort_keys=True,separators=(',',':'))
+json.dump({'redacted_action_values':len(proof),'proof':proof},
+    open(sys.argv[3],'w',encoding='utf-8'),sort_keys=True,separators=(',',':'))
+for path in sys.argv[2:]:
+    import os
+    os.chmod(path,0o600)
+REDACTPROVIDER
+  [[ -s "$RUN_ROOT/warning/smtp-captures.json" ]] || {
+    echo 'warning worker produced no loopback SMTP fixture exchange' >&2; exit 70;
+  }
+  cp "$RUN_ROOT/warning/smtp-captures.json" "$EVIDENCE/smtp-captures.json"
+  python3 - "$EVIDENCE/smtp-captures.json" <<'SMTPCAPTURE'
+import json,sys
+rows=json.load(open(sys.argv[1],encoding='utf-8'))
+by_recipient={}
+for row in rows: by_recipient.setdefault(row.get('recipient'),[]).append(row)
+if len(by_recipient.get('accepted@fixture.invalid',[]))!=1 or \
+        by_recipient['accepted@fixture.invalid'][0].get('result')!='accepted':
+    raise SystemExit('SMTP fixture did not capture one accepted submission')
+retry=by_recipient.get('retry@fixture.invalid',[])
+if len(retry)!=2 or [row.get('result') for row in retry] != [
+        'temporary_rcpt_rejection','accepted']:
+    raise SystemExit('SMTP fixture did not capture exactly one confirmed rejection and one accepted retry')
+uncertain=by_recipient.get('uncertain@fixture.invalid',[])
+if len(uncertain)!=1 or uncertain[0].get('result')!='connection_lost_after_data':
+    raise SystemExit('SMTP fixture did not capture exactly one post-DATA ambiguous exchange')
+if any(row.get('authenticated') is not True for row in rows):
+    raise SystemExit('SMTP fixture received a submission without the synthetic credential')
+if retry[0].get('sender') != 'from:<uvm@fixture.invalid>' or \
+        retry[1].get('sender') != retry[0].get('sender'):
+    raise SystemExit('SMTP retry changed the approved sender identity')
+if retry[1].get('message_id') is None or retry[1].get('byte_count',0) <= 0:
+    raise SystemExit('SMTP accepted retry lacks message identity or message bytes')
+SMTPCAPTURE
+  python3 - "$EVIDENCE/warning-smtp-retry-proof.json" <<'SMTPIDENTITY'
+import json,sys
+proof=json.load(open(sys.argv[1],encoding='utf-8'))
+retry=proof['retry_exchange']
+if retry[1]['message_id'] != proof['retried_intent']['attempts'][1]['receipt'].split('|',2)[2]:
+    raise SystemExit('durable SMTP acceptance receipt does not match captured Message-ID')
+if proof['retried_intent']['retry']['attempts'] != 2:
+    raise SystemExit('public warning readback does not show exactly two attempts for the retained intent')
+SMTPIDENTITY
+  python3 - "$RUN_ROOT/warning/provider-captures.json" <<'WARNACCEPT'
 import json,sys
 rows=json.load(open(sys.argv[1],encoding='utf-8'))
 channels={row.get('payload',{}).get('channel') for row in rows}
@@ -1255,7 +1376,7 @@ action=payload['blocks'][1]['elements'][0]
 if action.get('action_id')!='uvm_warning_ack' or not action.get('value'):
     raise SystemExit('captured Slack acknowledgement action is incomplete')
 WARNACCEPT
-  echo 'G7 exception warning public workflow reached loopback provider acceptance' | tee "$EVIDENCE/result.txt"
+  echo 'G7 exception warning public worker reached Slack provider acceptance and SMTP submission, rejection, retry and held-uncertain outcomes' | tee "$EVIDENCE/result.txt"
   exit 0
 fi
 

@@ -51,6 +51,7 @@ def verify_startup_fence(token_path: str, public_key_path: str, *, deployment_id
         required = {"admission_id", "recovery_epoch", "source_image_digest", "source_package_manifest_digest",
             "target_image_digest", "target_package_manifest_digest", "archive_digest",
             "from_schema", "to_schema", "volume_ids"}
+        runtime_head = _runtime_schema_head()
         if (not isinstance(admission, dict) or set(admission) != required
                 or str(uuid.UUID(admission["admission_id"])) != admission["admission_id"]
                 or type(admission["recovery_epoch"]) is not int
@@ -58,7 +59,9 @@ def verify_startup_fence(token_path: str, public_key_path: str, *, deployment_id
                 or admission["target_image_digest"] != image_digest
                 or admission["archive_digest"] != archive_digest
                 or admission["volume_ids"] != volume_ids
-                or admission["from_schema"] != "0058" or admission["to_schema"] != "0059"
+                or admission["from_schema"] != "0058"
+                or admission["to_schema"] not in {"0059", "0061"}
+                or admission["to_schema"] != runtime_head
                 or admission["target_package_manifest_digest"] != _runtime_package_digest()):
             raise ValueError("startup token compatibility admission is invalid")
         for field in ("source_image_digest", "source_package_manifest_digest",
@@ -77,6 +80,10 @@ def _runtime_package_digest() -> str:
     for name in ("pyproject.toml", "uv.lock"):
         digest.update(name.encode() + b"\0" + (root / name).read_bytes() + b"\0")
     return "sha256:" + digest.hexdigest()
+
+
+def _runtime_schema_head() -> str:
+    return Path("/etc/uvm-g7-schema-head").read_text(encoding="utf-8").strip()
 
 
 def _unique_pairs(pairs):
@@ -123,6 +130,34 @@ def startup_admitted(engine, token: dict, *, released: bool = False) -> bool:
             restored["new_volume_ids"] == token["volume_ids"])
 
 
+def schema_admission_complete(engine, token: dict) -> bool:
+    """Require the admitted migration's exact head and objects before readers start."""
+    admission = token.get("compatibility_admission")
+    if admission is None:
+        return True
+    target = admission.get("to_schema")
+    if target not in {"0059", "0061"}:
+        return False
+    import sqlalchemy as sa
+    with engine.connect() as connection:
+        heads = connection.execute(sa.text(
+            "SELECT version_num FROM alembic_version ORDER BY version_num")).scalars().all()
+        if heads != [target]:
+            return False
+        tables = {row[0] for row in connection.execute(sa.text(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema='public'"))}
+        if target == "0059":
+            return "g7_backup_projection_evidence" in tables
+        required = {"g7_backup_projection_evidence", "collection_request_reservations"}
+        if not required.issubset(tables):
+            return False
+        columns = {row[0] for row in connection.execute(sa.text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema='public' AND table_name='ingestion_evidence'"))}
+        return "byte_size" in columns
+
+
 def host_release_authorized(token: dict, path="/run/uvm-g7/host-release") -> bool:
     try:
         marker = Path(path)
@@ -153,6 +188,10 @@ def main() -> int:
             if not startup_admitted(sa.create_engine(os.environ["UVM_DB_URL"]), token,
                     released=any(flag in sys.argv for flag in ("--check-release", "--check-host-release", "--authorize-host-release"))):
                 return 1
+        if any(flag in sys.argv for flag in ("--check-schema-complete", "--check-release", "--check-host-release", "--authorize-host-release")):
+            import sqlalchemy as sa
+            if not schema_admission_complete(sa.create_engine(os.environ["UVM_DB_URL"]), token):
+                return 1
         if "--check-schema-admission" in sys.argv and token.get("compatibility_admission") is None:
             return 1
         if "--authorize-host-release" in sys.argv:
@@ -171,8 +210,10 @@ def main() -> int:
         print(json.dumps({"verified": True, "deployment_id": token["deployment_id"],
             "recovery_epoch": token["recovery_epoch"]}, separators=(",", ":")))
         return 0
-    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-        print("G7_RECOVERY_ERROR startup token rejected", file=sys.stderr)
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        # Keep diagnostics useful while emitting only the verifier's fixed
+        # validation messages, never the signed token or key material.
+        print(f"G7_RECOVERY_ERROR startup token rejected: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
 

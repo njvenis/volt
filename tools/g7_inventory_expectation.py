@@ -7,6 +7,8 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timezone
 import inspect
+import json
+import re
 from unittest.mock import patch
 from pathlib import Path
 import sqlalchemy as sa
@@ -15,6 +17,66 @@ from tools.g7_product_inventory import canon, digest
 
 REPLAY_TABLES = {"g7_backup_state", "g7_backup_host_records", "g7_backup_settings_revisions",
     "g7_backup_connector_quarantine", "assessment_policy", "g7_connectors"}
+
+
+def _migration_table_record(table):
+    """Render a migration-created table expectation from checked-in metadata."""
+    def type_name(value):
+        if isinstance(value, sa.Uuid): return "UUID"
+        if isinstance(value, sa.String): return "VARCHAR" + (f"({value.length})" if value.length else "")
+        if isinstance(value, sa.BigInteger): return "BIGINT"
+        if isinstance(value, sa.Integer): return "INTEGER"
+        if isinstance(value, sa.DateTime): return "TIMESTAMP"
+        return str(value).upper()
+    columns = [{"name": column.name, "type": type_name(column.type),
+        "nullable": column.nullable, "primary_key": column.primary_key,
+        "default": str(column.server_default.arg) if column.server_default else None}
+        for column in table.columns]
+    primary_key = list(table.primary_key.columns.keys())
+    checks = sorted(re.sub(r"length\(([A-Za-z_][A-Za-z_0-9]*)\)",
+        r"length(\1::text)", str(item.sqltext)) for item in table.constraints
+        if isinstance(item, sa.CheckConstraint))
+    unique_constraints = [item for item in table.constraints
+        if isinstance(item, sa.UniqueConstraint)]
+    unique = sorted([list(item.columns.keys()) for item in unique_constraints])
+    foreign_keys = []
+    for item in table.foreign_key_constraints:
+        foreign_keys.append({"constrained_columns": list(item.column_keys),
+            "referred_schema": "public", "referred_table": item.elements[0].column.table.name,
+            "referred_columns": [element.column.name for element in item.elements], "options": {},
+            "comment": None})
+    indexes = [{"column_names": list(item.columns.keys()),
+        "dialect_options": {"postgresql_include": []},
+        "duplicates_constraint": item.name, "include_columns": [], "unique": True}
+        for item in unique_constraints]
+    constraints = {"primary_key": primary_key, "checks": checks, "unique": unique,
+        "foreign_keys": canon(sorted(foreign_keys, key=lambda value:
+            json.dumps(value, sort_keys=True))),
+        "indexes": canon(sorted(indexes, key=lambda value: json.dumps(value, sort_keys=True)))}
+    return {"columns": columns, "constraints": constraints,
+        "schema_sha256": digest({"columns": columns, "constraints": constraints}),
+        "rows": [], "row_count": 0}
+
+
+def _append_0061_byte_size_expectation(evidence):
+    if not isinstance(evidence, dict) or 'byte_size' in {c['name'] for c in evidence['columns']}:
+        raise ValueError('0058 baseline ingestion_evidence schema is unexpected')
+    if any('payload' not in row for row in evidence['rows']):
+        raise ValueError('0058 ingestion_evidence baseline lacks independently captured row payloads')
+    evidence['columns'].append({'name':'byte_size','type':'BIGINT','nullable':True,
+        'primary_key':False,'default':None})
+    evidence['constraints']['checks'] = sorted([*evidence['constraints']['checks'],
+        'byte_size IS NULL OR byte_size >= 0 AND byte_size <= 16777216'])
+    for row in evidence['rows']:
+        payload = copy.deepcopy(row['payload'])
+        if 'byte_size' in payload:
+            raise ValueError('0058 ingestion_evidence payload unexpectedly has byte_size')
+        payload['byte_size'] = None
+        row['payload'] = payload
+        row['payload_sha256'] = digest(payload)
+    evidence['schema_sha256'] = digest({'columns':evidence['columns'],
+        'constraints':evidence['constraints']})
+    return evidence
 
 
 def expected_inventory(source, receipts, public_key):
@@ -103,19 +165,22 @@ def expected_inventory(source, receipts, public_key):
             rows = sorted(retained.values(), key=lambda r: __import__('json').dumps(r['key'],sort_keys=True,separators=(',',':')))
             expected['uvm'][table.name]['rows'] = rows
             expected['uvm'][table.name]['row_count'] = len(rows)
-        # Exact reviewed 0058->0059 migration; no desired revision mutation.
+        # Exact current-image 0058->0061 migration, independently derived from
+        # migration-owned metadata and source payloads rather than candidate state.
         table = expected['uvm']['alembic_version']
         if [r['key'] for r in table['rows']] != [['0058']]:
             raise ValueError('baseline must be exactly 0058')
-        table['rows'] = [{'key':['0059'], 'payload_sha256':digest({'version_num':'0059'})}]
-        columns = [{'name':'deployment_id','type':'VARCHAR(256)','nullable':False,'primary_key':True,'default':None},
-            {'name':'application_evidence_record_id','type':'VARCHAR(36)','nullable':True,'primary_key':False,'default':None},
-            {'name':'effective_evidence_record_id','type':'VARCHAR(36)','nullable':True,'primary_key':False,'default':None}]
-        if 'g7_backup_projection_evidence' in expected['uvm']:
-            raise ValueError('baseline unexpectedly contains 0059 table')
-        constraints={'primary_key':['deployment_id'],'checks':[],'unique':[],'foreign_keys':[],'indexes':[]}
-        expected['uvm']['g7_backup_projection_evidence'] = {'columns':columns,'constraints':constraints,
-            'schema_sha256':digest({'columns':columns,'constraints':constraints}), 'rows':[], 'row_count':0}
+        table['rows'] = [{'key':['0061'], 'payload_sha256':digest({'version_num':'0061'})}]
+        if any(name in expected['uvm'] for name in
+                ('g7_backup_projection_evidence', 'collection_request_reservations')):
+            raise ValueError('0058 baseline unexpectedly contains a post-0058 migration table')
+        from uvm.persistence.backup_settings_schema import g7_backup_projection_evidence
+        from uvm.persistence.ingestion_schema import collection_request_reservations
+        expected['uvm']['g7_backup_projection_evidence'] = _migration_table_record(
+            g7_backup_projection_evidence)
+        expected['uvm']['collection_request_reservations'] = _migration_table_record(
+            collection_request_reservations)
+        _append_0061_byte_size_expectation(expected['uvm'].get('ingestion_evidence'))
         return expected
     finally:
         engine.dispose()

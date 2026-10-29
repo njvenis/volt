@@ -30,7 +30,7 @@ def database_inventory(url):
                     item={k:canon(v) for k,v in row.items()}
                     pk=[item[c.name] for c in table.primary_key.columns]
                     record={"key":pk,"payload_sha256":digest(item)}
-                    if table.name in {"g7_backup_state","g7_backup_host_records","g7_backup_settings_revisions","g7_backup_connector_quarantine","assessment_policy","g7_connectors"}:
+                    if table.name in {"g7_backup_state","g7_backup_host_records","g7_backup_settings_revisions","g7_backup_connector_quarantine","assessment_policy","g7_connectors","ingestion_evidence"}:
                         record["payload"] = item
                     rows.append(record)
                 rows.sort(key=lambda r:json.dumps(r["key"],sort_keys=True,separators=(",",":")))

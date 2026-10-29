@@ -97,7 +97,15 @@ PYOIDCPORT
 )
 API_PORT=8000
 RECOVERY_PORT=8002
-OIDC_PROXY_PORT=9000
+OIDC_PROXY_PORT=$(python3 - <<'PYOIDCPROXYPORT'
+import socket
+for port in (9000,19090,29090,39090,49090,59090):
+    sock=socket.socket()
+    try: sock.bind(('127.0.0.1',port)); print(port); sock.close(); break
+    except OSError: sock.close()
+else: raise SystemExit('no preapproved OIDC proxy loopback port available')
+PYOIDCPROXYPORT
+)
 if (( DATA_PRESERVATION_MODE )); then
   choose_port() {
     python3 - "$@" <<'PICKPORT'
@@ -476,7 +484,13 @@ if [[ $CANDIDATE_IMAGE != "$IMAGE" ]] && ! docker image inspect "$CANDIDATE_IMAG
   CREATED_CANDIDATE_IMAGE=1
 fi
 
-FIXTURE_OIDC_ARGS=(--oidc-port "$OIDC_PROXY_PORT")
+FIXTURE_OIDC_INTERNAL_ARGS=()
+HOST_OIDC_INTERNAL_ARGS=()
+if (( ! DATA_PRESERVATION_MODE )) && [[ $OIDC_PROXY_PORT != 9000 ]]; then
+  FIXTURE_OIDC_INTERNAL_ARGS=(--oidc-internal)
+  HOST_OIDC_INTERNAL_ARGS=(--oidc-internal)
+fi
+FIXTURE_OIDC_ARGS=(--oidc-port "$OIDC_PROXY_PORT" "${FIXTURE_OIDC_INTERNAL_ARGS[@]}")
 if (( EXCEPTION_WARNING_MODE )); then FIXTURE_OIDC_ARGS+=(--oidc-host "$OIDC_HOST"); fi
 if (( DATA_PRESERVATION_MODE )); then FIXTURE_OIDC_ARGS=(--oidc-port "$OIDC_PORT" --oidc-internal); fi
 if (( EXCEPTION_WARNING_MODE )); then FIXTURE_OIDC_ARGS+=(--exception-warning); fi
@@ -619,6 +633,11 @@ PYPACKAGE
   }
   printf 'image_a=%s\nimage_b=%s\nsource_package_manifest_digest=%s\ntarget_package_manifest_digest=%s\n' \
     "$IMAGE" "$CANDIDATE_IMAGE" "$SOURCE_PACKAGE_DIGEST" "$CANDIDATE_PACKAGE_DIGEST" >"$EVIDENCE/image-bindings.txt"
+  UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/volt-uv-cache}" uv run python "$ROOT/tools/g7_schema_migration_probe.py" \
+    --image "$RESTORE_IMAGE_DIGEST" --run-id "$RUN_ID" \
+    --evidence "$EVIDENCE/migration-fault-probe" \
+    >"$EVIDENCE/migration-fault-probe.stdout" \
+    2>"$EVIDENCE/migration-fault-probe.stderr"
 else
   docker build -f "$ROOT/Dockerfile.g7" -t "$IMAGE" "$ROOT" \
     >"$EVIDENCE/docker-build.stdout" 2>"$EVIDENCE/docker-build.stderr"
@@ -720,6 +739,51 @@ if (( ! ready )); then
     >"$EVIDENCE/app-startup-redacted.log" || true
   echo 'disposable application did not become healthy; see retained redacted startup evidence' >&2
   exit 70
+fi
+if (( ! DATA_PRESERVATION_MODE && ! EXCEPTION_WARNING_MODE )) && [[ $OIDC_PROXY_PORT != 9000 ]]; then
+  cat >"$RUN_ROOT/host/oidc-container-loopback-proxy.py" <<'PYCONTAINERPROXY'
+import select,socket,socketserver,sys
+port=int(sys.argv[1])
+class Handler(socketserver.BaseRequestHandler):
+ def handle(self):
+  try:
+   with socket.create_connection(('127.0.0.1',9000),timeout=5) as upstream:
+    client=self.request; client.setblocking(False); upstream.setblocking(False)
+    while True:
+     readable,_,_=select.select((client,upstream),(),(),30)
+     if not readable: return
+     for source in readable:
+      data=source.recv(65536)
+      if not data: return
+      (upstream if source is client else client).sendall(data)
+  except OSError:
+   return
+class Server(socketserver.ThreadingTCPServer):
+ allow_reuse_address=True
+ daemon_threads=True
+Server(('127.0.0.1',port),Handler).serve_forever()
+PYCONTAINERPROXY
+  chmod 0644 "$RUN_ROOT/host/oidc-container-loopback-proxy.py"
+  cp "$RUN_ROOT/host/oidc-container-loopback-proxy.py" \
+    "$EVIDENCE/oidc-container-loopback-proxy.py"
+  docker cp "$RUN_ROOT/host/oidc-container-loopback-proxy.py" \
+    "$CONTAINER:/tmp/oidc-container-loopback-proxy.py" >/dev/null
+  docker exec -u uvm -d "$CONTAINER" /opt/uvm/venv/bin/python \
+    /tmp/oidc-container-loopback-proxy.py "$OIDC_PROXY_PORT"
+  oidc_container_proxy_ready=0
+  for _ in $(seq 1 30); do
+    if docker exec -u uvm "$CONTAINER" /opt/uvm/venv/bin/python -c \
+        'import socket,sys; socket.create_connection(("127.0.0.1",int(sys.argv[1])),timeout=1).close()' \
+        "$OIDC_PROXY_PORT" >"$EVIDENCE/oidc-container-loopback-proxy-ready.stdout" \
+        2>"$EVIDENCE/oidc-container-loopback-proxy-ready.stderr"; then
+      oidc_container_proxy_ready=1; break
+    fi
+    sleep 1
+  done
+  (( oidc_container_proxy_ready )) || {
+    echo 'historical A loopback OIDC endpoint did not become ready' >&2
+    exit 70
+  }
 fi
 curl --fail --silent --show-error "http://127.0.0.1:$API_PORT/openapi.json" >/dev/null
 if (( EXCEPTION_WARNING_MODE )); then
@@ -1273,6 +1337,8 @@ uv run python "$ROOT/tools/g7_observer_fixture.py" link-actor --root "$RUN_ROOT"
   >"$EVIDENCE/oidc-link.stdout" 2>"$EVIDENCE/oidc-link.stderr"
 uv run python "$ROOT/tools/g7_observer_fixture.py" host-config --root "$RUN_ROOT" --image "$IMAGE" \
   --anchor-port "$ANCHOR_PORT" --api-port "$API_PORT" --recovery-port "$RECOVERY_PORT" \
+  --oidc-port "$OIDC_PROXY_PORT" \
+  "${HOST_OIDC_INTERNAL_ARGS[@]}" \
   >"$EVIDENCE/host-config.stdout" 2>"$EVIDENCE/host-config.stderr"
 PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
   node "$ROOT/tools/g7_observer_journey_browser.mjs" \
@@ -1282,6 +1348,24 @@ PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
   $([[ $EXCEPTION_WARNING_MODE == 1 ]] && printf '%s %s' '--oidc-proxy-port' "$OIDC_PROXY_PORT") \
   $([[ $EXCEPTION_WARNING_MODE == 1 ]] && printf '%s' '--exception-warning-only') \
   >"$EVIDENCE/browser-journey.stdout" 2>"$EVIDENCE/browser-journey.stderr"
+
+# Retain the authenticated settings DTO while the source OIDC sync heartbeat is
+# live. Verification-only restore deliberately stops identity sync until the
+# signed release, so the final status calculation uses this captured readback.
+python3 - "$EVIDENCE/recovery-auth-state.json" "$API_PORT" \
+    "$EVIDENCE/source-backup-settings-readback.json" <<'PYSOURCEBACKUPSETTINGS'
+import json,sys,urllib.request
+from pathlib import Path
+state=json.loads(Path(sys.argv[1]).read_text())
+cookie=next(c['value'] for c in state['cookies'] if c['name']=='uvm_session' and c['domain']=='127.0.0.1')
+request=urllib.request.Request(f'http://127.0.0.1:{int(sys.argv[2])}/api/v1/operations/backup-settings/g7-local',
+    headers={'Cookie':'uvm_session='+cookie})
+with urllib.request.urlopen(request,timeout=15) as response:
+    value=json.load(response)
+if not isinstance(value.get('desired'),dict) or not isinstance(value.get('status'),dict):
+    raise SystemExit('source backup-settings readback is incomplete')
+Path(sys.argv[3]).write_text(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n')
+PYSOURCEBACKUPSETTINGS
 
 if (( EXCEPTION_WARNING_MODE )); then
   for _ in $(seq 1 45); do
@@ -1464,6 +1548,7 @@ PYFENCE
     docker cp "$ROOT/tools/g7_product_inventory.py" "$CONTAINER:/tmp/g7_product_inventory.py"
     docker exec "$CONTAINER" /opt/uvm/venv/bin/python /tmp/g7_product_inventory.py --output /tmp/source-product-inventory.json
     docker cp "$CONTAINER:/tmp/source-product-inventory.json" "$EVIDENCE/source-product-inventory.json"
+    chmod 600 "$EVIDENCE/source-product-inventory.json"
   fi
   uv run python "$ROOT/tools/g7_backup_recovery.py" observe-queue \
     --container "$CONTAINER" --output "$EVIDENCE/queue-observation.json" \
@@ -1629,7 +1714,7 @@ volumes=json.load(open(sys.argv[1],encoding='utf-8'))
 admission={'admission_id':str(uuid.uuid4()),'recovery_epoch':int(sys.argv[8]),
  'source_image_digest':sys.argv[3],'source_package_manifest_digest':sys.argv[4],
  'target_image_digest':sys.argv[5],'target_package_manifest_digest':sys.argv[6],
- 'archive_digest':sys.argv[7],'from_schema':'0058','to_schema':'0059','volume_ids':volumes}
+ 'archive_digest':sys.argv[7],'from_schema':'0058','to_schema':'0061','volume_ids':volumes}
 json.dump(admission,open(sys.argv[2],'x',encoding='utf-8'),sort_keys=True,separators=(',',':'))
 PYADMISSION
     uv run python "$ROOT/tools/g7_backup_controller.py" --config "$RUN_ROOT/host/backup-controller.json" \
@@ -1734,103 +1819,60 @@ assert replay['events'][0]['event_id'] != replay['events'][1]['event_id']
 assert (root/'before-replay-controller-journal.json').read_bytes() == Path(sys.argv[2]).read_bytes()
 (root/'exact-stage-replay-proof.json').write_text(json.dumps({'passed':True,'stage_ack_ids':[v['event_id'] for v in replay['events']],'journal_unchanged':True},sort_keys=True))
 PYEXACTREPLAY
-  product_readers_ready=0
-  for _ in $(seq 1 180); do
-    if docker exec "$RESTORE_CONTAINER" test -f /run/uvm-g7/pid-api \
-        && docker exec "$RESTORE_CONTAINER" test -f /run/uvm-g7/pid-ce-web; then product_readers_ready=1; break; fi
-    if [[ $(docker inspect "$RESTORE_CONTAINER" --format '{{.State.Running}}') != true ]]; then break; fi
+  if (( UPGRADE_ROLLBACK_MODE )); then
+    # Refresh the short-lived signed startup context after host restore work,
+    # then advance its authenticated resync before checking the restored gate.
+    rm "$RUN_ROOT/secrets/startup-fence.json"
+    uv run python "$ROOT/tools/g7_backup_recovery.py" startup-token \
+      --deployment-id g7-local --image-digest "$RESTORE_IMAGE_DIGEST" \
+      --volume-ids-json "$RESTORE_VOLUMES_JSON" --archive-digest "$ARCHIVE_DIGEST" \
+      --recovery-epoch "$RECOVERY_EPOCH" --connector-recovery-id "$CONNECTOR_RECOVERY_ID" \
+      "${COMPATIBILITY_ADMISSION_ARGS[@]}" \
+      --key-id g7-host-controller-key --signing-key "$RUN_ROOT/host/ed25519.pem" \
+      --output "$RUN_ROOT/secrets/startup-fence.json" >"$EVIDENCE/pre-migration-startup-token.stdout"
+    # Controller resync timestamps are second precision; leave one full second
+    # so its authenticated checkpoint is never older than this token's
+    # microsecond-precision issued_at value.
     sleep 1
-  done
-  (( product_readers_ready )) || { echo 'replacement did not start both verification-only product listeners after volumes_restored' >&2; exit 2; }
-  product_api_ready=0
-  for _ in $(seq 1 60); do
-    if curl --fail --silent --show-error --max-time 5 http://127.0.0.1:8000/openapi.json \
-        >"$EVIDENCE/restore-uvm-openapi.json" 2>"$EVIDENCE/restore-uvm-openapi.stderr"; then
-      product_api_ready=1; break
-    fi
-    sleep 1
-  done
-  if (( ! product_api_ready )); then
-    docker exec "$RESTORE_CONTAINER" ps -eo pid,ppid,uid,stat,args \
-      >"$EVIDENCE/restore-processes.txt" 2>&1 || true
-    docker exec "$RESTORE_CONTAINER" cat /run/uvm-g7/api.log \
-      >"$EVIDENCE/restore-api-startup.log" 2>&1 || true
-    docker exec "$RESTORE_CONTAINER" cat /run/uvm-g7/ce-web.log \
-      >"$EVIDENCE/restore-ce-startup.log" 2>&1 || true
-    echo 'replacement UVM public API did not become reachable on its loopback listener' >&2
-    exit 2
+    CURRENT_SEQUENCE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["last_sequence"])' "$RUN_ROOT/host/state/backup/controller-journal.json")
+    uv run python "$ROOT/tools/g7_backup_controller.py" --config "$RUN_ROOT/host/backup-controller.json" \
+      --resync-database-epoch "$RECOVERY_EPOCH" --resync-database-sequence "$CURRENT_SEQUENCE" \
+      --resync-checkpoint-epoch "$RECOVERY_EPOCH" --force-resync \
+      >"$EVIDENCE/pre-migration-resync.json"
+    docker restart "$RESTORE_CONTAINER" >"$EVIDENCE/pre-migration-restart.stdout"
+    pre_migration_control_ready=0
+    for _ in $(seq 1 90); do
+      if [[ $(docker inspect "$RESTORE_CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null) == healthy ]]; then
+        pre_migration_control_ready=1; break
+      fi
+      if [[ $(docker inspect "$RESTORE_CONTAINER" --format '{{.State.Running}}' 2>/dev/null) != true ]]; then break; fi
+      sleep 1
+    done
+    (( pre_migration_control_ready )) || { echo 'refreshed current-image control-only restore did not become healthy' >&2; exit 2; }
   fi
-  restore_ce_ready=0
-  for _ in $(seq 1 90); do
-    if docker exec "$RESTORE_CONTAINER" curl --fail --silent --show-error --max-time 5 \
-        -u "admin:$CE_ADMIN_PASSWORD" 'http://127.0.0.1:8081/api/v2/findings/?limit=1' \
-        >"$EVIDENCE/restore-ce-readiness.json" 2>"$EVIDENCE/restore-ce-readiness.stderr"; then
-      restore_ce_ready=1; break
-    fi
-    sleep 1
-  done
-  if (( ! restore_ce_ready )); then
-    docker exec "$RESTORE_CONTAINER" ps -eo pid,ppid,uid,stat,args \
-      >"$EVIDENCE/restore-processes.txt" 2>&1 || true
-    docker exec "$RESTORE_CONTAINER" cat /run/uvm-g7/ce-web.log \
-      >"$EVIDENCE/restore-ce-startup.log" 2>&1 || true
-    echo 'replacement CE public API did not become reachable on its loopback listener' >&2
-    exit 2
-  fi
-  docker exec "$RESTORE_CONTAINER" curl --fail --silent --show-error --max-time 15 \
-    -u "admin:$CE_ADMIN_PASSWORD" 'http://127.0.0.1:8081/api/v2/findings/?limit=100' \
-    >"$EVIDENCE/restore-ce-findings.json"
-  python3 - "$EVIDENCE/source-ce-public-sentinel.json" "$EVIDENCE/restore-ce-findings.json" \
-      "$EVIDENCE/restore-ce-public-sentinel.json" <<'PYRESTORECE'
-import hashlib,json,sys
-source=json.load(open(sys.argv[1],encoding='utf-8'))
-document=json.load(open(sys.argv[2],encoding='utf-8'))
-results=document.get('results') if isinstance(document,dict) else None
-if not isinstance(results,list): raise SystemExit('restored CE public findings endpoint did not return a results array')
-retained=[f for f in results if f.get('unique_id_from_tool')=='g7-backup-recovery-sentinel-v1']
-if len(retained)!=1: raise SystemExit('restored CE public API did not return exactly one recovery sentinel finding')
-encoded=json.dumps(retained,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()
-restored={'count':len(retained),'results_sha256':'sha256:'+hashlib.sha256(encoded).hexdigest()}
-json.dump(restored,open(sys.argv[3],'x',encoding='utf-8'),sort_keys=True,separators=(',',':'))
-if restored != source: raise SystemExit('restored CE public findings differ from source public readback')
-if restored['count'] < 1: raise SystemExit('CE public readback has no retained sentinel finding')
-PYRESTORECE
-  docker exec "$RESTORE_CONTAINER" curl --fail --silent --show-error --max-time 15 -u "admin:$CE_ADMIN_PASSWORD" \
-    "http://127.0.0.1:8081/api/v2/findings/$FINDING_ID/files/download/$MEDIA_ID/" >"$EVIDENCE/restore-ce-media.txt"
-  cmp "$EVIDENCE/source-ce-media.txt" "$EVIDENCE/restore-ce-media.txt"
-  docker exec "$RESTORE_CONTAINER" curl --fail --silent --show-error --max-time 15 -u "admin:$CE_ADMIN_PASSWORD" \
-    "http://127.0.0.1:8081/api/v2/engagements/$ENGAGEMENT_ID/" >"$EVIDENCE/restore-ce-engagement.json"
-  cmp "$EVIDENCE/source-ce-engagement.json" "$EVIDENCE/restore-ce-engagement.json"
-  chmod 600 "$EVIDENCE/restore-ce-findings.json" "$EVIDENCE/restore-ce-public-sentinel.json"
-  python3 - "$EVIDENCE/recovery-auth-state.json" "$EVIDENCE" <<'PYPUBLICPROBE'
-import http.client,json,sys,urllib.error,urllib.request
-from pathlib import Path
-state=json.load(open(sys.argv[1],encoding='utf-8'))
-cookies=[c for c in state.get('cookies',[]) if c.get('name')=='uvm_session' and c.get('domain')=='127.0.0.1']
-if len(cookies)!=1: raise SystemExit('recovery browser state must contain exactly one UVM session cookie')
-cookie=cookies[0]['value']
-root=Path(sys.argv[2])
-for name,path in [('recovery-session','/api/v1/auth/session'),
-                  ('recovery-backup-discovery','/api/v1/operations/backup-settings'),
-                  ('recovery-backup-readback','/api/v1/operations/backup-settings/g7-local')]:
- request=urllib.request.Request('http://127.0.0.1:8000'+path,headers={'Cookie':'uvm_session='+cookie,'Accept':'application/json'})
- try:
-  with urllib.request.urlopen(request,timeout=15) as response:
-   status=response.status; body=response.read()
- except urllib.error.HTTPError as error:
-  status=error.code; body=error.read()
- except Exception as error:
-  json.dump({'status':None,'transport_error':type(error).__name__},open(root/(name+'.json'),'w',encoding='utf-8'),sort_keys=True)
-  continue
- try:
-  value=json.loads(body)
-  if name=='recovery-session' and isinstance(value,dict): value.pop('csrf_token',None)
- except Exception:
-  value={'body_bytes':len(body)}
- json.dump({'status':status,'response':value},open(root/(name+'.json'),'w',encoding='utf-8'),sort_keys=True,separators=(',',':'))
-PYPUBLICPROBE
-  uv run python "$ROOT/tools/g7_recovery_public_readback.py" --evidence "$EVIDENCE" --phase pre-migration \
-    >"$EVIDENCE/pre-migration-public-readback.json"
+  docker exec "$RESTORE_CONTAINER" bash -lc 'test "$(cat /run/uvm-g7/runtime-mode)" = control'
+  docker exec "$RESTORE_CONTAINER" test ! -f /run/uvm-g7/pid-api
+  docker exec "$RESTORE_CONTAINER" test ! -f /run/uvm-g7/pid-ce-web
+  docker exec "$RESTORE_CONTAINER" test ! -f /run/uvm-g7/pid-ce-worker
+  docker exec "$RESTORE_CONTAINER" test ! -f /run/uvm-g7/pid-ce-beat
+  docker exec "$RESTORE_CONTAINER" cat /run/uvm-g7/schema-migration-gate-query.stderr \
+    >"$EVIDENCE/pre-migration-reader-gate.stderr" 2>/dev/null || :
+  docker exec "$RESTORE_CONTAINER" bash -lc \
+    'export UVM_DB_URL="postgresql+psycopg://uvm_app:$(cat /run/secrets/uvm_db_password)@127.0.0.1:5432/uvm"; exec /opt/uvm/venv/bin/python -m uvm.operations.startup_fence --check-admission' \
+    >"$EVIDENCE/pre-migration-restored-context.json"
+  python3 - "$RESTORE_CONTAINER" "$EVIDENCE/pre-migration-control-only.json" <<'PYCONTROLONLY'
+import json,subprocess,sys
+container,out=sys.argv[1:]
+ports={}
+for name,port in (("uvm_api",8000),("ce_api",8081)):
+ code=subprocess.run(["docker","exec",container,"bash","-lc",
+   f"/opt/uvm/venv/bin/python -c 'import socket;s=socket.socket();s.settimeout(1);raise SystemExit(0 if s.connect_ex((\"127.0.0.1\",{port})) else 1)'"] ,capture_output=True).returncode
+ ports[name]={"listener_open":code==1,"probe_exit":code}
+if any(v["listener_open"] for v in ports.values()): raise SystemExit("product listener opened before admitted migration")
+json.dump({"passed":True,"runtime_mode":"control","product_listeners":ports,
+ "product_api_pid_absent":True,"ce_web_pid_absent":True,"workers_absent":True,
+ "restored_context_verified":True},open(out,"x"),sort_keys=True,separators=(",",":"))
+PYCONTROLONLY
   if (( UPGRADE_ROLLBACK_MODE )); then
     docker exec "$RESTORE_CONTAINER" bash -lc \
       'export UVM_DB_URL="postgresql+psycopg://uvm_app:$(cat /run/secrets/uvm_db_password)@127.0.0.1:5432/uvm"; cd /opt/uvm/app; exec /opt/uvm/venv/bin/python -m alembic -c alembic.ini current' \
@@ -1840,7 +1882,7 @@ PYPUBLICPROBE
     }
     set +e
     docker exec "$RESTORE_CONTAINER" bash -lc \
-      'export UVM_DB_URL="postgresql+psycopg://uvm_app:$(cat /run/secrets/uvm_db_password)@127.0.0.1:5432/uvm"; cd /opt/uvm/app; exec /opt/uvm/venv/bin/python -m alembic -c alembic.ini upgrade 0059' \
+      'export UVM_DB_URL="postgresql+psycopg://uvm_app:$(cat /run/secrets/uvm_db_password)@127.0.0.1:5432/uvm"; cd /opt/uvm/app; exec /opt/uvm/venv/bin/python -m alembic -c alembic.ini upgrade 0061' \
       >"$EVIDENCE/explicit-migration.stdout" 2>"$EVIDENCE/explicit-migration.stderr"
     MIGRATION_EXIT=$?
     set -e
@@ -1859,8 +1901,8 @@ PYPUBLICPROBE
     docker exec "$RESTORE_CONTAINER" bash -lc \
       'export UVM_DB_URL="postgresql+psycopg://uvm_app:$(cat /run/secrets/uvm_db_password)@127.0.0.1:5432/uvm"; cd /opt/uvm/app; exec /opt/uvm/venv/bin/python -m alembic -c alembic.ini current' \
       >"$EVIDENCE/post-migration-schema-current.stdout" 2>"$EVIDENCE/post-migration-schema-current.stderr"
-    rg -q '^0059([[:space:]]|$)' "$EVIDENCE/post-migration-schema-current.stdout" || {
-      echo 'explicit migration did not establish exactly schema 0059' >&2; exit 2;
+    rg -q '^0061([[:space:]]|$)' "$EVIDENCE/post-migration-schema-current.stdout" || {
+      echo 'explicit migration did not establish exactly schema 0061' >&2; exit 2;
     }
   fi
   # Renew the startup context, restart verification processes after the explicit
@@ -1891,9 +1933,44 @@ PYPUBLICPROBE
   uv run python "$ROOT/tools/g7_recovery_public_readback.py" --evidence "$EVIDENCE" --phase post-migration \
     >"$EVIDENCE/post-migration-public-readback.json"
   if (( UPGRADE_ROLLBACK_MODE )); then
+    restore_ce_ready=0
+    for _ in $(seq 1 90); do
+      if docker exec "$RESTORE_CONTAINER" curl --fail --silent --show-error --max-time 5 \
+          -u "admin:$CE_ADMIN_PASSWORD" 'http://127.0.0.1:8081/api/v2/findings/?limit=1' \
+          >"$EVIDENCE/restore-ce-readiness.json" 2>"$EVIDENCE/restore-ce-readiness.stderr"; then
+        restore_ce_ready=1; break
+      fi
+      sleep 1
+    done
+    (( restore_ce_ready )) || { echo 'CE reader did not start after schema 0061 migration and restored-context gate' >&2; exit 2; }
+    docker exec "$RESTORE_CONTAINER" curl --fail --silent --show-error --max-time 15 \
+      -u "admin:$CE_ADMIN_PASSWORD" 'http://127.0.0.1:8081/api/v2/findings/?limit=100' \
+      >"$EVIDENCE/restore-ce-findings.json"
+    python3 - "$EVIDENCE/source-ce-public-sentinel.json" "$EVIDENCE/restore-ce-findings.json" \
+        "$EVIDENCE/restore-ce-public-sentinel.json" <<'PYRESTORECE'
+import hashlib,json,sys
+source=json.load(open(sys.argv[1],encoding='utf-8'))
+document=json.load(open(sys.argv[2],encoding='utf-8'))
+results=document.get('results') if isinstance(document,dict) else None
+if not isinstance(results,list): raise SystemExit('restored CE public findings endpoint did not return a results array')
+retained=[f for f in results if f.get('unique_id_from_tool')=='g7-backup-recovery-sentinel-v1']
+if len(retained)!=1: raise SystemExit('restored CE public API did not return exactly one recovery sentinel finding')
+encoded=json.dumps(retained,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()
+restored={'count':len(retained),'results_sha256':'sha256:'+hashlib.sha256(encoded).hexdigest()}
+json.dump(restored,open(sys.argv[3],'x',encoding='utf-8'),sort_keys=True,separators=(',',':'))
+if restored != source: raise SystemExit('restored CE public findings differ from source public readback')
+PYRESTORECE
+    docker exec "$RESTORE_CONTAINER" curl --fail --silent --show-error --max-time 15 -u "admin:$CE_ADMIN_PASSWORD" \
+      "http://127.0.0.1:8081/api/v2/findings/$FINDING_ID/files/download/$MEDIA_ID/" >"$EVIDENCE/restore-ce-media.txt"
+    cmp "$EVIDENCE/source-ce-media.txt" "$EVIDENCE/restore-ce-media.txt"
+    docker exec "$RESTORE_CONTAINER" curl --fail --silent --show-error --max-time 15 -u "admin:$CE_ADMIN_PASSWORD" \
+      "http://127.0.0.1:8081/api/v2/engagements/$ENGAGEMENT_ID/" >"$EVIDENCE/restore-ce-engagement.json"
+    cmp "$EVIDENCE/source-ce-engagement.json" "$EVIDENCE/restore-ce-engagement.json"
+    chmod 600 "$EVIDENCE/restore-ce-findings.json" "$EVIDENCE/restore-ce-public-sentinel.json"
     docker cp "$ROOT/tools/g7_product_inventory.py" "$RESTORE_CONTAINER:/tmp/g7_product_inventory.py"
     docker exec "$RESTORE_CONTAINER" /opt/uvm/venv/bin/python /tmp/g7_product_inventory.py --output /tmp/forward-product-inventory.json
     docker cp "$RESTORE_CONTAINER:/tmp/forward-product-inventory.json" "$EVIDENCE/forward-product-inventory.json"
+    chmod 600 "$EVIDENCE/forward-product-inventory.json"
     cp "$RUN_ROOT/host/state/backup/controller-journal.json" "$EVIDENCE/inventory-controller-journal.json"
     PYTHONPATH="$ROOT" uv run python "$ROOT/tools/g7_product_inventory.py" --output "$EVIDENCE/product-inventory-attestation.json" \
       --journal "$EVIDENCE/inventory-controller-journal.json" --public-key "$RUN_ROOT/secrets/host-pub.pem" \
@@ -1974,7 +2051,7 @@ request={'request_id':str(uuid.uuid4()),'state':'development_rollback_requested'
  'source_package_manifest_digest':manifest['package_manifest_digest'],
  'upgraded_image_digest':(root/'image-b-id.txt').read_text().strip(),
  'target_package_manifest_digest':None,
- 'forward_volume_ids':volumes,'schema_head':'0059','inventory_attestation_id':attestation['attestation_id'],
+ 'forward_volume_ids':volumes,'schema_head':'0061','inventory_attestation_id':attestation['attestation_id'],
  'inventory_attestation_digest':attestation_digest,'product_write_count':attestation['product_mutation_count'],
  'control_mutation_count':attestation['control_mutation_count'],
  'unexpected_inventory_change_count':attestation['unexpected_inventory_change_count'],'unresolved_external_effect_count':attestation['unresolved_external_effect_count'],
@@ -1986,7 +2063,7 @@ PYROLLBACKREQUEST
     uv run python "$ROOT/tools/g7_backup_controller.py" --config "$RUN_ROOT/host/backup-controller.json" \
       --development-rollback-request-json "$EVIDENCE/development-rollback-request.json" \
       >"$EVIDENCE/development-rollback-request-ack.json"
-    # Stop B while preserving its volumes, then prove A fails closed on 0059.
+    # Stop B while preserving its volumes, then prove prior image A fails closed on 0061.
     docker inspect "$RESTORE_CONTAINER" >"$EVIDENCE/upgraded-b-container-inspect.json"
     docker logs "$RESTORE_CONTAINER" >"$EVIDENCE/upgraded-b-container.log" 2>&1
     phase_mark rollback_start
@@ -2001,9 +2078,9 @@ PYROLLBACKREQUEST
       --volume-ids-json "$RESTORE_VOLUMES_JSON" --archive-digest "$ARCHIVE_DIGEST" \
       --recovery-epoch 1 --connector-recovery-id "$CONNECTOR_RECOVERY_ID" \
       --key-id g7-host-controller-key --signing-key "$RUN_ROOT/host/ed25519.pem" \
-      --output "$RUN_ROOT/secrets/startup-fence.json" >"$EVIDENCE/a-reject-0059-token.stdout"
+      --output "$RUN_ROOT/secrets/startup-fence.json" >"$EVIDENCE/a-reject-0061-token.stdout"
     set +e
-    docker run --name "${RESTORE_CONTAINER}-reject-0059" --rm --network none \
+    docker run --name "${RESTORE_CONTAINER}-reject-0061" --rm --network none \
       --mount "type=bind,src=$RUN_ROOT/secrets,dst=/run/secrets,readonly" \
       --mount "type=bind,src=$RUN_ROOT/secrets/registry.json,dst=/run/uvm-g7-registry.json,readonly" \
       --mount "type=bind,src=$RUN_ROOT/secrets/host-pub.pem,dst=/run/uvm-g7-host-pub.pem,readonly" \
@@ -2018,12 +2095,12 @@ PYROLLBACKREQUEST
       --env UVM_G7_RECOVERY_VOLUME_IDS="$(cat "$RESTORE_VOLUMES_JSON")" \
       --env UVM_G7_ARCHIVE_DIGEST="$ARCHIVE_DIGEST" --env UVM_G7_RECOVERY_EPOCH=1 \
       --env UVM_G7_CONNECTOR_RECOVERY_ID="$CONNECTOR_RECOVERY_ID" "$IMAGE" \
-      >"$EVIDENCE/a-reject-0059.stdout" 2>"$EVIDENCE/a-reject-0059.stderr"
+      >"$EVIDENCE/a-reject-0061.stdout" 2>"$EVIDENCE/a-reject-0061.stderr"
     A_REJECT_EXIT=$?
     set -e
-    printf '%s\n' "$A_REJECT_EXIT" >"$EVIDENCE/a-reject-0059.exit"
-    (( A_REJECT_EXIT != 0 )) || { echo 'A unexpectedly accepted 0059 schema' >&2; exit 2; }
-    rg -q 'G7_SCHEMA_COMPATIBILITY_REJECTED' "$EVIDENCE/a-reject-0059.stderr" || {
+    printf '%s\n' "$A_REJECT_EXIT" >"$EVIDENCE/a-reject-0061.exit"
+    (( A_REJECT_EXIT != 0 )) || { echo 'A unexpectedly accepted 0061 schema' >&2; exit 2; }
+    rg -q 'G7_SCHEMA_COMPATIBILITY_REJECTED' "$EVIDENCE/a-reject-0061.stderr" || {
       echo 'A rejection did not come from the image schema guard' >&2; exit 2;
     }
     # Restore the same signed archive with A into distinct volumes at epoch 2.
@@ -2046,7 +2123,7 @@ if set(value.values()) & set(json.load(open(sys.argv[3],encoding='utf-8')).value
 json.dump(value,open(sys.argv[2],'x',encoding='utf-8'),sort_keys=True,separators=(',',':'))
 PYROLLBACKVOLS
     RESTORE_VOLUMES_JSON="$EVIDENCE/rollback-volume-ids.json"
-    python3 - "$RUN_ROOT/secrets/startup-fence.json" "$EVIDENCE/a-reject-0059-token-binding.json" <<'PYTOKENBINDING'
+    python3 - "$RUN_ROOT/secrets/startup-fence.json" "$EVIDENCE/a-reject-0061-token-binding.json" <<'PYTOKENBINDING'
 import json,sys
 from pathlib import Path
 x=json.loads(Path(sys.argv[1]).read_text()); x.pop('signature',None)
@@ -2181,11 +2258,11 @@ from tools.g7_upgrade_assertions import validate_epoch_two_readbacks
 from uvm.operations.backup_host import digest
 config=load_config(Path(sys.argv[1])); controller=Controller(config); root=Path(sys.argv[2])
 if (root/'explicit-migration.exit').read_text().strip()!='0': raise ValueError('explicit migration failed')
-for phase in ('pre-migration','post-migration'):
- if json.loads((root/(phase+'-public-readback.json')).read_text()).get('passed') is not True: raise ValueError('public retained assertions missing')
+if json.loads((root/'pre-migration-control-only.json').read_text()).get('passed') is not True: raise ValueError('pre-migration reader fence was not proved')
+if json.loads((root/'post-migration-public-readback.json').read_text()).get('passed') is not True: raise ValueError('post-migration public retained assertions missing')
 for name in ('media.txt','engagement.json'):
  if (root/('source-ce-'+name)).read_bytes() != (root/('restore-ce-'+name)).read_bytes(): raise ValueError('CE retained sentinel differs')
-files=['pre-migration-public-readback.json','post-migration-public-readback.json','source-ce-public-sentinel.json','restore-ce-public-sentinel.json','source-ce-media.txt','restore-ce-media.txt','source-ce-engagement.json','restore-ce-engagement.json','explicit-migration.exit','signed-drain-proof.json']
+files=['pre-migration-control-only.json','post-migration-public-readback.json','source-ce-public-sentinel.json','restore-ce-public-sentinel.json','source-ce-media.txt','restore-ce-media.txt','source-ce-engagement.json','restore-ce-engagement.json','source-backup-settings-readback.json','explicit-migration.exit','signed-drain-proof.json']
 if (root/'upgrade-rollback-mode.txt').exists():
  required=['rollback-public-readback.json','rollback-uvm-group.json','rollback-uvm-audit.json','rollback-ce-findings.json','rollback-volume-ids.json','restore-ce-media.txt','restore-ce-engagement.json']
  for name in required:
@@ -2205,6 +2282,9 @@ last=controller.state['last_recovery_event']['event']
 unsigned={k:v for k,v in last.items() if k not in {'signature','sequence','controller_instance_id'}}
 verification={k:'passed' for k in ('uvm_public_api','ce_public_api','media_readback','queue_reconciliation','migration')}
 verification['details_digest']=readback_digest
+dto=json.loads((root/'source-backup-settings-readback.json').read_text())
+if not isinstance(dto.get('desired'),dict) or not isinstance(dto.get('status'),dict):
+ raise ValueError('source backup-settings readback is incomplete')
 if (root/'upgrade-rollback-mode.txt').exists():
  archive=json.loads((root/'archive/manifest.json').read_text()); bindings=dict(line.rstrip().split('=',1) for line in (root/'image-bindings.txt').read_text().splitlines())
  context_binding={**{k:last.get(k) for k in ('recovery_epoch','target_image_digest','new_volume_ids','connector_recovery_id','archive_id','manifest_digest','source_image_digest')},'package_manifest_digest':archive['package_manifest_digest'],'archive_digest':'sha256:'+hashlib.sha256((root/'archive/manifest.json').read_bytes()).hexdigest(),'expected_source_package_digest':bindings['source_package_manifest_digest']}
@@ -2214,10 +2294,6 @@ if (root/'upgrade-rollback-mode.txt').exists():
  verification['details_digest']=validate_epoch_two_readbacks(root,readbacks,context_binding)
 unsigned.update(event_id=str(uuid.uuid4()),previous_epoch=last['recovery_epoch'],event_type='verification_passed',verification=verification,public_readback_digest=readback_digest,observed_at=datetime.now(timezone.utc).isoformat().replace('+00:00','Z'))
 verified=controller.submit_recovery_event(unsigned)
-storage=json.loads((root/'recovery-auth-state.json').read_text())
-cookie=next(c['value'] for c in storage['cookies'] if c['name']=='uvm_session' and c['domain']=='127.0.0.1')
-request=urllib.request.Request('http://127.0.0.1:8000/api/v1/operations/backup-settings/g7-local',headers={'Cookie':'uvm_session='+cookie})
-with urllib.request.urlopen(request,timeout=15) as response: dto=json.load(response)
 manifest=json.loads((root/'archive/manifest.json').read_text())
 now=datetime.now(timezone.utc);completed=datetime.fromisoformat(manifest['completed_at'].replace('Z','+00:00'))
 maximum=dto['desired']['values']['maximum_backup_age_seconds'];age=int((now-completed).total_seconds())
@@ -2225,7 +2301,7 @@ status={'schema_version':1,'deployment_id':controller.deployment,'report_id':str
  'desired':{k:dto['desired'][k] for k in ('revision','digest')},'settings_application':dto['status']['settings_application'],
  'completed_archive':{'archive_id':manifest['archive_id'],'completed_at':manifest['completed_at'],'manifest_digest':'sha256:'+hashlib.sha256((root/'archive/manifest.json').read_bytes()).hexdigest(),'outcome':'complete'},
  'freshness':{'state':'fresh' if age<=maximum else 'stale','evaluated_at':now.isoformat().replace('+00:00','Z'),'age_seconds':age,'basis_completed_at':manifest['completed_at'],'maximum_backup_age_seconds':maximum},
- 'restore_verification':dto['status']['restore_verification'],'recovery_epoch':last['recovery_epoch'],
+ 'restore_verification':{'state':'verified','archive_id':last['archive_id'],'recovery_epoch':last['recovery_epoch'],'verified_at':last['observed_at'],'failure_code':None},'recovery_epoch':last['recovery_epoch'],
  'observed_at':now.isoformat().replace('+00:00','Z'),'fresh_until':(now+timedelta(seconds=config['host_policy']['maximum_report_age_seconds'])).isoformat().replace('+00:00','Z')}
 status_ack=controller.submit_status(status)
 unsigned.update(event_id=str(uuid.uuid4()),event_type='fence_released',observed_at=datetime.now(timezone.utc).isoformat().replace('+00:00','Z'))
@@ -2308,7 +2384,7 @@ PHDUR
   fi
   finish_operation_deadline verification
   if (( UPGRADE_ROLLBACK_MODE )); then
-    echo 'G7 0058-to-0059 verification upgrade rolled back from the signed archive with A at epoch 2; UVM UI and CE public retained-state readback passed' | tee "$EVIDENCE/result.txt"
+    echo 'G7 current-image 0058-to-0061 verification upgrade rolled back from the signed archive with A at epoch 2; UVM UI and CE public retained-state readback passed' | tee "$EVIDENCE/result.txt"
   else
     echo 'G7 recovery-only signed archive restored into new volumes; UVM UI and CE public retained-state readback passed' | tee "$EVIDENCE/result.txt"
   fi

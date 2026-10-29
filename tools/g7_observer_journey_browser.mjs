@@ -30,6 +30,27 @@ const counts = {bootstrap:0, nativeActivation:0, accessGroup:0, membership:0,
   consumerRestarts:0, controllerRestart:0, containerRestart:0, containerOutage:0,
   schedulerStall:0, healthFaults:[], hostReportAttacks:{},
   reflow:[], axe:[], screenshots:[]};
+const authResponseFacts=[];
+let capturedLoginSession=null;
+await page.exposeFunction('__g7CaptureLoginSession',value=>{capturedLoginSession=value;});
+page.on('response',response=>{
+  const url=response.url();
+  if(!url.includes('/api/v1/auth/session')&&!url.includes('/api/v1/auth/callback'))return;
+  void response.headersArray().then(headers=>{
+    const cookies=headers.filter(item=>item.name.toLowerCase()==='set-cookie').map(item=>{
+      const parts=item.value.split(';').map(part=>part.trim());
+      return {name:parts[0]?.split('=',1)[0],attributes:parts.slice(1).map(part=>part.split('=',1)[0].toLowerCase()).sort()};
+    });
+    void response.json().then(body=>{
+    authResponseFacts.push({path:new URL(url).pathname,status:response.status(),
+      error_code:body?.detail?.code ?? null,set_cookie_names:cookies.map(c=>c.name),
+        set_cookie_attributes:cookies.map(c=>c.attributes),
+        disposable_failure_code:headers.find(item=>item.name.toLowerCase()==='x-uvm-g7-auth-failure')?.value ?? null});
+    }).catch(()=>authResponseFacts.push({path:new URL(url).pathname,status:response.status(),
+      set_cookie_names:cookies.map(c=>c.name),set_cookie_attributes:cookies.map(c=>c.attributes),
+      disposable_failure_code:headers.find(item=>item.name.toLowerCase()==='x-uvm-g7-auth-failure')?.value ?? null}));
+  });
+});
 let droppedReceipt = null;
 let dropCommandAcknowledgement = false;
 page.on('console', message => { if (message.type() === 'error') counts.consoleErrors = (counts.consoleErrors ?? 0) + 1; });
@@ -145,14 +166,25 @@ try {
   await page.goto(origin + '/api/v1/auth/login',{waitUntil:'domcontentloaded',timeout:30000});
   await page.waitForFunction(async()=>{
     const r=await fetch('/api/v1/auth/session'); if(!r.ok)return false;
-    const s=await r.json();return s.authenticated===true&&s.credential_mode==='oidc_session';
+    const s=await r.json();
+    await window.__g7CaptureLoginSession({authenticated:s.authenticated,
+      credential_mode:s.credential_mode,principal_id:s.principal_id,url:location.href});
+    return s.authenticated===true&&s.credential_mode==='oidc_session';
   },null,{timeout:30000});
+  const loginSession=capturedLoginSession;
+  const loginCookieNames=(await context.cookies(origin)).map(cookie=>cookie.name).sort();
+  await writeFile(path.join(evidence,'recovery-auth-state.json'),
+    JSON.stringify(await context.storageState(),null,2),{mode:0o600});
 
   const bootstrap = await api('/api/v1/assessment/bootstrap-policy',{method:'POST',write:true,
     body:JSON.stringify({policy:{grants:[],denies:[{deny_id:'g7-deny-b-observer',principal_id:'g7-actor',
       actions:['observer.timing.read','observer.timing.configure','backup.settings.read','backup.settings.configure'],target_ids:['g7-other']}],
       acceptance_material_changes:{},exception_warning_routes:[]}})});
-  if (![200,409].includes(bootstrap.status)) throw new Error(`bootstrap policy failed with ${bootstrap.status}`);
+  if (![200,409].includes(bootstrap.status)) throw new Error(
+    `bootstrap policy failed with ${bootstrap.status}: ${JSON.stringify(bootstrap.body)}; `+
+    `session=${JSON.stringify({status:loginSession?.status,
+      authenticated:loginSession?.body?.authenticated,credential_mode:loginSession?.body?.credential_mode,
+      cookie_names:loginCookieNames,page_url:page.url(),auth_responses:authResponseFacts})}`);
   counts.bootstrap = bootstrap.status;
 
   // The recovery-control listener evaluates signed host policy against the

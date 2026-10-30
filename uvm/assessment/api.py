@@ -2590,9 +2590,8 @@ def install_assessment_routes(app: FastAPI) -> None:
                     "permissions": copy.deepcopy(group.get("permissions", [])),
                     "memberships": copy.deepcopy(group.get("memberships", [])),
                     "history": administration_history(connection, "access_group", group_id)})
-            if not bootstrap and not items and not any(_matches(policy, principal,
-                    "ownership.team.manage", team_id, None)
-                    for team_id in state.get("ownership_teams", {})):
+            if not bootstrap and not items and not _matches(
+                    policy, principal, "access_group.read", _ZERO_ID, None):
                 _error(403, "forbidden", "Current access-group read scope is required")
             configured = [{"principal_id": item["principal_id"],
                 "display_name": item["display_label"], "enabled": item["enabled"],
@@ -2790,6 +2789,11 @@ def install_assessment_routes(app: FastAPI) -> None:
             active_connection = _ACTIVE_COMMAND_CONNECTION.get()
             transaction = engine.begin() if active_connection is None else nullcontext(active_connection)
             with transaction as connection:
+                barrier_command_id = request.headers.get("x-uvm-g7-barrier-command")
+                if (os.environ.get("UVM_G7_DISPOSABLE_MODE") == "1" and
+                        barrier_command_id == str(body.get("command_id", ""))):
+                    connection.execute(sa.text("SELECT set_config('application_name', :name, true)"),
+                        {"name": "g7cmd:" + barrier_command_id})
                 if policy_command:
                     lock_policy(connection)
                 policy_row = connection.execute(sa.select(assessment_policy).where(

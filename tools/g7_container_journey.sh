@@ -3,8 +3,8 @@ set -Eeuo pipefail
 umask 077
 
 MODE=${1-}
-if [[ ( $MODE != --observer-settings-only && $MODE != --backup-recovery-only && $MODE != --upgrade-rollback-only && $MODE != --data-preservation-audit-only && $MODE != --exception-warning-only && $MODE != --identity-access-ownership-only ) || $# != 1 ]]; then
-  echo 'usage: G7_EVIDENCE_DIR=/absolute/path bash tools/g7_container_journey.sh (--observer-settings-only|--backup-recovery-only|--upgrade-rollback-only|--data-preservation-audit-only|--exception-warning-only|--identity-access-ownership-only)' >&2
+if [[ ( $MODE != --observer-settings-only && $MODE != --backup-recovery-only && $MODE != --upgrade-rollback-only && $MODE != --data-preservation-audit-only && $MODE != --exception-warning-only && $MODE != --exception-sla-only && $MODE != --identity-access-ownership-only ) || $# != 1 ]]; then
+  echo 'usage: G7_EVIDENCE_DIR=/absolute/path bash tools/g7_container_journey.sh (--observer-settings-only|--backup-recovery-only|--upgrade-rollback-only|--data-preservation-audit-only|--exception-warning-only|--exception-sla-only|--identity-access-ownership-only)' >&2
   exit 64
 fi
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -31,6 +31,8 @@ if [[ $MODE == --data-preservation-audit-only ]]; then DATA_PRESERVATION_MODE=1;
 UPGRADE_ROLLBACK_MODE=0
 EXCEPTION_WARNING_MODE=0
 if [[ $MODE == --exception-warning-only ]]; then EXCEPTION_WARNING_MODE=1; fi
+EXCEPTION_SLA_MODE=0
+if [[ $MODE == --exception-sla-only ]]; then EXCEPTION_SLA_MODE=1; fi
 IDENTITY_MODE=0
 if [[ $MODE == --identity-access-ownership-only ]]; then IDENTITY_MODE=1; fi
 if [[ $MODE == --upgrade-rollback-only ]]; then
@@ -57,10 +59,10 @@ elif (( DATA_PRESERVATION_MODE )); then
   CANDIDATE_IMAGE=$IMAGE
   RESTORE_IMAGE=$IMAGE
 else
-  if (( EXCEPTION_WARNING_MODE )); then
-    CONTAINER="volt-g7-warning-app-$RUN_ID"
-    ANCHOR_CONTAINER="volt-g7-warning-anchor-$RUN_ID"
-    IMAGE="volt-g7-warning-dev:$RUN_ID"
+  if (( EXCEPTION_WARNING_MODE || EXCEPTION_SLA_MODE )); then
+    CONTAINER="volt-g7-exception-app-$RUN_ID"
+    ANCHOR_CONTAINER="volt-g7-exception-anchor-$RUN_ID"
+    IMAGE="volt-g7-exception-dev:$RUN_ID"
   else
     CONTAINER=volt-g7-observer-journey
     ANCHOR_CONTAINER=volt-g7-observer-anchor
@@ -73,7 +75,7 @@ IS_BACKUP_MODE=0
 if [[ $MODE == --backup-recovery-only || $MODE == --upgrade-rollback-only ]]; then IS_BACKUP_MODE=1; fi
 SCHEMA_MODE_ARGS=()
 if (( UPGRADE_ROLLBACK_MODE )); then SCHEMA_MODE_ARGS=(--env UVM_G7_SCHEMA_MODE=upgrade-verification); fi
-if (( ! DATA_PRESERVATION_MODE && ! EXCEPTION_WARNING_MODE && ! IDENTITY_MODE )); then
+if (( ! DATA_PRESERVATION_MODE && ! EXCEPTION_WARNING_MODE && ! EXCEPTION_SLA_MODE && ! IDENTITY_MODE )); then
   CONTAINER=volt-g7-observer-journey
   ANCHOR_CONTAINER=volt-g7-observer-anchor
 fi
@@ -127,8 +129,8 @@ PICKPORT
   }
   API_PORT=$(choose_port 18080 28080 38080 48080 58080)
   RECOVERY_PORT=$(choose_port 18082 28082 38082 48082 58082)
-  OIDC_PROXY_PORT=$(choose_port 19090 29090 39090 49090 59090)
-elif (( EXCEPTION_WARNING_MODE )); then
+  OIDC_PROXY_PORT=$(choose_port 29090 39090 49090 59090)
+elif (( EXCEPTION_WARNING_MODE || EXCEPTION_SLA_MODE )); then
   choose_port() {
     python3 - "$@" <<'PICKPORT'
 import socket,sys
@@ -499,18 +501,20 @@ if (( ! DATA_PRESERVATION_MODE )) && [[ $OIDC_PROXY_PORT != 9000 ]]; then
   HOST_OIDC_INTERNAL_ARGS=(--oidc-internal)
 fi
 FIXTURE_OIDC_ARGS=(--oidc-port "$OIDC_PROXY_PORT" "${FIXTURE_OIDC_INTERNAL_ARGS[@]}")
-if (( EXCEPTION_WARNING_MODE )); then FIXTURE_OIDC_ARGS+=(--oidc-host "$OIDC_HOST"); fi
+if (( EXCEPTION_WARNING_MODE || EXCEPTION_SLA_MODE )); then FIXTURE_OIDC_ARGS+=(--oidc-host "$OIDC_HOST"); fi
 if (( DATA_PRESERVATION_MODE )); then FIXTURE_OIDC_ARGS=(--oidc-port "$OIDC_PORT" --oidc-internal); fi
 if (( EXCEPTION_WARNING_MODE )); then FIXTURE_OIDC_ARGS+=(--exception-warning); fi
+if (( EXCEPTION_SLA_MODE )); then FIXTURE_OIDC_ARGS+=(--exception-sla); fi
 if (( IDENTITY_MODE )); then FIXTURE_OIDC_ARGS+=(--identity-access-ownership); fi
 uv run python "$ROOT/tools/g7_observer_fixture.py" create --root "$RUN_ROOT" --image "$IMAGE" \
   "${FIXTURE_OIDC_ARGS[@]}" --api-port "$API_PORT" --recovery-port "$RECOVERY_PORT"
-if (( EXCEPTION_WARNING_MODE )); then
-  mkdir -p "$RUN_ROOT/warning"
-  chmod 0777 "$RUN_ROOT/warning"
+if (( EXCEPTION_WARNING_MODE || EXCEPTION_SLA_MODE )); then
   WARNING_NOW=$(date -u +'%Y-%m-%dT%H:%M:%S+00:00')
   printf '%s\n' "$WARNING_NOW" >"$RUN_ROOT/scheduler/warning-clock.txt"
   chmod 0666 "$RUN_ROOT/scheduler/warning-clock.txt"
+  if (( EXCEPTION_WARNING_MODE )); then
+  mkdir -p "$RUN_ROOT/warning"
+  chmod 0777 "$RUN_ROOT/warning"
   printf '%s\n' 'g7-warning-fixture-token' >"$RUN_ROOT/secrets/slack-warning-token"
   chmod 0600 "$RUN_ROOT/secrets/slack-warning-token"
   printf '%s\n' 'fixture-secret' >"$RUN_ROOT/secrets/smtp-warning-token"
@@ -541,6 +545,11 @@ UVM_EXCEPTION_WARNING_DESTINATIONS={"fixture-destination":{"channel":"slack","se
 WARNINGENV
   printf '%s\n' 'g7-warning-fixture-signing-secret' >"$RUN_ROOT/secrets/slack-signing-secret"
   chmod 0600 "$RUN_ROOT/secrets/slack-signing-secret"
+  else
+    cat >>"$RUN_ROOT/container.env" <<SLAENV
+UVM_G7_TEST_CLOCK_FILE=/run/uvm-g7-scheduler/warning-clock.txt
+SLAENV
+  fi
 fi
 if (( DATA_PRESERVATION_MODE )); then
   PRESERVATION_VOLUME_NAMES=("volt-g7-preservation-$RUN_ID-postgres" "volt-g7-preservation-$RUN_ID-media" "volt-g7-preservation-$RUN_ID-state")
@@ -721,6 +730,8 @@ APP_EXTRA_MOUNTS=()
 APP_EXTRA_PORTS=()
 if (( EXCEPTION_WARNING_MODE )); then
   APP_EXTRA_MOUNTS+=(--mount "type=bind,src=$RUN_ROOT/warning,dst=/run/uvm-g7-warning-fixture")
+fi
+if (( EXCEPTION_WARNING_MODE || EXCEPTION_SLA_MODE )); then
   APP_EXTRA_PORTS+=( -p "127.0.0.1:$OIDC_PROXY_PORT:$OIDC_PROXY_PORT" )
 fi
 docker run -d --name "$CONTAINER" --label uvm.g7.observer-journey=true --label "uvm.g7.run-id=$RUN_ID" \
@@ -749,7 +760,7 @@ if (( ! ready )); then
   echo 'disposable application did not become healthy; see retained redacted startup evidence' >&2
   exit 70
 fi
-if (( ! DATA_PRESERVATION_MODE && ! EXCEPTION_WARNING_MODE )) && [[ $OIDC_PROXY_PORT != 9000 ]]; then
+if (( ! DATA_PRESERVATION_MODE && ! EXCEPTION_WARNING_MODE && ! EXCEPTION_SLA_MODE )) && [[ $OIDC_PROXY_PORT != 9000 ]]; then
   cat >"$RUN_ROOT/host/oidc-container-loopback-proxy.py" <<'PYCONTAINERPROXY'
 import select,socket,socketserver,sys
 port=int(sys.argv[1])
@@ -816,7 +827,7 @@ if (( EXCEPTION_WARNING_MODE )); then
       echo 'disposable SMTP TLS trust/hostname probe failed; see retained probe output' >&2; exit 70;
     }
 fi
-if (( EXCEPTION_WARNING_MODE )); then
+if (( EXCEPTION_WARNING_MODE || EXCEPTION_SLA_MODE )); then
   docker exec -d "$CONTAINER" /opt/uvm/venv/bin/python /opt/uvm/app/tools/g7_exception_warning_oidc_proxy.py \
     --host 0.0.0.0 --port "$OIDC_PROXY_PORT" --upstream-port 9000
   for _ in $(seq 1 30); do
@@ -1335,11 +1346,18 @@ PYSOURCECE
     "$EVIDENCE/source-ce-findings.json" "$EVIDENCE/source-ce-public-sentinel.json"
 fi
 
-if (( EXCEPTION_WARNING_MODE )); then
+if (( EXCEPTION_WARNING_MODE || EXCEPTION_SLA_MODE )); then
+  if (( EXCEPTION_WARNING_MODE )); then
   docker exec -e UVM_G7_WARNING_FIXTURE=1 "$CONTAINER" \
     /opt/uvm/venv/bin/python /opt/uvm/app/tools/g7_recovery_retained_fixture.py \
     >"$EVIDENCE/warning-fixture-ids.json"
-  chmod 0600 "$EVIDENCE/warning-fixture-ids.json"
+    chmod 0600 "$EVIDENCE/warning-fixture-ids.json"
+  else
+    docker exec -e UVM_G7_SLA_FIXTURE=1 "$CONTAINER" \
+      /opt/uvm/venv/bin/python /opt/uvm/app/tools/g7_recovery_retained_fixture.py \
+      >"$EVIDENCE/sla-fixture-ids.json"
+    chmod 0600 "$EVIDENCE/sla-fixture-ids.json"
+  fi
 fi
 uv run python "$ROOT/tools/g7_observer_fixture.py" link-actor --root "$RUN_ROOT" \
   --container "$CONTAINER" \
@@ -1375,6 +1393,8 @@ PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
   $([[ $IS_BACKUP_MODE == 1 ]] && printf '%s' '--backup-seed-only') \
   $([[ $EXCEPTION_WARNING_MODE == 1 ]] && printf '%s %s' '--oidc-proxy-port' "$OIDC_PROXY_PORT") \
   $([[ $EXCEPTION_WARNING_MODE == 1 ]] && printf '%s' '--exception-warning-only') \
+  $([[ $EXCEPTION_SLA_MODE == 1 ]] && printf '%s %s' '--oidc-proxy-port' "$OIDC_PROXY_PORT") \
+  $([[ $EXCEPTION_SLA_MODE == 1 ]] && printf '%s' '--exception-sla-only') \
   >"$EVIDENCE/browser-journey.stdout" 2>"$EVIDENCE/browser-journey.stderr"
 
 # Retain backup settings only in backup recovery modes. Observer and warning
@@ -2433,4 +2453,10 @@ PHDUR
   fi
   exit 0
 fi
-echo 'G7 observer-settings-only journey completed' | tee "$EVIDENCE/result.txt"
+if (( EXCEPTION_SLA_MODE )); then
+  echo 'G7 authoritative ingestion and exception SLA pause/resume public journey completed' | tee "$EVIDENCE/result.txt"
+elif (( EXCEPTION_WARNING_MODE )); then
+  echo 'G7 exception warning public lifecycle journey completed' | tee "$EVIDENCE/result.txt"
+else
+  echo 'G7 observer-settings-only journey completed' | tee "$EVIDENCE/result.txt"
+fi

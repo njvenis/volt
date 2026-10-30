@@ -17,7 +17,8 @@ const fixtureRoot = arg('--fixture-root');
 const appContainer = process.argv.includes('--app-container') ? arg('--app-container') : 'volt-g7-observer-journey';
 const backupSeedOnly = process.argv.includes('--backup-seed-only');
 const warningOnly = process.argv.includes('--exception-warning-only');
-const oidcProxyPort = warningOnly ? arg('--oidc-proxy-port') : null;
+const exceptionSlaOnly = process.argv.includes('--exception-sla-only');
+const oidcProxyPort = warningOnly || exceptionSlaOnly ? arg('--oidc-proxy-port') : null;
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname),'..');
 await mkdir(evidence, {recursive:true, mode:0o700});
 const browser = await chromium.launch({headless:true});
@@ -229,7 +230,8 @@ try {
     required_approver_count:1,prohibited_action_pairs:[]};
   const actions=['observer.timing.read','observer.timing.configure',
     'backup.settings.read','backup.settings.configure','assessment.read','audit.read',
-    ...(warningOnly?['acceptance.submit','acceptance.approve','warning.route.manage','warning.actor_link.manage']:[])];
+    ...(warningOnly?['acceptance.submit','acceptance.approve','warning.route.manage','warning.actor_link.manage']:[]),
+    ...(exceptionSlaOnly?['acceptance.submit','acceptance.approve','portion.define','portion.transfer','report.create','report.read']:[])];
   const permissions=actions.map(action=>({permission_id:crypto.randomUUID(),role_id:crypto.randomUUID(),action,
     target_scope:scope,limits,separation_of_duties:duties,
     ...(action.startsWith('observer.timing.')||action.startsWith('backup.settings.')?{deployment_scopes:['g7-local','g7-other']}: {})}));
@@ -252,6 +254,291 @@ try {
   if(membership.status!==200)throw new Error(`access-group membership failed with ${membership.status}: ${JSON.stringify(membership.body)}`);
   counts.membership=membership.status;
   await page.waitForTimeout(5500);
+
+  if (exceptionSlaOnly) {
+    const seeded=JSON.parse(await readFile(path.join(evidence,'sla-fixture-ids.json'),'utf8'));
+    const findingId=seeded.group, members=seeded.members;
+    const memberByKey=Object.fromEntries(members.map(member=>[member.key,member]));
+    const occurrenceIds=members.map(member=>member.occurrence);
+    const ingestAt=Date.parse(seeded.ingested_at);
+    if (!Number.isFinite(ingestAt) || Date.parse(seeded.observed_at)>=ingestAt
+        || Date.parse(seeded.collected_at)>=ingestAt)
+      throw new Error('authoritative fixture did not separate the older observation/collection times from UVM retention');
+    const pauseAt=new Date(ingestAt+18*60*60*1000);
+    const expiry=new Date(pauseAt.getTime()+60*1000);
+    const clockPath=path.join(fixtureRoot,'scheduler','warning-clock.txt');
+    await writeFile(clockPath,pauseAt.toISOString()+'\n',{mode:0o666});
+    const g7ReportCommand=crypto.randomUUID();
+    const g7Report=await api('/api/v1/reports',{method:'POST',write:true,body:JSON.stringify({
+      schema_version:1,definition_version:'g7-exception-sla-v1',command_id:g7ReportCommand,
+      mode:'as_known_at',scope:{group_ids:[findingId]},as_of:pauseAt.toISOString(),
+      known_at:pauseAt.toISOString()})});
+    if(g7Report.status!==200||!g7Report.body.report_id)
+      throw new Error(`public G7 continuity report creation failed ${g7Report.status}: ${JSON.stringify(g7Report.body)}`);
+    let reportRead;
+    for(let attempt=0;attempt<30;attempt++) {
+      reportRead=await api(`/api/v1/reports/${g7Report.body.report_id}`);
+      if(reportRead.status===200&&reportRead.body.status==='ready')break;
+      await page.waitForTimeout(500);
+    }
+    if(reportRead?.status!==200||reportRead.body.status!=='ready')
+      throw new Error(`public G7 continuity report did not become ready: ${JSON.stringify(reportRead?.body)}`);
+    const g7Atoms=await api(`/api/v1/reports/${g7Report.body.report_id}/atoms`);
+    if(g7Atoms.status!==200)throw new Error(`public G7 continuity atoms failed ${g7Atoms.status}: ${JSON.stringify(g7Atoms.body)}`);
+    const g7AtomByOccurrence=Object.fromEntries(g7Atoms.body.items.map(item=>[item.occurrence_id,item]));
+    for(const member of members) {
+      const atom=g7AtomByOccurrence[member.occurrence];
+      const anchorMatches=Date.parse(atom?.clock?.start)===ingestAt
+        &&(member.deadline_at
+          ? Date.parse(atom?.clock?.original_deadline_at)===Date.parse(member.deadline_at)
+          : atom?.clock?.original_deadline_at==null);
+      if(!atom||!anchorMatches)
+        throw new Error(`public G7 report lost authoritative membership anchor/deadline: ${JSON.stringify({member,atom})}`);
+    }
+    await writeFile(path.join(evidence,'sla-continuity-g7-public-report.json'),JSON.stringify({
+      create:g7Report.body,read:reportRead.body,atoms:g7Atoms.body,command_id:g7ReportCommand},null,2),{mode:0o600});
+    const g5=seeded.g5_compatibility;
+    const g5ReportCommand=crypto.randomUUID();
+    const g5Report=await api('/api/v1/reports',{method:'POST',write:true,body:JSON.stringify({
+      schema_version:1,definition_version:'g5-metrics-v1',command_id:g5ReportCommand,
+      mode:'as_known_at',scope:{group_ids:[g5.group]},as_of:pauseAt.toISOString(),
+      known_at:pauseAt.toISOString()})});
+    if(g5Report.status!==200||!g5Report.body.report_id)
+      throw new Error(`public G5 compatibility report creation failed ${g5Report.status}: ${JSON.stringify(g5Report.body)}`);
+    let g5ReportRead;
+    for(let attempt=0;attempt<30;attempt++) {
+      g5ReportRead=await api(`/api/v1/reports/${g5Report.body.report_id}`);
+      if(g5ReportRead.status===200&&g5ReportRead.body.status==='ready')break;
+      await page.waitForTimeout(500);
+    }
+    if(g5ReportRead?.status!==200||g5ReportRead.body.status!=='ready')
+      throw new Error(`public G5 compatibility report did not become ready: ${JSON.stringify(g5ReportRead?.body)}`);
+    const g5Atoms=await api(`/api/v1/reports/${g5Report.body.report_id}/atoms`);
+    const g5Atom=g5Atoms.body.items?.find(item=>item.occurrence_id===g5.occurrence);
+    if(g5Atoms.status!==200||!g5Atom
+        ||Date.parse(g5Atom.clock.start)!==Date.parse(g5.observed_at)
+        ||Date.parse(g5Atom.clock.start)===Date.parse(g5.ingested_at))
+      throw new Error(`G5 source-observation anchor was changed by prospective G7 setup: ${JSON.stringify({g5,g5Atom})}`);
+    await writeFile(path.join(evidence,'g5-prospective-compatibility-public-report.json'),JSON.stringify({
+      fixture:g5,create:g5Report.body,read:g5ReportRead.body,atoms:g5Atoms.body,
+      scanner_observation_anchor_preserved:true},null,2),{mode:0o600});
+    let current=await api(`/api/v1/assessment/groups/${findingId}`);
+    if(current.status!==200)throw new Error(`SLA fixture public read failed ${current.status}: ${JSON.stringify(current.body)}`);
+    const episodes=current.body.episodes??[];
+    const expectedExposureMap=new Map();
+    for(const member of members){
+      const episode=episodes.find(item=>item.exposure_id===member.exposure);
+      if(!episode)throw new Error(`public finding omitted the writer-created episode ${member.episode}`);
+      if(episode.episode_id!==member.episode)throw new Error(`writer-created episode changed for ${member.occurrence}`);
+      expectedExposureMap.set(episode.exposure_id,{exposure_id:episode.exposure_id,
+        episode_id:episode.episode_id,state_revision:episode.state_revision});
+    }
+    const expectedExposures=[...expectedExposureMap.values()];
+    const transferredMember=memberByKey.covered_six_hours;
+    const portionId=crypto.randomUUID();
+    const authorityBeforeTransfer=(await api('/api/v1/assessment/administration/catalogue')).body.authority_revision;
+    const definePortion=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+      command_id:crypto.randomUUID(),target_id:findingId,action:'portion.define',
+      membership_ids:[transferredMember.occurrence],expected_revisions:{
+        target:current.body.assessment.revision,policy:current.body.assessment.policy_revision,
+        authority:authorityBeforeTransfer,identity_membership:current.body.assessment.membership.revision,
+        owners:current.body.assessment.owner_revision},payload:{portion_id:portionId,
+        owner_ids:['synthetic-owner-before-transfer'],membership_ids:[transferredMember.occurrence],
+        rationale:'Define exact synthetic membership ownership before transfer'}})});
+    if(definePortion.status!==200)throw new Error(`public portion definition failed ${definePortion.status}: ${JSON.stringify(definePortion.body)}`);
+    const beforeTransfer=await api(`/api/v1/assessment/groups/${findingId}`);
+    const transferCatalogue=(await api('/api/v1/assessment/administration/catalogue')).body;
+    const transfer=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+      command_id:crypto.randomUUID(),target_id:findingId,action:'portion.transfer',
+      membership_ids:[transferredMember.occurrence],expected_revisions:{
+        target:beforeTransfer.body.assessment.revision,policy:beforeTransfer.body.assessment.policy_revision,
+        authority:transferCatalogue.authority_revision,
+        identity_membership:beforeTransfer.body.assessment.membership.revision,
+        owners:beforeTransfer.body.assessment.owner_revision},payload:{portion_id:portionId,
+        owner_ids:['synthetic-owner-after-transfer'],membership_ids:[transferredMember.occurrence],
+        rationale:'Transfer the exact synthetic membership to a new owner'}})});
+    if(transfer.status!==200)throw new Error(`public owner transfer failed ${transfer.status}: ${JSON.stringify(transfer.body)}`);
+    current=await api(`/api/v1/assessment/groups/${findingId}`);
+    const transferredPortion=current.body.assessment.portions.find(item=>item.portion_id===portionId);
+    if(current.status!==200||!transferredPortion
+        ||JSON.stringify(transferredPortion.owner_ids)!==JSON.stringify(['synthetic-owner-after-transfer'])
+        ||transferredPortion.membership_ids.length!==1
+        ||transferredPortion.membership_ids[0]!==transferredMember.occurrence)
+      throw new Error(`public owner transfer readback did not preserve exact membership: ${JSON.stringify(transferredPortion)}`);
+    const reportAfterOwnerTransfer=await api(`/api/v1/reports/${g7Report.body.report_id}`);
+    if(reportAfterOwnerTransfer.status!==200
+        ||JSON.stringify(reportAfterOwnerTransfer.body)!==JSON.stringify(reportRead.body))
+      throw new Error('owner transfer mutated the already-issued G7 continuity report');
+    const g5ReportAfterTransfer=await api(`/api/v1/reports/${g5Report.body.report_id}`);
+    const g5AtomsAfterTransfer=await api(`/api/v1/reports/${g5Report.body.report_id}/atoms`);
+    if(g5ReportAfterTransfer.status!==200||g5AtomsAfterTransfer.status!==200
+        ||JSON.stringify(g5ReportAfterTransfer.body)!==JSON.stringify(g5ReportRead.body)
+        ||JSON.stringify(g5AtomsAfterTransfer.body)!==JSON.stringify(g5Atoms.body))
+      throw new Error('owner transfer or G7 activation mutated the already-issued G5 report');
+    await writeFile(path.join(evidence,'sla-owner-transfer-public-readback.json'),JSON.stringify({
+      define:definePortion.body,transfer:transfer.body,portion:transferredPortion,
+      membership_anchor_before:seeded.members.find(item=>item.occurrence===transferredMember.occurrence),
+      membership_anchor_after:seeded.continuity.reimport_refresh,
+      expected_deadline_at:transferredMember.deadline_at,
+      issued_g7_report_id:g7Report.body.report_id,
+      report_unchanged_after_transfer:true,
+      issued_g5_report_id:g5Report.body.report_id,
+      g5_report_unchanged_after_transfer:true},null,2),{mode:0o600});
+    await writeFile(path.join(evidence,'sla-before-exception-readback.json'),JSON.stringify(current.body,null,2),{mode:0o600});
+    const expectedEvaluations=members.map(member=>({episode_id:member.episode,occurrence_id:member.occurrence,
+      evaluation_id:member.evaluation,revision:member.revision}));
+    const submit=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+      command_id:crypto.randomUUID(),target_id:findingId,action:'acceptance.submit',membership_ids:occurrenceIds,
+      expected_revisions:{target:current.body.assessment.revision,policy:current.body.assessment.policy_revision,
+        authority:(await api('/api/v1/assessment/administration/catalogue')).body.authority_revision,
+        identity_membership:current.body.assessment.membership.revision,owners:current.body.assessment.owner_revision},
+      expected_exposures:expectedExposures,expected_evaluations:expectedEvaluations,
+      payload:{accountable_owner_id:'synthetic-owner',rationale:'Exercise ingestion-anchored G7 pause and resume',
+        expires_at:expiry.toISOString(),continuity_allowed:false,exception_contract_version:1,
+        context:{environment:'local',evidence:'synthetic-local'},
+        compensating_controls:'Synthetic disposable journey controls.'}})});
+    if(submit.status!==200)throw new Error(`G7 SLA public submit failed ${submit.status}: ${JSON.stringify(submit.body)}`);
+    let afterSubmit=await api(`/api/v1/assessment/groups/${findingId}`);
+    const acceptanceId=afterSubmit.body.assessment.acceptances.find(item=>item.state==='pending')?.acceptance_id;
+    if(!acceptanceId)throw new Error(`public submit did not return the pending request: ${JSON.stringify(afterSubmit.body.assessment.acceptances)}`);
+    const catalogueAfter=await api('/api/v1/assessment/administration/catalogue');
+    const approvalBody={command_id:crypto.randomUUID(),target_id:findingId,action:'acceptance.approve',
+      membership_ids:occurrenceIds,expected_revisions:{target:afterSubmit.body.assessment.revision,
+        policy:afterSubmit.body.assessment.policy_revision,authority:catalogueAfter.body.authority_revision,
+        identity_membership:afterSubmit.body.assessment.membership.revision,
+        owners:afterSubmit.body.assessment.owner_revision},expected_exposures:expectedExposures,
+      expected_evaluations:expectedEvaluations,payload:{acceptance_id:acceptanceId,
+        rationale:'Approve the synthetic ingestion-anchored exception',selected_expires_at:expiry.toISOString(),
+        expected_request_revision:1}};
+    const auditBeforeStale=await api(`/api/v1/assessment/audit?group_id=${encodeURIComponent(findingId)}`);
+    if(auditBeforeStale.status!==200)throw new Error(`pre-denial public audit read failed ${auditBeforeStale.status}`);
+    const staleAuthorityRequest={...approvalBody,command_id:crypto.randomUUID(),expected_revisions:{
+      ...approvalBody.expected_revisions,authority:approvalBody.expected_revisions.authority+1}};
+    const staleAuthority=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify(staleAuthorityRequest)});
+    if(staleAuthority.status!==409)throw new Error(`stale authority approval was not denied without effects: ${staleAuthority.status} ${JSON.stringify(staleAuthority.body)}`);
+    const staleMembershipRequest={...approvalBody,command_id:crypto.randomUUID(),expected_revisions:{
+      ...approvalBody.expected_revisions,identity_membership:approvalBody.expected_revisions.identity_membership+1}};
+    const staleMembership=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify(staleMembershipRequest)});
+    if(staleMembership.status!==409)throw new Error(`stale membership approval was not denied without effects: ${staleMembership.status} ${JSON.stringify(staleMembership.body)}`);
+    // A receipt replay would return the committed success. Replaying the exact
+    // denied command IDs must reach the same guards and remain denied.
+    const staleAuthorityReplay=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify(staleAuthorityRequest)});
+    const staleMembershipReplay=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify(staleMembershipRequest)});
+    const afterStaleGuards=await api(`/api/v1/assessment/groups/${findingId}`);
+    const auditAfterStale=await api(`/api/v1/assessment/audit?group_id=${encodeURIComponent(findingId)}`);
+    await writeFile(path.join(evidence,'sla-stale-guard-public-readback.json'),JSON.stringify({
+      stale_authority_request:staleAuthorityRequest,stale_authority_response:staleAuthority.body,
+      stale_membership_request:staleMembershipRequest,stale_membership_response:staleMembership.body,
+      stale_authority_replay_response:staleAuthorityReplay.body,
+      stale_membership_replay_response:staleMembershipReplay.body,
+      latest_receipt_after_denials:afterStaleGuards.body.assessment.latest_receipt,
+      audit_before:auditBeforeStale.body,audit_after:auditAfterStale.body,
+      pending_request_after_denials:afterStaleGuards.body.assessment.acceptances.find(item=>item.acceptance_id===acceptanceId)},null,2),{mode:0o600});
+    if(afterStaleGuards.status!==200||afterStaleGuards.body.assessment.acceptances.some(item=>
+        item.acceptance_id===acceptanceId&&item.state==='active'))
+      throw new Error('denied stale authority or membership command changed exception state');
+    if(staleAuthorityReplay.status!==409||staleMembershipReplay.status!==409)
+      throw new Error(`denied stale command replay found a committed receipt: ${JSON.stringify({
+        authority:staleAuthorityReplay.status,membership:staleMembershipReplay.status})}`);
+    if(auditAfterStale.status!==200||auditAfterStale.body.items.length!==auditBeforeStale.body.items.length
+        ||auditAfterStale.body.items.some(item=>[staleAuthorityRequest.command_id,
+          staleMembershipRequest.command_id].includes(item.command_id)))
+      throw new Error(`denied stale command changed audit: ${JSON.stringify({before:auditBeforeStale.body.items,
+        after:auditAfterStale.body.items,stale:[staleAuthorityRequest.command_id,staleMembershipRequest.command_id]})}`);
+    const approve=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+      command_id:crypto.randomUUID(),target_id:findingId,action:'acceptance.approve',membership_ids:occurrenceIds,
+      expected_revisions:{target:afterSubmit.body.assessment.revision,policy:afterSubmit.body.assessment.policy_revision,
+        authority:catalogueAfter.body.authority_revision,identity_membership:afterSubmit.body.assessment.membership.revision,
+        owners:afterSubmit.body.assessment.owner_revision},expected_exposures:expectedExposures,
+      expected_evaluations:expectedEvaluations,payload:{acceptance_id:acceptanceId,
+        rationale:'Approve the synthetic ingestion-anchored exception',selected_expires_at:expiry.toISOString(),
+        expected_request_revision:1}})});
+    if(approve.status!==200)throw new Error(`G7 SLA public approval failed ${approve.status}: ${JSON.stringify(approve.body)}`);
+    const pausedRead=await api(`/api/v1/assessment/groups/${findingId}`);
+    const pausedAcceptance=pausedRead.body.assessment.acceptances.find(item=>item.acceptance_id===acceptanceId);
+    const pausedClocks=Object.fromEntries((pausedAcceptance?.sla_clock??[]).map(clock=>[clock.occurrence_id,clock]));
+    const coveredClock=pausedClocks[memberByKey.covered_six_hours.occurrence];
+    const rebuiltClock=pausedClocks[memberByKey.verified_rebuild_membership.occurrence];
+    const breachedClock=pausedClocks[memberByKey.already_breached.occurrence];
+    const gapClock=pausedClocks[memberByKey.unknown_coverage.occurrence];
+    if(pausedAcceptance?.state!=='active'||coveredClock?.state!=='paused'
+        ||Date.parse(coveredClock?.target_at)!==expiry.getTime()
+        ||Number(coveredClock?.frozen_sla_seconds)!==21600
+        ||rebuiltClock?.state!=='paused'||Date.parse(rebuiltClock?.target_at)!==expiry.getTime()
+        ||Number(rebuiltClock?.frozen_sla_seconds)!==21600
+        ||breachedClock?.state!=='paused'||Number(breachedClock?.frozen_sla_seconds)!==0
+        ||breachedClock?.prior_breach!==true||gapClock?.state!=='gap'
+        ||gapClock?.target_at!=null||gapClock?.remaining_seconds!=null)
+      throw new Error(`public SLA pause failed covered, breached, or unknown atom assertions: ${JSON.stringify({acceptance:pausedAcceptance,expectedExpiry:expiry.toISOString()})}`);
+    await writeFile(path.join(evidence,'sla-paused-public-readback.json'),JSON.stringify({
+      findingId,memberKeys:members.map(member=>member.key),acceptanceId,submit:submit.body,approve:approve.body,
+      public_acceptance:pausedAcceptance,expected_ingest_at:seeded.ingested_at,
+      expected_deadline_at:seeded.deadline_at,readback_at:pauseAt.toISOString()},null,2),{mode:0o600});
+    await page.goto(origin+'/#findings?group='+encodeURIComponent(findingId),{waitUntil:'domcontentloaded'});
+    await page.waitForTimeout(1500);
+    await page.getByRole('button',{name:'Exceptions',exact:true}).waitFor({state:'visible',timeout:20000});
+    await page.getByRole('button',{name:'Exceptions',exact:true}).click();
+    await page.getByText('Recorded SLA state',{exact:true}).waitFor({state:'visible',timeout:10000});
+    const pausedRendered=await page.locator('body').innerText();
+    await writeFile(path.join(evidence,'sla-paused-ui-debug.json'),JSON.stringify({
+      body:pausedRendered,clocks:pausedAcceptance.sla_clock,
+      visible_exception_expiry:pausedRendered.includes('Exception expires'),
+      visible_frozen_remainder:pausedRendered.includes('Currently frozen SLA duration'),
+      visible_gap:pausedRendered.includes('SLA coverage unknown'),
+      visible_prior_breach:pausedRendered.includes('Earlier breach retained')},null,2),{mode:0o600});
+    if(!pausedRendered.includes('Exception expires')||!pausedRendered.includes('Currently frozen SLA duration')
+        ||!pausedRendered.includes('SLA coverage unknown')
+        ||!pausedRendered.toLowerCase().includes('earlier breach retained'))
+      throw new Error('rendered Exceptions register omitted paused, gap, or prior breach values');
+    await page.screenshot({path:path.join(evidence,'sla-paused-browser.png'),fullPage:true});
+    await writeFile(path.join(evidence,'sla-paused-browser.json'),JSON.stringify({
+      title:await page.title(),findingId,acceptanceId,rendered_paused_sla:true,
+      visible_exception_expiry:pausedRendered.includes('Exception expires'),
+      visible_frozen_remainder:pausedRendered.includes('Currently frozen SLA duration')},null,2),{mode:0o600});
+    await writeFile(path.join(evidence,'sla-paused-clock.json'),expiry.toISOString()+'\n',{mode:0o666});
+    const resumedAt=new Date(expiry.getTime()+60*1000);
+    await writeFile(clockPath,resumedAt.toISOString()+'\n',{mode:0o666});
+    await page.waitForTimeout(1500);
+    const resumedRead=await api(`/api/v1/assessment/groups/${findingId}`);
+    const resumedAcceptance=resumedRead.body.assessment.acceptances.find(item=>item.acceptance_id===acceptanceId);
+    const resumedClocks=Object.fromEntries((resumedAcceptance?.sla_clock??[]).map(clock=>[clock.occurrence_id,clock]));
+    const resumedCovered=resumedClocks[memberByKey.covered_six_hours.occurrence];
+    const resumedRebuilt=resumedClocks[memberByKey.verified_rebuild_membership.occurrence];
+    const resumedBreached=resumedClocks[memberByKey.already_breached.occurrence];
+    const resumedGap=resumedClocks[memberByKey.unknown_coverage.occurrence];
+    if(resumedRead.status!==200||resumedCovered?.state!=='running'
+        ||Date.parse(resumedCovered.target_at)!==expiry.getTime()+6*60*60*1000
+        ||Number(resumedCovered.remaining_seconds)!==21540
+        ||resumedRebuilt?.state!=='running'
+        ||Date.parse(resumedRebuilt.target_at)!==expiry.getTime()+6*60*60*1000
+        ||Number(resumedRebuilt.remaining_seconds)!==21540
+        ||resumedBreached?.state!=='running'||Number(resumedBreached.remaining_seconds)!==0
+        ||resumedBreached?.prior_breach!==true||resumedBreached?.currently_breached!==true
+        ||resumedGap?.state!=='gap'||resumedGap?.target_at!=null||resumedGap?.remaining_seconds!=null)
+      throw new Error(`late expiry processing failed resume, prior breach, or gap assertions: ${JSON.stringify({status:resumedRead.status,clocks:resumedAcceptance?.sla_clock,expectedTarget:new Date(expiry.getTime()+6*60*60*1000).toISOString()})}`);
+    await writeFile(path.join(evidence,'sla-resumed-public-readback.json'),JSON.stringify({
+      readback_at:resumedAt.toISOString(),public_acceptance:resumedAcceptance},null,2),{mode:0o600});
+    await page.goto(origin+'/#findings?group='+encodeURIComponent(findingId),{waitUntil:'domcontentloaded'});
+    await page.waitForTimeout(2000);
+    await page.getByRole('button',{name:'Exceptions',exact:true}).waitFor({state:'visible',timeout:20000});
+    await page.getByRole('button',{name:'Exceptions',exact:true}).click();
+    await page.getByText('Recorded SLA state',{exact:true}).waitFor({state:'visible',timeout:10000});
+    const rendered=await page.locator('body').innerText();
+    if(!rendered.includes('Current SLA target')||!rendered.includes('Remaining SLA duration at refresh'))
+      throw new Error('rendered Exceptions register omitted server-computed resumed SLA values');
+    await page.screenshot({path:path.join(evidence,'sla-resumed-browser.png'),fullPage:true});
+    await writeFile(path.join(evidence,'sla-resumed-browser.json'),JSON.stringify({
+      title:await page.title(),findingId,acceptanceId,rendered_server_computed_sla:true,
+      visible_target:rendered.includes('Current SLA target'),
+      visible_remaining:rendered.includes('Remaining SLA duration at refresh')},null,2),{mode:0o600});
+    process.stdout.write(JSON.stringify({exceptionSlaWorkflow:'paused_then_resumed',findingId,
+      memberKeys:members.map(member=>member.key),acceptanceId})+'\n');
+    process.exit(0);
+  }
 
   if (warningOnly) {
     const seeded=JSON.parse(await readFile(path.join(evidence,'warning-fixture-ids.json'),'utf8'));

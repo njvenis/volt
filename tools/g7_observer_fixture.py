@@ -149,14 +149,18 @@ def run(args: argparse.Namespace) -> None:
                 "actions": ["observer.timing.read", "observer.timing.configure",
                     "backup.settings.read", "backup.settings.configure", "assessment.read", "audit.read",
                     *( ["access_group.read", "ownership.team.read", "ownership.team.manage",
-                        "owners.directory.read", "owners.assign", "portion.define"]
-                        if args.identity_access_ownership else [] ),
+                        "owners.directory.read", "owners.assign", "portion.define", "portion.transfer"]
+                        if args.identity_access_ownership or args.exception_sla else [] ),
                     "preservation.read", "preservation.evidence.read", "audit.read.deployment",
-                    "audit.export.deployment", *( ["acceptance.submit", "acceptance.approve",
-                    "warning.route.manage", "warning.actor_link.manage"] if args.exception_warning else [] )],
+                    "audit.export.deployment",
+                    *( ["acceptance.submit", "acceptance.approve"]
+                        if args.exception_warning or args.exception_sla else [] ),
+                    *( ["warning.route.manage", "warning.actor_link.manage"]
+                        if args.exception_warning else [] ),
+                    *( ["report.create", "report.read"] if args.exception_sla else [] )],
                 "target_scope": {"group_ids": ["*"], "source_families": ["*"],
                     "environments": ["*"], "service_ids": ["*"], "membership_mode": "all_current"},
-                "limits": {"maximum_acceptance_days": 2 if args.exception_warning else None, "maximum_severity": None,
+                "limits": {"maximum_acceptance_days": 2 if (args.exception_warning or args.exception_sla) else None, "maximum_severity": None,
                     "whole_group_confirmation": True, "allowed_environments": ["*"],
                     "allowed_service_ids": ["*"],
                     "allowed_sla_clock_bases": ["elapsed_utc_seconds", "calendar_days_utc"],
@@ -166,7 +170,7 @@ def run(args: argparse.Namespace) -> None:
                     "maximum_deadline_extension_seconds": None,
                     "allowed_identity_scalar_fields": {}},
                 "separation_of_duties": {"approval_requires_distinct_actor": True,
-                    "prohibit_requester_approval": not args.exception_warning, "required_approver_count": 1,
+                    "prohibit_requester_approval": not (args.exception_warning or args.exception_sla), "required_approver_count": 1,
                     "prohibited_action_pairs": []},
                 **({"warning_route_scope": {
                 "installation_ids": ["fixture-installation"], "workspace_ids": ["T_FIXTURE"],
@@ -609,6 +613,7 @@ def main() -> int:
     parser.add_argument("--api-port", type=int, default=8000)
     parser.add_argument("--recovery-port", type=int, default=8002)
     parser.add_argument("--exception-warning", action="store_true")
+    parser.add_argument("--exception-sla", action="store_true")
     parser.add_argument("--identity-access-ownership", action="store_true")
     args = parser.parse_args()
     run(args)

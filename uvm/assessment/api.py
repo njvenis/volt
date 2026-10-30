@@ -3417,6 +3417,9 @@ def install_assessment_routes(app: FastAPI) -> None:
                             or expected.get("policy") != current_policy_revision
                             or expected.get("owners", 1) != int(old_document.get("owner_revision", 1))):
                         _error(409, "revision_conflict", "Assessment revisions changed")
+                    if (g7_exception_command and expected.get("authority") !=
+                            int(native_state(policy).get("revision", 0))):
+                        _error(409, "revision_conflict", "Exception authority revision changed")
                     episode_records = ensure_current_episodes(connection, target_id, now=now)
                     if guarded_episode_command:
                         selected_exposures = set(connection.execute(sa.select(

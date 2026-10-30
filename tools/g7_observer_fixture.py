@@ -109,7 +109,10 @@ def run(args: argparse.Namespace) -> None:
             "session_ttl_seconds": 3600, "heartbeat_max_age_seconds": 120}
         identities = [{"subject": "g7-actor-subject", "groups": []}]
         if args.identity_access_ownership:
-            identities.append({"subject": "g7-identity-user-subject", "groups": []})
+            identities.extend([
+                {"subject": "g7-identity-user-subject", "groups": []},
+                {"subject": "g7-identity-deny-subject", "groups": []},
+            ])
         g7_scope = ("local", "g7-local", "all")
         service_principals = {
             "g7-host": {"token": values["uvm_cursor_secret"], "scopes": [],
@@ -145,7 +148,9 @@ def run(args: argparse.Namespace) -> None:
             "UVM_NATIVE_GRANTABLE_ENVELOPE": json.dumps({
                 "actions": ["observer.timing.read", "observer.timing.configure",
                     "backup.settings.read", "backup.settings.configure", "assessment.read", "audit.read",
-                    *( ["access_group.read", "ownership.team.read", "ownership.team.manage"] if args.identity_access_ownership else [] ),
+                    *( ["access_group.read", "ownership.team.read", "ownership.team.manage",
+                        "owners.directory.read", "owners.assign", "portion.define"]
+                        if args.identity_access_ownership else [] ),
                     "preservation.read", "preservation.evidence.read", "audit.read.deployment",
                     "audit.export.deployment", *( ["acceptance.submit", "acceptance.approve",
                     "warning.route.manage", "warning.actor_link.manage"] if args.exception_warning else [] )],
@@ -215,6 +220,14 @@ def run(args: argparse.Namespace) -> None:
                 "evidence_ref": "g7-identity-access-ownership-fixture"},
                 separators=(",", ":")), encoding="utf-8")
             (secrets_dir / "identity-user-operator-link.json").chmod(0o600)
+            (secrets_dir / "identity-deny-operator-link.json").write_text(json.dumps({
+                "issuer": oidc, "subject": "g7-identity-deny-subject",
+                "principal_id": "g7-identity-deny-user",
+                "display_label": "Synthetic G7 Explicit-Deny User",
+                "rationale": "Link the separate explicit-deny acceptance principal",
+                "evidence_ref": "g7-identity-access-ownership-explicit-deny"},
+                separators=(",", ":")), encoding="utf-8")
+            (secrets_dir / "identity-deny-operator-link.json").chmod(0o600)
         return
 
     if args.command == "link-identity-user":
@@ -222,6 +235,15 @@ def run(args: argparse.Namespace) -> None:
         subprocess.run(["docker", "exec", container, "bash", "-lc",
             "curl --fail --silent --show-error -H 'Authorization: Bearer '$(cat /run/uvm-g7-secrets/oidc_operator_secret) "
             "-H 'Content-Type: application/json' --data-binary @/run/secrets/identity-user-operator-link.json "
+            "http://127.0.0.1:8000/api/v1/auth/operator/links"], check=True)
+        print("oidc_fixture_link=created")
+        return
+
+    if args.command == "link-identity-deny-user":
+        container = args.container or "volt-g7-identity-app"
+        subprocess.run(["docker", "exec", container, "bash", "-lc",
+            "curl --fail --silent --show-error -H 'Authorization: Bearer '$(cat /run/uvm-g7-secrets/oidc_operator_secret) "
+            "-H 'Content-Type: application/json' --data-binary @/run/secrets/identity-deny-operator-link.json "
             "http://127.0.0.1:8000/api/v1/auth/operator/links"], check=True)
         print("oidc_fixture_link=created")
         return
@@ -573,7 +595,7 @@ def run(args: argparse.Namespace) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("create", "anchor-init", "link-actor", "link-identity-user", "backup-policy", "host-config", "backup-host-config", "backup-host-once", "host-control", "host-once", "host-report-attacks", "host-telemetry-count"))
+    parser.add_argument("command", choices=("create", "anchor-init", "link-actor", "link-identity-user", "link-identity-deny-user", "backup-policy", "host-config", "backup-host-config", "backup-host-once", "host-control", "host-once", "host-report-attacks", "host-telemetry-count"))
     parser.add_argument("--role", choices=("observer", "supervisor", "controller"))
     parser.add_argument("--action", choices=("stop", "resume", "restart", "start", "terminate", "tighten-policy", "restore-policy"))
     parser.add_argument("--report-id")

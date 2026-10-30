@@ -19,6 +19,7 @@ from uvm.persistence.metrics_schema import (g7_sla_evaluations, sla_policy_heads
 
 def seed(engine):
     warning_fixture = os.environ.get('UVM_G7_WARNING_FIXTURE') == '1'
+    identity_fixture = os.environ.get('UVM_G7_IDENTITY_FIXTURE') == '1'
     ids = {name: str(uuid.uuid5(uuid.NAMESPACE_URL, 'volt:g7:recovery-fixture:' + name))
         for name in ('group', 'workload', 'incarnation', 'exposure', 'occurrence',
             'run', 'observation', 'event', 'command', 'decision', 'intent')}
@@ -64,7 +65,7 @@ def seed(engine):
                 'projection': 'pending', 'outcome': 'committed'} if warning_fixture else
                 {'command_id': ids['command'], 'decision_id': ids['decision'],
                     'audit_event_id': ids['event'], 'outcome': 'committed'}), created_at=now))
-        repository_id = '777777' if warning_fixture else 'synthetic-recovery-repo'
+        repository_id = '777777' if warning_fixture else ('777776' if identity_fixture else 'synthetic-recovery-repo')
         c.execute(github_repositories.insert().values(repository_id=repository_id, github_host='github.example.invalid',
             owner='synthetic', name='recovery', enabled=False, audience_revision=1, audience_document={}, updated_at=now))
         c.execute(github_group_issues.insert().values(group_id=ids['group'], repository_id=repository_id,

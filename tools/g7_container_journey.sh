@@ -1353,6 +1353,13 @@ if (( IDENTITY_MODE )); then
   uv run python "$ROOT/tools/g7_observer_fixture.py" link-identity-user --root "$RUN_ROOT" \
     --container "$CONTAINER" >"$EVIDENCE/identity-user-link.stdout" \
     2>"$EVIDENCE/identity-user-link.stderr"
+  uv run python "$ROOT/tools/g7_observer_fixture.py" link-identity-deny-user --root "$RUN_ROOT" \
+    --container "$CONTAINER" >"$EVIDENCE/identity-deny-user-link.stdout" \
+    2>"$EVIDENCE/identity-deny-user-link.stderr"
+  docker exec --env UVM_G7_DISPOSABLE_MODE=1 --env UVM_G7_IDENTITY_FIXTURE=1 -i "$CONTAINER" /opt/uvm/venv/bin/python - \
+    <"$ROOT/tools/g7_recovery_retained_fixture.py" \
+    >"$EVIDENCE/identity-owner-finding-fixture.stdout" \
+    2>"$EVIDENCE/identity-owner-finding-fixture.stderr"
   PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
     node "$ROOT/tools/g7_identity_access_ownership_browser.mjs" \
       --origin "http://127.0.0.1:$API_PORT" --evidence "$EVIDENCE" \

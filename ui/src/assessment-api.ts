@@ -2,7 +2,7 @@ import {sessionFetch, errorCode} from './session';
 import type { JsonValue } from './api';
 import { validG4View, type G4View, type ExposureGuard } from './github-model';
 
-export type Revisions={target:number;identity_membership:number;policy:number;owners:number};
+export type Revisions={target:number;identity_membership:number;policy:number;owners:number;authority?:number};
 export type Command={command_id:string;action:string;target_id:string;membership_ids:string[];expected_revisions:Revisions;expected_exposures?:ExposureGuard[];expected_evaluations?:EvaluationGuard[];payload:Record<string,JsonValue>};
 export type Receipt={schema_version:1;command_id:string;decision_id:string;audit_event_id:string;intent_id:string|null;committed_revision:number;projection:string};
 export type Owner={owner_id:string;owner_type:string;display_name:string};
@@ -61,7 +61,7 @@ export type RoutingOverride={override_id:string;owner_ids:string[];rationale:str
 export type DeadlineReference={schema_version:1;reference_id:string;occurrence_id:string;deadline_at:string|null;policy_ref:string|null;evidence_ref:string;evidence_sha256:string;supersedes_reference_id:string|null;rationale:string};
 export type OccurrenceClock={occurrence_id:string;first_observed_at:string|null;deadline_at:string|null;deadline_status:string;policy_ref:string|null;deadline_reference_revision:number;deadline_reference:DeadlineReference|null};
 export type RoutingEvidence={rule_id:string;match:{source_family:string};matched:boolean;owner_ids:string[];outcome:'matched'|'unmatched'|'conflicting'|'owner_unavailable'};
-export type GroupView=G4View&{schema_version:1;group:{group_id:string;source_family:string;native_id_scheme:string;native_id_authority:string;native_id_value:string;identity_revision:number};assessment:{revision:number;policy_revision:number;owner_revision:number;native_severity:{value:string;source:string;observed_at:string|null}|null;assessed_severity:{value:string;rationale:string;actor_id:string;updated_at:string}|null;owners:Owner[];portions:Portion[];routing:{status:string;owner_ids:string[];override:RoutingOverride|null;evaluated_policy_revision:number;evidence:RoutingEvidence[]};acceptances:Acceptance[];membership:{revision:number;actionable_ids:string[];outstanding_ids:string[];completed_ids:string[];reconciliation_pending_ids:string[]};clocks:OccurrenceClock[];latest_receipt:Receipt|null;pending_projection_intents:JsonValue[]};audit:{next_cursor:string|null}};
+export type GroupView=G4View&{schema_version:1;group:{group_id:string;source_family:string;native_id_scheme:string;native_id_authority:string;native_id_value:string;identity_revision:number};assessment:{revision:number;policy_revision:number;owner_revision:number;authority_revision?:number;native_severity:{value:string;source:string;observed_at:string|null}|null;assessed_severity:{value:string;rationale:string;actor_id:string;updated_at:string}|null;owners:Owner[];portions:Portion[];routing:{status:string;owner_ids:string[];override:RoutingOverride|null;evaluated_policy_revision:number;evidence:RoutingEvidence[]};acceptances:Acceptance[];membership:{revision:number;actionable_ids:string[];outstanding_ids:string[];completed_ids:string[];reconciliation_pending_ids:string[]};clocks:OccurrenceClock[];latest_receipt:Receipt|null;pending_projection_intents:JsonValue[]};audit:{next_cursor:string|null}};
 export type BulkResult={command_id:string;target_id:string;status:'committed'|'denied'|'conflict'|'invalid'|'unavailable';code:string;receipt:Receipt|null;error:{code:string;message:string;details:Record<string,JsonValue>}|null};
 export type BulkResponse={schema_version:1;results:BulkResult[]};
 export type TargetScope={group_ids:string[];source_families:string[];environments:string[];service_ids:string[];membership_mode:'explicit'|'all_current'};
@@ -77,6 +77,7 @@ export class AssessmentError extends Error {
 }
 function errorText(status:number,code:string){
   if(code==='outcome_unknown')return 'VOLT could not confirm whether your change was saved. Check or retry this same save to avoid creating a duplicate.';
+  if(code==='authority_revision_unavailable')return 'Current access rules could not be verified. Refresh this finding before requesting or approving an exception.';
   if(code==='sla_clock_gap')return 'Current SLA versions are unavailable for one or more selected instances. An administrator must check their SLA coverage before this exception can proceed.';
   if(status===409)return 'The affected instances or access rules have changed. Refresh, review the updated details and confirm them before saving again.';
   if(status===403)return 'You do not have access to make this change. Ask an administrator to check your permissions.';
@@ -126,7 +127,13 @@ export function exposureGuards(view:GroupView,membership:string[]):ExposureGuard
   if(membership.some(id=>!view.episodes.some(e=>e.members.some(m=>m.membership_id===id))))throw new AssessmentError(502,'unsupported_response');
   return view.episodes.filter(e=>e.members.some(m=>membership.includes(m.membership_id))).map(({exposure_id,episode_id,state_revision})=>({exposure_id,episode_id,state_revision}));
 }
-export function newCommand(view:GroupView,action:string,membership:string[],payload:Record<string,JsonValue>):Command{return {command_id:crypto.randomUUID(),action,target_id:view.group.group_id,membership_ids:[...membership],expected_revisions:revisions(view),...(action.startsWith('remediation.')?{expected_exposures:exposureGuards(view,membership)}:{}),payload};}
+export function hasCurrentAuthority(view:GroupView):boolean{return num(view.assessment.authority_revision);}
+export function newCommand(view:GroupView,action:string,membership:string[],payload:Record<string,JsonValue>):Command{
+  const guardedException=action==='acceptance.submit'&&payload.exception_contract_version===1
+    ||action==='acceptance.approve'&&view.assessment.acceptances.some(a=>a.acceptance_id===payload.acceptance_id&&a.exception_contract_version===1);
+  if(guardedException&&!hasCurrentAuthority(view))throw new AssessmentError(502,'authority_revision_unavailable');
+  return {command_id:crypto.randomUUID(),action,target_id:view.group.group_id,membership_ids:[...membership],expected_revisions:{...revisions(view),...(guardedException?{authority:view.assessment.authority_revision!}:{})},...(action.startsWith('remediation.')?{expected_exposures:exposureGuards(view,membership)}:{}),payload};
+}
 export function newPolicyCommand(policyRevision:number,action:string,payload:Record<string,JsonValue>):Command{return {command_id:crypto.randomUUID(),action,target_id:'00000000-0000-4000-8000-000000000000',membership_ids:[],expected_revisions:{target:policyRevision,identity_membership:0,policy:policyRevision,owners:0},payload};}
 
 const obj=(v:unknown):v is Record<string,unknown>=>v!==null&&typeof v==='object'&&!Array.isArray(v);
@@ -163,6 +170,7 @@ export function validGroup(v:unknown):v is GroupView{
   if(!obj(v)||!validG4View(v)||v.schema_version!==1||!obj(v.group)||!fields(v.group,['group_id','source_family','native_id_scheme','native_id_authority','native_id_value'],str)||!num(v.group.identity_revision)||!obj(v.assessment)||!obj(v.audit)||!nullableString(v.audit.next_cursor))return false;
   const a=v.assessment;
   return fields(a,['revision','policy_revision','owner_revision'],num)
+    &&(!('authority_revision' in a)||num(a.authority_revision))
     &&(a.native_severity===null||(obj(a.native_severity)&&fields(a.native_severity,['value','source'],str)&&sourceTime(a.native_severity.observed_at)))
     &&(a.assessed_severity===null||(obj(a.assessed_severity)&&fields(a.assessed_severity,['value','rationale','actor_id'],str)&&time(a.assessed_severity.updated_at)))
     &&rows(a.owners,o=>fields(o,['owner_id','owner_type','display_name'],str))

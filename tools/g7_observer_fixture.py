@@ -153,7 +153,7 @@ def run(args: argparse.Namespace) -> None:
                         if args.identity_access_ownership or args.exception_sla else [] ),
                     "preservation.read", "preservation.evidence.read", "audit.read.deployment",
                     "audit.export.deployment",
-                    *( ["acceptance.submit", "acceptance.approve"]
+                    *( ["acceptance.submit", "acceptance.approve", "acceptance.reject", "acceptance.revoke"]
                         if args.exception_warning or args.exception_sla else [] ),
                     *( ["warning.route.manage", "warning.actor_link.manage"]
                         if args.exception_warning else [] ),

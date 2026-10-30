@@ -231,7 +231,8 @@ try {
   const actions=['observer.timing.read','observer.timing.configure',
     'backup.settings.read','backup.settings.configure','assessment.read','audit.read',
     ...(warningOnly?['acceptance.submit','acceptance.approve','warning.route.manage','warning.actor_link.manage']:[]),
-    ...(exceptionSlaOnly?['acceptance.submit','acceptance.approve','portion.define','portion.transfer','report.create','report.read']:[])];
+    ...(exceptionSlaOnly?['acceptance.submit','acceptance.approve','acceptance.reject','acceptance.revoke',
+      'portion.define','portion.transfer','report.create','report.read']:[])];
   const permissions=actions.map(action=>({permission_id:crypto.randomUUID(),role_id:crypto.randomUUID(),action,
     target_scope:scope,limits,separation_of_duties:duties,
     ...(action.startsWith('observer.timing.')||action.startsWith('backup.settings.')?{deployment_scopes:['g7-local','g7-other']}: {})}));
@@ -387,6 +388,44 @@ try {
     await writeFile(path.join(evidence,'sla-before-exception-readback.json'),JSON.stringify(current.body,null,2),{mode:0o600});
     const expectedEvaluations=members.map(member=>({episode_id:member.episode,occurrence_id:member.occurrence,
       evaluation_id:member.evaluation,revision:member.revision}));
+    const unknownMember=memberByKey.unknown_coverage;
+    const unknownEvaluation=expectedEvaluations.find(item=>item.occurrence_id===unknownMember.occurrence);
+    const unknownExposure=expectedExposures.find(item=>item.exposure_id===unknownMember.exposure);
+    const rejectCatalogue=(await api('/api/v1/assessment/administration/catalogue')).body;
+    const rejectSubmit=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+      command_id:crypto.randomUUID(),target_id:findingId,action:'acceptance.submit',
+      membership_ids:[unknownMember.occurrence],expected_revisions:{target:current.body.assessment.revision,
+        policy:current.body.assessment.policy_revision,authority:rejectCatalogue.authority_revision,
+        identity_membership:current.body.assessment.membership.revision,
+        owners:current.body.assessment.owner_revision},expected_exposures:[unknownExposure],
+      expected_evaluations:[unknownEvaluation],payload:{accountable_owner_id:'synthetic-owner',
+        rationale:'Exercise public rejection while preserving unknown coverage as a gap',
+        expires_at:expiry.toISOString(),continuity_allowed:false,exception_contract_version:1,
+        context:{environment:'local',evidence:'synthetic-local'},
+        compensating_controls:'Synthetic disposable journey controls.'}})});
+    if(rejectSubmit.status!==200)throw new Error(`public rejection fixture submit failed ${rejectSubmit.status}: ${JSON.stringify(rejectSubmit.body)}`);
+    let rejectState=await api(`/api/v1/assessment/groups/${findingId}`);
+    const rejectAcceptanceId=rejectState.body.assessment.acceptances.find(item=>item.state==='pending'
+      &&item.membership_ids?.length===1&&item.membership_ids[0]===unknownMember.occurrence)?.acceptance_id;
+    if(!rejectAcceptanceId)throw new Error('unknown-coverage rejection request was not pending');
+    const rejectCurrent=rejectState.body.assessment;
+    const rejectAuthority=(await api('/api/v1/assessment/administration/catalogue')).body.authority_revision;
+    const rejectCommand=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+      command_id:crypto.randomUUID(),target_id:findingId,action:'acceptance.reject',
+      membership_ids:[unknownMember.occurrence],expected_revisions:{target:rejectCurrent.revision,
+        policy:rejectCurrent.policy_revision,authority:rejectAuthority,
+        identity_membership:rejectCurrent.membership.revision,owners:rejectCurrent.owner_revision},
+      expected_exposures:[unknownExposure],expected_evaluations:[unknownEvaluation],
+      payload:{acceptance_id:rejectAcceptanceId,rationale:'Reject synthetic exception request'}})});
+    if(rejectCommand.status!==200)throw new Error(`public exception rejection failed ${rejectCommand.status}: ${JSON.stringify(rejectCommand.body)}`);
+    rejectState=await api(`/api/v1/assessment/groups/${findingId}`);
+    const rejectedAcceptance=rejectState.body.assessment.acceptances.find(item=>item.acceptance_id===rejectAcceptanceId);
+    if(rejectState.status!==200||rejectedAcceptance?.state!=='rejected')
+      throw new Error(`public exception rejection state was not retained: ${JSON.stringify(rejectedAcceptance)}`);
+    await writeFile(path.join(evidence,'sla-rejected-public-readback.json'),JSON.stringify({
+      submit:rejectSubmit.body,reject:rejectCommand.body,acceptance:rejectedAcceptance,
+      unknown_coverage_remains_gap:true},null,2),{mode:0o600});
+    current=await api(`/api/v1/assessment/groups/${findingId}`);
     const submit=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
       command_id:crypto.randomUUID(),target_id:findingId,action:'acceptance.submit',membership_ids:occurrenceIds,
       expected_revisions:{target:current.body.assessment.revision,policy:current.body.assessment.policy_revision,
@@ -482,7 +521,7 @@ try {
     await page.waitForTimeout(1500);
     await page.getByRole('button',{name:'Exceptions',exact:true}).waitFor({state:'visible',timeout:20000});
     await page.getByRole('button',{name:'Exceptions',exact:true}).click();
-    await page.getByText('Recorded SLA state',{exact:true}).waitFor({state:'visible',timeout:10000});
+    await page.getByRole('heading',{name:'Recorded SLA state',exact:true}).first().waitFor({state:'visible',timeout:10000});
     const pausedRendered=await page.locator('body').innerText();
     await writeFile(path.join(evidence,'sla-paused-ui-debug.json'),JSON.stringify({
       body:pausedRendered,clocks:pausedAcceptance.sla_clock,
@@ -526,7 +565,7 @@ try {
     await page.waitForTimeout(2000);
     await page.getByRole('button',{name:'Exceptions',exact:true}).waitFor({state:'visible',timeout:20000});
     await page.getByRole('button',{name:'Exceptions',exact:true}).click();
-    await page.getByText('Recorded SLA state',{exact:true}).waitFor({state:'visible',timeout:10000});
+    await page.getByRole('heading',{name:'Recorded SLA state',exact:true}).first().waitFor({state:'visible',timeout:10000});
     const rendered=await page.locator('body').innerText();
     if(!rendered.includes('Current SLA target')||!rendered.includes('Remaining SLA duration at refresh'))
       throw new Error('rendered Exceptions register omitted server-computed resumed SLA values');
@@ -535,6 +574,22 @@ try {
       title:await page.title(),findingId,acceptanceId,rendered_server_computed_sla:true,
       visible_target:rendered.includes('Current SLA target'),
       visible_remaining:rendered.includes('Remaining SLA duration at refresh')},null,2),{mode:0o600});
+    const beforeRevoke=await api(`/api/v1/assessment/groups/${findingId}`);
+    const revokeCatalogue=(await api('/api/v1/assessment/administration/catalogue')).body;
+    const revoke=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+      command_id:crypto.randomUUID(),target_id:findingId,action:'acceptance.revoke',membership_ids:occurrenceIds,
+      expected_revisions:{target:beforeRevoke.body.assessment.revision,
+        policy:beforeRevoke.body.assessment.policy_revision,authority:revokeCatalogue.authority_revision,
+        identity_membership:beforeRevoke.body.assessment.membership.revision,
+        owners:beforeRevoke.body.assessment.owner_revision},expected_exposures:expectedExposures,
+      expected_evaluations:expectedEvaluations,payload:{acceptance_id:acceptanceId,
+        rationale:'Revoke synthetic exception after resumed-state readback'}})});
+    const afterRevoke=await api(`/api/v1/assessment/groups/${findingId}`);
+    const revokedAcceptance=afterRevoke.body.assessment.acceptances.find(item=>item.acceptance_id===acceptanceId);
+    if(revoke.status!==200||afterRevoke.status!==200||revokedAcceptance?.state!=='revoked')
+      throw new Error(`public exception revoke failed: ${JSON.stringify({status:revoke.status,acceptance:revokedAcceptance})}`);
+    await writeFile(path.join(evidence,'sla-revoked-public-readback.json'),JSON.stringify({
+      command:revoke.body,acceptance:revokedAcceptance},null,2),{mode:0o600});
     process.stdout.write(JSON.stringify({exceptionSlaWorkflow:'paused_then_resumed',findingId,
       memberKeys:members.map(member=>member.key),acceptanceId})+'\n');
     process.exit(0);

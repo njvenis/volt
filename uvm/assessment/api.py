@@ -278,6 +278,18 @@ def _record_g7_exception_pause(connection, *, acceptance, episode_records,
             previously_breached=bool(clock.get("prior_breach") or (deadline and now > deadline)),
             clock_basis=(policy["document"].get("clock_basis", "elapsed_utc_seconds")
                 if ingestion_clock else "elapsed_utc_seconds"))
+        if clock["state"] == "paused":
+            # A linked active replacement retargets the same uninterrupted
+            # pause. Its remaining SLA is frozen, not elapsed against the old
+            # pre-pause deadline. Preserve that deadline as historical input.
+            snapshot["remaining_seconds"] = clock["frozen_sla_seconds"]
+            snapshot["previously_breached"] = bool(clock["prior_breach"])
+            previous_pause = connection.execute(sa.select(sla_clock_events).where(
+                sla_clock_events.c.episode_id == episode_id,
+                sla_clock_events.c.occurrence_id == occurrence_id,
+                sla_clock_events.c.event_type == "paused").order_by(
+                    sla_clock_events.c.sequence.desc()).limit(1)).mappings().one()
+            snapshot["pre_pause_deadline_at"] = previous_pause["data"]["pre_pause_deadline_at"]
         event_id = str(uuid.uuid4())
         sequence = int(connection.execute(sa.select(sa.func.coalesce(
             sa.func.max(sla_clock_events.c.sequence), 0) + 1).where(
@@ -3753,6 +3765,11 @@ def install_assessment_routes(app: FastAPI) -> None:
                                 approved_request["approvals"][-1]["authority_context"] = auth_context.document() if auth_context else None
                         prior_acceptances = {item.get("acceptance_id"): item
                             for item in old_document.get("acceptances", [])}
+                        replacing = (next((item for item in after.get("acceptances", [])
+                            if item.get("acceptance_id") == payload.get("acceptance_id")
+                            and item.get("state") == "active"
+                            and item.get("exception_contract_version") == 1), None)
+                            if action == "acceptance.approve" else None)
                         for updated in after.get("acceptances", []):
                             prior_acceptance = prior_acceptances.get(updated.get("acceptance_id"))
                             if (prior_acceptance and prior_acceptance.get("exception_contract_version") == 1
@@ -3761,7 +3778,16 @@ def install_assessment_routes(app: FastAPI) -> None:
                                         or updated.get("suspended_membership_ids") != prior_acceptance.get("suspended_membership_ids"))):
                                 terminal_event = ("resumed" if updated["state"] == "expired"
                                     else "suspended" if updated["state"] in {"suspended", "active"} else "revoked")
-                                _record_g7_exception_resume(connection, acceptance=updated,
+                                resuming = updated
+                                if replacing and replacing.get("predecessor_id") == updated.get("acceptance_id"):
+                                    # Only removed atoms end their pause. Shared
+                                    # atoms carry their frozen remainder into
+                                    # the successor without a running interval.
+                                    shared = set(replacing["membership_ids"])
+                                    resuming = {**updated, "pause_snapshots": [snapshot
+                                        for snapshot in updated.get("pause_snapshots", [])
+                                        if snapshot["occurrence_id"] not in shared]}
+                                _record_g7_exception_resume(connection, acceptance=resuming,
                                     event_type=terminal_event, now=now)
                         if action == "acceptance.approve":
                             selected = next((item for item in after.get("acceptances", [])

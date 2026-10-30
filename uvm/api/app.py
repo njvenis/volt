@@ -400,8 +400,9 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
                 value = datetime.fromisoformat(Path(clock_file).read_text().strip().replace("Z", "+00:00"))
                 if value.tzinfo is not None and value.utcoffset() == UTC.utcoffset(value):
                     return value.astimezone(UTC)
-            except (OSError, ValueError):
-                pass
+            except (OSError, ValueError) as exc:
+                raise RuntimeError("invalid disposable G7 clock") from exc
+            raise RuntimeError("disposable G7 clock must be an aware UTC instant")
         return datetime.now(UTC)
     app.state.utc_now = utc_now or runtime_utc_now
     app.state.principals = principals

@@ -1359,10 +1359,7 @@ if (( EXCEPTION_WARNING_MODE || EXCEPTION_SLA_MODE )); then
       /opt/uvm/venv/bin/python /opt/uvm/app/tools/g7_recovery_retained_fixture.py \
       >"$EVIDENCE/sla-preactivation-ids.json"
     chmod 0600 "$EVIDENCE/sla-preactivation-ids.json"
-    docker exec -e UVM_G7_SLA_STAGE=pre_g7_target "$CONTAINER" \
-      /opt/uvm/venv/bin/python /opt/uvm/app/tools/g7_recovery_retained_fixture.py \
-      >"$EVIDENCE/sla-g7-target-preactivation-ids.json"
-    chmod 0600 "$EVIDENCE/sla-g7-target-preactivation-ids.json"
+    cp "$EVIDENCE/sla-preactivation-ids.json" "$EVIDENCE/sla-g7-target-preactivation-ids.json"
   fi
 fi
 uv run python "$ROOT/tools/g7_observer_fixture.py" link-actor --root "$RUN_ROOT" \

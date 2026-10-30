@@ -55,7 +55,7 @@ def seed_exception_sla(engine):
             'environments': ['local'], 'service_ids': [
                 'g7-sla-service-covered', 'g7-sla-service-breached',
                 'g7-sla-service-unknown', 'g7-sla-service-deadline-boundary',
-                'g7-sla-service-replacement']},
+                'g7-sla-service-replacement', 'g7-sla-service-legacy']},
         'eligibility': {'included_severities': ['critical', 'high'], 'excluded_classifications': []},
         'classification': {'source_rating_map': {'critical': 'critical', 'low': 'high'}},
         'duration_seconds_by_severity': {'critical': 3600, 'high': 86400},
@@ -425,6 +425,9 @@ def seed_g5_activation_stage(engine, stage):
     elif stage == 'postg7':
         observed, collected = now - timedelta(milliseconds=500), now - timedelta(milliseconds=250)
         name, component, ordinal = 'g5-postg7', 'g5-component-postg7', 2
+    elif stage == 'recur':
+        observed, collected = now - timedelta(milliseconds=500), now - timedelta(milliseconds=250)
+        name, component, ordinal = 'g5-recur', 'g5-component-postg7', 3
     else:
         raise RuntimeError(f'unknown G5 activation fixture stage: {stage}')
     suffix = 'volt:g7:exception-sla-g5-staged:' + name
@@ -444,7 +447,7 @@ def seed_g5_activation_stage(engine, stage):
     missing = tuple(MissingField(field, 'not_applicable') for field in (
         'source_record_locator', 'source_first_seen_at', 'report_id', 'coverage_scope'))
     native_id_value = ('exception-sla-ingestion-v1' if stage == 'pre_g7_target'
-        else 'exception-sla-g5-staged-v1')
+        else 'exception-sla-ingestion-v1')
     source = SourceObservationV1(schema_version=1, observation_id=observation_id,
         revision=1, source_family='local', source_account_id='g7-local', run_id=run_id,
         source_record_ordinal=ordinal, collection_status='success', observed_at=observed,
@@ -475,7 +478,7 @@ def seed_g5_activation_stage(engine, stage):
     result = identity.resolve_retained(request_id, observation_id, 1, rule,
         {'provisioning_key': ('g7-sla-policy-scope-seed' if stage == 'pre_g7_target' else 'g7-sla-g5-staged'),
          'service_key': ('g7-sla-key-policy-scope-seed' if stage == 'pre_g7_target' else 'g7-sla-g5-staged'),
-         'environment': ('activation-seed' if stage == 'pre_g7_target' else 'preactivation'),
+         'environment': ('activation-seed' if stage == 'pre_g7_target' else 'local'),
          'service_id': ('g7-sla-service-policy-scope-seed' if stage == 'pre_g7_target' else 'g7-sla-service-legacy')}, now)
     if stage == 'pre_g7_target' and (result.outcome not in {'new', 'matched'}
             or not result.group_id or not result.exposure_id):
@@ -491,8 +494,9 @@ def seed_g5_activation_stage(engine, stage):
         receipt = c.execute(sa.select(sla_ingest_receipts).where(
             sla_ingest_receipts.c.episode_id == episode_id,
             sla_ingest_receipts.c.occurrence_id == result.occurrence_id)).mappings().one()
-    if contract['contract_version'] != 5:
-        raise RuntimeError(f'{stage} unexpectedly changed the pinned G5 episode contract')
+    expected_contract = 7 if stage == 'recur' else 5
+    if contract['contract_version'] != expected_contract:
+        raise RuntimeError(f'{stage} expected episode contract {expected_contract}, got {contract}')
     if receipt['ingested_at'] != now or not observed < collected < receipt['ingested_at']:
         raise RuntimeError(f'{stage} retained time does not follow source timestamps')
     return {'stage': stage, 'group_id': result.group_id, 'exposure_id': result.exposure_id,
@@ -505,6 +509,10 @@ def seed_g5_activation_stage(engine, stage):
 
 
 def seed(engine):
+    if os.environ.get('UVM_G7_SLA_STAGE') == 'context_matrix':
+        from g7_context_retained_fixture import context_matrix
+        now = datetime.fromisoformat(Path(os.environ['UVM_G7_TEST_CLOCK_FILE']).read_text().strip().replace('Z', '+00:00'))
+        return context_matrix(engine, now)
     if os.environ.get('UVM_G7_SLA_STAGE'):
         return seed_g5_activation_stage(engine, os.environ['UVM_G7_SLA_STAGE'])
     if os.environ.get('UVM_G7_SLA_FIXTURE') == '1':

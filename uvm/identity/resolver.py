@@ -74,6 +74,14 @@ class RuleV1:
         self.verified_asset_locator = verified_asset_locator
         self.workload_context_fields = workload_context_fields
 
+    def validate_context(self, matching_inputs: dict[str, str]) -> None:
+        """Validate declared values before any identity branch or graph staging."""
+        for field in self.workload_context_fields:
+            if field in matching_inputs:
+                value = matching_inputs[field]
+                if type(value) is not str or not value.strip():
+                    raise ValueError("workload context values must be non-empty strings")
+
     def matches(self, other: "RuleV1") -> bool:
         return (
             self.rule_id == other.rule_id
@@ -102,6 +110,7 @@ def resolve(
         raise ValueError("evaluated_at must be a timezone-aware UTC instant")
     if any(not isinstance(value, str) for value in matching_inputs.values()):
         raise ValueError("matching inputs must be strings")
+    rule.validate_context(matching_inputs)
     rule_key = (rule.rule_id, rule.rule_version)
     rule_definition = (rule.workload_match_fields, rule.verified_asset_locator,
                        rule.workload_context_fields)

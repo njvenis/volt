@@ -719,10 +719,12 @@ class IdentityRepository:
             raise DurableIdentityError("pinned_rule must be RuleV1")
         if not isinstance(matching_inputs, dict):
             raise DurableIdentityError("matching_inputs must be an object")
+        rule.validate_context(matching_inputs)
         canonical_inputs = json.loads(json.dumps(matching_inputs, sort_keys=True,
             separators=(",", ":"), allow_nan=False))
         if any(type(k) is not str or type(v) is not str for k, v in canonical_inputs.items()):
             raise DurableIdentityError("matching inputs must be string pairs")
+        rule.validate_context(canonical_inputs)
         # A supplied DTO may carry unpersisted changes despite identical ID
         # and revision. The transaction compares it to the retained row.
         fingerprint = self._request_fingerprint(

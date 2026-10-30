@@ -78,6 +78,7 @@ class RecoverySafetyTests(unittest.TestCase):
         from tools.g7_product_inventory import canon, digest as inventory_digest, compare
         from tools.g7_inventory_expectation import _migration_table_record
         from uvm.persistence.ingestion_schema import ingestion_evidence
+        from uvm.persistence.lineage_schema import identity_rule_definitions
         from uvm.persistence.connector_schema import connectors
         connectors.create(self.engine)
         with self.engine.begin() as c:
@@ -103,6 +104,12 @@ class RecoverySafetyTests(unittest.TestCase):
         ingestion['schema_sha256'] = inventory_digest({'columns': ingestion['columns'],
             'constraints': ingestion['constraints']})
         baseline['uvm']['ingestion_evidence'] = ingestion
+        identity_rules = _migration_table_record(identity_rule_definitions)
+        identity_rules['columns'] = [c for c in identity_rules['columns']
+            if c['name'] != 'workload_context_fields']
+        identity_rules['schema_sha256'] = inventory_digest({'columns': identity_rules['columns'],
+            'constraints': identity_rules['constraints']})
+        baseline['uvm']['identity_rule_definitions'] = identity_rules
         policy={**self.policy,'revision':5}
         policy['digest']='sha256:'+digest({k:v for k,v in policy.items() if k!='digest'})
         request=self.signed({'schema_version':1,'deployment_id':'local','report_id':str(uuid.uuid4()),

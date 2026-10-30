@@ -115,10 +115,40 @@ class IdentityRepository:
 
     @staticmethod
     def _rule_digest(rule):
-        definition = json.dumps({"fields": rule.workload_match_fields,
-            "verified_asset_locator": rule.verified_asset_locator},
+        payload = {"fields": rule.workload_match_fields,
+            "verified_asset_locator": rule.verified_asset_locator}
+        if rule.workload_context_fields:
+            payload["workload_context_fields"] = list(rule.workload_context_fields)
+        definition = json.dumps(payload,
             sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(definition).hexdigest()
+
+    @staticmethod
+    def _stored_context_fields(value, match_fields):
+        if type(value) is not list or any(type(field) is not str or not field
+                or field != field.strip() for field in value):
+            raise DurableIdentityError("stored workload context fields are not a valid JSON array")
+        if len(set(value)) != len(value) or set(value) & set(match_fields):
+            raise DurableIdentityError("stored workload context fields are duplicate or overlap match fields")
+        return tuple(value)
+
+    @staticmethod
+    def _request_fingerprint(*, observation_id, observation_revision, rule,
+            matching_inputs, evaluated_at):
+        payload = {
+            "observation_id": observation_id,
+            "observation_revision": observation_revision,
+            "rule_id": rule.rule_id,
+            "rule_version": rule.rule_version,
+            "rule_fields": rule.workload_match_fields,
+            "verified_asset_locator": rule.verified_asset_locator,
+            "matching_inputs": matching_inputs,
+            "evaluated_at": evaluated_at.isoformat(),
+        }
+        if rule.workload_context_fields:
+            payload["workload_context_fields"] = list(rule.workload_context_fields)
+        return hashlib.sha256(json.dumps(payload, sort_keys=True,
+            separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
     def provision_rule(self, rule, created_at):
         """Provision immutable configuration separately from resolution."""
@@ -133,6 +163,8 @@ class IdentityRepository:
             if existing:
                 if (existing["definition_digest"] != digest
                         or tuple(existing["workload_match_fields"]) != rule.workload_match_fields
+                        or self._stored_context_fields(existing["workload_context_fields"],
+                            existing["workload_match_fields"]) != rule.workload_context_fields
                         or existing["verified_asset_locator"] != rule.verified_asset_locator):
                     raise DurableIdentityError("immutable rule definition changed")
                 return
@@ -144,6 +176,7 @@ class IdentityRepository:
             conn.execute(identity_rule_definitions.insert().values(
                 rule_id=rule.rule_id, rule_version=rule.rule_version,
                 workload_match_fields=list(rule.workload_match_fields),
+                workload_context_fields=list(rule.workload_context_fields),
                 verified_asset_locator=rule.verified_asset_locator,
                 definition_digest=digest, authorisation_decision_id=decision.decision_id,
                 created_at=at))
@@ -316,9 +349,12 @@ class IdentityRepository:
                         raise DurableIdentityError("observation references missing occurrence")
                     state.observation_occurrences[row["observation_id"]] = row["occurrence_id"]
             for row in conn.execute(sa.select(identity_rule_definitions)).mappings():
+                context_fields = self._stored_context_fields(
+                    row["workload_context_fields"], row["workload_match_fields"])
                 rule = RuleV1(row["rule_id"], row["rule_version"],
                               tuple(row["workload_match_fields"]),
-                              verified_asset_locator=row["verified_asset_locator"])
+                              verified_asset_locator=row["verified_asset_locator"],
+                              workload_context_fields=context_fields)
                 if (self._rule_digest(rule) != row["definition_digest"]
                         or row["authorisation_decision_id"] is None):
                     raise DurableIdentityError("stored rule definition is corrupt")
@@ -331,7 +367,8 @@ class IdentityRepository:
                         or decision["target_id"] != config_id):
                     raise DurableIdentityError("rule has no matching retained authorisation decision")
                 state.rule_definitions[(rule.rule_id, rule.rule_version)] = (
-                    rule.workload_match_fields, rule.verified_asset_locator)
+                    rule.workload_match_fields, rule.verified_asset_locator,
+                    rule.workload_context_fields)
             corrections = conn.execute(sa.select(correction_records).order_by(
                 correction_records.c.record_type, correction_records.c.record_id,
                 correction_records.c.previous_revision)).mappings().all()
@@ -688,13 +725,10 @@ class IdentityRepository:
             raise DurableIdentityError("matching inputs must be string pairs")
         # A supplied DTO may carry unpersisted changes despite identical ID
         # and revision. The transaction compares it to the retained row.
-        fingerprint = hashlib.sha256(json.dumps({
-            "observation_id": observation_id, "observation_revision": retained_observation_revision,
-            "rule_id": rule.rule_id, "rule_version": rule.rule_version,
-            "rule_fields": rule.workload_match_fields,
-            "verified_asset_locator": rule.verified_asset_locator,
-            "matching_inputs": canonical_inputs, "evaluated_at": evaluated_at.isoformat(),
-        }, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        fingerprint = self._request_fingerprint(
+            observation_id=observation_id,
+            observation_revision=retained_observation_revision, rule=rule,
+            matching_inputs=canonical_inputs, evaluated_at=evaluated_at)
         if self.engine.dialect.name == "sqlite":
             conn = self.engine.connect().execution_options(isolation_level="AUTOCOMMIT")
             try:
@@ -749,7 +783,10 @@ class IdentityRepository:
             raise DurableIdentityError("immutable rule definition changed")
         if not stored:
             raise DurableIdentityError("rule definition has not been provisioned")
+        stored_context_fields = self._stored_context_fields(
+            stored["workload_context_fields"], stored["workload_match_fields"])
         if tuple(stored["workload_match_fields"]) != rule.workload_match_fields \
+                or stored_context_fields != rule.workload_context_fields \
                 or stored["verified_asset_locator"] != rule.verified_asset_locator:
             raise DurableIdentityError("stored rule definition is inconsistent")
         state = self.restore_state(conn)

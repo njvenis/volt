@@ -106,8 +106,10 @@ def run(args: argparse.Namespace) -> None:
             "allowed_endpoint_origins": sorted({api, oidc, *( [internal_oidc] if args.oidc_internal else [] )}),
             "source_scope_ceilings": [],
             "group_mappings": {}, "mapping_revision": 1,
-            "session_ttl_seconds": 3600, "heartbeat_max_age_seconds": 120}
+            "session_ttl_seconds": 3600, "heartbeat_max_age_seconds": args.heartbeat_max_age_seconds}
         identities = [{"subject": "g7-actor-subject", "groups": []}]
+        if args.exception_sla:
+            identities.append({"subject": "g7-exception-approver-subject", "groups": []})
         if args.identity_access_ownership:
             identities.extend([
                 {"subject": "g7-identity-user-subject", "groups": []},
@@ -155,9 +157,10 @@ def run(args: argparse.Namespace) -> None:
                     "audit.export.deployment",
                     *( ["acceptance.submit", "acceptance.approve", "acceptance.reject", "acceptance.revoke"]
                         if args.exception_warning or args.exception_sla else [] ),
+                    *( ["remediation.confirm_portion"] if args.exception_sla else [] ),
                     *( ["warning.route.manage", "warning.actor_link.manage"]
                         if args.exception_warning else [] ),
-                    *( ["report.create", "report.read"] if args.exception_sla else [] )],
+                    *( ["report.create", "report.read", "policy.sla.publish", "policy.read"] if args.exception_sla else [] )],
                 "target_scope": {"group_ids": ["*"], "source_families": ["*"],
                     "environments": ["*"], "service_ids": ["*"], "membership_mode": "all_current"},
                 "limits": {"maximum_acceptance_days": 2 if (args.exception_warning or args.exception_sla) else None, "maximum_severity": None,
@@ -166,7 +169,7 @@ def run(args: argparse.Namespace) -> None:
                     "allowed_sla_clock_bases": ["elapsed_utc_seconds", "calendar_days_utc"],
                     "allowed_sla_severities": ["critical", "high", "medium", "low", "informational"],
                     "allowed_sla_start_sources": ["source_observation_v1", "uvm_ingest_commit_v1"],
-                    "maximum_sla_duration_seconds": None, "allow_sla_backfill": True,
+                    "maximum_sla_duration_seconds": 86400, "allow_sla_backfill": True,
                     "maximum_deadline_extension_seconds": None,
                     "allowed_identity_scalar_fields": {}},
                 "separation_of_duties": {"approval_requires_distinct_actor": True,
@@ -207,6 +210,15 @@ def run(args: argparse.Namespace) -> None:
             "display_label": "Synthetic G7 Operator", "rationale": "Disposable observer settings journey fixture",
             "evidence_ref": "g7-observer-journey-fixture"}, separators=(",", ":")), encoding="utf-8")
         (secrets_dir / "operator-link.json").chmod(0o600)
+        if args.exception_sla:
+            (secrets_dir / "exception-approver-operator-link.json").write_text(json.dumps({
+                "issuer": oidc, "subject": "g7-exception-approver-subject",
+                "principal_id": "g7-exception-approver",
+                "display_label": "Synthetic G7 Exception Approver",
+                "rationale": "Link the separate synthetic approver for the rendered exception journey",
+                "evidence_ref": "g7-exception-sla-approver-fixture"},
+                separators=(",", ":")), encoding="utf-8")
+            (secrets_dir / "exception-approver-operator-link.json").chmod(0o600)
         (secrets_dir / "source-operator-link.json").write_text(json.dumps({
             "issuer": oidc, "subject": "g7-preservation-source-subject",
             "principal_id": "g7-preservation-source",
@@ -248,6 +260,15 @@ def run(args: argparse.Namespace) -> None:
         subprocess.run(["docker", "exec", container, "bash", "-lc",
             "curl --fail --silent --show-error -H 'Authorization: Bearer '$(cat /run/uvm-g7-secrets/oidc_operator_secret) "
             "-H 'Content-Type: application/json' --data-binary @/run/secrets/identity-deny-operator-link.json "
+            "http://127.0.0.1:8000/api/v1/auth/operator/links"], check=True)
+        print("oidc_fixture_link=created")
+        return
+
+    if args.command == "link-exception-approver":
+        container = args.container or "volt-g7-observer-journey"
+        subprocess.run(["docker", "exec", container, "bash", "-lc",
+            "curl --fail --silent --show-error -H 'Authorization: Bearer '$(cat /run/uvm-g7-secrets/oidc_operator_secret) "
+            "-H 'Content-Type: application/json' --data-binary @/run/secrets/exception-approver-operator-link.json "
             "http://127.0.0.1:8000/api/v1/auth/operator/links"], check=True)
         print("oidc_fixture_link=created")
         return
@@ -599,7 +620,7 @@ def run(args: argparse.Namespace) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("create", "anchor-init", "link-actor", "link-identity-user", "link-identity-deny-user", "backup-policy", "host-config", "backup-host-config", "backup-host-once", "host-control", "host-once", "host-report-attacks", "host-telemetry-count"))
+    parser.add_argument("command", choices=("create", "anchor-init", "link-actor", "link-identity-user", "link-identity-deny-user", "link-exception-approver", "backup-policy", "host-config", "backup-host-config", "backup-host-once", "host-control", "host-once", "host-report-attacks", "host-telemetry-count"))
     parser.add_argument("--role", choices=("observer", "supervisor", "controller"))
     parser.add_argument("--action", choices=("stop", "resume", "restart", "start", "terminate", "tighten-policy", "restore-policy"))
     parser.add_argument("--report-id")
@@ -610,6 +631,7 @@ def main() -> int:
     parser.add_argument("--oidc-port", type=int, default=9000)
     parser.add_argument("--oidc-host", default="127.0.0.1")
     parser.add_argument("--oidc-internal", action="store_true")
+    parser.add_argument("--heartbeat-max-age-seconds", type=int, default=120)
     parser.add_argument("--api-port", type=int, default=8000)
     parser.add_argument("--recovery-port", type=int, default=8002)
     parser.add_argument("--exception-warning", action="store_true")

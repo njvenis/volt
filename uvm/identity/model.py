@@ -445,7 +445,7 @@ class IdentityState:
         self._incarnation_index: dict[tuple, str] = {}
         self._occurrence_index: dict[tuple, str] = {}
         self.resolutions: list[IdentityResolutionV1] = []
-        self.rule_definitions: dict[tuple[str, int], tuple[tuple[str, ...], bool]] = {}
+        self.rule_definitions: dict[tuple[str, int], tuple[tuple[str, ...], bool, tuple[str, ...]]] = {}
         self.corrections: list[CorrectionRecord] = []
         self.aliases: dict[str, str] = {}  # former id/value -> current id
         self.mapping_aliases: dict[tuple, str] = {}

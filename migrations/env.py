@@ -50,7 +50,7 @@ def _migration_fault_callbacks():
     target = os.environ.get("UVM_G7_TEST_FAIL_AFTER_REVISION")
     if target is None:
         return []
-    if target not in {"0059", "0060", "0061"}:
+    if target not in {"0059", "0060", "0061", "0062"}:
         raise RuntimeError("unsupported G7 migration test fault boundary")
 
     def fail_after_revision(*, ctx, step, heads, run_args):

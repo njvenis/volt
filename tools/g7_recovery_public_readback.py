@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import urllib.error
 import urllib.request
 
 
@@ -23,14 +24,44 @@ def main():
             ('audit', '/api/v1/assessment/audit?group_id=' + ids['group'])):
         request = urllib.request.Request('http://127.0.0.1:8000' + path,
             headers={'Cookie': 'uvm_session=' + cookies[0], 'Accept': 'application/json'})
-        with urllib.request.urlopen(request, timeout=15) as response:
-            if response.status != 200: raise ValueError('public readback failed')
-            value = json.load(response)
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                if response.status != 200: raise ValueError('public readback failed')
+                value = json.load(response)
+        except urllib.error.HTTPError as error:
+            diagnostic = {'phase': args.phase, 'endpoint': path, 'status': error.code,
+                'body': error.read().decode('utf-8', errors='replace')[:4096]}
+            (root / (args.phase + '-uvm-readback-http-error.json')).write_text(
+                json.dumps(diagnostic, sort_keys=True, separators=(',', ':')) + '\n')
+            raise RuntimeError('public readback HTTP failure; see phase-bound diagnostic') from error
         expected = json.loads((root / ('source-uvm-retained-' + name + '.json')).read_text())
-        if value != expected:
-            raise ValueError('retained public UVM ' + name + ' differs after replacement')
+        observed_path = root / (args.phase + '-uvm-' + name + '-observed.json')
+        expected_path = root / (args.phase + '-uvm-' + name + '-expected.json')
+        observed_path.write_text(json.dumps(value, sort_keys=True, separators=(',', ':')))
+        expected_path.write_text(json.dumps(expected, sort_keys=True, separators=(',', ':')))
+        observed_path.chmod(0o600); expected_path.chmod(0o600)
+        comparison_expected = expected
+        additive_authority_revision = False
+        if (name == 'group' and args.phase == 'post-migration'
+                and 'authority_revision' not in expected.get('assessment', {})):
+            authority_revision = value.get('assessment', {}).get('authority_revision')
+            if type(authority_revision) is not int or authority_revision < 0:
+                raise ValueError('post-migration group read has invalid additive authority revision')
+            comparison_expected = json.loads(json.dumps(expected))
+            comparison_expected['assessment']['authority_revision'] = authority_revision
+            additive_authority_revision = True
+        if value != comparison_expected:
+            actual_digest = hashlib.sha256(json.dumps(value, sort_keys=True,
+                separators=(',', ':')).encode()).hexdigest()
+            expected_digest = hashlib.sha256(json.dumps(comparison_expected, sort_keys=True,
+                separators=(',', ':')).encode()).hexdigest()
+            raise ValueError('retained public UVM ' + name +
+                f' differs after replacement (observed={actual_digest}, expected={expected_digest}); '
+                'see phase-bound observed/expected JSON evidence')
         (root / (args.phase + '-uvm-' + name + '.json')).write_text(json.dumps(value, sort_keys=True, separators=(',', ':')))
-        receipts[name] = 'sha256:' + hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        receipts[name] = {'digest': 'sha256:' + hashlib.sha256(json.dumps(value,
+            sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+            'additive_authority_revision': additive_authority_revision}
     if not receipts: raise ValueError('no retained public assertions were exercised')
     print(json.dumps({'phase': args.phase, 'passed': True, 'readback_digests': receipts}, sort_keys=True))
 

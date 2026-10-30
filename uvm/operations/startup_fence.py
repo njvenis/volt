@@ -60,7 +60,7 @@ def verify_startup_fence(token_path: str, public_key_path: str, *, deployment_id
                 or admission["archive_digest"] != archive_digest
                 or admission["volume_ids"] != volume_ids
                 or admission["from_schema"] != "0058"
-                or admission["to_schema"] not in {"0059", "0061"}
+                or admission["to_schema"] not in {"0059", "0061", "0062"}
                 or admission["to_schema"] != runtime_head
                 or admission["target_package_manifest_digest"] != _runtime_package_digest()):
             raise ValueError("startup token compatibility admission is invalid")
@@ -136,7 +136,7 @@ def schema_admission_complete(engine, token: dict) -> bool:
     if admission is None:
         return True
     target = admission.get("to_schema")
-    if target not in {"0059", "0061"}:
+    if target not in {"0059", "0061", "0062"}:
         return False
     import sqlalchemy as sa
     with engine.connect() as connection:
@@ -155,7 +155,14 @@ def schema_admission_complete(engine, token: dict) -> bool:
         columns = {row[0] for row in connection.execute(sa.text(
             "SELECT column_name FROM information_schema.columns "
             "WHERE table_schema='public' AND table_name='ingestion_evidence'"))}
-        return "byte_size" in columns
+        if "byte_size" not in columns:
+            return False
+        if target == "0062":
+            rule_columns = {row[0] for row in connection.execute(sa.text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='identity_rule_definitions'"))}
+            return "workload_context_fields" in rule_columns
+        return True
 
 
 def host_release_authorized(token: dict, path="/run/uvm-g7/host-release") -> bool:

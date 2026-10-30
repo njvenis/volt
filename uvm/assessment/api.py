@@ -925,6 +925,36 @@ def _coverage_binding_is_current(connection, engine, coverage: dict, *, lock: bo
         return False
 
 
+def _candidate_permission_actions(policy: dict, principal: str) -> set[str]:
+    """Project actions from the same current authority sources used by command guards."""
+    authority_ids = _policy_authority_ids(policy, principal) | {"*"}
+    grants = policy.get("grants", [])
+    candidate_actions = {action for grant in grants
+        if grant.get("principal_id") in authority_ids
+        for action in grant.get("actions", []) if action != "*"}
+    for grant in grants:
+        if grant.get("principal_id") in authority_ids and grant.get("role_id") in policy.get("roles", {}):
+            candidate_actions.update(policy["roles"][grant["role_id"]].get("actions", []))
+    wildcard_grant = any(grant.get("principal_id") in authority_ids
+        and "*" in grant.get("actions", []) for grant in grants)
+    wildcard_role = any(grant.get("principal_id") in authority_ids
+        and grant.get("role_id") in policy.get("roles", {})
+        and "*" in policy["roles"][grant["role_id"]].get("actions", [])
+        for grant in grants)
+    if wildcard_grant or wildcard_role:
+        candidate_actions.update(_ACTIONS)
+    native = native_state(policy)
+    if native.get("mode") == NATIVE_MODE:
+        current = effective_access(policy, principal)
+        for group_id in (current[0] if current else ()):
+            group = native.get("access_groups", {}).get(group_id, {})
+            candidate_actions.update(permission.get("action") for permission in group.get("permissions", [])
+                if isinstance(permission, dict) and isinstance(permission.get("action"), str)
+                and permission.get("action") != "*")
+    candidate_actions.discard("*")
+    return candidate_actions
+
+
 def _policy_authority_ids(policy: dict, principal: str) -> set[str]:
     """Return a principal and its currently configured, enabled teams."""
     record = policy.get("principals", {}).get(principal, {})
@@ -1513,6 +1543,9 @@ def _apply_group_action(document: dict, action: str, payload: dict, membership_i
         acceptance = next((item for item in acceptances if item["acceptance_id"] == payload["acceptance_id"]), None)
         if acceptance is None:
             _error(409, "revision_conflict", "Acceptance decision is unavailable")
+        if (action == "acceptance.revoke" and acceptance.get("exception_contract_version") == 1
+                and datetime.fromisoformat(acceptance["expires_at"].replace("Z", "+00:00")) <= now):
+            _error(409, "revision_conflict", "Expired exception cannot be revoked")
         expected_states = {"acceptance.approve": {"pending"}, "acceptance.reject": {"pending"},
                            "acceptance.revoke": {"active", "suspended"},
                            "acceptance.expire": {"pending", "active", "suspended"}}[action]
@@ -4376,6 +4409,7 @@ def install_assessment_routes(app: FastAPI) -> None:
                 "identity_revision": int(group["revision"])},
             "assessment": {"revision": int(state["revision"]) if state else 1,
                 "policy_revision": policy_revision, "owner_revision": owner_revision,
+                "authority_revision": int(native_state(policy_row["document"]).get("revision", 0)),
                 "native_severity": ({"value": native_row["source_rating"],
                     "source": native_row["source_family"],
                     "observed_at": native_row["observed_at"].isoformat().replace("+00:00", "Z")
@@ -4932,24 +4966,10 @@ def install_assessment_routes(app: FastAPI) -> None:
         if source_family is None or policy_row is None or not scope_allowed or not grants:
             _error(403, "forbidden", "Access forbidden")
         document = policy_row["document"]
+        authority_ids = _policy_authority_ids(document, principal) | {"*"}
         grants = document.get("grants", [])
         denies = document.get("denies", [])
-        authority_ids = _policy_authority_ids(document, principal) | {"*"}
-        candidate_actions = {action for grant in grants
-            if grant.get("principal_id") in authority_ids
-            for action in grant.get("actions", []) if action != "*"}
-        for grant in grants:
-            if grant.get("principal_id") in authority_ids and grant.get("role_id") in document.get("roles", {}):
-                candidate_actions.update(document["roles"][grant["role_id"]].get("actions", []))
-        wildcard_grant = any(grant.get("principal_id") in authority_ids
-            and "*" in grant.get("actions", []) for grant in grants)
-        wildcard_role = any(grant.get("principal_id") in authority_ids
-            and grant.get("role_id") in document.get("roles", {})
-            and "*" in document["roles"][grant["role_id"]].get("actions", [])
-            for grant in grants)
-        if wildcard_grant or wildcard_role:
-            candidate_actions.update(_ACTIONS)
-        candidate_actions.discard("*")
+        candidate_actions = _candidate_permission_actions(document, principal)
         with engine.connect() as connection:
             actions = sorted(action for action in candidate_actions
                 if _complete_target_grants(connection, document, principal, action,

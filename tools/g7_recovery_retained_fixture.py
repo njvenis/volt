@@ -41,8 +41,10 @@ def seed_exception_sla(engine):
     ids = {name: str(uuid.uuid5(uuid.NAMESPACE_URL,
         'volt:g7:exception-sla-ingestion-fixture:' + name))
         for name in ('run', 'high_observation', 'breach_observation',
-            'gap_observation', 'high_resolution', 'breach_resolution', 'gap_resolution')}
-    expected_group_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
+            'gap_observation', 'deadline_observation', 'replacement_observation',
+            'high_resolution', 'breach_resolution', 'gap_resolution',
+            'deadline_resolution', 'replacement_resolution')}
+    expected_group_id = os.environ.get('UVM_G7_SLA_EXPECTED_GROUP_ID') or str(uuid.uuid5(uuid.NAMESPACE_URL,
         'volt:g7:exception-sla-ingestion-fixture:identity-id:1'))
     observed = now.replace(microsecond=0) - timedelta(hours=30)
     collected = observed + timedelta(hours=1)
@@ -50,9 +52,10 @@ def seed_exception_sla(engine):
     policy = {'policy_id': policy_id, 'version': 1,
         'effective_from': (now - timedelta(days=2)).isoformat().replace('+00:00', 'Z'),
         'effective_until': None, 'scope': {'group_ids': [expected_group_id],
-            'environments': [], 'service_ids': [
+            'environments': ['local'], 'service_ids': [
                 'g7-sla-service-covered', 'g7-sla-service-breached',
-                'g7-sla-service-unknown']},
+                'g7-sla-service-unknown', 'g7-sla-service-deadline-boundary',
+                'g7-sla-service-replacement']},
         'eligibility': {'included_severities': ['critical', 'high'], 'excluded_classifications': []},
         'classification': {'source_rating_map': {'critical': 'critical', 'low': 'high'}},
         'duration_seconds_by_severity': {'critical': 3600, 'high': 86400},
@@ -62,20 +65,25 @@ def seed_exception_sla(engine):
         ('covered_six_hours', ids['high_observation'], 0, 'low'),
         ('already_breached', ids['breach_observation'], 1, 'critical'),
         ('unknown_coverage', ids['gap_observation'], 2, 'unclassified'),
+        ('deadline_boundary', ids['deadline_observation'], 3, 'low'),
+        ('replacement_member', ids['replacement_observation'], 4, 'low'),
     ]
     with engine.begin() as c:
-        head = c.execute(sa.select(sla_policy_heads).where(
-            sla_policy_heads.c.head_id == 1).with_for_update()).mappings().one_or_none()
-        revision = int(head['revision']) + 1 if head else 1
-        if head:
-            c.execute(sla_policy_heads.update().where(sla_policy_heads.c.head_id == 1).values(
-                revision=revision, updated_at=now))
-        else:
-            c.execute(sla_policy_heads.insert().values(head_id=1, revision=revision, updated_at=now))
-        policy_revision = int(c.execute(sa.select(sa.func.coalesce(
-            sa.func.max(sla_policy_versions.c.revision), 0) + 1)).scalar_one())
-        c.execute(sla_policy_versions.insert().values(policy_id=policy_id, version=1,
-            revision=policy_revision, document=policy, created_at=now, created_by='g7-fixture'))
+        published_policy = c.execute(sa.select(sla_policy_versions).where(
+            sla_policy_versions.c.policy_id == policy_id,
+            sla_policy_versions.c.version == 1)).mappings().one_or_none()
+        if published_policy is None:
+            raise RuntimeError('prospective G7 policy was not published through the public policy writer')
+        published_document = published_policy['document']
+        for field in ('policy_id', 'version', 'eligibility', 'classification',
+                'duration_seconds_by_severity', 'clock_basis', 'start_source', 'backfill'):
+            if published_document.get(field) != policy.get(field):
+                raise RuntimeError(f'publicly published G7 policy does not match fixture contract field {field}')
+        published_scope = published_document.get('scope', {})
+        if (expected_group_id not in published_scope.get('group_ids', [])
+                or published_scope.get('environments') != policy['scope']['environments']
+                or published_scope.get('service_ids') != policy['scope']['service_ids']):
+            raise RuntimeError('publicly published G7 policy does not cover the writer target and fixture dimensions')
         c.execute(collection_runs.insert().values(run_id=ids['run'], revision=1, schema_version=1,
             manual_origin='g7-exception-sla-ingestion-fixture', schedule_id='synthetic',
             schedule_revision=1, source_family='local', source_account_id='g7-local',
@@ -116,7 +124,8 @@ def seed_exception_sla(engine):
             correlation_id=ids['high_resolution'], decided_at=decision_time, details={})
     identity = IdentityRepository(engine, authorisation_evaluator=authorise)
     rule = RuleV1('g7-exception-sla-fixture-rule', 1,
-        ('provisioning_key', 'service_key', 'service_id'), verified_asset_locator=True)
+        ('provisioning_key', 'service_key'), verified_asset_locator=True,
+        workload_context_fields=('environment', 'service_id'))
     identity.provision_rule(rule, now)
     import uvm.identity.model as identity_model
     import uvm.identity.resolver as identity_resolver
@@ -138,39 +147,59 @@ def seed_exception_sla(engine):
              'service_key': f'g7-sla-key-{workload_name}',
              'environment': 'local', 'service_id': f'g7-sla-service-{workload_name}'}, now)
 
+    def rollback_state_counts():
+        with engine.connect() as c:
+            return tuple(c.execute(sa.select(sa.func.count()).select_from(table)).scalar_one()
+                for table in (sla_ingest_receipts, sla_clock_events, exposure_episodes,
+                    source_observation_receipts, g7_sla_evaluations))
+
+    rollback_baseline = rollback_state_counts()
+
     def fail_first_sla_receipt(connection, cursor, statement, parameters, context, executemany):
-        if 'INSERT INTO sla_ingest_receipts' in statement:
+        if statement.lstrip().lower().startswith('insert') and 'sla_ingest_receipts' in statement.lower():
             raise RuntimeError('fixture_fail_after_authoritative_sla_receipt_insert')
 
     import sqlalchemy as sqlalchemy
     try:
         sqlalchemy.event.listen(engine, 'after_cursor_execute', fail_first_sla_receipt)
         try:
-            resolve_fixture(observations[0], ids['high_resolution'], 'covered', 0)
+            result = resolve_fixture(observations[0], ids['high_resolution'], 'covered', 0)
         except RuntimeError as error:
             if str(error) != 'fixture_fail_after_authoritative_sla_receipt_insert':
                 raise
         else:
-            raise RuntimeError('SLA receipt rollback failpoint did not fire')
+            with engine.connect() as c:
+                episode = c.execute(sa.select(exposure_episodes).where(
+                    exposure_episodes.c.exposure_id == result.exposure_id,
+                    exposure_episodes.c.is_current.is_(True))).mappings().first()
+                contract = (c.execute(sa.select(sla_episode_contracts).where(
+                    sla_episode_contracts.c.episode_id == episode['episode_id'])).mappings().first()
+                    if episode else None)
+                receipt = c.execute(sa.select(sla_ingest_receipts).where(
+                    sla_ingest_receipts.c.occurrence_id == result.occurrence_id)).mappings().first()
+            raise RuntimeError('SLA receipt rollback failpoint did not fire: ' + json.dumps({
+                'group_id': result.group_id, 'exposure_id': result.exposure_id,
+                'occurrence_id': result.occurrence_id,
+                'outcome': result.outcome, 'reason': result.reason,
+                'candidate_workload_ids': list(result.candidate_workload_ids),
+                'candidate_explanations': repr(result.candidate_explanations),
+                'episode_id': episode['episode_id'] if episode else None,
+                'contract_version': contract['contract_version'] if contract else None,
+                'receipt_id': receipt['receipt_id'] if receipt else None,
+                'receipt_writer_attempted': receipt is not None}))
         finally:
             sqlalchemy.event.remove(engine, 'after_cursor_execute', fail_first_sla_receipt)
-        with engine.connect() as c:
-            rollback_receipts = c.execute(sa.select(sa.func.count()).select_from(
-                sla_ingest_receipts)).scalar_one()
-            rollback_clocks = c.execute(sa.select(sa.func.count()).select_from(
-                sla_clock_events)).scalar_one()
-            rollback_episodes = c.execute(sa.select(sa.func.count()).select_from(
-                exposure_episodes)).scalar_one()
-            retained_receipts = c.execute(sa.select(sa.func.count()).select_from(
-                source_observation_receipts)).scalar_one()
-        if (rollback_receipts, rollback_clocks, rollback_episodes, retained_receipts) != (0, 0, 0, 3):
+        rollback_after = rollback_state_counts()
+        if rollback_after != rollback_baseline:
             raise RuntimeError('atomic ingest rollback leaked episode/SLA state or lost retained input: '
-                f'{(rollback_receipts, rollback_clocks, rollback_episodes, retained_receipts)}')
+                f'baseline={rollback_baseline}; after={rollback_after}')
         results = []
         for row, request_id, workload_name, base in (
                 (observations[0], ids['high_resolution'], 'covered', 0),
                 (observations[1], ids['breach_resolution'], 'breached', 100),
-                (observations[2], ids['gap_resolution'], 'unknown', 200)):
+                (observations[2], ids['gap_resolution'], 'unknown', 200),
+                (observations[3], ids['deadline_resolution'], 'deadline-boundary', 300),
+                (observations[4], ids['replacement_resolution'], 'replacement', 400)):
             results.append(resolve_fixture(row, request_id, workload_name, base))
     finally:
         identity_model.new_id = original_model_new_id
@@ -355,7 +384,7 @@ def seed_exception_sla(engine):
         'occurrence': covered['occurrence'], 'episode': covered['episode'],
         'evaluation': covered['evaluation'], 'revision': covered['revision'],
         'members': members,
-        'atomic_rollback': {'attempted': True, 'retained_input_count': 3,
+        'atomic_rollback': {'attempted': True, 'retained_input_count': len(observations),
             'sla_receipts_after_rollback': 0, 'clock_events_after_rollback': 0,
             'episodes_after_rollback': 0},
         'ingested_at': now.isoformat().replace('+00:00', 'Z'),
@@ -370,7 +399,114 @@ def seed_exception_sla(engine):
         'g5_compatibility': g5_compatibility}
 
 
+def seed_g5_activation_stage(engine, stage):
+    """Create G5 episode membership only through retained source/identity writers.
+
+    ``prepolicy`` establishes a genuine G5 episode before either SLA policy is
+    published. ``postlegacy`` and ``postg7`` add independent memberships to
+    that same pinned G5 episode after the corresponding public publication.
+    """
+    clock_file = os.environ.get('UVM_G7_TEST_CLOCK_FILE')
+    if not clock_file:
+        raise RuntimeError('G5 activation fixture requires the disposable server clock file')
+    now = datetime.fromisoformat(Path(clock_file).read_text().strip().replace('Z', '+00:00'))
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise RuntimeError('G5 activation fixture clock must be timezone-aware')
+    now = now.astimezone(timezone.utc)
+    if stage == 'prepolicy':
+        observed, collected = now - timedelta(hours=2), now - timedelta(hours=1)
+        name, component, ordinal = 'g5-prepolicy', 'g5-component-prepolicy', 0
+    elif stage == 'pre_g7_target':
+        observed, collected = now - timedelta(hours=2), now - timedelta(hours=1)
+        name, component, ordinal = 'g7-target-prepolicy', 'g7-target-component-prepolicy', 0
+    elif stage == 'postlegacy':
+        observed, collected = now - timedelta(milliseconds=500), now - timedelta(milliseconds=250)
+        name, component, ordinal = 'g5-postlegacy', 'g5-component-postlegacy', 1
+    elif stage == 'postg7':
+        observed, collected = now - timedelta(milliseconds=500), now - timedelta(milliseconds=250)
+        name, component, ordinal = 'g5-postg7', 'g5-component-postg7', 2
+    else:
+        raise RuntimeError(f'unknown G5 activation fixture stage: {stage}')
+    suffix = 'volt:g7:exception-sla-g5-staged:' + name
+    run_id = str(uuid.uuid5(uuid.NAMESPACE_URL, suffix + ':run'))
+    observation_id = str(uuid.uuid5(uuid.NAMESPACE_URL, suffix + ':observation'))
+    request_id = str(uuid.uuid5(uuid.NAMESPACE_URL, suffix + ':resolution'))
+    raw = ('g7-exception-sla-g5-staged:' + name).encode()
+    with engine.begin() as c:
+        c.execute(collection_runs.insert().values(run_id=run_id, revision=1,
+            schema_version=1, manual_origin=suffix, schedule_id='synthetic',
+            schedule_revision=1, source_family='local', source_account_id='g7-local',
+            scope_key='all', state='completed', started_at=collected, ended_at=collected,
+            retrieval_status='complete', retrieval_reasons=[], coverage_status='complete',
+            coverage_reasons=[], freshness_status='fresh', freshness_reasons=[],
+            facts_snapshot={'environment': 'synthetic-local'},
+            provenance_snapshot={'environment': 'synthetic-local'}, created_at=now))
+    missing = tuple(MissingField(field, 'not_applicable') for field in (
+        'source_record_locator', 'source_first_seen_at', 'report_id', 'coverage_scope'))
+    native_id_value = ('exception-sla-ingestion-v1' if stage == 'pre_g7_target'
+        else 'exception-sla-g5-staged-v1')
+    source = SourceObservationV1(schema_version=1, observation_id=observation_id,
+        revision=1, source_family='local', source_account_id='g7-local', run_id=run_id,
+        source_record_ordinal=ordinal, collection_status='success', observed_at=observed,
+        collected_at=collected, raw_evidence_ref='synthetic:' + suffix,
+        raw_evidence_sha256=hashlib.sha256(raw).hexdigest(), missing_fields=missing,
+        native_id_scheme='fixture', native_id_authority='g7-local',
+        native_id_value=native_id_value,
+        asset_locator='host-g7-policy-scope-seed' if stage == 'pre_g7_target' else 'host-g5-staged',
+        component_locator='g7-policy-scope-seed' if stage == 'pre_g7_target' else component, source_rating='low',
+        vulnerability_refs=('CVE-2099-0010',))
+    retained = ObservationRepository(engine, clock=lambda: now).write_run(
+        'g7-local', run_id, [(source, 'created')])
+    if retained.status != 'created' or retained.new_rows != 1:
+        raise RuntimeError(f'{stage} source was not retained by the actual writer: {retained}')
+    decision_time = now
+    def authorise(action, target_id, context):
+        return AuthorisationDecision(decision_id=str(uuid.uuid4()), allowed=True,
+            principal_id='g7-fixture', action=action, target_id=target_id,
+            scope='fixture:identity-rule-provision', policy_revision='fixture-v1',
+            reason='Provision staged G5 fixture identity', evidence_ref=suffix,
+            correlation_id=request_id, decided_at=decision_time, details={})
+    identity = IdentityRepository(engine, authorisation_evaluator=authorise)
+    rule = RuleV1('g7-exception-sla-g5-staged-rule', 1,
+        ('provisioning_key', 'service_key'), verified_asset_locator=True,
+        workload_context_fields=('environment', 'service_id'))
+    if stage == 'prepolicy':
+        identity.provision_rule(rule, now)
+    result = identity.resolve_retained(request_id, observation_id, 1, rule,
+        {'provisioning_key': ('g7-sla-policy-scope-seed' if stage == 'pre_g7_target' else 'g7-sla-g5-staged'),
+         'service_key': ('g7-sla-key-policy-scope-seed' if stage == 'pre_g7_target' else 'g7-sla-g5-staged'),
+         'environment': ('activation-seed' if stage == 'pre_g7_target' else 'preactivation'),
+         'service_id': ('g7-sla-service-policy-scope-seed' if stage == 'pre_g7_target' else 'g7-sla-service-legacy')}, now)
+    if stage == 'pre_g7_target' and (result.outcome not in {'new', 'matched'}
+            or not result.group_id or not result.exposure_id):
+        raise RuntimeError(f'{stage} did not establish a source-covered exposure through the actual identity writer: {result}')
+    if result.outcome not in {'new', 'matched'} or not result.occurrence_id:
+        raise RuntimeError(f'{stage} did not resolve through the actual identity writer: {result}')
+    with engine.connect() as c:
+        episode_id = c.execute(sa.select(exposure_episodes.c.episode_id).where(
+            exposure_episodes.c.exposure_id == result.exposure_id,
+            exposure_episodes.c.is_current.is_(True))).scalar_one()
+        contract = c.execute(sa.select(sla_episode_contracts).where(
+            sla_episode_contracts.c.episode_id == episode_id)).mappings().one()
+        receipt = c.execute(sa.select(sla_ingest_receipts).where(
+            sla_ingest_receipts.c.episode_id == episode_id,
+            sla_ingest_receipts.c.occurrence_id == result.occurrence_id)).mappings().one()
+    if contract['contract_version'] != 5:
+        raise RuntimeError(f'{stage} unexpectedly changed the pinned G5 episode contract')
+    if receipt['ingested_at'] != now or not observed < collected < receipt['ingested_at']:
+        raise RuntimeError(f'{stage} retained time does not follow source timestamps')
+    return {'stage': stage, 'group_id': result.group_id, 'exposure_id': result.exposure_id,
+        'episode_id': episode_id, 'occurrence_id': result.occurrence_id,
+        'receipt_id': receipt['receipt_id'], 'observation_id': observation_id,
+        'observed_at': observed.isoformat().replace('+00:00', 'Z'),
+        'collected_at': collected.isoformat().replace('+00:00', 'Z'),
+        'ingested_at': receipt['ingested_at'].isoformat().replace('+00:00', 'Z'),
+        'contract_version': int(contract['contract_version'])}
+
+
 def seed(engine):
+    if os.environ.get('UVM_G7_SLA_STAGE'):
+        return seed_g5_activation_stage(engine, os.environ['UVM_G7_SLA_STAGE'])
     if os.environ.get('UVM_G7_SLA_FIXTURE') == '1':
         return seed_exception_sla(engine)
     warning_fixture = os.environ.get('UVM_G7_WARNING_FIXTURE') == '1'

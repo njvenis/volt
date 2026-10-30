@@ -39,6 +39,20 @@ Final deployment SHALL provide one supervised, self-contained Docker image inten
 - **THEN** the evolved SLA version uses the first authoritative UVM ingestion commit of the applicable membership/episode as its start, and later refresh, owner transfer or rebuild does not reset it
 - **AND** scanner observation, source collection and ingest timestamps remain distinct; historical issued G5 reports retain their recorded clock basis and no prior source time is fabricated
 
+#### Scenario: G7-SLA-ID-CTX-01 policy context without identity correspondence
+- **WHEN** an authorized versioned `RuleV1` declares optional context fields such as environment or service identity and the retained-observation writer receives matching inputs
+- **THEN** only `workload_match_fields` may discover, select, create or rebuild a workload; context fields are retained as policy-selection facts on a newly created workload but never contribute candidate or correspondence evidence
+- **AND** context alone cannot create/select a workload, shared context across distinct native workloads cannot merge them, distinct match keys remain separate, and ambiguous match evidence remains unresolved
+- **AND** known stored context with an omitted follow-up input remains retained and usable for applicable SLA selection; omission does not weaken existing coverage
+- **AND** conflicting supplied context after a unique match produces unresolved evidence, no staged identity graph or new SLA coverage, and no erasure/reset of an already admitted membership clock; separately committed source-observation retention remains
+- **AND** missing stored context remains unavailable even if later supplied; no automatic enrichment/backfill occurs, and only an unavailable selector required by prospective G7 selection creates a coverage gap; missing unused optional context does not blanket-create a gap
+- **AND** an episode already pinned to G5 remains G5, including later membership in that same episode after prospective G7 policy activation
+- **AND** the empty-context default preserves exact legacy definition digest, request-fingerprint bytes, persisted identity reconstruction and replay; non-empty context is ordered immutable definition data and appears in definition/request fingerprints only for non-empty context
+- **AND** stored context definitions are validated as actual arrays of unique valid strings disjoint from match names before reconstruction, and context fields are never scalar-correction targets
+- **AND** context persistence, identity resolution and coupled G7 episode/receipt/evaluation commit atomically; any failure leaves no partial identity or SLA state
+- **AND** migration `0062` adds only non-null `identity_rule_definitions.workload_context_fields` with default `[]`, preserves old digests and rows, blocks downgrade while non-empty definitions exist, and is admitted only through exact schema-head and inventory checks
+- **AND** public SLA selection uses context produced by actual identity writers; browser code does not synthesize context or calculate coverage, and a missing-context gap occurs only when retained context lacks a selector required for prospective G7 selection
+
 #### Scenario: G7-NET-01 private access and webhook ingress
 - **WHEN** intended users and GitHub deliver valid and invalid requests to the named single-container candidate
 - **THEN** authorised access and authenticated webhook processing work while public database, admin and DefectDojo operational access are denied

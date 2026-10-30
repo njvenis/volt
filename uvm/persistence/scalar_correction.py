@@ -179,7 +179,9 @@ def _execute(repo, connection, body, text, digest):
         if (rule is None or rule['authorisation_decision_id'] is None
                 or rule['definition_digest'] != pinned['definition_digest']
                 or repo._rule_digest(RuleV1(rule['rule_id'], rule['rule_version'],
-                    tuple(rule['workload_match_fields']), verified_asset_locator=rule['verified_asset_locator'])) != pinned['definition_digest']
+                    tuple(rule['workload_match_fields']), verified_asset_locator=rule['verified_asset_locator'],
+                    workload_context_fields=repo._stored_context_fields(
+                        rule['workload_context_fields'], rule['workload_match_fields']))) != pinned['definition_digest']
                 or field not in rule['workload_match_fields']):
             raise ScalarCorrectionError('Pinned scalar eligibility unavailable')
     history = validate_scalar_history(connection, body['record_type'], target)

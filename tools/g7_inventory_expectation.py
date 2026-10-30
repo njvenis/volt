@@ -99,6 +99,37 @@ def _append_0061_byte_size_expectation(evidence):
     return evidence
 
 
+def _append_0062_context_expectation(evidence):
+    if not isinstance(evidence, dict) or not isinstance(evidence.get('columns'), list) or \
+            not isinstance(evidence.get('constraints'), dict) or \
+            not isinstance(evidence.get('rows'), list) or 'workload_context_fields' in {
+                c.get('name') for c in evidence['columns']}:
+        raise ValueError('0058 baseline identity_rule_definitions schema is unexpected')
+    names = [column.get('name') for column in evidence['columns']]
+    if len(names) != len(set(names)) or any(not isinstance(name, str) for name in names):
+        raise ValueError('identity rule baseline columns are ambiguous')
+    primary_key = [column['name'] for column in evidence['columns'] if column.get('primary_key')]
+    seen = set()
+    for row in evidence['rows']:
+        payload = row.get('payload')
+        if not isinstance(payload, dict) or set(payload) != set(names) or digest(payload) != row.get('payload_sha256'):
+            raise ValueError('identity rule baseline row does not match its exact preimage')
+        key = [payload[name] for name in primary_key]
+        if row.get('key') != key:
+            raise ValueError('identity rule baseline primary key mismatch')
+        encoded = json.dumps(key, sort_keys=True, separators=(',', ':'))
+        if encoded in seen:
+            raise ValueError('identity rule baseline has duplicate keys')
+        seen.add(encoded)
+        payload['workload_context_fields'] = []
+        row['payload_sha256'] = digest(payload)
+    evidence['columns'].append({'name': 'workload_context_fields',
+        'type': 'JSONB', 'nullable': False, 'primary_key': False, 'default': "'[]'::jsonb"})
+    evidence['schema_sha256'] = digest({'columns': evidence['columns'],
+        'constraints': evidence['constraints']})
+    return evidence
+
+
 def expected_inventory(source, receipts, public_key):
     from fastapi import FastAPI, Request
     from uvm.operations.api import install_observer_settings_routes
@@ -186,22 +217,24 @@ def expected_inventory(source, receipts, public_key):
             rows = sorted(retained.values(), key=lambda r: __import__('json').dumps(r['key'],sort_keys=True,separators=(',',':')))
             expected['uvm'][table.name]['rows'] = rows
             expected['uvm'][table.name]['row_count'] = len(rows)
-        # Exact current-image 0058->0061 migration, independently derived from
+        # Exact current-image 0058->0062 migration, independently derived from
         # migration-owned metadata and source payloads rather than candidate state.
         table = expected['uvm']['alembic_version']
         if [r['key'] for r in table['rows']] != [['0058']]:
             raise ValueError('baseline must be exactly 0058')
-        table['rows'] = [{'key':['0061'], 'payload_sha256':digest({'version_num':'0061'})}]
+        table['rows'] = [{'key':['0062'], 'payload_sha256':digest({'version_num':'0062'})}]
         if any(name in expected['uvm'] for name in
                 ('g7_backup_projection_evidence', 'collection_request_reservations')):
             raise ValueError('0058 baseline unexpectedly contains a post-0058 migration table')
         from uvm.persistence.backup_settings_schema import g7_backup_projection_evidence
         from uvm.persistence.ingestion_schema import collection_request_reservations
+        from uvm.persistence.lineage_schema import identity_rule_definitions
         expected['uvm']['g7_backup_projection_evidence'] = _migration_table_record(
             g7_backup_projection_evidence)
         expected['uvm']['collection_request_reservations'] = _migration_table_record(
             collection_request_reservations)
         _append_0061_byte_size_expectation(expected['uvm'].get('ingestion_evidence'))
+        _append_0062_context_expectation(expected['uvm'].get('identity_rule_definitions'))
         return expected
     finally:
         engine.dispose()

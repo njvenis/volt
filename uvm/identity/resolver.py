@@ -13,6 +13,7 @@ supported detection are retained.
 from __future__ import annotations
 
 from dataclasses import replace
+from copy import deepcopy
 from datetime import datetime
 from typing import Optional
 
@@ -38,7 +39,8 @@ class RuleV1:
     treated as ephemeral and rejected."""
 
     def __init__(self, rule_id: str, rule_version: int, workload_match_fields: tuple[str, ...],
-                 *, verified_asset_locator: bool = False) -> None:
+                 *, verified_asset_locator: bool = False,
+                 workload_context_fields: tuple[str, ...] = ()) -> None:
         if not rule_id:
             raise ValueError("rule_id is required")
         if rule_version < 1:
@@ -53,12 +55,24 @@ class RuleV1:
                      "asset_locator", "image_digest", "image_ref", "component_version"}
         if any(field in ephemeral for field in workload_match_fields):
             raise ValueError("ephemeral attributes cannot prove workload correspondence")
+        if type(workload_context_fields) is not tuple:
+            raise ValueError("workload_context_fields must be an actual tuple")
+        if any(type(field) is not str or not field or field != field.strip()
+               for field in workload_context_fields):
+            raise ValueError("workload_context_fields must contain non-empty trimmed strings")
+        if len(set(workload_context_fields)) != len(workload_context_fields):
+            raise ValueError("workload_context_fields cannot repeat a field")
+        if set(workload_context_fields) & set(workload_match_fields):
+            raise ValueError("workload context fields must be disjoint from match fields")
+        if any(field in ephemeral for field in workload_context_fields):
+            raise ValueError("ephemeral attributes cannot be retained as workload context")
         self.rule_id = rule_id
         self.rule_version = rule_version
         self.workload_match_fields: tuple[str, ...] = tuple(workload_match_fields)
         # Only set after source-specific uniqueness and reuse evidence is
         # established. D-01 is still open for live scanner fields.
         self.verified_asset_locator = verified_asset_locator
+        self.workload_context_fields = workload_context_fields
 
     def matches(self, other: "RuleV1") -> bool:
         return (
@@ -66,6 +80,7 @@ class RuleV1:
             and self.rule_version == other.rule_version
             and self.workload_match_fields == other.workload_match_fields
             and self.verified_asset_locator == other.verified_asset_locator
+            and self.workload_context_fields == other.workload_context_fields
         )
 
 
@@ -88,7 +103,8 @@ def resolve(
     if any(not isinstance(value, str) for value in matching_inputs.values()):
         raise ValueError("matching inputs must be strings")
     rule_key = (rule.rule_id, rule.rule_version)
-    rule_definition = (rule.workload_match_fields, rule.verified_asset_locator)
+    rule_definition = (rule.workload_match_fields, rule.verified_asset_locator,
+                       rule.workload_context_fields)
     if (rule_key in state.rule_definitions
             and state.rule_definitions[rule_key] != rule_definition):
         raise ValueError("rule definition changed without a new version")
@@ -163,6 +179,7 @@ def resolve(
                            "reason": "historical native-group alias requires reviewed correspondence"},),
             reason="historical native group key; no new group guessed",
         )
+    state_before_graph = deepcopy(state)
     group, group_is_new = state.find_or_create_group(group_key, at=evaluated_at)
     if obs.vulnerability_refs:
         state.add_cve_refs(group, obs.vulnerability_refs)
@@ -277,6 +294,27 @@ def resolve(
                 {"workload_id": workload_id, "field": field, "value": value,
                  "reason": "stable attribute match"}
             )
+        context_conflicts = []
+        for field in rule.workload_context_fields:
+            value = matching_inputs.get(field)
+            if value is None:
+                continue
+            if type(value) is not str or not value.strip():
+                raise ValueError("workload context values must be non-empty strings")
+            retained = workload.stable_attrs.get(field)
+            if retained is not None and retained != value:
+                context_conflicts.append((field, value, retained))
+        if context_conflicts:
+            state.__dict__.clear()
+            state.__dict__.update(state_before_graph.__dict__)
+            return _record(state, obs, rule, matching_inputs, evaluated_at,
+                outcome=OUTCOME_UNRESOLVED, candidates=(workload_id,),
+                explanations=tuple(explanations) + tuple(
+                    {"workload_id": workload_id, "field": field, "value": supplied,
+                     "stored_value": retained,
+                     "reason": "supplied workload context conflicts with retained context"}
+                    for field, supplied, retained in context_conflicts),
+                reason="workload context conflict; no graph or SLA mutation")
         # A corrected host locator is historical only for the workload that
         # owned the incarnation; the same locator under an unrelated
         # workload is not blocked (the alias is keyed workload-scoped).
@@ -306,6 +344,13 @@ def resolve(
                 reason="no stable workload attributes supplied; no match guessed",
             )
         workload, workload_is_new = state.find_or_create_workload(supplied, at=evaluated_at)
+        if workload_is_new:
+            for field in rule.workload_context_fields:
+                value = matching_inputs.get(field)
+                if value is not None:
+                    if type(value) is not str or not value.strip():
+                        raise ValueError("workload context values must be non-empty strings")
+                    workload.stable_attrs[field] = value
 
     existing_incarnation = state._incarnation_index.get((workload.workload_id, obs.asset_locator))
     if existing_incarnation is not None and not rule.verified_asset_locator:
@@ -429,7 +474,8 @@ def _record(
     reason: Optional[str] = None,
 ) -> IdentityResolutionV1:
     state.rule_definitions[(rule.rule_id, rule.rule_version)] = (
-        rule.workload_match_fields, rule.verified_asset_locator)
+        rule.workload_match_fields, rule.verified_asset_locator,
+        rule.workload_context_fields)
     prior = state.resolution_for_observation(obs.observation_id)
     res = IdentityResolutionV1(
         schema_version=SCHEMA_VERSION,

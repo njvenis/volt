@@ -3,8 +3,8 @@ set -Eeuo pipefail
 umask 077
 
 MODE=${1-}
-if [[ ( $MODE != --observer-settings-only && $MODE != --backup-recovery-only && $MODE != --upgrade-rollback-only && $MODE != --data-preservation-audit-only && $MODE != --exception-warning-only && $MODE != --exception-sla-only && $MODE != --identity-access-ownership-only ) || $# != 1 ]]; then
-  echo 'usage: G7_EVIDENCE_DIR=/absolute/path bash tools/g7_container_journey.sh (--observer-settings-only|--backup-recovery-only|--upgrade-rollback-only|--data-preservation-audit-only|--exception-warning-only|--exception-sla-only|--identity-access-ownership-only)' >&2
+if [[ ( $MODE != --observer-settings-only && $MODE != --backup-recovery-only && $MODE != --upgrade-rollback-only && $MODE != --data-preservation-audit-only && $MODE != --exception-warning-only && $MODE != --exception-sla-only && $MODE != --identity-access-ownership-only && $MODE != --container-boundaries-only ) || $# != 1 ]]; then
+  echo 'usage: G7_EVIDENCE_DIR=/absolute/path bash tools/g7_container_journey.sh (--observer-settings-only|--backup-recovery-only|--upgrade-rollback-only|--data-preservation-audit-only|--exception-warning-only|--exception-sla-only|--identity-access-ownership-only|--container-boundaries-only)' >&2
   exit 64
 fi
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -28,6 +28,8 @@ RUN_ROOT=$(mktemp -d /tmp/volt-g7-observer-run.XXXXXX)
 RUN_ID=${RUN_ROOT##*.}
 DATA_PRESERVATION_MODE=0
 if [[ $MODE == --data-preservation-audit-only ]]; then DATA_PRESERVATION_MODE=1; fi
+CONTAINER_BOUNDARIES_MODE=0
+if [[ $MODE == --container-boundaries-only ]]; then DATA_PRESERVATION_MODE=1; CONTAINER_BOUNDARIES_MODE=1; fi
 UPGRADE_ROLLBACK_MODE=0
 EXCEPTION_WARNING_MODE=0
 if [[ $MODE == --exception-warning-only ]]; then EXCEPTION_WARNING_MODE=1; fi
@@ -40,6 +42,12 @@ if [[ $MODE == --upgrade-rollback-only ]]; then
   IMAGE="volt-g7-upgrade-a-dev:$RUN_ID"
   CANDIDATE_IMAGE="volt-g7-upgrade-b-dev:$RUN_ID"
   RESTORE_IMAGE=$CANDIDATE_IMAGE
+elif (( CONTAINER_BOUNDARIES_MODE )); then
+  CONTAINER="volt-g7-boundaries-app-$RUN_ID"
+  ANCHOR_CONTAINER="volt-g7-boundaries-anchor-$RUN_ID"
+  IMAGE="volt-g7-boundaries-dev:$RUN_ID"
+  CANDIDATE_IMAGE=$IMAGE
+  RESTORE_IMAGE=$IMAGE
 elif [[ $MODE == --backup-recovery-only ]]; then
   CONTAINER=volt-g7-observer-journey
   ANCHOR_CONTAINER=volt-g7-observer-anchor
@@ -460,13 +468,15 @@ sha256sum "$EVIDENCE/source-snapshot.tar.gz" >"$EVIDENCE/source-snapshot.sha256"
 
 command -v docker >/dev/null || { echo 'Docker CLI unavailable' >&2; exit 69; }
 command -v curl >/dev/null || { echo 'curl unavailable' >&2; exit 69; }
-command -v nsenter >/dev/null || { echo 'nsenter is required for the host controller to reach the isolated recovery namespace' >&2; exit 69; }
-[[ -x /home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome ]] || {
-  echo 'Playwright Chromium 1234 executable unavailable' >&2; exit 69;
-}
-PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright node -e \
-  "process.stdout.write(require('./ui/node_modules/playwright/package.json').version+'\\n')" \
-  >"$EVIDENCE/playwright-version.txt"
+if (( ! CONTAINER_BOUNDARIES_MODE )); then
+  command -v nsenter >/dev/null || { echo 'nsenter is required for the host controller to reach the isolated recovery namespace' >&2; exit 69; }
+  [[ -x /home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome ]] || {
+    echo 'Playwright Chromium 1234 executable unavailable' >&2; exit 69;
+  }
+  PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright node -e \
+    "process.stdout.write(require('./ui/node_modules/playwright/package.json').version+'\\n')" \
+    >"$EVIDENCE/playwright-version.txt"
+fi
 df -Pk /tmp >"$EVIDENCE/tmp-space-preflight.txt"
 for port in "$API_PORT" "$RECOVERY_PORT" "$OIDC_PROXY_PORT" "$OIDC_PORT" "$ANCHOR_PORT"; do
   if (echo >/dev/tcp/127.0.0.1/$port) >/dev/null 2>&1; then
@@ -509,6 +519,21 @@ if (( IDENTITY_MODE )); then FIXTURE_OIDC_ARGS+=(--identity-access-ownership); f
 if (( UPGRADE_ROLLBACK_MODE )); then FIXTURE_OIDC_ARGS+=(--heartbeat-max-age-seconds 900); fi
 uv run python "$ROOT/tools/g7_observer_fixture.py" create --root "$RUN_ROOT" --image "$IMAGE" \
   "${FIXTURE_OIDC_ARGS[@]}" --api-port "$API_PORT" --recovery-port "$RECOVERY_PORT"
+if (( CONTAINER_BOUNDARIES_MODE )); then
+  python3 - "$RUN_ROOT/secrets" "$RUN_ROOT/container.env" <<'WEBHOOKFIXTURE'
+import secrets,sys
+from pathlib import Path
+root=Path(sys.argv[1]); env=Path(sys.argv[2])
+for name,value in (("github_webhook_secret_v1",secrets.token_hex(32)),
+                   ("github_webhook_secret_v2",secrets.token_hex(32)),
+                   ("github_webhook_secret_version","v1")):
+    path=root/name; path.write_text(value+"\n",encoding="ascii"); path.chmod(0o600)
+with env.open("a",encoding="utf-8") as stream:
+    stream.write("UVM_GITHUB_WEBHOOK_SECRET_DIR=/run/uvm-g7-secrets\n")
+    stream.write("UVM_GITHUB_WEBHOOK_SECRET_VERSION_FILE=/run/uvm-g7-secrets/github_webhook_secret_version\n")
+WEBHOOKFIXTURE
+  chmod 0600 "$RUN_ROOT/container.env"
+fi
 if (( EXCEPTION_WARNING_MODE || EXCEPTION_SLA_MODE )); then
   WARNING_NOW=$(date -u +'%Y-%m-%dT%H:%M:%S+00:00')
   printf '%s\n' "$WARNING_NOW" >"$RUN_ROOT/scheduler/warning-clock.txt"
@@ -761,6 +786,165 @@ if (( ! ready )); then
     >"$EVIDENCE/app-startup-redacted.log" || true
   echo 'disposable application did not become healthy; see retained redacted startup evidence' >&2
   exit 70
+fi
+if (( CONTAINER_BOUNDARIES_MODE )); then
+  printf '%s\n' "$CONTAINER_ID" >"$EVIDENCE/initial-container-id.txt"
+  docker inspect "$CONTAINER_ID" --format '{{.Id}} {{.Image}} {{json .Mounts}} {{json .NetworkSettings.Ports}}' \
+    >"$EVIDENCE/initial-runtime-binding.txt"
+  docker exec "$CONTAINER" /bin/bash -lc 'printf "entrypoint="; cat /run/uvm-g7/entrypoint-pid; for n in postgres valkey recovery-control oidc-provider oidc-sync-api api ce-web ce-worker ce-beat; do f=/run/uvm-g7/pid-$n; if [[ -f $f ]]; then p=$(cat "$f"); printf "%s pid=%s uid=" "$n" "$p"; awk "/^Uid:/ {print \$2}" "/proc/$p/status"; fi; done; printf "mode="; cat /run/uvm-g7/runtime-mode; printf "ready="; test -f /run/uvm-g7/ready && echo yes' \
+    >"$EVIDENCE/initial-processes.txt"
+  docker exec "$CONTAINER" ps -eo pid,uid,comm >"$EVIDENCE/initial-process-inventory.txt"
+  docker exec "$CONTAINER" /bin/bash -lc 'pgrep -u postgres -x postgres >/dev/null && pgrep -u valkey -x valkey-server >/dev/null && for n in recovery-control oidc-provider oidc-sync-api api ce-web ce-worker ce-beat; do f=/run/uvm-g7/pid-$n; [[ -s $f ]] || { [[ $n == oidc-sync-api ]] && continue; exit 1; }; p=$(cat "$f"); kill -0 "$p"; done; echo required_processes=present' \
+    >"$EVIDENCE/required-process-identities.txt"
+  docker exec "$CONTAINER" /usr/local/bin/uvm-g7-healthcheck >"$EVIDENCE/initial-healthcheck.txt"
+  for db_role in uvm_app ce_app; do
+    if [[ $db_role == uvm_app ]]; then own_db=uvm; other_db=defectdojo; secret_name=uvm_db_password; else own_db=defectdojo; other_db=uvm; secret_name=ce_db_password; fi
+    docker exec "$CONTAINER" /bin/bash -lc "export PGPASSWORD=\$(cat /run/secrets/$secret_name); psql -X -h 127.0.0.1 -U $db_role -d $own_db -v ON_ERROR_STOP=1 -c 'CREATE SCHEMA IF NOT EXISTS g7_acceptance AUTHORIZATION $db_role' -c 'CREATE TABLE IF NOT EXISTS g7_acceptance.volume_probe (id integer primary key, marker text not null)' -c \"INSERT INTO g7_acceptance.volume_probe VALUES (1, '$RUN_ID') ON CONFLICT (id) DO UPDATE SET marker=EXCLUDED.marker\"" >"$EVIDENCE/$db_role-own-db-write.txt" 2>"$EVIDENCE/$db_role-own-db-write.stderr"
+    if docker exec "$CONTAINER" /bin/bash -lc "export PGPASSWORD=\$(cat /run/secrets/$secret_name); psql -X -h 127.0.0.1 -U $db_role -d $other_db -c 'SELECT 1'" >"$EVIDENCE/$db_role-cross-db.stdout" 2>"$EVIDENCE/$db_role-cross-db.stderr"; then
+      echo "$db_role unexpectedly connected to $other_db" >&2; exit 70
+    fi
+    grep -qi 'permission denied for database' "$EVIDENCE/$db_role-cross-db.stderr" || { echo "$db_role cross-database denial was not a permission denial" >&2; exit 70; }
+    chmod 0600 "$EVIDENCE/$db_role-cross-db.stdout" "$EVIDENCE/$db_role-cross-db.stderr"
+    for access in read write; do
+      if [[ $access == read ]]; then statement='SELECT 1'; else statement="CREATE SCHEMA g7_denied_${db_role}"; fi
+      if docker exec "$CONTAINER" /bin/bash -lc "export PGPASSWORD=\$(cat /run/secrets/$secret_name); psql -X -h 127.0.0.1 -U $db_role -d $other_db -v ON_ERROR_STOP=1 -c '$statement'" >"$EVIDENCE/$db_role-other-db-$access.stdout" 2>"$EVIDENCE/$db_role-other-db-$access.stderr"; then
+        echo "$db_role unexpectedly performed other-database $access" >&2; exit 70
+      fi
+      grep -qi 'permission denied for database' "$EVIDENCE/$db_role-other-db-$access.stderr" || { echo "$db_role other-database $access denial was not a permission denial" >&2; exit 70; }
+      chmod 0600 "$EVIDENCE/$db_role-other-db-$access.stdout" "$EVIDENCE/$db_role-other-db-$access.stderr"
+    done
+  done
+  docker exec "$CONTAINER" /bin/bash -lc 'printf "%s\n" "$HOSTNAME" > /app/media/g7-container-boundary-marker; printf "%s\n" "$HOSTNAME" > /opt/uvm/state/g7-container-boundary-marker' >"$EVIDENCE/volume-markers.stdout"
+  # Create the CE product/finding and attached media through DefectDojo's API.
+  CE_ADMIN_PASSWORD=$(cat "$RUN_ROOT/secrets/ce_admin_password")
+  python3 - "$RUN_ROOT/ce-container-sentinel.json" <<'CEBOUNDARY'
+import datetime,json,sys
+json.dump({'name':'G7 Container Boundary Evidence','type':'G7 Container Boundary Fixture',
+ 'findings':[{'title':'G7 container boundary API sentinel','severity':'Low',
+  'description':'Synthetic finding imported through DefectDojo public API for local replacement acceptance.',
+  'date':datetime.date.today().isoformat(),'active':True,'verified':False,
+  'unique_id_from_tool':'g7-container-boundary-sentinel-v1'}]},
+ open(sys.argv[1],'x',encoding='utf-8'),sort_keys=True,separators=(',',':'))
+CEBOUNDARY
+  docker cp "$RUN_ROOT/ce-container-sentinel.json" "$CONTAINER:/tmp/g7-container-sentinel.json" >/dev/null
+  docker exec "$CONTAINER" curl --fail --silent --show-error --max-time 30 -u "admin:$CE_ADMIN_PASSWORD" \
+    -F 'scan_type=Generic Findings Import' -F 'product_name=G7 Container Boundary Evidence' \
+    -F 'product_type_name=Research and Development' -F 'engagement_name=G7 Container Boundary Retention' \
+    -F 'auto_create_context=true' -F 'verified=true' -F 'minimum_severity=Info' \
+    -F 'close_old_findings=false' -F 'skip_duplicates=true' \
+    -F 'file=@/tmp/g7-container-sentinel.json;type=application/json' \
+    'http://127.0.0.1:8081/api/v2/import-scan/' >"$EVIDENCE/ce-sentinel-import.json"
+  docker exec "$CONTAINER" curl --fail --silent --show-error --max-time 15 -u "admin:$CE_ADMIN_PASSWORD" \
+    'http://127.0.0.1:8081/api/v2/findings/?limit=100' >"$EVIDENCE/ce-sentinel-findings-before.json"
+  FINDING_ID=$(python3 -c 'import json,sys;print(next(f["id"] for f in json.load(open(sys.argv[1]))["results"] if f.get("unique_id_from_tool")=="g7-container-boundary-sentinel-v1"))' "$EVIDENCE/ce-sentinel-findings-before.json")
+  printf 'G7 container boundary API media sentinel %s\n' "$RUN_ID" >"$RUN_ROOT/ce-container-media.txt"
+  docker cp "$RUN_ROOT/ce-container-media.txt" "$CONTAINER:/tmp/g7-container-media.txt" >/dev/null
+  docker exec "$CONTAINER" curl --fail --silent --show-error --max-time 15 -u "admin:$CE_ADMIN_PASSWORD" \
+    -F title=g7-container-boundary-media -F 'file=@/tmp/g7-container-media.txt;type=text/plain' \
+    "http://127.0.0.1:8081/api/v2/findings/$FINDING_ID/files/" >"$EVIDENCE/ce-sentinel-media-descriptor.json"
+  MEDIA_ID=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["id"])' "$EVIDENCE/ce-sentinel-media-descriptor.json")
+  printf '%s\n' "$FINDING_ID" >"$EVIDENCE/ce-sentinel-finding-id.txt"
+  printf '%s\n' "$MEDIA_ID" >"$EVIDENCE/ce-sentinel-media-id.txt"
+  docker exec "$CONTAINER" curl --fail --silent --show-error --max-time 15 -u "admin:$CE_ADMIN_PASSWORD" \
+    "http://127.0.0.1:8081/api/v2/findings/$FINDING_ID/files/download/$MEDIA_ID/" >"$EVIDENCE/ce-media-before.txt"
+  cmp "$RUN_ROOT/ce-container-media.txt" "$EVIDENCE/ce-media-before.txt"
+  chmod 0600 "$EVIDENCE/ce-sentinel-import.json" "$EVIDENCE/ce-sentinel-findings-before.json" \
+    "$EVIDENCE/ce-sentinel-media-descriptor.json" "$EVIDENCE/ce-media-before.txt"
+  docker exec -u postgres "$CONTAINER" psql -X -U postgres -d postgres -Atc "select datname,datallowconn from pg_database where datname in ('uvm','defectdojo') order by datname" >"$EVIDENCE/database-listener-boundary.txt"
+  BOUNDARY_PEER_IP=$(docker inspect "$CONTAINER" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+  printf 'network=default-private-bridge\npeer_target_container_id=%s\npeer_target_ip=%s\nprobe_ports=8000,8002,9000,5432,6379,8081\n' \
+    "$CONTAINER_ID" "$BOUNDARY_PEER_IP" >"$EVIDENCE/unauthorized-peer-target.txt"
+  uv run python "$ROOT/tools/g7_container_webhook_probe.py" --container "$CONTAINER" \
+    --origin "http://127.0.0.1:$API_PORT" --secret-file "$RUN_ROOT/secrets/github_webhook_secret_v1" \
+    --evidence "$EVIDENCE" >"$EVIDENCE/webhook-probe.stdout" 2>"$EVIDENCE/webhook-probe.stderr"
+  PEER_RESULT=$(docker run --rm --cidfile "$EVIDENCE/unauthorized-peer-container-id.txt" --network bridge \
+    --label "uvm.g7.run-id=$RUN_ID" --entrypoint python3 "$IMAGE" -c 'import http.client,socket,ssl,sys; host=sys.argv[1]; result={};
+for port in (8000,9000,5432,6379,8081):
+ try: socket.create_connection((host,port),timeout=2).close(); result[str(port)]=True
+ except OSError: result[str(port)]=False
+try:
+ h=http.client.HTTPConnection(host,8000,timeout=4); h.request("GET","/api/v1/assessment/access-groups"); r=h.getresponse(); result["8000_unauthenticated_api_status"]=r.status; r.read(); h.close()
+except OSError as e: result["8000_unauthenticated_api_error"]=type(e).__name__
+try: socket.create_connection((host,8002),timeout=2).close(); result["8002_tcp_listener"]=True
+except OSError: result["8002_tcp_listener"]=False
+try:
+ c=ssl._create_unverified_context(); c.check_hostname=False; h=http.client.HTTPSConnection(host,8002,context=c,timeout=4); h.request("GET","/recovery-control/v1/g7-local/desired"); r=h.getresponse(); result["8002_unauthorized_route_status"]=r.status; r.read(); h.close()
+except (OSError,ssl.SSLError) as e: result["8002_unauthorized_route_error"]=type(e).__name__
+print(result)' "$BOUNDARY_PEER_IP")
+  printf 'invocation=docker run --rm --network bridge --entrypoint python3 <pinned-image> %s\nports=8000,9000,5432,6379,8081,8002\nresult=%s\n' \
+    "$BOUNDARY_PEER_IP" "$PEER_RESULT" >"$EVIDENCE/unauthorized-bridge-probes.txt"
+  [[ $PEER_RESULT == *"'8000': True"* && $PEER_RESULT == *"'8000_unauthenticated_api_status': 401"* && $PEER_RESULT == *"'9000': True"* && $PEER_RESULT == *"'5432': False"* && $PEER_RESULT == *"'6379': False"* && $PEER_RESULT == *"'8081': False"* && $PEER_RESULT == *"'8002_tcp_listener': True"* && ( $PEER_RESULT == *"'8002_unauthorized_route_status': 401"* || $PEER_RESULT == *"'8002_unauthorized_route_error': 'ConnectionResetError'"* || $PEER_RESULT == *"'8002_unauthorized_route_error': 'SSLError'"* ) ]] || { echo 'the intended UVM/OIDC ingress or restricted internal route did not match its expected peer policy' >&2; exit 70; }
+  docker stop --time 30 "$CONTAINER" >"$EVIDENCE/pre-replacement-stop.txt"
+  docker rm "$CONTAINER" >"$EVIDENCE/pre-replacement-remove.txt"
+  STARTED_CONTAINER=0
+  docker run -d --name "$CONTAINER" --label uvm.g7.observer-journey=true --label "uvm.g7.run-id=$RUN_ID" \
+    -p "127.0.0.1:$API_PORT:8000" -p "127.0.0.1:$RECOVERY_PORT:8002" -p "127.0.0.1:$OIDC_PORT:9000" \
+    "${PRESERVATION_MOUNTS[@]}" --mount "type=bind,src=$RUN_ROOT/secrets,dst=/run/secrets,readonly" \
+    --mount "type=bind,src=$RUN_ROOT/secrets/registry.json,dst=/run/uvm-g7-registry.json,readonly" \
+    --mount "type=bind,src=$RUN_ROOT/secrets/host-pub.pem,dst=/run/uvm-g7-host-pub.pem,readonly" \
+    --mount "type=bind,src=$RUN_ROOT/scheduler,dst=/run/uvm-g7-scheduler" --env-file "$RUN_ROOT/container.env" "$IMAGE" \
+    >"$EVIDENCE/replacement-container-id.txt"
+  CONTAINER_ID=$(cat "$EVIDENCE/replacement-container-id.txt"); STARTED_CONTAINER=1
+  for _ in $(seq 1 300); do
+    [[ $(docker inspect "$CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null) == healthy ]] && break
+    [[ $(docker inspect "$CONTAINER" --format '{{.State.Status}}' 2>/dev/null) == running ]] || break
+    sleep 2
+  done
+  [[ $(docker inspect "$CONTAINER" --format '{{.State.Health.Status}}') == healthy ]] || { echo 'replacement did not become healthy' >&2; exit 70; }
+  [[ $(cat "$EVIDENCE/initial-container-id.txt") != "$CONTAINER_ID" ]] || { echo 'container identity did not change on replacement' >&2; exit 70; }
+  docker exec "$CONTAINER" /bin/bash -lc "test \"\$(cat /app/media/g7-container-boundary-marker)\" = \"\$(cat /opt/uvm/state/g7-container-boundary-marker)\"" \
+    >"$EVIDENCE/replacement-volume-readback.txt"
+  for db_role in uvm_app ce_app; do
+    if [[ $db_role == uvm_app ]]; then own_db=uvm; secret_name=uvm_db_password; else own_db=defectdojo; secret_name=ce_db_password; fi
+    docker exec "$CONTAINER" /bin/bash -lc "export PGPASSWORD=\$(cat /run/secrets/$secret_name); psql -X -h 127.0.0.1 -U $db_role -d $own_db -Atc 'select marker from g7_acceptance.volume_probe where id=1'" >"$EVIDENCE/replacement-$db_role-db-readback.txt"
+    [[ $(cat "$EVIDENCE/replacement-$db_role-db-readback.txt") == "$RUN_ID" ]] || { echo "$db_role database marker lost on replacement" >&2; exit 70; }
+  done
+  curl --fail --silent --show-error "http://127.0.0.1:$API_PORT/openapi.json" -o "$EVIDENCE/replacement-uvm-api-openapi.json"
+  docker exec "$CONTAINER" curl --fail --silent --show-error http://127.0.0.1:8081/login \
+    >"$EVIDENCE/replacement-ce-login.html"
+  docker exec "$CONTAINER" curl --fail --silent --show-error --max-time 15 -u "admin:$CE_ADMIN_PASSWORD" \
+    'http://127.0.0.1:8081/api/v2/findings/?limit=100' >"$EVIDENCE/ce-sentinel-findings-after.json"
+  python3 - "$EVIDENCE/ce-sentinel-findings-after.json" "$EVIDENCE/ce-sentinel-finding-id.txt" <<'CEASSERT'
+import json,sys
+results=json.load(open(sys.argv[1],encoding='utf-8')).get('results',[])
+found=[f for f in results if f.get('unique_id_from_tool')=='g7-container-boundary-sentinel-v1']
+if len(found)!=1 or str(found[0]['id'])!=open(sys.argv[2]).read().strip():
+ raise SystemExit('CE public API finding sentinel was not retained across container replacement')
+CEASSERT
+  FINDING_ID=$(cat "$EVIDENCE/ce-sentinel-finding-id.txt"); MEDIA_ID=$(cat "$EVIDENCE/ce-sentinel-media-id.txt")
+  docker exec "$CONTAINER" curl --fail --silent --show-error --max-time 15 -u "admin:$CE_ADMIN_PASSWORD" \
+    "http://127.0.0.1:8081/api/v2/findings/$FINDING_ID/files/download/$MEDIA_ID/" >"$EVIDENCE/ce-media-after.txt"
+  cmp "$EVIDENCE/ce-media-before.txt" "$EVIDENCE/ce-media-after.txt"
+  chmod 0600 "$EVIDENCE/ce-sentinel-findings-after.json" "$EVIDENCE/ce-media-after.txt"
+  uv run python "$ROOT/tools/g7_container_webhook_probe.py" --container "$CONTAINER" \
+    --origin "http://127.0.0.1:$API_PORT" --secret-file "$RUN_ROOT/secrets/github_webhook_secret_v1" \
+    --evidence "$EVIDENCE" --replay-of "$EVIDENCE/webhook-public-admission.json" \
+    >"$EVIDENCE/webhook-replay.stdout" 2>"$EVIDENCE/webhook-replay.stderr"
+  API_PID=$(docker exec "$CONTAINER" cat /run/uvm-g7/pid-api)
+  docker exec "$CONTAINER" kill -KILL "$API_PID" >"$EVIDENCE/critical-child-fault.stdout" 2>"$EVIDENCE/critical-child-fault.stderr"
+  ready_withdrawn=0
+  for _ in $(seq 1 90); do
+    if docker exec "$CONTAINER" test ! -f /run/uvm-g7/ready >/dev/null 2>&1; then ready_withdrawn=1; break; fi
+    sleep 1
+  done
+  (( ready_withdrawn )) || { echo 'readiness marker remained after critical child loss' >&2; exit 70; }
+  printf 'readiness_marker_withdrawn=%s\n' "$ready_withdrawn" >"$EVIDENCE/critical-child-readiness.txt"
+  if docker exec "$CONTAINER" /usr/local/bin/uvm-g7-healthcheck >"$EVIDENCE/critical-child-healthcheck.stdout" 2>"$EVIDENCE/critical-child-healthcheck.stderr"; then
+    echo 'healthcheck remained successful after readiness withdrawal' >&2; exit 70;
+  fi
+  printf 'healthcheck_success_after_withdrawal=0\n' >>"$EVIDENCE/critical-child-readiness.txt"
+  for _ in $(seq 1 240); do
+    state=$(docker inspect "$CONTAINER" --format '{{.State.Status}}' 2>/dev/null || true)
+    [[ $state != running ]] && break
+    sleep 1
+  done
+  docker inspect "$CONTAINER" --format '{{.State.Status}} {{.State.ExitCode}} {{.State.Health.Status}}' >"$EVIDENCE/critical-child-container-state.txt"
+  docker logs "$CONTAINER" 2>&1 | sed -E 's/([[:alnum:]_-]*(PASSWORD|SECRET|TOKEN|KEY)[[:alnum:]_-]*[:=][[:space:]]*)[^[:space:]]+/\1[redacted]/Ig' >"$EVIDENCE/critical-child-redacted.log" || true
+  grep -q G7_CRITICAL_CHILD_EXITED "$EVIDENCE/critical-child-redacted.log" || { echo 'supervisor did not report critical-child loss' >&2; exit 70; }
+  grep -q G7_STOP_PHASE "$EVIDENCE/critical-child-redacted.log" || { echo 'ordered child cleanup was not recorded' >&2; exit 70; }
+  grep -q '^exited ' "$EVIDENCE/critical-child-container-state.txt" || { echo 'container supervisor did not fail after critical child loss' >&2; exit 70; }
+  echo 'G7 container boundaries: startup, DB role isolation, unauthorized peer fences, volume replacement and critical-child failure observed' | tee "$EVIDENCE/result.txt"
+  exit 0
 fi
 if (( ! DATA_PRESERVATION_MODE && ! EXCEPTION_WARNING_MODE && ! EXCEPTION_SLA_MODE )) && [[ $OIDC_PROXY_PORT != 9000 ]]; then
   cat >"$RUN_ROOT/host/oidc-container-loopback-proxy.py" <<'PYCONTAINERPROXY'

@@ -477,6 +477,14 @@ if (( ! CONTAINER_BOUNDARIES_MODE )); then
     "process.stdout.write(require('./ui/node_modules/playwright/package.json').version+'\\n')" \
     >"$EVIDENCE/playwright-version.txt"
 fi
+if (( CONTAINER_BOUNDARIES_MODE )); then
+  command -v node >/dev/null || { echo 'Node.js is required for the fake-OIDC protected API acceptance' >&2; exit 69; }
+  [[ -x /home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome ]] || {
+    echo 'Playwright Chromium 1234 executable unavailable for the fake-OIDC journey' >&2; exit 69;
+  }
+  node -e "const p=require('./ui/node_modules/playwright/package.json'); if(p.version!=='1.61.1')process.exit(1); process.stdout.write(p.version+'\\n')" \
+    >"$EVIDENCE/playwright-version.txt"
+fi
 df -Pk /tmp >"$EVIDENCE/tmp-space-preflight.txt"
 for port in "$API_PORT" "$RECOVERY_PORT" "$OIDC_PROXY_PORT" "$OIDC_PORT" "$ANCHOR_PORT"; do
   if (echo >/dev/tcp/127.0.0.1/$port) >/dev/null 2>&1; then
@@ -487,13 +495,19 @@ printf 'api_loopback_port=%s\nrecovery_loopback_port=%s\nanchor_loopback_port=%s
   "$API_PORT" "$RECOVERY_PORT" "$ANCHOR_PORT" "$OIDC_HOST" "$OIDC_PROXY_PORT" "$OIDC_PORT" >"$EVIDENCE/runtime-ports.txt"
 docker version --format 'engine={{.Server.Version}}' >"$EVIDENCE/docker-version.txt"
 DOCKER_BRIDGE_SUBNET=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Subnet}}')
+DOCKER_BRIDGE_GATEWAY=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')
 python3 - "$DOCKER_BRIDGE_SUBNET" <<'CHECKBRIDGE'
 import ipaddress,sys
 network=ipaddress.ip_network(sys.argv[1], strict=True)
 if network.version != 4 or not network.is_private:
     raise SystemExit('default Docker bridge must be a private IPv4 subnet')
 CHECKBRIDGE
-printf 'docker_bridge_subnet=%s\n' "$DOCKER_BRIDGE_SUBNET" >>"$EVIDENCE/runtime-ports.txt"
+python3 - "$DOCKER_BRIDGE_SUBNET" "$DOCKER_BRIDGE_GATEWAY" <<'CHECKGATEWAY'
+import ipaddress,sys
+network=ipaddress.ip_network(sys.argv[1],strict=True); gateway=ipaddress.ip_address(sys.argv[2])
+if gateway not in network: raise SystemExit('Docker bridge gateway is outside its private subnet')
+CHECKGATEWAY
+printf 'docker_bridge_subnet=%s\ndocker_bridge_gateway=%s\n' "$DOCKER_BRIDGE_SUBNET" "$DOCKER_BRIDGE_GATEWAY" >>"$EVIDENCE/runtime-ports.txt"
 for name in "$CONTAINER" "$ANCHOR_CONTAINER"; do
   if docker inspect "$name" >/dev/null 2>&1; then
     echo "owned journey container name already exists: $name" >&2; exit 69
@@ -516,11 +530,12 @@ if (( DATA_PRESERVATION_MODE )); then FIXTURE_OIDC_ARGS=(--oidc-port "$OIDC_PORT
 if (( EXCEPTION_WARNING_MODE )); then FIXTURE_OIDC_ARGS+=(--exception-warning); fi
 if (( EXCEPTION_SLA_MODE )); then FIXTURE_OIDC_ARGS+=(--exception-sla); fi
 if (( IDENTITY_MODE )); then FIXTURE_OIDC_ARGS+=(--identity-access-ownership); fi
+if (( CONTAINER_BOUNDARIES_MODE )); then FIXTURE_OIDC_ARGS+=(--identity-access-ownership); fi
 if (( UPGRADE_ROLLBACK_MODE )); then FIXTURE_OIDC_ARGS+=(--heartbeat-max-age-seconds 900); fi
 uv run python "$ROOT/tools/g7_observer_fixture.py" create --root "$RUN_ROOT" --image "$IMAGE" \
   "${FIXTURE_OIDC_ARGS[@]}" --api-port "$API_PORT" --recovery-port "$RECOVERY_PORT"
 if (( CONTAINER_BOUNDARIES_MODE )); then
-  python3 - "$RUN_ROOT/secrets" "$RUN_ROOT/container.env" <<'WEBHOOKFIXTURE'
+  python3 - "$RUN_ROOT/secrets" "$RUN_ROOT/container.env" "$DOCKER_BRIDGE_GATEWAY" <<'WEBHOOKFIXTURE'
 import secrets,sys
 from pathlib import Path
 root=Path(sys.argv[1]); env=Path(sys.argv[2])
@@ -531,8 +546,12 @@ for name,value in (("github_webhook_secret_v1",secrets.token_hex(32)),
 with env.open("a",encoding="utf-8") as stream:
     stream.write("UVM_GITHUB_WEBHOOK_SECRET_DIR=/run/uvm-g7-secrets\n")
     stream.write("UVM_GITHUB_WEBHOOK_SECRET_VERSION_FILE=/run/uvm-g7-secrets/github_webhook_secret_version\n")
+    stream.write("UVM_INGRESS_ALLOWED_PEER_CIDRS=127.0.0.1/32," + sys.argv[3] + "/32\n")
+    stream.write("UVM_INGRESS_ALLOWED_HOSTS=127.0.0.1\n")
 WEBHOOKFIXTURE
   chmod 0600 "$RUN_ROOT/container.env"
+  printf 'configured_peer_cidrs=127.0.0.1/32,%s/32\nconfigured_exact_hosts=127.0.0.1\nforwarded_headers_are_not_authority=true\n' \
+    "$DOCKER_BRIDGE_GATEWAY" >"$EVIDENCE/private-ingress-policy.txt"
 fi
 if (( EXCEPTION_WARNING_MODE || EXCEPTION_SLA_MODE )); then
   WARNING_NOW=$(date -u +'%Y-%m-%dT%H:%M:%S+00:00')
@@ -788,6 +807,16 @@ if (( ! ready )); then
   exit 70
 fi
 if (( CONTAINER_BOUNDARIES_MODE )); then
+  uv run python "$ROOT/tools/g7_observer_fixture.py" link-actor --root "$RUN_ROOT" \
+    --container "$CONTAINER" >"$EVIDENCE/oidc-link.stdout" 2>"$EVIDENCE/oidc-link.stderr"
+  uv run python "$ROOT/tools/g7_observer_fixture.py" link-identity-user --root "$RUN_ROOT" \
+    --container "$CONTAINER" >"$EVIDENCE/oidc-user-link.stdout" 2>"$EVIDENCE/oidc-user-link.stderr"
+  uv run python "$ROOT/tools/g7_observer_fixture.py" link-identity-deny-user --root "$RUN_ROOT" \
+    --container "$CONTAINER" >"$EVIDENCE/oidc-denied-user-link.stdout" 2>"$EVIDENCE/oidc-denied-user-link.stderr"
+  python3 "$ROOT/tools/g7_container_marker_probe.py" --self-test-dir "$RUN_ROOT/marker-negative-cases" \
+    >"$EVIDENCE/marker-negative-classifiers.json"
+  printf 'g7-container-boundary:%s\n' "$RUN_ID" >"$RUN_ROOT/marker.expected"
+  chmod 0600 "$RUN_ROOT/marker.expected"
   printf '%s\n' "$CONTAINER_ID" >"$EVIDENCE/initial-container-id.txt"
   docker inspect "$CONTAINER_ID" --format '{{.Id}} {{.Image}} {{json .Mounts}} {{json .NetworkSettings.Ports}}' \
     >"$EVIDENCE/initial-runtime-binding.txt"
@@ -797,6 +826,58 @@ if (( CONTAINER_BOUNDARIES_MODE )); then
   docker exec "$CONTAINER" /bin/bash -lc 'pgrep -u postgres -x postgres >/dev/null && pgrep -u valkey -x valkey-server >/dev/null && for n in recovery-control oidc-provider oidc-sync-api api ce-web ce-worker ce-beat; do f=/run/uvm-g7/pid-$n; [[ -s $f ]] || { [[ $n == oidc-sync-api ]] && continue; exit 1; }; p=$(cat "$f"); kill -0 "$p"; done; echo required_processes=present' \
     >"$EVIDENCE/required-process-identities.txt"
   docker exec "$CONTAINER" /usr/local/bin/uvm-g7-healthcheck >"$EVIDENCE/initial-healthcheck.txt"
+  ingress_boundary_probe() {
+    local phase=$1 peer_result host_status admin_status
+    curl --fail --silent --show-error "http://127.0.0.1:$API_PORT/openapi.json" \
+      -o "$EVIDENCE/$phase-intended-ingress-openapi.json"
+    host_status=$(curl --silent --show-error -o "$EVIDENCE/$phase-wrong-host-denial.json" -w '%{http_code}' \
+      -H 'Host: evil.invalid' -H 'X-Forwarded-Host: 127.0.0.1' -H 'X-Forwarded-For: 127.0.0.1' \
+      "http://127.0.0.1:$API_PORT/api/v1/auth/session")
+    printf '%s\n' "$host_status" >"$EVIDENCE/$phase-wrong-host-status.txt"
+    python3 - "$host_status" "$EVIDENCE/$phase-wrong-host-denial.json" <<'HOSTDENIAL'
+import json,sys
+body=json.load(open(sys.argv[2],encoding='utf-8'))
+if sys.argv[1]!='421' or body.get('error',{}).get('code')!='ingress_host_forbidden':
+ raise SystemExit('wrong Host was not rejected by exact private-ingress Host policy')
+HOSTDENIAL
+    admin_status=$(curl --silent --show-error -o "$EVIDENCE/$phase-public-admin-denial.json" -w '%{http_code}' \
+      -X POST -H 'Host: 127.0.0.1' -H 'Content-Type: application/json' --data '{}' \
+      "http://127.0.0.1:$API_PORT/api/v1/auth/operator/links")
+    printf '%s\n' "$admin_status" >"$EVIDENCE/$phase-public-admin-status.txt"
+    python3 - "$admin_status" "$EVIDENCE/$phase-public-admin-denial.json" <<'ADMINNEGATIVE'
+import json,sys
+body=json.load(open(sys.argv[2],encoding='utf-8'))
+if sys.argv[1] not in {'401','403'} or body.get('error',{}).get('code','').startswith('ingress_'):
+ raise SystemExit('public operator-link endpoint was not denied by application authentication')
+ADMINNEGATIVE
+    peer_result=$(docker run --rm --cidfile "$EVIDENCE/$phase-unauthorized-peer-container-id.txt" \
+      --network bridge --label "uvm.g7.run-id=$RUN_ID" --entrypoint python3 "$IMAGE" -c 'import http.client,json,socket,ssl,sys; host=sys.argv[1]; result={};
+for port in (8000,9000,5432,6379,8081):
+ try: socket.create_connection((host,port),timeout=2).close(); result[str(port)]=True
+ except OSError: result[str(port)]=False
+try:
+ h=http.client.HTTPConnection(host,8000,timeout=4); h.request("GET","/api/v1/auth/session",headers={"Host":"127.0.0.1","X-Forwarded-For":"172.17.0.1","X-Forwarded-Host":"127.0.0.1"}); r=h.getresponse(); raw=r.read(); body=json.loads(raw); result["peer_http_status"]=r.status; result["peer_error_code"]=body.get("error",{}).get("code"); h.close()
+except Exception as e: result["peer_probe_error"]=type(e).__name__
+try: socket.create_connection((host,8002),timeout=2).close(); result["8002_tcp_listener"]=True
+except OSError: result["8002_tcp_listener"]=False
+try:
+ c=ssl._create_unverified_context(); h=http.client.HTTPSConnection(host,8002,context=c,timeout=4); h.request("GET","/recovery-control/v1/g7-local/desired"); r=h.getresponse(); result["8002_unauthorized_route_status"]=r.status; r.read(); h.close()
+except (OSError,ssl.SSLError) as e: result["8002_unauthorized_route_error"]=type(e).__name__
+print(json.dumps(result,sort_keys=True))' "$BOUNDARY_PEER_IP")
+    printf '%s\n' "$peer_result" >"$EVIDENCE/$phase-unauthorized-peer-probes.json"
+    python3 - "$EVIDENCE/$phase-unauthorized-peer-probes.json" <<'PEERDENIAL'
+import json,sys
+result=json.load(open(sys.argv[1],encoding='utf-8'))
+if (result.get('8000') is not True or result.get('9000') is not True
+ or result.get('5432') is not False or result.get('6379') is not False
+ or result.get('8081') is not False or result.get('peer_http_status')!=403
+ or result.get('peer_error_code')!='ingress_peer_forbidden'
+ or result.get('8002_tcp_listener') is not True
+ or result.get('8002_unauthorized_route_status') not in (401,None)
+ and result.get('8002_unauthorized_route_error') not in ('ConnectionResetError','SSLError')):
+ raise SystemExit('bridge peer did not receive exact private-peer denial while listeners were present')
+PEERDENIAL
+  }
   for db_role in uvm_app ce_app; do
     if [[ $db_role == uvm_app ]]; then own_db=uvm; other_db=defectdojo; secret_name=uvm_db_password; else own_db=defectdojo; other_db=uvm; secret_name=ce_db_password; fi
     docker exec "$CONTAINER" /bin/bash -lc "export PGPASSWORD=\$(cat /run/secrets/$secret_name); psql -X -h 127.0.0.1 -U $db_role -d $own_db -v ON_ERROR_STOP=1 -c 'CREATE SCHEMA IF NOT EXISTS g7_acceptance AUTHORIZATION $db_role' -c 'CREATE TABLE IF NOT EXISTS g7_acceptance.volume_probe (id integer primary key, marker text not null)' -c \"INSERT INTO g7_acceptance.volume_probe VALUES (1, '$RUN_ID') ON CONFLICT (id) DO UPDATE SET marker=EXCLUDED.marker\"" >"$EVIDENCE/$db_role-own-db-write.txt" 2>"$EVIDENCE/$db_role-own-db-write.stderr"
@@ -814,7 +895,12 @@ if (( CONTAINER_BOUNDARIES_MODE )); then
       chmod 0600 "$EVIDENCE/$db_role-other-db-$access.stdout" "$EVIDENCE/$db_role-other-db-$access.stderr"
     done
   done
-  docker exec "$CONTAINER" /bin/bash -lc 'printf "%s\n" "$HOSTNAME" > /app/media/g7-container-boundary-marker; printf "%s\n" "$HOSTNAME" > /opt/uvm/state/g7-container-boundary-marker' >"$EVIDENCE/volume-markers.stdout"
+  docker cp "$RUN_ROOT/marker.expected" "$CONTAINER:/tmp/g7-container-boundary-marker.expected" >/dev/null
+  docker exec "$CONTAINER" /bin/bash -lc 'set -euo pipefail; install -m 0600 /tmp/g7-container-boundary-marker.expected /app/media/g7-container-boundary-marker; install -m 0600 /tmp/g7-container-boundary-marker.expected /opt/uvm/state/g7-container-boundary-marker' \
+    >"$EVIDENCE/volume-markers.stdout"
+  docker exec -i "$CONTAINER" python3 - /tmp/g7-container-boundary-marker.expected \
+    /app/media/g7-container-boundary-marker /opt/uvm/state/g7-container-boundary-marker \
+    <"$ROOT/tools/g7_container_marker_probe.py" >"$EVIDENCE/volume-marker-before.json"
   # Create the CE product/finding and attached media through DefectDojo's API.
   CE_ADMIN_PASSWORD=$(cat "$RUN_ROOT/secrets/ce_admin_password")
   python3 - "$RUN_ROOT/ce-container-sentinel.json" <<'CEBOUNDARY'
@@ -852,28 +938,20 @@ CEBOUNDARY
     "$EVIDENCE/ce-sentinel-media-descriptor.json" "$EVIDENCE/ce-media-before.txt"
   docker exec -u postgres "$CONTAINER" psql -X -U postgres -d postgres -Atc "select datname,datallowconn from pg_database where datname in ('uvm','defectdojo') order by datname" >"$EVIDENCE/database-listener-boundary.txt"
   BOUNDARY_PEER_IP=$(docker inspect "$CONTAINER" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+  docker exec "$CONTAINER" /bin/bash -lc 'printf "%s\n" "$UVM_INGRESS_ALLOWED_PEER_CIDRS" "$UVM_INGRESS_ALLOWED_HOSTS"' \
+    >"$EVIDENCE/runtime-private-ingress-values.txt"
+  cmp "$EVIDENCE/runtime-private-ingress-values.txt" <(printf '127.0.0.1/32,%s/32\n127.0.0.1\n' "$DOCKER_BRIDGE_GATEWAY")
   printf 'network=default-private-bridge\npeer_target_container_id=%s\npeer_target_ip=%s\nprobe_ports=8000,8002,9000,5432,6379,8081\n' \
     "$CONTAINER_ID" "$BOUNDARY_PEER_IP" >"$EVIDENCE/unauthorized-peer-target.txt"
+  ingress_boundary_probe before
+  CHROMIUM_EXECUTABLE_PATH=/home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome \
+    node "$ROOT/tools/g7_container_authenticated_probe.mjs" --origin "http://127.0.0.1:$API_PORT" \
+      --fixture-root "$RUN_ROOT" --evidence "$EVIDENCE" --phase before \
+      >"$EVIDENCE/container-auth-before.stdout" 2>"$EVIDENCE/container-auth-before.stderr"
   uv run python "$ROOT/tools/g7_container_webhook_probe.py" --container "$CONTAINER" \
     --origin "http://127.0.0.1:$API_PORT" --secret-file "$RUN_ROOT/secrets/github_webhook_secret_v1" \
     --evidence "$EVIDENCE" >"$EVIDENCE/webhook-probe.stdout" 2>"$EVIDENCE/webhook-probe.stderr"
-  PEER_RESULT=$(docker run --rm --cidfile "$EVIDENCE/unauthorized-peer-container-id.txt" --network bridge \
-    --label "uvm.g7.run-id=$RUN_ID" --entrypoint python3 "$IMAGE" -c 'import http.client,socket,ssl,sys; host=sys.argv[1]; result={};
-for port in (8000,9000,5432,6379,8081):
- try: socket.create_connection((host,port),timeout=2).close(); result[str(port)]=True
- except OSError: result[str(port)]=False
-try:
- h=http.client.HTTPConnection(host,8000,timeout=4); h.request("GET","/api/v1/assessment/access-groups"); r=h.getresponse(); result["8000_unauthenticated_api_status"]=r.status; r.read(); h.close()
-except OSError as e: result["8000_unauthenticated_api_error"]=type(e).__name__
-try: socket.create_connection((host,8002),timeout=2).close(); result["8002_tcp_listener"]=True
-except OSError: result["8002_tcp_listener"]=False
-try:
- c=ssl._create_unverified_context(); c.check_hostname=False; h=http.client.HTTPSConnection(host,8002,context=c,timeout=4); h.request("GET","/recovery-control/v1/g7-local/desired"); r=h.getresponse(); result["8002_unauthorized_route_status"]=r.status; r.read(); h.close()
-except (OSError,ssl.SSLError) as e: result["8002_unauthorized_route_error"]=type(e).__name__
-print(result)' "$BOUNDARY_PEER_IP")
-  printf 'invocation=docker run --rm --network bridge --entrypoint python3 <pinned-image> %s\nports=8000,9000,5432,6379,8081,8002\nresult=%s\n' \
-    "$BOUNDARY_PEER_IP" "$PEER_RESULT" >"$EVIDENCE/unauthorized-bridge-probes.txt"
-  [[ $PEER_RESULT == *"'8000': True"* && $PEER_RESULT == *"'8000_unauthenticated_api_status': 401"* && $PEER_RESULT == *"'9000': True"* && $PEER_RESULT == *"'5432': False"* && $PEER_RESULT == *"'6379': False"* && $PEER_RESULT == *"'8081': False"* && $PEER_RESULT == *"'8002_tcp_listener': True"* && ( $PEER_RESULT == *"'8002_unauthorized_route_status': 401"* || $PEER_RESULT == *"'8002_unauthorized_route_error': 'ConnectionResetError'"* || $PEER_RESULT == *"'8002_unauthorized_route_error': 'SSLError'"* ) ]] || { echo 'the intended UVM/OIDC ingress or restricted internal route did not match its expected peer policy' >&2; exit 70; }
+  cp "$EVIDENCE/before-unauthorized-peer-probes.json" "$EVIDENCE/unauthorized-bridge-probes.json"
   docker stop --time 30 "$CONTAINER" >"$EVIDENCE/pre-replacement-stop.txt"
   docker rm "$CONTAINER" >"$EVIDENCE/pre-replacement-remove.txt"
   STARTED_CONTAINER=0
@@ -892,8 +970,11 @@ print(result)' "$BOUNDARY_PEER_IP")
   done
   [[ $(docker inspect "$CONTAINER" --format '{{.State.Health.Status}}') == healthy ]] || { echo 'replacement did not become healthy' >&2; exit 70; }
   [[ $(cat "$EVIDENCE/initial-container-id.txt") != "$CONTAINER_ID" ]] || { echo 'container identity did not change on replacement' >&2; exit 70; }
-  docker exec "$CONTAINER" /bin/bash -lc "test \"\$(cat /app/media/g7-container-boundary-marker)\" = \"\$(cat /opt/uvm/state/g7-container-boundary-marker)\"" \
-    >"$EVIDENCE/replacement-volume-readback.txt"
+  docker cp "$RUN_ROOT/marker.expected" "$CONTAINER:/tmp/g7-container-boundary-marker.expected" >/dev/null
+  docker exec -i "$CONTAINER" python3 - /tmp/g7-container-boundary-marker.expected \
+    /app/media/g7-container-boundary-marker /opt/uvm/state/g7-container-boundary-marker \
+    <"$ROOT/tools/g7_container_marker_probe.py" >"$EVIDENCE/volume-marker-after.json"
+  cp "$EVIDENCE/volume-marker-after.json" "$EVIDENCE/replacement-volume-readback.txt"
   for db_role in uvm_app ce_app; do
     if [[ $db_role == uvm_app ]]; then own_db=uvm; secret_name=uvm_db_password; else own_db=defectdojo; secret_name=ce_db_password; fi
     docker exec "$CONTAINER" /bin/bash -lc "export PGPASSWORD=\$(cat /run/secrets/$secret_name); psql -X -h 127.0.0.1 -U $db_role -d $own_db -Atc 'select marker from g7_acceptance.volume_probe where id=1'" >"$EVIDENCE/replacement-$db_role-db-readback.txt"
@@ -916,6 +997,12 @@ CEASSERT
     "http://127.0.0.1:8081/api/v2/findings/$FINDING_ID/files/download/$MEDIA_ID/" >"$EVIDENCE/ce-media-after.txt"
   cmp "$EVIDENCE/ce-media-before.txt" "$EVIDENCE/ce-media-after.txt"
   chmod 0600 "$EVIDENCE/ce-sentinel-findings-after.json" "$EVIDENCE/ce-media-after.txt"
+  BOUNDARY_PEER_IP=$(docker inspect "$CONTAINER" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+  ingress_boundary_probe after
+  CHROMIUM_EXECUTABLE_PATH=/home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome \
+    node "$ROOT/tools/g7_container_authenticated_probe.mjs" --origin "http://127.0.0.1:$API_PORT" \
+      --fixture-root "$RUN_ROOT" --evidence "$EVIDENCE" --phase after \
+      >"$EVIDENCE/container-auth-after.stdout" 2>"$EVIDENCE/container-auth-after.stderr"
   uv run python "$ROOT/tools/g7_container_webhook_probe.py" --container "$CONTAINER" \
     --origin "http://127.0.0.1:$API_PORT" --secret-file "$RUN_ROOT/secrets/github_webhook_secret_v1" \
     --evidence "$EVIDENCE" --replay-of "$EVIDENCE/webhook-public-admission.json" \

@@ -866,19 +866,9 @@ try:
 except (OSError,ssl.SSLError) as e: result["8002_unauthorized_route_error"]=type(e).__name__
 print(json.dumps(result,sort_keys=True))' "$BOUNDARY_PEER_IP" "$DOCKER_BRIDGE_GATEWAY")
     printf '%s\n' "$peer_result" >"$EVIDENCE/$phase-unauthorized-peer-probes.json"
-    python3 - "$EVIDENCE/$phase-unauthorized-peer-probes.json" "$DOCKER_BRIDGE_GATEWAY" <<'PEERDENIAL'
-import json,sys
-result=json.load(open(sys.argv[1],encoding='utf-8'))
-if (result.get('8000') is not True or result.get('9000') is not True
- or result.get('5432') is not False or result.get('6379') is not False
- or result.get('8081') is not False or result.get('peer_http_status')!=403
- or result.get('peer_error_code')!='ingress_peer_forbidden'
- or result.get('peer_source_ip') in {'127.0.0.1',sys.argv[2]}
- or result.get('8002_tcp_listener') is not True
- or result.get('8002_unauthorized_route_status') not in (401,None)
- and result.get('8002_unauthorized_route_error') not in ('ConnectionResetError','SSLError')):
- raise SystemExit('bridge peer did not receive exact private-peer denial while listeners were present')
-PEERDENIAL
+    python3 "$ROOT/tools/g7_container_peer_classifier.py" \
+      "$EVIDENCE/$phase-unauthorized-peer-probes.json" "$DOCKER_BRIDGE_GATEWAY" \
+      >"$EVIDENCE/$phase-peer-boundary-classifier.json"
     printf 'phase=%s\npeer_container_id=%s\npeer_source_ip=%s\ntarget_container_id=%s\ntarget_container_ip=%s\nnetwork_namespace=docker-bridge\nports=8000,8002,9000,5432,6379,8081\n' \
       "$phase" "$(cat "$EVIDENCE/$phase-unauthorized-peer-container-id.txt")" \
       "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["peer_source_ip"])' "$EVIDENCE/$phase-unauthorized-peer-probes.json")" \

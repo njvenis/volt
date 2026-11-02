@@ -852,6 +852,7 @@ if sys.argv[1] not in {'401','403'} or body.get('error',{}).get('code','').start
 ADMINNEGATIVE
     peer_result=$(docker run --rm --cidfile "$EVIDENCE/$phase-unauthorized-peer-container-id.txt" \
       --network bridge --label "uvm.g7.run-id=$RUN_ID" --entrypoint python3 "$IMAGE" -c 'import http.client,json,socket,ssl,sys; host=sys.argv[1]; result={};
+s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.connect((host,8000)); result["peer_source_ip"]=s.getsockname()[0]; s.close()
 for port in (8000,9000,5432,6379,8081):
  try: socket.create_connection((host,port),timeout=2).close(); result[str(port)]=True
  except OSError: result[str(port)]=False
@@ -863,20 +864,25 @@ except OSError: result["8002_tcp_listener"]=False
 try:
  c=ssl._create_unverified_context(); h=http.client.HTTPSConnection(host,8002,context=c,timeout=4); h.request("GET","/recovery-control/v1/g7-local/desired"); r=h.getresponse(); result["8002_unauthorized_route_status"]=r.status; r.read(); h.close()
 except (OSError,ssl.SSLError) as e: result["8002_unauthorized_route_error"]=type(e).__name__
-print(json.dumps(result,sort_keys=True))' "$BOUNDARY_PEER_IP")
+print(json.dumps(result,sort_keys=True))' "$BOUNDARY_PEER_IP" "$DOCKER_BRIDGE_GATEWAY")
     printf '%s\n' "$peer_result" >"$EVIDENCE/$phase-unauthorized-peer-probes.json"
-    python3 - "$EVIDENCE/$phase-unauthorized-peer-probes.json" <<'PEERDENIAL'
+    python3 - "$EVIDENCE/$phase-unauthorized-peer-probes.json" "$DOCKER_BRIDGE_GATEWAY" <<'PEERDENIAL'
 import json,sys
 result=json.load(open(sys.argv[1],encoding='utf-8'))
 if (result.get('8000') is not True or result.get('9000') is not True
  or result.get('5432') is not False or result.get('6379') is not False
  or result.get('8081') is not False or result.get('peer_http_status')!=403
  or result.get('peer_error_code')!='ingress_peer_forbidden'
+ or result.get('peer_source_ip') in {'127.0.0.1',sys.argv[2]}
  or result.get('8002_tcp_listener') is not True
  or result.get('8002_unauthorized_route_status') not in (401,None)
  and result.get('8002_unauthorized_route_error') not in ('ConnectionResetError','SSLError')):
  raise SystemExit('bridge peer did not receive exact private-peer denial while listeners were present')
 PEERDENIAL
+    printf 'phase=%s\npeer_container_id=%s\npeer_source_ip=%s\ntarget_container_id=%s\ntarget_container_ip=%s\nnetwork_namespace=docker-bridge\nports=8000,8002,9000,5432,6379,8081\n' \
+      "$phase" "$(cat "$EVIDENCE/$phase-unauthorized-peer-container-id.txt")" \
+      "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["peer_source_ip"])' "$EVIDENCE/$phase-unauthorized-peer-probes.json")" \
+      "$CONTAINER_ID" "$BOUNDARY_PEER_IP" >"$EVIDENCE/$phase-peer-boundary-identity.txt"
   }
   for db_role in uvm_app ce_app; do
     if [[ $db_role == uvm_app ]]; then own_db=uvm; other_db=defectdojo; secret_name=uvm_db_password; else own_db=defectdojo; other_db=uvm; secret_name=ce_db_password; fi

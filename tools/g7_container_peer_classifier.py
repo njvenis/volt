@@ -11,11 +11,17 @@ from typing import Any
 
 def validate_peer_result(result: dict[str, Any], bridge_gateway: str) -> dict[str, Any]:
     """Raise ValueError unless every expected peer boundary observation holds."""
-    recovery_denied = (
-        result.get("8002_unauthorized_route_status") == 401
-        or result.get("8002_unauthorized_route_error")
-        in ("ConnectionResetError", "SSLError")
-    )
+    if "8002_unauthorized_route_status" in result:
+        # The probe records status before reading the response body. Once a
+        # status exists, a later read/reset failure cannot change its meaning.
+        recovery_denied = (
+            type(result["8002_unauthorized_route_status"]) is int
+            and result["8002_unauthorized_route_status"] == 401
+        )
+        recovery_denial = "http_401" if recovery_denied else None
+    else:
+        recovery_denial = result.get("8002_unauthorized_route_error")
+        recovery_denied = recovery_denial in ("ConnectionResetError", "SSLError")
     if (
         result.get("8000") is not True
         or result.get("9000") is not True
@@ -34,11 +40,7 @@ def validate_peer_result(result: dict[str, Any], bridge_gateway: str) -> dict[st
     return {
         "accepted": True,
         "peer_source_ip": result["peer_source_ip"],
-        "recovery_denial": (
-            "http_401"
-            if result.get("8002_unauthorized_route_status") == 401
-            else result["8002_unauthorized_route_error"]
-        ),
+        "recovery_denial": recovery_denial,
     }
 
 

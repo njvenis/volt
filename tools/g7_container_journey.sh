@@ -3,8 +3,8 @@ set -Eeuo pipefail
 umask 077
 
 MODE=${1-}
-if [[ ( $MODE != --observer-settings-only && $MODE != --backup-recovery-only && $MODE != --upgrade-rollback-only && $MODE != --data-preservation-audit-only && $MODE != --exception-warning-only && $MODE != --exception-sla-only && $MODE != --identity-access-ownership-only && $MODE != --container-boundaries-only ) || $# != 1 ]]; then
-  echo 'usage: G7_EVIDENCE_DIR=/absolute/path bash tools/g7_container_journey.sh (--observer-settings-only|--backup-recovery-only|--upgrade-rollback-only|--data-preservation-audit-only|--exception-warning-only|--exception-sla-only|--identity-access-ownership-only|--container-boundaries-only)' >&2
+if [[ ( $MODE != --observer-settings-only && $MODE != --backup-recovery-only && $MODE != --upgrade-rollback-only && $MODE != --data-preservation-audit-only && $MODE != --exception-warning-only && $MODE != --exception-sla-only && $MODE != --identity-access-ownership-only && $MODE != --container-boundaries-only && $MODE != --operational-alerts-only ) || $# != 1 ]]; then
+  echo 'usage: G7_EVIDENCE_DIR=/absolute/path bash tools/g7_container_journey.sh (--observer-settings-only|--backup-recovery-only|--upgrade-rollback-only|--data-preservation-audit-only|--exception-warning-only|--exception-sla-only|--identity-access-ownership-only|--container-boundaries-only|--operational-alerts-only)' >&2
   exit 64
 fi
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -60,6 +60,12 @@ elif (( IDENTITY_MODE )); then
   IMAGE="volt-g7-identity-dev:$RUN_ID"
   CANDIDATE_IMAGE=$IMAGE
   RESTORE_IMAGE=$IMAGE
+elif [[ $MODE == --operational-alerts-only ]]; then
+  CONTAINER="volt-g7-operational-app-$RUN_ID"
+  ANCHOR_CONTAINER="volt-g7-operational-anchor-$RUN_ID"
+  IMAGE="volt-g7-operational-dev:$RUN_ID"
+  CANDIDATE_IMAGE=$IMAGE
+  RESTORE_IMAGE=$IMAGE
 elif (( DATA_PRESERVATION_MODE )); then
   CONTAINER="volt-g7-preservation-app-$RUN_ID"
   ANCHOR_CONTAINER="volt-g7-preservation-anchor-$RUN_ID"
@@ -83,7 +89,7 @@ IS_BACKUP_MODE=0
 if [[ $MODE == --backup-recovery-only || $MODE == --upgrade-rollback-only ]]; then IS_BACKUP_MODE=1; fi
 SCHEMA_MODE_ARGS=()
 if (( UPGRADE_ROLLBACK_MODE )); then SCHEMA_MODE_ARGS=(--env UVM_G7_SCHEMA_MODE=upgrade-verification); fi
-if (( ! DATA_PRESERVATION_MODE && ! EXCEPTION_WARNING_MODE && ! EXCEPTION_SLA_MODE && ! IDENTITY_MODE )); then
+if (( ! DATA_PRESERVATION_MODE && ! EXCEPTION_WARNING_MODE && ! EXCEPTION_SLA_MODE && ! IDENTITY_MODE )) && [[ $MODE != --operational-alerts-only ]]; then
   CONTAINER=volt-g7-observer-journey
   ANCHOR_CONTAINER=volt-g7-observer-anchor
 fi
@@ -774,6 +780,10 @@ preservation_role_denial host-update host_ro audit_anchor \
 STARTED_CONTAINER=1
 APP_EXTRA_MOUNTS=()
 APP_EXTRA_PORTS=()
+APP_EXTRA_LABELS=()
+if [[ $MODE == --operational-alerts-only ]]; then
+  APP_EXTRA_LABELS+=(--label uvm.deployment_id=g7-local --label "uvm.run_id=$RUN_ID")
+fi
 if (( EXCEPTION_WARNING_MODE )); then
   APP_EXTRA_MOUNTS+=(--mount "type=bind,src=$RUN_ROOT/warning,dst=/run/uvm-g7-warning-fixture")
 fi
@@ -781,6 +791,7 @@ if (( EXCEPTION_WARNING_MODE || EXCEPTION_SLA_MODE )); then
   APP_EXTRA_PORTS+=( -p "127.0.0.1:$OIDC_PROXY_PORT:$OIDC_PROXY_PORT" )
 fi
 docker run -d --name "$CONTAINER" --label uvm.g7.observer-journey=true --label "uvm.g7.run-id=$RUN_ID" \
+  "${APP_EXTRA_LABELS[@]}" \
   -p "127.0.0.1:$API_PORT:8000" -p "127.0.0.1:$RECOVERY_PORT:8002" -p "127.0.0.1:$OIDC_PORT:9000" \
   "${APP_EXTRA_PORTS[@]}" \
   "${PRESERVATION_MOUNTS[@]}" \
@@ -1640,6 +1651,7 @@ fi
 uv run python "$ROOT/tools/g7_observer_fixture.py" host-config --root "$RUN_ROOT" --image "$IMAGE" \
   --anchor-port "$ANCHOR_PORT" --api-port "$API_PORT" --recovery-port "$RECOVERY_PORT" \
   --oidc-port "$OIDC_PROXY_PORT" \
+  $([[ $MODE == --operational-alerts-only ]] && printf '%s %s' '--sink-id' 'g7-siem') \
   "${HOST_OIDC_INTERNAL_ARGS[@]}" \
   >"$EVIDENCE/host-config.stdout" 2>"$EVIDENCE/host-config.stderr"
 if (( IDENTITY_MODE )); then
@@ -1662,6 +1674,7 @@ if (( IDENTITY_MODE )); then
   exit 0
 fi
 PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
+CHROMIUM_EXECUTABLE_PATH=/home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome \
   node "$ROOT/tools/g7_observer_journey_browser.mjs" \
   --origin "http://127.0.0.1:$API_PORT" --evidence "$EVIDENCE" --fixture-root "$RUN_ROOT" \
   --app-container "$CONTAINER" \
@@ -1670,6 +1683,7 @@ PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
   $([[ $EXCEPTION_WARNING_MODE == 1 ]] && printf '%s' '--exception-warning-only') \
   $([[ $EXCEPTION_SLA_MODE == 1 ]] && printf '%s %s' '--oidc-proxy-port' "$OIDC_PROXY_PORT") \
   $([[ $EXCEPTION_SLA_MODE == 1 ]] && printf '%s' '--exception-sla-only') \
+  $([[ $MODE == --operational-alerts-only ]] && printf '%s' '--operational-alerts-only') \
   >"$EVIDENCE/browser-journey.stdout" 2>"$EVIDENCE/browser-journey.stderr"
 
 # Retain backup settings only in backup recovery modes. Observer and warning
@@ -2728,7 +2742,9 @@ PHDUR
   fi
   exit 0
 fi
-if (( EXCEPTION_SLA_MODE )); then
+if [[ $MODE == --operational-alerts-only ]]; then
+  echo 'G7 host operational alert app-down send, causal recovery and public catchup journey completed' | tee "$EVIDENCE/result.txt"
+elif (( EXCEPTION_SLA_MODE )); then
   echo 'G7 authoritative ingestion and exception SLA pause/resume public journey completed' | tee "$EVIDENCE/result.txt"
 elif (( EXCEPTION_WARNING_MODE )); then
   echo 'G7 exception warning public lifecycle journey completed' | tee "$EVIDENCE/result.txt"

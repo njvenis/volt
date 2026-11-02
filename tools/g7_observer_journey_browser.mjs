@@ -19,6 +19,7 @@ const appContainer = process.argv.includes('--app-container') ? arg('--app-conta
 const backupSeedOnly = process.argv.includes('--backup-seed-only');
 const warningOnly = process.argv.includes('--exception-warning-only');
 const exceptionSlaOnly = process.argv.includes('--exception-sla-only');
+const operationalAlertsOnly = process.argv.includes('--operational-alerts-only');
 const oidcProxyPort = warningOnly || exceptionSlaOnly ? arg('--oidc-proxy-port') : null;
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname),'..');
 const utcMicros=value=>{
@@ -27,7 +28,9 @@ const utcMicros=value=>{
   return Number.isFinite(millis)?millis*1000+Number(fraction||0):NaN;
 };
 await mkdir(evidence, {recursive:true, mode:0o700});
-const browser = await chromium.launch({headless:true});
+const browser = await chromium.launch({headless:true,
+  ...(process.env.CHROMIUM_EXECUTABLE_PATH
+    ? {executablePath:process.env.CHROMIUM_EXECUTABLE_PATH} : {})});
 const context = await browser.newContext({viewport:{width:1440,height:1000},deviceScaleFactor:1});
 const page = await context.newPage();
 const counts = {bootstrap:0, nativeActivation:0, accessGroup:0, membership:0,
@@ -170,7 +173,7 @@ async function waitForHostStatus(status,timeoutMs=60000) {
 async function waitForContainerHealthy(timeoutMs=90000) {
   const until=Date.now()+timeoutMs;
   while(Date.now()<until){
-    try { if(docker(['inspect','--format','{{.State.Health.Status}}','volt-g7-observer-journey'])==='healthy')return; } catch {}
+    try { if(docker(['inspect','--format','{{.State.Health.Status}}',appContainer])==='healthy')return; } catch {}
     await page.waitForTimeout(1000);
   }
   throw new Error('disposable application did not recover to healthy after restart');
@@ -251,7 +254,8 @@ try {
   const catalogue=await api('/api/v1/assessment/administration/catalogue');
   if(catalogue.status!==200)throw new Error(`administration catalogue failed with ${catalogue.status}`);
   const grant=catalogue.body.caller.grantable;
-  const groupId=warningOnly?'00000000-0000-4000-8000-000000000024':crypto.randomUUID();
+  const groupId=warningOnly?'00000000-0000-4000-8000-000000000024':
+    operationalAlertsOnly?'00000000-0000-4000-8000-000000000042':crypto.randomUUID();
   const scope={group_ids:['*'],source_families:['*'],environments:['*'],service_ids:['*'],membership_mode:'all_current'};
   const limits={...grant.limits,allowed_environments:grant.limits.allowed_environments?.length?grant.limits.allowed_environments:['*'],
     allowed_service_ids:grant.limits.allowed_service_ids?.length?grant.limits.allowed_service_ids:['*']};
@@ -2083,6 +2087,35 @@ try {
       ||after3.body.effective?.revision!==3||after3.body.desired?.values?.request_deadline_seconds!==values1.request_deadline_seconds)
     throw new Error('rollback did not create and apply revision 3 from revision 1');
 
+  // Run while the authenticated policy and applied host timing are present,
+  // before browser fault cases create intentional unknown anchor telemetry.
+  // Recovery still uses the strict post-restart serial observer barrier.
+  if(operationalAlertsOnly){
+    // The fixture deliberately logged out and refreshed the OIDC session
+    // earlier; persist that current cookie rather than the pre-refresh state.
+    await context.storageState({path:path.join(evidence,'recovery-auth-state.json')});
+    const args=['run','python','tools/g7_operational_alert_journey.py','--container',appContainer,
+      '--run-id',path.basename(fixtureRoot).split('.').at(-1),
+      '--api-port',new URL(origin).port,'--root',fixtureRoot,'--evidence',evidence,
+      '--browser-state',path.join(evidence,'recovery-auth-state.json')];
+    try{
+      const stdout=execFileSync('uv',args,{cwd:repoRoot,encoding:'utf8',maxBuffer:1024*1024,
+        env:{...process.env,UV_CACHE_DIR:process.env.UV_CACHE_DIR??'/tmp/volt-g7-uv-cache',
+          G7_OPERATIONAL_RECIPIENT_GROUP_ID:groupId}});
+      await writeFile(path.join(evidence,'operational-alert-journey.stdout'),stdout,{mode:0o600});
+    }catch(error){
+      await writeFile(path.join(evidence,'operational-alert-journey.stdout'),error.stdout??'',{mode:0o600});
+      await writeFile(path.join(evidence,'operational-alert-journey.stderr'),error.stderr??String(error),{mode:0o600});
+      throw error;
+    }
+    await waitForContainerHealthy();
+    await page.goto(origin+'/#administration?section=observer-timing&deployment_id=g7-local',
+      {waitUntil:'domcontentloaded',timeout:30000});
+    await page.getByRole('heading',{name:'Observer timing'}).waitFor({timeout:20000});
+    await page.getByLabel('Observation interval').waitFor({timeout:15000});
+    await page.getByRole('button',{name:'Refresh observer state'}).click();
+  }
+
   // Restart each independent host process and prove its persisted work and
   // consumer progress survive process replacement.
   const hostStateDir=path.join(fixtureRoot,'host','state');
@@ -2112,7 +2145,7 @@ try {
   const progressPath=path.join(fixtureRoot,'scheduler','progress.json');
   const stallMarker='/run/uvm-g7-scheduler/test-stall';
   const lastProgress=JSON.parse(await readFile(progressPath,'utf8'));
-  docker(['exec','volt-g7-observer-journey','touch',stallMarker]);
+  docker(['exec',appContainer,'touch',stallMarker]);
   try {
     await page.waitForTimeout(18000);
     let observerState=JSON.parse(await readFile(observerStatePath,'utf8'));
@@ -2120,7 +2153,7 @@ try {
       throw new Error('real scheduler stall did not fail host scheduler progress health');
     counts.schedulerStall=1;
     counts.healthFaults.push('real_scheduler_stall');
-    docker(['exec','-u','0','volt-g7-observer-journey','rm','-f','/run/uvm-g7-scheduler/progress.json']);
+    docker(['exec','-u','0',appContainer,'rm','-f','/run/uvm-g7-scheduler/progress.json']);
     observerState=await waitForJson(observerStatePath,state=>state.scheduler?.status==='stale_or_nonprogressing'
       &&state.scheduler?.loop_sequence===null);
     counts.healthFaults.push('missing_scheduler_progress');
@@ -2130,14 +2163,14 @@ try {
       monotonic_ns:Number(lastProgress.monotonic_ns)+120_000_000_000};
     const futurePath=path.join('/tmp',`volt-g7-progress-future-${crypto.randomUUID()}.json`);
     await writeFile(futurePath,JSON.stringify(future)+'\n',{mode:0o644});
-    docker(['cp',futurePath,'volt-g7-observer-journey:/tmp/progress.future.json']);
-    docker(['exec','-u','0','volt-g7-observer-journey','cp','/tmp/progress.future.json','/run/uvm-g7-scheduler/progress.json']);
-    docker(['exec','-u','0','volt-g7-observer-journey','chmod','0644','/run/uvm-g7-scheduler/progress.json']);
+    docker(['cp',futurePath,`${appContainer}:/tmp/progress.future.json`]);
+    docker(['exec','-u','0',appContainer,'cp','/tmp/progress.future.json','/run/uvm-g7-scheduler/progress.json']);
+    docker(['exec','-u','0',appContainer,'chmod','0644','/run/uvm-g7-scheduler/progress.json']);
     await unlink(futurePath);
     const futureState=await waitForJson(observerStatePath,state=>state.scheduler?.sample_age_seconds<0);
     if(futureState.scheduler.status!=='stale_or_nonprogressing')throw new Error('future scheduler heartbeat was accepted');
     counts.healthFaults.push('future_scheduler_progress');
-  } finally { docker(['exec','volt-g7-observer-journey','rm','-f',stallMarker]); }
+  } finally { docker(['exec',appContainer,'rm','-f',stallMarker]); }
   await waitForJson(observerStatePath,state=>state.scheduler?.status==='healthy',25000);
   counts.healthFaults.push('scheduler_recovered');
 
@@ -2181,7 +2214,18 @@ try {
   hostControl('controller','stop');
   await fillValues(values4);
   await page.getByRole('button',{name:'Save timing settings'}).click();
-  await page.getByText(/Desired revision 4 recorded/).waitFor({timeout:15000});
+  try {
+    await page.getByText(/Desired revision 4 recorded/).waitFor({timeout:15000});
+  } catch(error) {
+    const readback=await api('/api/v1/operations/observer-settings/g7-local');
+    await writeFile(path.join(evidence,'revision4-save-diagnostics.json'),JSON.stringify({
+      api_status:readback.status,desired:readback.body?.desired,revisions:readback.body?.revisions,
+      notices:await page.locator('.observer-notice').allInnerTexts().catch(()=>[]),
+      state:await page.locator('.observer-state').innerText().catch(()=>null),
+      alert_text:await page.locator('[role=alert]').allInnerTexts().catch(()=>[])
+    },null,2)+'\n',{mode:0o600});
+    throw error;
+  }
   hostControl('controller','tighten-policy');
   const failed=await waitForHostStatus('failed',30000);
   if(failed.body.desired?.revision!==4||failed.body.effective?.revision!==3
@@ -2254,14 +2298,14 @@ try {
     throw new Error('revision 7 was not pending before whole-container outage');
   const beforeOutageObserver=JSON.parse(await readFile(observerStatePath,'utf8'));
   const beforeOutageSupervisor=JSON.parse(await readFile(supervisorStatePath,'utf8'));
-  docker(['stop','volt-g7-observer-journey']);
+  docker(['stop',appContainer]);
   await waitForJson(observerStatePath,state=>state.loop_sequence>beforeOutageObserver.loop_sequence,15000);
   await waitForJson(supervisorStatePath,state=>state.loop_sequence>beforeOutageSupervisor.loop_sequence,15000);
   const outageReadbacks=await Promise.all(['observer-readback.json','supervisor-readback.json'].map(async name=>
     JSON.parse(await readFile(path.join(hostStateDir,name),'utf8'))));
   if(outageReadbacks.some(item=>item.revision!==6))
     throw new Error('host consumers did not preserve revision 6 through the app outage');
-  docker(['start','volt-g7-observer-journey']);
+  docker(['start',appContainer]);
   await waitForContainerHealthy(150000);
   await page.reload({waitUntil:'domcontentloaded'});
   hostControl('controller','resume');
@@ -2334,7 +2378,12 @@ try {
   // API and verify the deployment becomes non-disclosing to that actor.
   const groups=await api('/api/v1/assessment/access-groups');
   const group=groups.body.items?.find(item=>item.display_name==='Disposable observer operators');
-  if(!group)throw new Error('disposable access group missing during grant-withdrawal check');
+  if(!group){
+    await writeFile(path.join(evidence,'grant-withdrawal-group-diagnostics.json'),JSON.stringify({
+      status:groups.status,body:groups.body
+    },null,2)+'\n',{mode:0o600});
+    throw new Error('disposable access group missing during grant-withdrawal check');
+  }
   const cat=await api('/api/v1/assessment/administration/catalogue');
   const withdrawn=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
     command_id:crypto.randomUUID(),target_id:zero,action:'access_group.membership.set',membership_ids:[],

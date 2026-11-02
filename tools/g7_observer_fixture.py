@@ -37,7 +37,7 @@ def run(args: argparse.Namespace) -> None:
         names = ("uvm_db_password", "ce_db_password", "ce_admin_password",
             "ce_secret_key", "ce_credential_key", "uvm_cursor_secret",
             "oidc_client_secret", "oidc_sync_secret", "oidc_operator_secret",
-            "g7_preservation_source_token")
+            "g7_preservation_source_token", "g7_operational_alert_token")
         values = {name: secrets.token_urlsafe(32) for name in names}
         for name, value in values.items():
             path = secrets_dir / name
@@ -135,7 +135,10 @@ def run(args: argparse.Namespace) -> None:
                         "deployment_scopes": ["g7-local"]},
                     {"grant_id": "g7-source-deployment-audit-export-v1", "action": "audit.export.deployment",
                         "source_scopes": [{"source_family": g7_scope[0], "source_account_id": g7_scope[1], "scope_key": g7_scope[2]}],
-                        "deployment_scopes": ["g7-local"]}]}}
+                        "deployment_scopes": ["g7-local"]}]},
+            "g7-host-operational-alert-sender": {"token": values["g7_operational_alert_token"],
+                "scopes": [], "actor_kind": "service", "origin": "g7-host-operational-alert-sender",
+                "role_ids": ["integration.incident.submit"]}}
         env = {
             "UVM_AUTH_MODE": "oidc", "UVM_OIDC_CONFIG": json.dumps(config, separators=(",", ":")),
             "UVM_OIDC_FIXTURE_SUBJECT": "g7-actor-subject",
@@ -402,7 +405,7 @@ def run(args: argparse.Namespace) -> None:
             "bounds": bounds, "freshness_seconds": 60, "poll_seconds": 1,
             "controller_request_timeout_seconds": 8, "apply_deadline_seconds": 35,
             "endpoint": f"http://127.0.0.1:{args.api_port}", "token_file": str(token_file),
-            "sink_id": "g7-local-fixture", "anchor_read_dsn":
+            "sink_id": args.sink_id or "g7-local-fixture", "anchor_read_dsn":
                 "postgresql://host_ro:" + password + "@127.0.0.1:" + str(args.anchor_port) + "/audit_anchor",
             "signing_key_file": str(host_dir / "ed25519.pem"),
             "state_dir": str(state), "active_file": str(state / "active.json"),
@@ -627,6 +630,7 @@ def main() -> int:
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--image", default="")
     parser.add_argument("--anchor-port", type=int, default=5433)
+    parser.add_argument("--sink-id")
     parser.add_argument("--container")
     parser.add_argument("--oidc-port", type=int, default=9000)
     parser.add_argument("--oidc-host", default="127.0.0.1")

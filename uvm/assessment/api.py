@@ -5067,9 +5067,12 @@ def install_assessment_routes(app: FastAPI) -> None:
             _error(403, "incident_ingestion_forbidden",
                    "A dedicated incident submission service is required")
         from uvm.assessment.incidents import (IncidentConflict, IncidentForbidden,
-                                              ingest_transition)
+            ingest_transition, verified_future_skew)
         try:
-            return ingest_transition(engine, principal, payload, now=now_utc())
+            request_now = now_utc()
+            future_skew = verified_future_skew(engine, payload.get("deployment_id"), request_now)
+            return ingest_transition(engine, principal, payload, now=request_now,
+                future_skew_seconds=future_skew)
         except IncidentForbidden:
             _error(403, "incident_ingestion_forbidden", "Current incident service binding is required")
         except IncidentConflict as exc:
@@ -5087,10 +5090,18 @@ def install_assessment_routes(app: FastAPI) -> None:
             _error(403, "incident_ingestion_forbidden",
                    "A dedicated incident submission service is required")
         from uvm.assessment.incidents import (IncidentConflict, IncidentForbidden,
-                                              ingest_delivery_outcome)
+            ingest_delivery_outcome, verified_future_skew)
         try:
+            request_now = now_utc()
+            with engine.begin() as connection:
+                transition = connection.execute(sa.select(g7_incident_transitions.c.deployment_id)
+                    .where(g7_incident_transitions.c.transition_id == transition_id)).scalar_one_or_none()
+            if transition is None:
+                _error(403, "incident_ingestion_forbidden",
+                    "Delivery attempt is not bound to a projected transition")
+            future_skew = verified_future_skew(engine, transition, request_now)
             return ingest_delivery_outcome(engine, principal, transition_id, payload,
-                now=now_utc())
+                now=request_now, future_skew_seconds=future_skew)
         except IncidentForbidden:
             _error(403, "incident_ingestion_forbidden",
                    "Current incident service binding is required")

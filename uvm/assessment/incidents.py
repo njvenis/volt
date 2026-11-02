@@ -1,9 +1,10 @@
 """Serialised, idempotent projection of external G7 incident transitions."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import re
 import uuid
 
 import sqlalchemy as sa
@@ -13,11 +14,16 @@ from uvm.persistence.incident_schema import (g7_incident_service_bindings,
     g7_incident_streams, g7_incident_transitions,
     g7_incident_projection_receipts, g7_incident_notification_intents,
     g7_incident_notification_attempts)
+from uvm.persistence.observer_settings_schema import (
+    g7_observer_settings_revisions, g7_observer_status)
 
 UTC = timezone.utc
+DELIVERY_FAILURES = frozenset({"provider_rejected", "rate_limited", "provider_unavailable",
+    "transport_pre_submit", "response_invalid", "submission_uncertain",
+    "local_persistence_failed"})
 INCIDENT_CONDITIONS = frozenset({"source_integrity", "siem_integrity", "siem_export",
     "container_availability", "observer_heartbeat", "notification_failure",
-    "incident_projection"})
+    "incident_projection", "host_sender_health"})
 TRANSITION_FIELDS = frozenset({"schema_version", "deployment_id", "subject_id",
     "condition", "transition_id", "transition_sequence", "predecessor_id",
     "episode_id", "opening_transition_id", "episode_generation", "transition_kind",
@@ -45,11 +51,13 @@ def _uuid(value, label, *, nullable=False):
     return value
 
 
-def _timestamp(value, label, *, nullable=False):
+def _timestamp(value, label, *, nullable=False, canonical_utc=False):
     if nullable and value is None:
         return None
     if not isinstance(value, str):
         raise IncidentConflict(f"{label} must be an RFC 3339 timestamp")
+    if canonical_utc and not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z", value):
+        raise IncidentConflict(f"{label} must use canonical UTC microsecond precision")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
@@ -65,15 +73,52 @@ def _digest(payload: dict) -> str:
     return hashlib.sha256(body).hexdigest()
 
 
-def _validate_shape(payload: dict, now: datetime) -> dict:
+def verified_future_skew(engine: Engine, deployment_id: str, now: datetime) -> int:
+    """Read only the exact deployment's still-current, verified applied timing revision."""
+    from uvm.operations.observer_settings import validate_timing_values, ObserverSettingsError
+    with engine.begin() as connection:
+        status = connection.execute(sa.select(g7_observer_status).where(
+            g7_observer_status.c.deployment_id == deployment_id)).mappings().first()
+        if (status is None or status["application_status"] != "applied"
+                or type(status["effective_revision"]) is not int
+                or not status["effective_digest"] or not status["host_policy_revision"]
+                or not status["host_policy_digest"] or not status["host_policy_key_id"]
+                or not isinstance(status["host_policy_bounds"], dict)
+                or status["host_policy_observed_at"] is None
+                or type(status["host_policy_freshness_seconds"]) is not int
+                or status["host_policy_freshness_seconds"] <= 0):
+            raise IncidentConflict("exact deployment timing authority is unavailable")
+        observed = status["host_policy_observed_at"]
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=UTC)
+        age = (now.astimezone(UTC) - observed.astimezone(UTC)).total_seconds()
+        if age < 0 or age > status["host_policy_freshness_seconds"]:
+            raise IncidentConflict("exact deployment host timing authority is stale")
+        revision = connection.execute(sa.select(g7_observer_settings_revisions).where(
+            g7_observer_settings_revisions.c.deployment_id == deployment_id,
+            g7_observer_settings_revisions.c.revision == status["effective_revision"]
+        )).mappings().first()
+        if revision is None or revision["digest"] != status["effective_digest"]:
+            raise IncidentConflict("exact deployment effective timing revision is inconsistent")
+        try:
+            values = validate_timing_values(revision["values"], status["host_policy_bounds"])
+        except (ObserverSettingsError, TypeError) as exc:
+            raise IncidentConflict("exact deployment timing bounds are invalid") from exc
+        if hashlib.sha256(json.dumps(values, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest() != revision["digest"]:
+            raise IncidentConflict("exact deployment timing digest is inconsistent")
+        return values["maximum_future_skew_seconds"]
+
+
+def _validate_shape(payload: dict, now: datetime, future_skew_seconds: int = 0) -> dict:
     if not isinstance(payload, dict) or set(payload) != TRANSITION_FIELDS:
         raise IncidentConflict("incident transition fields do not match g7-operations-incident/v1")
-    if payload["schema_version"] != 1:
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
         raise IncidentConflict("unsupported incident transition schema")
     for name in ("deployment_id", "subject_id", "condition", "producer_id"):
         if not isinstance(payload[name], str) or not payload[name] or len(payload[name]) > 200:
             raise IncidentConflict(f"{name} is invalid")
-    if payload["condition"] not in INCIDENT_CONDITIONS:
+    if not isinstance(payload["condition"], str) or payload["condition"] not in INCIDENT_CONDITIONS:
         raise IncidentConflict("incident condition is not registered")
     for name in ("transition_id", "episode_id", "opening_transition_id"):
         _uuid(payload[name], name)
@@ -84,7 +129,8 @@ def _validate_shape(payload: dict, now: datetime) -> dict:
         raise IncidentConflict("episode_generation must be a positive integer")
     if type(payload["configuration_revision"]) is not int or payload["configuration_revision"] < 1:
         raise IncidentConflict("configuration_revision must be a positive integer")
-    if payload["transition_kind"] not in {"opened", "observed", "recovered"}:
+    if (not isinstance(payload["transition_kind"], str)
+            or payload["transition_kind"] not in {"opened", "observed", "recovered"}):
         raise IncidentConflict("transition_kind is invalid")
     if (not isinstance(payload["evidence_refs"], list) or len(payload["evidence_refs"]) > 100
             or any(not isinstance(item, str) or not item or len(item) > 1000
@@ -93,7 +139,9 @@ def _validate_shape(payload: dict, now: datetime) -> dict:
     first = _timestamp(payload["first_detected_at"], "first_detected_at")
     observed = _timestamp(payload["observed_at"], "observed_at")
     recovered = _timestamp(payload["recovered_at"], "recovered_at", nullable=True)
-    if first > observed or observed > now.astimezone(UTC) or (recovered and recovered < observed):
+    latest = now.astimezone(UTC) + timedelta(seconds=future_skew_seconds)
+    if (first > observed or observed > latest
+            or (recovered and (recovered < observed or recovered > latest))):
         raise IncidentConflict("incident timestamps are not causally ordered or are future-dated")
     if (payload["transition_kind"] == "recovered") != (recovered is not None):
         raise IncidentConflict("only a recovery transition may carry recovered_at")
@@ -107,10 +155,12 @@ def _lock_key(deployment_id: str, subject_id: str, condition: str) -> int:
 
 
 def ingest_transition(engine: Engine, principal_id: str, payload: dict, *,
-                      now: datetime | None = None) -> dict:
+                      now: datetime | None = None, future_skew_seconds: int = 0) -> dict:
     """Apply one authorised contiguous journal transition in a single commit."""
     now = (now or datetime.now(UTC)).astimezone(UTC)
-    event = _validate_shape(payload, now)
+    if type(future_skew_seconds) is not int or not 0 <= future_skew_seconds <= 86400:
+        raise IncidentConflict("trusted future timestamp allowance is invalid")
+    event = _validate_shape(payload, now, future_skew_seconds)
     stream_key = (event["deployment_id"], event["subject_id"], event["condition"])
     with engine.begin() as connection:
         if connection.dialect.name == "postgresql":
@@ -145,6 +195,15 @@ def ingest_transition(engine: Engine, principal_id: str, payload: dict, *,
         if event["transition_sequence"] != expected_sequence or event["predecessor_id"] != last_id:
             raise IncidentConflict(f"retryable stream gap: expected sequence {expected_sequence} "
                                    f"after {last_id or 'null'}")
+        if stream is not None and last_id is not None:
+            prior_transition = connection.execute(sa.select(g7_incident_transitions.c.observed_at)
+                .where(g7_incident_transitions.c.transition_id == last_id)).scalar_one_or_none()
+            if prior_transition is None:
+                raise IncidentConflict("current stream head has no retained predecessor")
+            if prior_transition.tzinfo is None:
+                prior_transition = prior_transition.replace(tzinfo=UTC)
+            if event["observed_at"] <= prior_transition.astimezone(UTC):
+                raise IncidentConflict("new transition observation must follow its predecessor")
 
         kind = event["transition_kind"]
         if stream is None:
@@ -239,23 +298,36 @@ def ingest_transition(engine: Engine, principal_id: str, payload: dict, *,
 
 
 def ingest_delivery_outcome(engine: Engine, principal_id: str, transition_id: str,
-                            payload: dict, *, now: datetime | None = None) -> dict:
+                            payload: dict, *, now: datetime | None = None,
+                            future_skew_seconds: int = 0) -> dict:
     """Project an external delivery attempt into the UVM intent idempotently."""
     if not isinstance(payload, dict) or set(payload) != {
             "schema_version", "attempt_id", "outcome", "attempted_at",
-            "receipt_ref", "failure_detail"} or payload["schema_version"] != 1:
+            "receipt_ref", "failure_detail"} or type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
         raise IncidentConflict("delivery outcome fields do not match g7-incident-delivery/v1")
     _uuid(transition_id, "transition_id")
     _uuid(payload["attempt_id"], "attempt_id")
-    if payload["outcome"] not in {"accepted", "failed", "uncertain"}:
+    if not isinstance(payload["outcome"], str) or payload["outcome"] not in {"accepted", "failed", "uncertain"}:
         raise IncidentConflict("delivery outcome is invalid")
-    attempted_at = _timestamp(payload["attempted_at"], "attempted_at")
-    if not all(payload[key] is None or isinstance(payload[key], str)
-               for key in ("receipt_ref", "failure_detail")):
-        raise IncidentConflict("delivery references must be strings or null")
+    attempted_at = _timestamp(payload["attempted_at"], "attempted_at", canonical_utc=True)
+    if type(future_skew_seconds) is not int or not 0 <= future_skew_seconds <= 86400:
+        raise IncidentConflict("trusted future timestamp allowance is invalid")
+    receipt = payload["receipt_ref"]
+    failure = payload["failure_detail"]
+    if receipt is not None and (not isinstance(receipt, str)
+            or re.fullmatch(r"[A-Za-z0-9._:-]{1,256}", receipt) is None):
+        raise IncidentConflict("receipt_ref must be a sanitized opaque provider reference")
+    if failure is not None and (not isinstance(failure, str) or failure not in DELIVERY_FAILURES):
+        raise IncidentConflict("failure_detail is not a registered failure code")
     if payload["outcome"] == "accepted" and not payload["receipt_ref"]:
         raise IncidentConflict("accepted delivery requires its provider receipt")
+    if payload["outcome"] == "accepted" and failure is not None:
+        raise IncidentConflict("accepted delivery cannot include a failure code")
+    if payload["outcome"] != "accepted" and failure is None:
+        raise IncidentConflict("failed or uncertain delivery requires a failure code")
     now = (now or datetime.now(UTC)).astimezone(UTC)
+    if attempted_at > now + timedelta(seconds=future_skew_seconds):
+        raise IncidentConflict("attempted_at exceeds the current verified future-skew bound")
     with engine.begin() as connection:
         transition = connection.execute(sa.select(g7_incident_transitions).where(
             g7_incident_transitions.c.transition_id == transition_id).with_for_update()
@@ -278,7 +350,15 @@ def ingest_delivery_outcome(engine: Engine, principal_id: str, transition_id: st
             "attempted_at": attempted_at, "receipt_ref": payload["receipt_ref"],
             "failure_detail": payload["failure_detail"]}
         if prior:
-            if any(prior[key] != value for key, value in values.items()):
+            prior_attempted = prior["attempted_at"]
+            if prior_attempted.tzinfo is None:
+                prior_attempted = prior_attempted.replace(tzinfo=UTC)
+            same = (prior["transition_id"] == transition_id
+                and prior["outcome"] == values["outcome"]
+                and prior_attempted.astimezone(UTC) == attempted_at
+                and prior["receipt_ref"] == values["receipt_ref"]
+                and prior["failure_detail"] == values["failure_detail"])
+            if not same:
                 raise IncidentConflict("delivery attempt ID is already bound to different content")
             return {"schema_version": 1, "status": "projected",
                 "transition_id": transition_id, "attempt_id": payload["attempt_id"],
@@ -288,6 +368,23 @@ def ingest_delivery_outcome(engine: Engine, principal_id: str, transition_id: st
             .with_for_update()).mappings().first()
         if intent is None:
             raise IncidentConflict("notification intent is missing")
+        transition_observed = transition["observed_at"]
+        if transition_observed.tzinfo is None:
+            transition_observed = transition_observed.replace(tzinfo=UTC)
+        if attempted_at < transition_observed.astimezone(UTC):
+            raise IncidentConflict("attempted_at precedes its incident transition")
+        if intent["state"] in {"accepted", "uncertain"}:
+            raise IncidentConflict("terminal delivery outcome cannot be overwritten")
+        previous = connection.execute(sa.select(g7_incident_notification_attempts).where(
+            g7_incident_notification_attempts.c.transition_id == transition_id)
+            .order_by(g7_incident_notification_attempts.c.attempted_at.desc())
+            .with_for_update()).mappings().first()
+        if previous is not None:
+            previous_at = previous["attempted_at"]
+            if previous_at.tzinfo is None:
+                previous_at = previous_at.replace(tzinfo=UTC)
+            if attempted_at <= previous_at.astimezone(UTC):
+                raise IncidentConflict("new delivery attempt must be strictly later than every prior attempt")
         connection.execute(g7_incident_notification_attempts.insert().values(
             attempt_id=payload["attempt_id"], **values))
         latest = connection.execute(sa.select(g7_incident_notification_attempts.c.attempt_id)

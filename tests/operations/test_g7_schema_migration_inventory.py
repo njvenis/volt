@@ -5,6 +5,7 @@ import unittest
 
 from tools.g7_inventory_expectation import (
     _append_0061_byte_size_expectation,
+    _append_0062_context_expectation,
     _migration_table_record,
 )
 from uvm.persistence.backup_settings_schema import g7_backup_projection_evidence
@@ -14,6 +15,23 @@ from sqlalchemy import DateTime
 
 
 class G7SchemaMigrationInventoryTests(unittest.TestCase):
+    def test_0062_adds_empty_context_without_changing_legacy_rule_fields(self):
+        payload = {"rule_id":"r", "rule_version":1,
+            "workload_match_fields":["provisioning_key"],
+            "verified_asset_locator":True, "definition_digest":"a"*64}
+        table = {"columns":[{"name":name,"primary_key":name in {"rule_id","rule_version"}}
+                    for name in payload],
+            "constraints":{"checks":[]}, "rows":[{"key":["r",1],
+                "payload":copy.deepcopy(payload), "payload_sha256":digest(payload)}], "row_count":1}
+        expected = _append_0062_context_expectation(table)
+        row = expected["rows"][0]["payload"]
+        self.assertEqual({key:value for key,value in row.items()
+            if key != "workload_context_fields"}, payload)
+        self.assertEqual(row["workload_context_fields"], [])
+        self.assertEqual(expected["rows"][0]["payload_sha256"], digest(row))
+        self.assertIn({"name":"workload_context_fields", "type":"JSONB",
+            "nullable":False, "primary_key":False, "default":"'[]'::jsonb"}, expected["columns"])
+
     def test_0059_projection_table_expectation_comes_from_migration_metadata(self):
         expected = _migration_table_record(g7_backup_projection_evidence)
         self.assertEqual([column["name"] for column in expected["columns"]], [

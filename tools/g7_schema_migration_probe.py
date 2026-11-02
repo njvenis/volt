@@ -22,14 +22,145 @@ def run(command: list[str], evidence: Path, name: str, *, stdin: bytes | None = 
     return result
 
 
+def probe_0061_to_0062(image: str, run_id: str, root: Path) -> dict:
+    """Exercise only the new column against a source-shaped 0061 PostgreSQL DB."""
+    name = f"volt-g7-context-migration-{run_id}"
+    created = False
+    command = ["docker", "run", "-d", "--name", name,
+        "--label", "uvm.g7.schema-migration-probe=true",
+        "--label", f"uvm.g7.run-id={run_id}", "--network", "none",
+        "--tmpfs", "/var/lib/postgresql/data:rw,uid=101,gid=103,mode=0700",
+        "--user", "postgres", "--entrypoint", "/bin/bash", image, "-lc",
+        "if [[ ! -s /var/lib/postgresql/data/PG_VERSION ]]; then "
+        "/usr/lib/postgresql/18/bin/initdb -D /var/lib/postgresql/data "
+        "--auth-local=trust --auth-host=trust --encoding=UTF8 --locale=C >/dev/null; fi; "
+        "exec /usr/lib/postgresql/18/bin/postgres -D /var/lib/postgresql/data -h 127.0.0.1 -p 5432"]
+    try:
+        started = run(command, root, "context-postgres-container-start")
+        created = True
+        for attempt in range(90):
+            ready = subprocess.run(["docker", "exec", name,
+                "/usr/lib/postgresql/18/bin/pg_isready", "-h", "127.0.0.1", "-p", "5432"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if ready.returncode == 0:
+                (root / "context-postgres-ready.stdout").write_bytes(ready.stdout)
+                break
+        else:
+            logs = subprocess.run(["docker", "logs", name], stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, check=False)
+            (root / "context-postgres-startup.log").write_bytes(logs.stdout)
+            raise RuntimeError("disposable 0061→0062 probe PostgreSQL did not become ready")
+        sql = b"""CREATE DATABASE g7_context_base;
+\\connect g7_context_base
+CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY);
+INSERT INTO alembic_version VALUES ('0061');
+CREATE TABLE identity_rule_definitions (
+ rule_id VARCHAR NOT NULL, rule_version INTEGER NOT NULL,
+ workload_match_fields JSONB NOT NULL, verified_asset_locator BOOLEAN NOT NULL,
+ definition_digest VARCHAR NOT NULL, authorisation_decision_id UUID,
+ created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+ CONSTRAINT pk_identity_rule_definitions PRIMARY KEY (rule_id, rule_version),
+ CONSTRAINT uq_identity_rule_definition UNIQUE (rule_id, rule_version));
+INSERT INTO identity_rule_definitions VALUES
+ ('legacy-rule',1,'["provisioning_key","service_key"]'::jsonb,true,
+  '6ad174d7105acaa0f301671dad9bf4ff93e5b51a31dee5ebc84764959faf9bf7',NULL,
+  '2026-10-29T12:00:00Z');
+"""
+        run(["docker", "exec", "-i", name, "/usr/bin/psql", "-X", "-v",
+            "ON_ERROR_STOP=1", "-U", "postgres", "-h", "127.0.0.1", "-d", "postgres"],
+            root, "context-baseline-setup", stdin=sql)
+        query = """SELECT json_build_object(
+ 'heads',(SELECT array_agg(version_num ORDER BY version_num) FROM alembic_version),
+ 'context_column',EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public'
+  AND table_name='identity_rule_definitions' AND column_name='workload_context_fields'),
+ 'row',(SELECT to_jsonb(r) FROM identity_rule_definitions r WHERE rule_id='legacy-rule'))::text"""
+        def inspect(db, label):
+            output = run(["docker", "exec", name, "/usr/bin/psql", "-X", "-A", "-t",
+                "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-h", "127.0.0.1",
+                "-d", db, "-c", query], root, label)
+            return json.loads(output.stdout.decode().strip())
+        baseline = inspect("g7_context_base", "context-baseline-readback")
+        expected_legacy = {"rule_id":"legacy-rule", "rule_version":1,
+            "workload_match_fields":["provisioning_key","service_key"],
+            "verified_asset_locator":True,
+            "definition_digest":"6ad174d7105acaa0f301671dad9bf4ff93e5b51a31dee5ebc84764959faf9bf7",
+            "authorisation_decision_id":None, "created_at":"2026-10-29T12:00:00+00:00"}
+        expected_baseline = {"heads":["0061"], "context_column":False, "row":expected_legacy}
+        if baseline != expected_baseline:
+            raise RuntimeError("0061 narrow-migration baseline differs from its exact fixture")
+        run(["docker", "exec", name, "/usr/bin/createdb", "-U", "postgres",
+            "-h", "127.0.0.1", "-T", "g7_context_base", "g7_context_fail"],
+            root, "context-clone-before-failure")
+        failed = run(["docker", "exec", "-e",
+            "UVM_DB_URL=postgresql+psycopg://postgres@127.0.0.1:5432/g7_context_fail",
+            "-e", "UVM_G7_TEST_FAIL_AFTER_REVISION=0062", "--user", "uvm", name,
+            "/bin/bash", "-lc", "cd /opt/uvm/app && /opt/uvm/venv/bin/python -m alembic -c alembic.ini upgrade 0062"],
+            root, "context-fail-after-0062", expect=None)
+        if failed.returncode == 0 or b"G7_TEST_MIGRATION_BOUNDARY_FAILURE revision=0062" not in failed.stderr:
+            raise RuntimeError("0062 failure injection did not fire at the migration boundary")
+        if inspect("g7_context_fail", "context-state-after-failure") != expected_baseline:
+            raise RuntimeError("0062 migration failure left partial schema or changed legacy row")
+        run(["docker", "exec", name, "/usr/bin/createdb", "-U", "postgres",
+            "-h", "127.0.0.1", "-T", "g7_context_base", "g7_context_success"],
+            root, "context-clone-before-success")
+        run(["docker", "exec", "-e",
+            "UVM_DB_URL=postgresql+psycopg://postgres@127.0.0.1:5432/g7_context_success",
+            "--user", "uvm", name, "/bin/bash", "-lc",
+            "cd /opt/uvm/app && /opt/uvm/venv/bin/python -m alembic -c alembic.ini upgrade 0062"],
+            root, "context-success-0062-upgrade")
+        success = inspect("g7_context_success", "context-state-after-success")
+        expected_row = {**expected_legacy, "workload_context_fields": []}
+        expected_success = {"heads":["0062"], "context_column":True, "row":expected_row}
+        if success != expected_success:
+            raise RuntimeError("0062 changed legacy definition or did not apply the exact empty default")
+        run(["docker", "exec", name, "/usr/bin/psql", "-X", "-v", "ON_ERROR_STOP=1",
+            "-U", "postgres", "-h", "127.0.0.1", "-d", "g7_context_success", "-c",
+            "UPDATE identity_rule_definitions SET workload_context_fields='[\"environment\"]'::jsonb WHERE rule_id='legacy-rule'"],
+            root, "context-downgrade-guard-seed")
+        refused = run(["docker", "exec", "-e",
+            "UVM_DB_URL=postgresql+psycopg://postgres@127.0.0.1:5432/g7_context_success",
+            "--user", "uvm", name, "/bin/bash", "-lc",
+            "cd /opt/uvm/app && /opt/uvm/venv/bin/python -m alembic -c alembic.ini downgrade 0061"],
+            root, "context-downgrade-refused", expect=None)
+        if (refused.returncode == 0 or b"workload context is retained" not in
+                refused.stdout + refused.stderr):
+            raise RuntimeError("0062 downgrade did not refuse retained non-empty context")
+        retained = inspect("g7_context_success", "context-state-after-refused-downgrade")
+        if retained.get("heads") != ["0062"] or retained.get("row", {}).get("workload_context_fields") != ["environment"]:
+            raise RuntimeError("refused 0062 downgrade changed the retained rule or schema head")
+        (root / "context-probe-result.json").write_text(json.dumps({
+            "passed": True, "tested_revision": "0061→0062",
+            "failure_boundary_restored_exact_0061": True,
+            "legacy_digest_and_row_preserved": True,
+            "new_column_defaulted_empty": True,
+            "failure_setup_exit": failed.returncode,
+            "populated_context_downgrade_refused": True,
+            "success_row": expected_row}, sort_keys=True, separators=(",", ":")) + "\n")
+        return json.loads((root / "context-probe-result.json").read_text())
+    finally:
+        if created:
+            stopped = subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, check=False)
+            (root / "context-container-cleanup.stdout").write_bytes(stopped.stdout)
+            (root / "context-container-cleanup.stderr").write_bytes(stopped.stderr)
+            (root / "context-container-cleanup.exit").write_text(f"{stopped.returncode}\n")
+            if stopped.returncode:
+                raise RuntimeError("owned 0062 migration probe container cleanup failed")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--evidence", type=Path, required=True)
+    parser.add_argument("--source-head", choices=("0058", "0061"), default="0058")
+    parser.add_argument("--target-head", choices=("0061", "0062"), default="0061")
     args = parser.parse_args()
     root = args.evidence
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if (args.source_head, args.target_head) == ("0061", "0062"):
+        probe_0061_to_0062(args.image, args.run_id, root)
+        return 0
     name = f"volt-g7-schema-probe-{args.run_id}"
     token = str(uuid.uuid4())
     run_id = str(uuid.uuid4())

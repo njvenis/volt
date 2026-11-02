@@ -278,6 +278,18 @@ def _record_g7_exception_pause(connection, *, acceptance, episode_records,
             previously_breached=bool(clock.get("prior_breach") or (deadline and now > deadline)),
             clock_basis=(policy["document"].get("clock_basis", "elapsed_utc_seconds")
                 if ingestion_clock else "elapsed_utc_seconds"))
+        if clock["state"] == "paused":
+            # A linked active replacement retargets the same uninterrupted
+            # pause. Its remaining SLA is frozen, not elapsed against the old
+            # pre-pause deadline. Preserve that deadline as historical input.
+            snapshot["remaining_seconds"] = clock["frozen_sla_seconds"]
+            snapshot["previously_breached"] = bool(clock["prior_breach"])
+            previous_pause = connection.execute(sa.select(sla_clock_events).where(
+                sla_clock_events.c.episode_id == episode_id,
+                sla_clock_events.c.occurrence_id == occurrence_id,
+                sla_clock_events.c.event_type == "paused").order_by(
+                    sla_clock_events.c.sequence.desc()).limit(1)).mappings().one()
+            snapshot["pre_pause_deadline_at"] = previous_pause["data"]["pre_pause_deadline_at"]
         event_id = str(uuid.uuid4())
         sequence = int(connection.execute(sa.select(sa.func.coalesce(
             sa.func.max(sla_clock_events.c.sequence), 0) + 1).where(
@@ -925,6 +937,36 @@ def _coverage_binding_is_current(connection, engine, coverage: dict, *, lock: bo
         return False
 
 
+def _candidate_permission_actions(policy: dict, principal: str) -> set[str]:
+    """Project actions from the same current authority sources used by command guards."""
+    authority_ids = _policy_authority_ids(policy, principal) | {"*"}
+    grants = policy.get("grants", [])
+    candidate_actions = {action for grant in grants
+        if grant.get("principal_id") in authority_ids
+        for action in grant.get("actions", []) if action != "*"}
+    for grant in grants:
+        if grant.get("principal_id") in authority_ids and grant.get("role_id") in policy.get("roles", {}):
+            candidate_actions.update(policy["roles"][grant["role_id"]].get("actions", []))
+    wildcard_grant = any(grant.get("principal_id") in authority_ids
+        and "*" in grant.get("actions", []) for grant in grants)
+    wildcard_role = any(grant.get("principal_id") in authority_ids
+        and grant.get("role_id") in policy.get("roles", {})
+        and "*" in policy["roles"][grant["role_id"]].get("actions", [])
+        for grant in grants)
+    if wildcard_grant or wildcard_role:
+        candidate_actions.update(_ACTIONS)
+    native = native_state(policy)
+    if native.get("mode") == NATIVE_MODE:
+        current = effective_access(policy, principal)
+        for group_id in (current[0] if current else ()):
+            group = native.get("access_groups", {}).get(group_id, {})
+            candidate_actions.update(permission.get("action") for permission in group.get("permissions", [])
+                if isinstance(permission, dict) and isinstance(permission.get("action"), str)
+                and permission.get("action") != "*")
+    candidate_actions.discard("*")
+    return candidate_actions
+
+
 def _policy_authority_ids(policy: dict, principal: str) -> set[str]:
     """Return a principal and its currently configured, enabled teams."""
     record = policy.get("principals", {}).get(principal, {})
@@ -1513,6 +1555,9 @@ def _apply_group_action(document: dict, action: str, payload: dict, membership_i
         acceptance = next((item for item in acceptances if item["acceptance_id"] == payload["acceptance_id"]), None)
         if acceptance is None:
             _error(409, "revision_conflict", "Acceptance decision is unavailable")
+        if (action == "acceptance.revoke" and acceptance.get("exception_contract_version") == 1
+                and datetime.fromisoformat(acceptance["expires_at"].replace("Z", "+00:00")) <= now):
+            _error(409, "revision_conflict", "Expired exception cannot be revoked")
         expected_states = {"acceptance.approve": {"pending"}, "acceptance.reject": {"pending"},
                            "acceptance.revoke": {"active", "suspended"},
                            "acceptance.expire": {"pending", "active", "suspended"}}[action]
@@ -3417,6 +3462,9 @@ def install_assessment_routes(app: FastAPI) -> None:
                             or expected.get("policy") != current_policy_revision
                             or expected.get("owners", 1) != int(old_document.get("owner_revision", 1))):
                         _error(409, "revision_conflict", "Assessment revisions changed")
+                    if (g7_exception_command and expected.get("authority") !=
+                            int(native_state(policy).get("revision", 0))):
+                        _error(409, "revision_conflict", "Exception authority revision changed")
                     episode_records = ensure_current_episodes(connection, target_id, now=now)
                     if guarded_episode_command:
                         selected_exposures = set(connection.execute(sa.select(
@@ -3717,6 +3765,11 @@ def install_assessment_routes(app: FastAPI) -> None:
                                 approved_request["approvals"][-1]["authority_context"] = auth_context.document() if auth_context else None
                         prior_acceptances = {item.get("acceptance_id"): item
                             for item in old_document.get("acceptances", [])}
+                        replacing = (next((item for item in after.get("acceptances", [])
+                            if item.get("acceptance_id") == payload.get("acceptance_id")
+                            and item.get("state") == "active"
+                            and item.get("exception_contract_version") == 1), None)
+                            if action == "acceptance.approve" else None)
                         for updated in after.get("acceptances", []):
                             prior_acceptance = prior_acceptances.get(updated.get("acceptance_id"))
                             if (prior_acceptance and prior_acceptance.get("exception_contract_version") == 1
@@ -3725,7 +3778,16 @@ def install_assessment_routes(app: FastAPI) -> None:
                                         or updated.get("suspended_membership_ids") != prior_acceptance.get("suspended_membership_ids"))):
                                 terminal_event = ("resumed" if updated["state"] == "expired"
                                     else "suspended" if updated["state"] in {"suspended", "active"} else "revoked")
-                                _record_g7_exception_resume(connection, acceptance=updated,
+                                resuming = updated
+                                if replacing and replacing.get("predecessor_id") == updated.get("acceptance_id"):
+                                    # Only removed atoms end their pause. Shared
+                                    # atoms carry their frozen remainder into
+                                    # the successor without a running interval.
+                                    shared = set(replacing["membership_ids"])
+                                    resuming = {**updated, "pause_snapshots": [snapshot
+                                        for snapshot in updated.get("pause_snapshots", [])
+                                        if snapshot["occurrence_id"] not in shared]}
+                                _record_g7_exception_resume(connection, acceptance=resuming,
                                     event_type=terminal_event, now=now)
                         if action == "acceptance.approve":
                             selected = next((item for item in after.get("acceptances", [])
@@ -4373,6 +4435,7 @@ def install_assessment_routes(app: FastAPI) -> None:
                 "identity_revision": int(group["revision"])},
             "assessment": {"revision": int(state["revision"]) if state else 1,
                 "policy_revision": policy_revision, "owner_revision": owner_revision,
+                "authority_revision": int(native_state(policy_row["document"]).get("revision", 0)),
                 "native_severity": ({"value": native_row["source_rating"],
                     "source": native_row["source_family"],
                     "observed_at": native_row["observed_at"].isoformat().replace("+00:00", "Z")
@@ -4929,24 +4992,10 @@ def install_assessment_routes(app: FastAPI) -> None:
         if source_family is None or policy_row is None or not scope_allowed or not grants:
             _error(403, "forbidden", "Access forbidden")
         document = policy_row["document"]
+        authority_ids = _policy_authority_ids(document, principal) | {"*"}
         grants = document.get("grants", [])
         denies = document.get("denies", [])
-        authority_ids = _policy_authority_ids(document, principal) | {"*"}
-        candidate_actions = {action for grant in grants
-            if grant.get("principal_id") in authority_ids
-            for action in grant.get("actions", []) if action != "*"}
-        for grant in grants:
-            if grant.get("principal_id") in authority_ids and grant.get("role_id") in document.get("roles", {}):
-                candidate_actions.update(document["roles"][grant["role_id"]].get("actions", []))
-        wildcard_grant = any(grant.get("principal_id") in authority_ids
-            and "*" in grant.get("actions", []) for grant in grants)
-        wildcard_role = any(grant.get("principal_id") in authority_ids
-            and grant.get("role_id") in document.get("roles", {})
-            and "*" in document["roles"][grant["role_id"]].get("actions", [])
-            for grant in grants)
-        if wildcard_grant or wildcard_role:
-            candidate_actions.update(_ACTIONS)
-        candidate_actions.discard("*")
+        candidate_actions = _candidate_permission_actions(document, principal)
         with engine.connect() as connection:
             actions = sorted(action for action in candidate_actions
                 if _complete_target_grants(connection, document, principal, action,

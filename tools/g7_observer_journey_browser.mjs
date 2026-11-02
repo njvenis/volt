@@ -1,3 +1,4 @@
+import {assertClock, assertRenderedAcceptance, captureAcceptance} from './g7_sla_render_assertions.mjs';
 import {runBackupBrowserStep} from '../ui/tests/backup-recovery-browser.mjs';
 import { chromium } from '../ui/node_modules/playwright/index.mjs';
 import { readFile, mkdir, writeFile, unlink } from 'node:fs/promises';
@@ -17,8 +18,14 @@ const fixtureRoot = arg('--fixture-root');
 const appContainer = process.argv.includes('--app-container') ? arg('--app-container') : 'volt-g7-observer-journey';
 const backupSeedOnly = process.argv.includes('--backup-seed-only');
 const warningOnly = process.argv.includes('--exception-warning-only');
-const oidcProxyPort = warningOnly ? arg('--oidc-proxy-port') : null;
+const exceptionSlaOnly = process.argv.includes('--exception-sla-only');
+const oidcProxyPort = warningOnly || exceptionSlaOnly ? arg('--oidc-proxy-port') : null;
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname),'..');
+const utcMicros=value=>{
+  const millis=Date.parse(value);
+  const fraction=(String(value).match(/\.(\d+)(?:Z|[+-])/i)?.[1]??'').padEnd(6,'0').slice(3,6);
+  return Number.isFinite(millis)?millis*1000+Number(fraction||0):NaN;
+};
 await mkdir(evidence, {recursive:true, mode:0o700});
 const browser = await chromium.launch({headless:true});
 const context = await browser.newContext({viewport:{width:1440,height:1000},deviceScaleFactor:1});
@@ -128,6 +135,29 @@ function hostControl(role,action) {
 function docker(args) {
   return execFileSync('docker',args,{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
 }
+function disposableDbSnapshot({commandId,acceptanceId,groupId}) {
+  const py=`import json,sqlalchemy as sa,urllib.parse\nfrom pathlib import Path\np=urllib.parse.quote(Path('/run/secrets/uvm_db_password').read_text().strip(),safe='')\ne=sa.create_engine('postgresql+psycopg://uvm_app:'+p+'@127.0.0.1:5432/uvm')\nwith e.connect() as c:\n q=lambda s,p: c.execute(sa.text(s),p).scalar_one()\n group_state=c.execute(sa.text('select revision,document::text from assessment_group_state where group_id=:id'),{'id':'${groupId}'}).first()\n out={'audit':q('select count(*) from assessment_audit_events where command_id=:id',{'id':'${commandId}'}),'receipt':q('select count(*) from assessment_command_receipts where command_id=:id',{'id':'${commandId}'}),'clock':q('select count(*) from sla_clock_events where decision_id=:id',{'id':'${acceptanceId}'}),'warning_intents':q('select count(*) from exception_warning_intents where decision_id=:id',{'id':'${acceptanceId}'}),'projection_intents':q('select count(*) from assessment_projection_intents where target_id=:id',{'id':'${groupId}'}),'group_state':list(group_state) if group_state else None}\n print(json.dumps(out,sort_keys=True))\ne.dispose()`;
+  return JSON.parse(docker(['exec',appContainer,'/opt/uvm/venv/bin/python','-c',py]));
+}
+function disposableAtomClockEvents(episodeId,occurrenceId) {
+  const py=`import json,sqlalchemy as sa,urllib.parse
+from pathlib import Path
+p=urllib.parse.quote(Path('/run/secrets/uvm_db_password').read_text().strip(),safe='')
+e=sa.create_engine('postgresql+psycopg://uvm_app:'+p+'@127.0.0.1:5432/uvm')
+with e.connect() as c:
+ rows=c.execute(sa.text('select event_id,sequence,event_type,effective_at,decision_id,predecessor_event_id,data from sla_clock_events where episode_id=:episode and occurrence_id=:occurrence order by sequence'),{'episode':'${episodeId}','occurrence':'${occurrenceId}'}).mappings().all()
+ print(json.dumps([dict(row) for row in rows],default=str,sort_keys=True))
+e.dispose()`;
+  return JSON.parse(docker(['exec',appContainer,'/opt/uvm/venv/bin/python','-c',py]));
+}
+function installApprovalAuditFault({commandId,groupId}) {
+  const py=`import sqlalchemy as sa,urllib.parse\nfrom pathlib import Path\np=urllib.parse.quote(Path('/run/secrets/uvm_db_password').read_text().strip(),safe='')\ne=sa.create_engine('postgresql+psycopg://uvm_app:'+p+'@127.0.0.1:5432/uvm')\ns=sa.text\nwith e.begin() as c:\n c.execute(s('DROP TRIGGER IF EXISTS g7_fixture_fail_approval_audit ON assessment_audit_events'))\n c.execute(s('DROP FUNCTION IF EXISTS g7_fixture_fail_approval_audit()'))\n c.execute(s(\"CREATE FUNCTION g7_fixture_fail_approval_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action = 'acceptance.approve' AND NEW.target_id = '${groupId}' AND NEW.command_id = '${commandId}' THEN RAISE EXCEPTION 'g7 disposable approval audit fault' USING ERRCODE = 'P0001'; END IF; RETURN NEW; END; $$\"))\n c.execute(s('CREATE TRIGGER g7_fixture_fail_approval_audit BEFORE INSERT ON assessment_audit_events FOR EACH ROW EXECUTE FUNCTION g7_fixture_fail_approval_audit()'))\ne.dispose()`;
+  docker(['exec',appContainer,'/opt/uvm/venv/bin/python','-c',py]);
+}
+function removeApprovalAuditFault() {
+  const py=`import sqlalchemy as sa,urllib.parse\nfrom pathlib import Path\np=urllib.parse.quote(Path('/run/secrets/uvm_db_password').read_text().strip(),safe='')\ne=sa.create_engine('postgresql+psycopg://uvm_app:'+p+'@127.0.0.1:5432/uvm')\nwith e.begin() as c:\n c.execute(sa.text('DROP TRIGGER IF EXISTS g7_fixture_fail_approval_audit ON assessment_audit_events'))\n c.execute(sa.text('DROP FUNCTION IF EXISTS g7_fixture_fail_approval_audit()'))\ne.dispose()`;
+  docker(['exec',appContainer,'/opt/uvm/venv/bin/python','-c',py]);
+}
 async function waitForHostStatus(status,timeoutMs=60000) {
   const until=Date.now()+timeoutMs;let latest;
   while(Date.now()<until){
@@ -229,7 +259,10 @@ try {
     required_approver_count:1,prohibited_action_pairs:[]};
   const actions=['observer.timing.read','observer.timing.configure',
     'backup.settings.read','backup.settings.configure','assessment.read','audit.read',
-    ...(warningOnly?['acceptance.submit','acceptance.approve','warning.route.manage','warning.actor_link.manage']:[])];
+    ...(warningOnly?['acceptance.submit','acceptance.approve','warning.route.manage','warning.actor_link.manage']:[]),
+    ...(exceptionSlaOnly?['acceptance.submit','acceptance.approve','acceptance.reject','acceptance.revoke',
+      'owners.directory.read','owners.assign','ownership.team.manage','portion.define','portion.transfer','remediation.confirm_portion','report.create','report.read',
+      'policy.sla.publish','policy.read']:[])];
   const permissions=actions.map(action=>({permission_id:crypto.randomUUID(),role_id:crypto.randomUUID(),action,
     target_scope:scope,limits,separation_of_duties:duties,
     ...(action.startsWith('observer.timing.')||action.startsWith('backup.settings.')?{deployment_scopes:['g7-local','g7-other']}: {})}));
@@ -251,7 +284,1232 @@ try {
       rationale:'Grant the local observer journey actor access',evidence_ref:'g7-observer-journey-fixture'}})});
   if(membership.status!==200)throw new Error(`access-group membership failed with ${membership.status}: ${JSON.stringify(membership.body)}`);
   counts.membership=membership.status;
+  if(exceptionSlaOnly) {
+    const approverHead=await api('/api/v1/assessment/administration/catalogue');
+    const approverMembership=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+      command_id:crypto.randomUUID(),target_id:zero,action:'access_group.membership.set',membership_ids:[],
+      expected_revisions:{target:approverHead.body.policy_revision,policy:approverHead.body.policy_revision,
+        authority:approverHead.body.authority_revision,identity_membership:0,owners:0,access_group:2},
+      payload:{access_group_id:groupId,principal_id:'g7-exception-approver',effective_from:new Date(Date.now()+5000).toISOString(),enabled:true,
+        rationale:'Grant the separately linked synthetic approver the same scoped action set',
+        evidence_ref:'g7-exception-sla-approver-fixture'}})});
+    if(approverHead.status!==200||approverMembership.status!==200)
+      throw new Error(`exception approver access setup failed: ${JSON.stringify({head:approverHead.status,
+        membership:approverMembership.status,body:approverMembership.body})}`);
+  }
   await page.waitForTimeout(5500);
+
+  if (exceptionSlaOnly) {
+    const createSyntheticTeam=async(displayName)=>{
+      const teamId=crypto.randomUUID();
+      let created;
+      for(let attempt=0;attempt<3;attempt++) {
+        const head=await api('/api/v1/assessment/administration/catalogue');
+        if(head.status!==200)throw new Error('scoped owner directory setup could not read current authority head');
+        created=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+          command_id:crypto.randomUUID(),target_id:zero,action:'ownership.team.create',membership_ids:[],
+          expected_revisions:{target:head.body.policy_revision,policy:head.body.policy_revision,
+            authority:head.body.authority_revision,ownership:head.body.ownership_revision,
+            identity_membership:0,owners:0},
+          payload:{team_id:teamId,display_name:displayName,enabled:true,
+            rationale:'Provide a real eligible owner for the disposable public exception journey',
+            evidence_ref:'g7-observer-journey-fixture'}})});
+        if(created.status===200)return teamId;
+        if(created.status!==409)break;
+      }
+      throw new Error(`scoped owner directory setup failed ${created?.status}: ${JSON.stringify(created?.body)}`);
+    };
+    const ownerDirectoryId=await createSyntheticTeam('Synthetic accountable team');
+    const transferOwnerBeforeId=await createSyntheticTeam('Synthetic transfer owner before');
+    const transferOwnerAfterId=await createSyntheticTeam('Synthetic transfer owner after');
+    const suspensionOwnerBeforeId=await createSyntheticTeam('Synthetic suspension owner before');
+    const suspensionOwnerAfterId=await createSyntheticTeam('Synthetic suspension owner after');
+    const preactivation=JSON.parse(await readFile(path.join(evidence,'sla-preactivation-ids.json'),'utf8'));
+    const g7TargetPreactivation=JSON.parse(await readFile(path.join(evidence,'sla-g7-target-preactivation-ids.json'),'utf8'));
+    const clockPath=path.join(fixtureRoot,'scheduler','warning-clock.txt');
+    const readClock=async()=>new Date((await readFile(clockPath,'utf8')).trim());
+    const advanceClock=async(ms)=>{
+      const next=new Date((await readClock()).getTime()+ms);
+      await writeFile(clockPath,next.toISOString()+'\n',{mode:0o666});
+      return next;
+    };
+    const renderCurrentAcceptance=async(expected,label)=>{
+      const responsePromise=page.waitForResponse(r=>r.request().method()==='GET'&&r.status()===200
+        &&new URL(r.url()).pathname==='/api/v1/assessment/groups/'+encodeURIComponent(expected.group_id));
+      await page.reload({waitUntil:'domcontentloaded'});
+      const response=await responsePromise;
+      const scoped=await response.json();
+      const current=scoped.assessment.acceptances.find(a=>a.acceptance_id===expected.acceptance_id);
+      if(scoped.group.group_id!==expected.group_id||current?.state!==expected.state)
+        throw new Error('refreshed scoped acceptance response is stale');
+      for(const clock of expected.sla_clock)
+        assertClock(current.sla_clock.find(c=>c.occurrence_id===clock.occurrence_id),clock);
+      await page.locator('.assessment-workspace .load-status').filter({hasText:'Finding assessment loaded.'})
+        .waitFor({state:'visible',timeout:20000});
+      await page.getByRole('button',{name:'Exceptions',exact:true}).click();
+      const rendered=await captureAcceptance(page,expected.acceptance_id);
+      assertRenderedAcceptance(rendered,expected);
+      await page.screenshot({path:path.join(evidence,`sla-${label}-browser.png`),fullPage:true});
+      await writeFile(path.join(evidence,`sla-${label}-browser.json`),JSON.stringify({
+        expected,refreshed_group:scoped,rendered,selected_acceptance_and_every_atom_verified:true},null,2),{mode:0o600});
+    };
+    const publishPolicy=async(policy,readGroupId=preactivation.group_id,verifyPolicyReadback=true)=>{
+      const [catalogue,policies]=await Promise.all([
+        api('/api/v1/assessment/administration/catalogue'),
+        api(`/api/v1/reports/sla-policies?group_id=${encodeURIComponent(readGroupId)}`)]);
+      if(catalogue.status!==200||policies.status!==200)
+        throw new Error(`scoped SLA publication read failed: ${JSON.stringify({catalogue:catalogue.status,policies:policies.status})}`);
+      const command={command_id:crypto.randomUUID(),target_id:'00000000-0000-4000-8000-000000000000',
+        action:'policy.sla.publish',membership_ids:[],expected_revisions:{
+          target:catalogue.body.policy_revision,policy:catalogue.body.policy_revision,
+          authority:catalogue.body.authority_revision,identity_membership:0,owners:0,
+          sla_policy:policies.body.sla_policy_head},payload:{policy,rationale:'Publish scoped disposable staged SLA policy',
+            evidence_ref:'g7-exception-sla-staged-policy-fixture'}};
+      const response=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify(command)});
+      if(response.status!==200)throw new Error(`public staged SLA policy publication failed ${response.status}: ${JSON.stringify(response.body)}`);
+      if(!verifyPolicyReadback)
+        return {request:command,response:response.body,readback:null,head:policies.body.sla_policy_head,
+          readback_skipped:'target group has no membership and scoped SLA policy read correctly denies access'};
+      const readback=await api(`/api/v1/reports/sla-policies?group_id=${encodeURIComponent(readGroupId)}`);
+      if(readback.status!==200)throw new Error(`published SLA policy readback failed ${readback.status}: ${JSON.stringify(readback.body)}`);
+      const published=readback.body.policies?.find(item=>item.policy_id===policy.policy_id&&item.version===policy.version);
+      if(!published)throw new Error(`public SLA policy readback omitted the just-published policy: ${JSON.stringify(readback.body)}`);
+      return {request:command,response:response.body,readback:published,head:readback.body.sla_policy_head};
+    };
+    const stagedPolicy=(policyId,version,startSource,effectiveFrom)=>({
+      policy_id:policyId,version,effective_from:effectiveFrom,effective_until:null,
+      scope:{group_ids:[preactivation.group_id],environments:['local'],service_ids:['g7-sla-service-covered']},
+      eligibility:{included_severities:['critical','high'],excluded_classifications:[]},
+      classification:{source_rating_map:{critical:'critical',low:'high'}},
+      duration_seconds_by_severity:{critical:3600,high:86400},clock_basis:'elapsed_utc_seconds',
+      deadline_reference_rules:{bindings:[]},backfill:{mode:'prospective'},start_source:startSource});
+    const legacyActivationAt=await readClock();
+    const legacyPolicy=stagedPolicy(
+      'g7-exception-sla-staged-legacy-v1',1,'source_observation_v1',legacyActivationAt.toISOString());
+    legacyPolicy.scope.environments=['local'];
+    legacyPolicy.scope.service_ids=['g7-sla-service-legacy'];
+    const legacyPublication=await publishPolicy(legacyPolicy);
+    // Leave ample deterministic logical time after policy publication so the
+    // source observation anchor is later than the policy's immutable created_at.
+    const postLegacyAt=await advanceClock(10000);
+    const postLegacy=JSON.parse(docker(['exec','-e','UVM_G7_SLA_STAGE=postlegacy',appContainer,
+      '/opt/uvm/venv/bin/python','/opt/uvm/app/tools/g7_recovery_retained_fixture.py']));
+    if(postLegacy.episode_id!==preactivation.episode_id||postLegacy.contract_version!==5)
+      throw new Error(`post-legacy policy membership did not remain in the pinned G5 episode: ${JSON.stringify({preactivation,postLegacy})}`);
+    const legacyReportCommand=crypto.randomUUID();
+    const legacyReport=await api('/api/v1/reports',{method:'POST',write:true,body:JSON.stringify({
+      schema_version:1,definition_version:'g5-metrics-v1',command_id:legacyReportCommand,
+      mode:'as_known_at',scope:{group_ids:[preactivation.group_id]},
+      as_of:postLegacyAt.toISOString(),known_at:postLegacyAt.toISOString()})});
+    if(legacyReport.status!==200||!legacyReport.body.report_id)
+      throw new Error(`pre-G7 G5 report creation failed ${legacyReport.status}: ${JSON.stringify(legacyReport.body)}`);
+    let legacyReportRead;
+    for(let attempt=0;attempt<30;attempt++){
+      legacyReportRead=await api(`/api/v1/reports/${legacyReport.body.report_id}`);
+      if(legacyReportRead.status===200&&legacyReportRead.body.status==='ready')break;
+      await page.waitForTimeout(500);
+    }
+    if(legacyReportRead?.status!==200||legacyReportRead.body.status!=='ready')
+      throw new Error(`pre-G7 G5 report did not become ready: ${JSON.stringify(legacyReportRead?.body)}`);
+    const legacyAtoms=await api(`/api/v1/reports/${legacyReport.body.report_id}/atoms`);
+    const legacyAtom=legacyAtoms.body.items?.find(item=>item.occurrence_id===postLegacy.occurrence_id);
+    await writeFile(path.join(evidence,'sla-g5-policy-selection-diagnostic.json'),JSON.stringify({
+      preactivation,legacy_publication:legacyPublication,post_legacy_membership:postLegacy,
+      report_request:{command_id:legacyReportCommand,mode:'as_known_at',as_of:postLegacyAt.toISOString(),known_at:postLegacyAt.toISOString()},
+      report_create:legacyReport.body,report_read:legacyReportRead.body,report_atoms:legacyAtoms.body},null,2),{mode:0o600});
+    if(legacyAtoms.status!==200||!legacyAtom?.clock?.deadline
+        ||Date.parse(legacyAtom.clock.start)!==Date.parse(postLegacy.observed_at)
+        ||Date.parse(legacyAtom.clock.deadline)!==Date.parse(postLegacy.observed_at)+86400*1000
+        ||legacyAtom.policy?.policy_id!=='g7-exception-sla-staged-legacy-v1')
+      throw new Error(`G5 report writer did not calculate the source-observation deadline: ${JSON.stringify({postLegacy,legacy_publication:legacyPublication,legacyAtom})}`);
+    await writeFile(path.join(evidence,'sla-g5-preactivation-public-lifecycle.json'),JSON.stringify({
+      preactivation,legacy_publication:legacyPublication,post_legacy_membership:postLegacy,
+      report_request:{command_id:legacyReportCommand,mode:'as_known_at',as_of:postLegacyAt.toISOString(),known_at:postLegacyAt.toISOString()},
+      report_create:legacyReport.body,report_read:legacyReportRead.body,report_atoms:legacyAtoms.body},null,2),{mode:0o600});
+    const g7ActivationAt=await advanceClock(1000);
+    const prospectivePolicy=stagedPolicy(
+      'g7-exception-sla-ingestion-fixture-v1',1,'uvm_ingest_commit_v1',g7ActivationAt.toISOString());
+    prospectivePolicy.scope.group_ids=[g7TargetPreactivation.group_id];
+    prospectivePolicy.scope.environments=['local'];
+    prospectivePolicy.scope.service_ids=['g7-sla-service-covered','g7-sla-service-breached',
+      'g7-sla-service-unknown','g7-sla-service-deadline-boundary','g7-sla-service-replacement','g7-sla-service-legacy'];
+    const prospectivePublication=await publishPolicy(prospectivePolicy,preactivation.group_id,false);
+    const postG7At=await advanceClock(10000);
+    const postG7=JSON.parse(docker(['exec','-e','UVM_G7_SLA_STAGE=postg7',appContainer,
+      '/opt/uvm/venv/bin/python','/opt/uvm/app/tools/g7_recovery_retained_fixture.py']));
+    if(postG7.episode_id!==preactivation.episode_id||postG7.contract_version!==5)
+      throw new Error(`post-G7 membership changed the pinned G5 episode: ${JSON.stringify({preactivation,postG7})}`);
+    const legacyReportAfterActivation=await api(`/api/v1/reports/${legacyReport.body.report_id}`);
+    const legacyAtomsAfterActivation=await api(`/api/v1/reports/${legacyReport.body.report_id}/atoms`);
+    if(JSON.stringify(legacyReportAfterActivation.body)!==JSON.stringify(legacyReportRead.body)
+        ||JSON.stringify(legacyAtomsAfterActivation.body)!==JSON.stringify(legacyAtoms.body))
+      throw new Error('G7 activation or later G5 membership changed the already-issued preactivation G5 report');
+    const mainFixtureOutput=docker(['exec','-e','UVM_G7_SLA_FIXTURE=1',
+      '-e',`UVM_G7_SLA_EXPECTED_GROUP_ID=${g7TargetPreactivation.group_id}`,appContainer,
+      '/opt/uvm/venv/bin/python','/opt/uvm/app/tools/g7_recovery_retained_fixture.py']);
+    await writeFile(path.join(evidence,'sla-fixture-ids.json'),mainFixtureOutput+'\n',{mode:0o600});
+    const seeded=JSON.parse(mainFixtureOutput);
+    const contextMatrix=JSON.parse(docker(['exec','-e','UVM_G7_SLA_STAGE=context_matrix',appContainer,
+      '/opt/uvm/venv/bin/python','/opt/uvm/app/tools/g7_recovery_retained_fixture.py']));
+    await writeFile(path.join(evidence,'sla-context-retained-matrix.json'),JSON.stringify(contextMatrix,null,2),{mode:0o600});
+    const findingId=seeded.group, members=seeded.members;
+    const memberByKey=Object.fromEntries(members.map(member=>[member.key,member]));
+    const deadlineBoundaryMember=members.find(member=>member.key==='deadline_boundary');
+    const acceptanceMembers=members.filter(member=>!['deadline_boundary','replacement_member'].includes(member.key));
+    const occurrenceIds=acceptanceMembers.map(member=>member.occurrence);
+    const ingestAt=Date.parse(seeded.ingested_at);
+    if (!Number.isFinite(ingestAt) || Date.parse(seeded.observed_at)>=ingestAt
+        || Date.parse(seeded.collected_at)>=ingestAt)
+      throw new Error('authoritative fixture did not separate the older observation/collection times from UVM retention');
+    const pauseAt=new Date(ingestAt+18*60*60*1000);
+    const expiry=new Date(pauseAt.getTime()+60*1000);
+
+    // Exercise the actual rendered exception forms against the scoped public
+    // API using the dedicated deadline-boundary membership. Revoke this short
+    // fixture exception before advancing the deterministic SLA clock.
+    const uiOccurrence=deadlineBoundaryMember.occurrence;
+    const uiFlowNow=new Date(ingestAt+1000);
+    await writeFile(clockPath,uiFlowNow.toISOString()+'\n',{mode:0o666});
+    const uiGroupReads=[],uiSlaReads=[],uiCapturePromises=[];
+    page.on('response',response=>{
+      let url;
+      try{url=new URL(response.url());}catch{return;}
+      if(response.request().method()!=='GET'||response.status()!==200)return;
+      if(url.pathname==='/api/v1/assessment/groups/'+encodeURIComponent(findingId)
+          ||url.pathname==='/api/v1/reports/sla-policies') {
+        uiCapturePromises.push(response.json().then(body=>{
+          if(url.pathname==='/api/v1/assessment/groups/'+encodeURIComponent(findingId))
+            uiGroupReads.push(body);
+          else if(url.searchParams.get('group_id')===findingId)uiSlaReads.push(body);
+        }).catch(()=>{}));
+      }
+    });
+    await page.goto(origin+'/#findings?group='+encodeURIComponent(findingId),{waitUntil:'domcontentloaded'});
+    await page.waitForTimeout(1200);
+    await page.locator('.assessment-workspace .load-status').filter({hasText:'Finding assessment loaded.'})
+      .waitFor({state:'visible',timeout:20000});
+    await page.getByRole('button',{name:'Exceptions',exact:true}).waitFor({state:'visible',timeout:20000});
+    await page.getByRole('button',{name:'Exceptions',exact:true}).click();
+    const requestExceptionButtons=page.getByRole('button',{name:'Request an exception',exact:true});
+    await requestExceptionButtons.first().waitFor({state:'visible',timeout:10000});
+    let uiFormActionReady=false;
+    try {
+      await page.waitForFunction(()=>Array.from(document.querySelectorAll('button'))
+        .some(button=>button.textContent?.trim()==='Request an exception'&&!button.disabled),
+        null,{timeout:10000});
+      uiFormActionReady=true;
+    } catch {}
+    if(!uiFormActionReady) {
+      const uiPermissionProbe=await api('/api/v1/assessment/permissions?group_id='+encodeURIComponent(findingId));
+      await writeFile(path.join(evidence,'sla-ui-form-permission-diagnostic.json'),JSON.stringify({
+        permission_status:uiPermissionProbe.status,permission_body:uiPermissionProbe.body,
+        rendered_workspace:(await page.locator('.assessment-workspace').innerText()).slice(0,8000),
+        request_buttons:await requestExceptionButtons.evaluateAll(buttons=>buttons.map(button=>({
+          disabled:button.disabled,title:button.title,within:button.closest('section')?.getAttribute('aria-label')??null})))},null,2),{mode:0o600});
+      throw new Error('rendered exception form remains disabled after the scoped workspace loaded');
+    }
+    await requestExceptionButtons.first().click();
+    const uiSubmitDialog=page.getByRole('dialog',{name:'Request an exception',exact:true});
+    await uiSubmitDialog.getByRole('checkbox',{name:uiOccurrence,exact:true}).check();
+    await uiSubmitDialog.getByLabel('Accountable owner').selectOption(ownerDirectoryId);
+    await uiSubmitDialog.getByLabel('Resource context').fill('Synthetic rendered-form context for the deadline-boundary membership.');
+    await uiSubmitDialog.getByLabel('Compensating controls').fill('Disposable local controls while the test exception is active.');
+    const uiExpiryValue=expiry.toISOString().slice(0,19);
+    await uiSubmitDialog.getByLabel('Proposed expiry (UTC)').fill(uiExpiryValue);
+    await uiSubmitDialog.getByLabel('Reason').fill('Exercise actual rendered exception submission and approval.');
+    await uiSubmitDialog.getByRole('checkbox',{name:/I have reviewed the instances and current details above/}).check();
+    const uiSubmitGroup=uiGroupReads.at(-1),uiSubmitSla=uiSlaReads.at(-1);
+    if(!uiSubmitGroup||!uiSubmitSla||uiSubmitGroup.group?.group_id!==findingId
+        ||!Number.isSafeInteger(uiSubmitGroup.assessment?.authority_revision)
+        ||uiSubmitGroup.assessment.authority_revision<0||uiSubmitSla.group_id!==findingId
+        ||uiSubmitSla.policy_revision!==uiSubmitGroup.assessment.policy_revision)
+      throw new Error('actual UI submit form lacks its same-response scoped group and SLA readbacks');
+    const uiSubmitExposures=uiSubmitSla.current_heads.episodes
+      .filter(item=>item.episode_id===deadlineBoundaryMember.episode)
+      .map(({exposure_id,episode_id,state_revision})=>({exposure_id,episode_id,state_revision}));
+    const uiSubmitEvaluation=uiSubmitSla.current_heads.evaluations
+      .filter(item=>item.occurrence_id===uiOccurrence)
+      .map(({episode_id,occurrence_id,evaluation_id,revision})=>({episode_id,occurrence_id,evaluation_id,revision}));
+    if(uiSubmitExposures.length!==1||uiSubmitEvaluation.length!==1)
+      throw new Error('actual UI submit fixture lacks exact current episode/evaluation heads');
+    const uiSubmitResponsePromise=page.waitForResponse(response=>
+      response.url().endsWith('/api/v1/assessment/commands')&&response.request().method()==='POST');
+    await uiSubmitDialog.getByRole('button',{name:'Save decision',exact:true}).click();
+    const uiSubmitResponse=await uiSubmitResponsePromise;
+    const uiSubmitCommand=uiSubmitResponse.request().postDataJSON();
+    const uiSubmitReceipt=await uiSubmitResponse.json();
+    if(uiSubmitResponse.status()!==200||uiSubmitCommand.action!=='acceptance.submit'
+        ||uiSubmitCommand.target_id!==findingId||JSON.stringify(uiSubmitCommand.membership_ids)!==JSON.stringify([uiOccurrence])
+        ||uiSubmitCommand.expected_revisions?.authority!==uiSubmitGroup.assessment.authority_revision
+        ||uiSubmitCommand.expected_revisions?.target!==uiSubmitGroup.assessment.revision
+        ||uiSubmitCommand.expected_revisions?.policy!==uiSubmitGroup.assessment.policy_revision
+        ||uiSubmitCommand.expected_revisions?.identity_membership!==uiSubmitGroup.assessment.membership.revision
+        ||uiSubmitCommand.expected_revisions?.owners!==uiSubmitGroup.assessment.owner_revision
+        ||JSON.stringify(uiSubmitCommand.expected_exposures)!==JSON.stringify(uiSubmitExposures)
+        ||JSON.stringify(uiSubmitCommand.expected_evaluations)!==JSON.stringify(uiSubmitEvaluation)
+        ||uiSubmitCommand.payload?.exception_contract_version!==1
+        ||uiSubmitCommand.payload?.accountable_owner_id!==ownerDirectoryId
+        ||uiSubmitReceipt.command_id!==uiSubmitCommand.command_id
+        ||!uiSubmitReceipt.audit_event_id||!uiSubmitReceipt.decision_id)
+      throw new Error('actual rendered submit request or receipt differed from current public guards');
+    await uiSubmitDialog.getByRole('region',{name:'Saved decision'}).waitFor({state:'visible'});
+    await uiSubmitDialog.getByRole('button',{name:'Done',exact:true}).click();
+    const uiAcceptanceId=(await api('/api/v1/assessment/groups/'+findingId)).body.assessment.acceptances
+      .find(item=>item.state==='pending'&&item.membership_ids?.includes(uiOccurrence))?.acceptance_id;
+    if(!uiAcceptanceId)throw new Error('actual rendered submit receipt did not resolve its pending acceptance');
+    const approverContext=await browser.newContext({viewport:{width:1440,height:1000},deviceScaleFactor:1});
+    await approverContext.route('**/api/v1/auth/login',async route=>{
+      const response=await route.fetch({maxRedirects:0});
+      const headers=response.headers();
+      const loginUrl=new URL(headers.location);
+      loginUrl.searchParams.set('fixture_subject','g7-exception-approver-subject');
+      await route.fulfill({response,headers:{...headers,location:loginUrl.toString()}});
+    });
+    const approverPage=await approverContext.newPage();
+    await approverPage.goto(origin+'/api/v1/auth/login',{waitUntil:'domcontentloaded'});
+    await approverPage.waitForFunction(async()=>{
+      const response=await fetch('/api/v1/auth/session',{cache:'no-store'});
+      if(!response.ok)return false;
+      const session=await response.json();
+      return session.authenticated===true&&session.principal_id==='g7-exception-approver';
+    },null,{timeout:20000});
+    approverPage.on('response',response=>{
+      let url;
+      try{url=new URL(response.url());}catch{return;}
+      if(response.request().method()!=='GET'||response.status()!==200)return;
+      if(url.pathname==='/api/v1/assessment/groups/'+encodeURIComponent(findingId)
+          ||url.pathname==='/api/v1/reports/sla-policies') {
+        uiCapturePromises.push(response.json().then(body=>{
+          if(url.pathname==='/api/v1/assessment/groups/'+encodeURIComponent(findingId))
+            uiGroupReads.push(body);
+          else if(url.searchParams.get('group_id')===findingId)uiSlaReads.push(body);
+        }).catch(()=>{}));
+      }
+    });
+    await approverPage.goto(origin+'/#findings?group='+encodeURIComponent(findingId),{waitUntil:'domcontentloaded'});
+    await approverPage.locator('.assessment-workspace .load-status').filter({hasText:'Finding assessment loaded.'})
+      .waitFor({state:'visible',timeout:20000});
+    await approverPage.getByRole('button',{name:'Exceptions',exact:true}).click();
+    await approverPage.locator('[data-exception-pending="'+uiAcceptanceId+'"]')
+      .getByRole('button',{name:'Approve exception',exact:true}).click();
+    const uiApproveDialog=approverPage.getByRole('dialog',{name:'Approve exception',exact:true});
+    await uiApproveDialog.getByLabel('Approved expiry (UTC)').fill(uiExpiryValue);
+    await uiApproveDialog.getByLabel('Reason').fill('Approve the rendered synthetic exception request.');
+    await uiApproveDialog.getByRole('checkbox',{name:/I have reviewed the instances and current details above/}).check();
+    await Promise.all(uiCapturePromises);
+    const uiApproveGroup=uiGroupReads.at(-1),uiApproveSla=uiSlaReads.at(-1);
+    if(!uiApproveGroup||!uiApproveSla
+        ||!Number.isSafeInteger(uiApproveGroup.assessment?.authority_revision)
+        ||uiApproveGroup.assessment.authority_revision<0
+        ||uiApproveSla.policy_revision!==uiApproveGroup.assessment.policy_revision)
+      throw new Error('actual UI approve form lacks fresh scoped group and SLA reads');
+    const uiApproveResponsePromise=approverPage.waitForResponse(response=>
+      response.url().endsWith('/api/v1/assessment/commands')&&response.request().method()==='POST');
+    await uiApproveDialog.getByRole('button',{name:'Save decision',exact:true}).click();
+    const uiApproveResponse=await uiApproveResponsePromise;
+    const uiApproveCommand=uiApproveResponse.request().postDataJSON();
+    const uiApproveReceipt=await uiApproveResponse.json();
+    if(uiApproveResponse.status()!==200||uiApproveCommand.action!=='acceptance.approve'
+        ||uiApproveCommand.target_id!==findingId||JSON.stringify(uiApproveCommand.membership_ids)!==JSON.stringify([uiOccurrence])
+        ||uiApproveCommand.expected_revisions?.authority!==uiApproveGroup.assessment.authority_revision
+        ||uiApproveCommand.expected_revisions?.target!==uiApproveGroup.assessment.revision
+        ||uiApproveCommand.expected_revisions?.policy!==uiApproveGroup.assessment.policy_revision
+        ||uiApproveCommand.expected_revisions?.identity_membership!==uiApproveGroup.assessment.membership.revision
+        ||uiApproveCommand.expected_revisions?.owners!==uiApproveGroup.assessment.owner_revision
+        ||uiApproveCommand.payload?.expected_request_revision!==1
+        ||uiApproveCommand.payload?.selected_expires_at!==expiry.toISOString()
+        ||uiApproveReceipt.command_id!==uiApproveCommand.command_id
+        ||!uiApproveReceipt.audit_event_id||!uiApproveReceipt.decision_id)
+      throw new Error('actual rendered approve request or receipt differed from current public guards');
+    await uiApproveDialog.getByRole('region',{name:'Saved decision'}).waitFor({state:'visible'});
+    await uiApproveDialog.getByRole('button',{name:'Done',exact:true}).click();
+    await approverContext.close();
+    const uiApprovedRead=await api('/api/v1/assessment/groups/'+findingId);
+    const uiApprovedAcceptance=uiApprovedRead.body.assessment.acceptances
+      .find(item=>item.acceptance_id===uiAcceptanceId);
+    if(uiApprovedRead.status!==200||uiApprovedAcceptance?.state!=='active'
+        ||!uiApprovedAcceptance.sla_clock?.some(clock=>clock.occurrence_id===uiOccurrence))
+      throw new Error('actual rendered approval has no public active state or per-atom SLA clock');
+    const uiRevokeCatalogue=await api('/api/v1/reports/sla-policies?group_id='+encodeURIComponent(findingId));
+    const uiRevokeRequest={command_id:crypto.randomUUID(),target_id:findingId,action:'acceptance.revoke',
+      membership_ids:[uiOccurrence],expected_revisions:{target:uiApprovedRead.body.assessment.revision,
+        policy:uiApprovedRead.body.assessment.policy_revision,
+        authority:uiApprovedRead.body.assessment.authority_revision,
+        identity_membership:uiApprovedRead.body.assessment.membership.revision,
+        owners:uiApprovedRead.body.assessment.owner_revision},
+      expected_exposures:uiRevokeCatalogue.body.current_heads.episodes
+        .filter(item=>item.episode_id===deadlineBoundaryMember.episode)
+        .map(({exposure_id,episode_id,state_revision})=>({exposure_id,episode_id,state_revision})),
+      expected_evaluations:uiRevokeCatalogue.body.current_heads.evaluations
+        .filter(item=>item.occurrence_id===uiOccurrence)
+        .map(({episode_id,occurrence_id,evaluation_id,revision})=>({episode_id,occurrence_id,evaluation_id,revision})),
+      payload:{acceptance_id:uiAcceptanceId,rationale:'End temporary UI form validation before the SLA deadline journey.'}};
+    const uiRevoke=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify(uiRevokeRequest)});
+    const uiRevokedRead=await api('/api/v1/assessment/groups/'+findingId);
+    const uiRevokedAcceptance=uiRevokedRead.body.assessment.acceptances
+      .find(item=>item.acceptance_id===uiAcceptanceId);
+    if(uiRevoke.status!==200||uiRevokedAcceptance?.state!=='revoked'
+        ||uiRevokedAcceptance.effective_membership_ids?.length!==0)
+      throw new Error('early public revoke after actual UI approval did not remove effective membership');
+    await writeFile(path.join(evidence,'sla-ui-form-submit-approve.json'),JSON.stringify({
+      membership_id:uiOccurrence,authority_read_source:'actual scoped group GET captured from rendered forms',
+      submit:{group_view:uiSubmitGroup,sla_catalogue:uiSubmitSla,request:uiSubmitCommand,
+        status:uiSubmitResponse.status(),receipt:uiSubmitReceipt},
+      approval:{group_view:uiApproveGroup,sla_catalogue:uiApproveSla,request:uiApproveCommand,
+        status:uiApproveResponse.status(),receipt:uiApproveReceipt},
+      revoke:{request:uiRevokeRequest,response:uiRevoke.body,acceptance:uiRevokedAcceptance},
+      assertions:{actual_rendered_submit_and_approve:true,authority_bound_to_exact_group_get:true,
+        current_episode_and_evaluation_guards:true,successful_receipts_bound_to_commands:true}},null,2),{mode:0o600});
+
+    await writeFile(clockPath,pauseAt.toISOString()+'\n',{mode:0o666});
+    const g7ReportCommand=crypto.randomUUID();
+    const g7Report=await api('/api/v1/reports',{method:'POST',write:true,body:JSON.stringify({
+      schema_version:1,definition_version:'g7-exception-sla-v1',command_id:g7ReportCommand,
+      mode:'as_known_at',scope:{group_ids:[findingId]},as_of:pauseAt.toISOString(),
+      known_at:pauseAt.toISOString()})});
+    if(g7Report.status!==200||!g7Report.body.report_id)
+      throw new Error(`public G7 continuity report creation failed ${g7Report.status}: ${JSON.stringify(g7Report.body)}`);
+    let reportRead;
+    for(let attempt=0;attempt<30;attempt++) {
+      reportRead=await api(`/api/v1/reports/${g7Report.body.report_id}`);
+      if(reportRead.status===200&&reportRead.body.status==='ready')break;
+      await page.waitForTimeout(500);
+    }
+    if(reportRead?.status!==200||reportRead.body.status!=='ready')
+      throw new Error(`public G7 continuity report did not become ready: ${JSON.stringify(reportRead?.body)}`);
+    const g7Atoms=await api(`/api/v1/reports/${g7Report.body.report_id}/atoms`);
+    if(g7Atoms.status!==200)throw new Error(`public G7 continuity atoms failed ${g7Atoms.status}: ${JSON.stringify(g7Atoms.body)}`);
+    const g7AtomByOccurrence=Object.fromEntries(g7Atoms.body.items.map(item=>[item.occurrence_id,item]));
+    const matrixAtoms={};
+    for(const name of ['missing_environment','later_environment_not_admitted','missing_service',
+        'later_service_not_admitted','optional_unused_absent','omitted_followup']) {
+      const retained=contextMatrix[name];
+      const atom=g7AtomByOccurrence[retained.occurrence_id];
+      matrixAtoms[name]=atom;
+      if(!atom)throw new Error(`public context matrix omitted ${name}`);
+      const shouldGap=name.includes('missing')||name.includes('not_admitted');
+      if(shouldGap?(!atom.gap_reasons?.length||atom.clock.deadline!=null):
+          (!atom.clock.deadline||Date.parse(atom.clock.start)!==Date.parse(retained.receipt.ingested_at)
+            ||retained.head.policy_id!==prospectivePolicy.policy_id))
+        throw new Error(`public context selector/coverage matrix failed: ${JSON.stringify({name,retained,atom})}`);
+    }
+    if(contextMatrix.optional_unused_absent.head.evaluation_id!==contextMatrix.known_head_after_followups.evaluation_id
+        ||contextMatrix.omitted_followup.occurrence_id!==contextMatrix.optional_unused_absent.occurrence_id
+        ||contextMatrix.conflicting_followup.occurrence_id!=null)
+      throw new Error('omitted/conflicting context changed the established known clock/head');
+    await writeFile(path.join(evidence,'sla-context-public-matrix.json'),JSON.stringify({
+      retained_inputs_and_receipts:contextMatrix,policy:prospectivePolicy,publication:prospectivePublication,
+      report:g7Report.body,public_atoms:matrixAtoms},null,2),{mode:0o600});
+    for(const member of members) {
+      const atom=g7AtomByOccurrence[member.occurrence];
+      const anchorMatches=Date.parse(atom?.clock?.start)===ingestAt
+        &&(member.deadline_at
+          ? Date.parse(atom?.clock?.original_deadline_at)===Date.parse(member.deadline_at)
+          : atom?.clock?.original_deadline_at==null);
+      if(!atom||!anchorMatches)
+        throw new Error(`public G7 report lost authoritative membership anchor/deadline: ${JSON.stringify({member,atom})}`);
+    }
+    if(!deadlineBoundaryMember)
+      throw new Error('authoritative fixture omitted the dedicated public deadline-boundary membership');
+    const deadlineBoundaryAtom=g7AtomByOccurrence[deadlineBoundaryMember.occurrence];
+    const uiApprovalAt=uiApprovedAcceptance.pause_snapshots?.[0]?.approved_at;
+    const uiEndAt=uiRevokedAcceptance.history?.at(-1)?.at;
+    for(const [label,value] of Object.entries({submitted:uiRevokedAcceptance.submitted_at,
+        approved:uiApprovalAt,revoked:uiEndAt})) {
+      if(Date.parse(value)!==uiFlowNow.getTime())
+        throw new Error(`UI ${label} effective time differs from trusted fixture clock: ${value}`);
+    }
+    const uiPauseDurationMs=Date.parse(uiEndAt)-Date.parse(uiApprovalAt);
+    const expectedBoundaryDeadline=Date.parse(deadlineBoundaryMember.deadline_at)+uiPauseDurationMs;
+    if(!deadlineBoundaryAtom||!deadlineBoundaryMember.deadline_at
+        ||Date.parse(deadlineBoundaryAtom.clock.deadline)!==expectedBoundaryDeadline)
+      throw new Error(`deadline-boundary member differs from independent receipt plus pause interval: ${JSON.stringify({deadlineBoundaryMember,deadlineBoundaryAtom,uiApprovalAt,uiEndAt})}`);
+    await writeFile(path.join(evidence,'sla-writer-deadline-reconciliation.json'),JSON.stringify({
+      original_writer_deadline_at:deadlineBoundaryMember.deadline_at,
+      intended_ui_effective_at:uiFlowNow.toISOString(),actual_ui_approval_at:uiApprovalAt,
+      actual_ui_end_at:uiEndAt,pause_duration_ms:uiPauseDurationMs,
+      independently_expected_deadline_at:new Date(expectedBoundaryDeadline).toISOString(),
+      public_report_deadline_at:deadlineBoundaryAtom.clock.deadline},null,2),{mode:0o600});
+    await writeFile(path.join(evidence,'sla-continuity-g7-public-report.json'),JSON.stringify({
+      create:g7Report.body,read:reportRead.body,atoms:g7Atoms.body,command_id:g7ReportCommand},null,2),{mode:0o600});
+    const g5=seeded.g5_compatibility;
+    const g5ReportCommand=crypto.randomUUID();
+    const g5Report=await api('/api/v1/reports',{method:'POST',write:true,body:JSON.stringify({
+      schema_version:1,definition_version:'g5-metrics-v1',command_id:g5ReportCommand,
+      mode:'as_known_at',scope:{group_ids:[g5.group]},as_of:pauseAt.toISOString(),
+      known_at:pauseAt.toISOString()})});
+    if(g5Report.status!==200||!g5Report.body.report_id)
+      throw new Error(`public G5 compatibility report creation failed ${g5Report.status}: ${JSON.stringify(g5Report.body)}`);
+    let g5ReportRead;
+    for(let attempt=0;attempt<30;attempt++) {
+      g5ReportRead=await api(`/api/v1/reports/${g5Report.body.report_id}`);
+      if(g5ReportRead.status===200&&g5ReportRead.body.status==='ready')break;
+      await page.waitForTimeout(500);
+    }
+    if(g5ReportRead?.status!==200||g5ReportRead.body.status!=='ready')
+      throw new Error(`public G5 compatibility report did not become ready: ${JSON.stringify(g5ReportRead?.body)}`);
+    const g5Atoms=await api(`/api/v1/reports/${g5Report.body.report_id}/atoms`);
+    const g5Atom=g5Atoms.body.items?.find(item=>item.occurrence_id===g5.occurrence);
+    if(g5Atoms.status!==200||!g5Atom
+        ||Date.parse(g5Atom.clock.start)!==Date.parse(g5.observed_at)
+        ||Date.parse(g5Atom.clock.start)===Date.parse(g5.ingested_at))
+      throw new Error(`G5 source-observation anchor was changed by prospective G7 setup: ${JSON.stringify({g5,g5Atom})}`);
+    await writeFile(path.join(evidence,'g5-prospective-compatibility-public-report.json'),JSON.stringify({
+      fixture:g5,create:g5Report.body,read:g5ReportRead.body,atoms:g5Atoms.body,
+      scanner_observation_anchor_preserved:true},null,2),{mode:0o600});
+    let current=await api(`/api/v1/assessment/groups/${findingId}`);
+    if(current.status!==200)throw new Error(`SLA fixture public read failed ${current.status}: ${JSON.stringify(current.body)}`);
+    const scopedAuthority=(await api('/api/v1/assessment/administration/catalogue')).body.authority_revision;
+    if(!Number.isSafeInteger(current.body.assessment.authority_revision)
+        ||current.body.assessment.authority_revision<0
+        ||current.body.assessment.authority_revision!==scopedAuthority)
+      throw new Error(`scoped assessment read authority revision disagrees with current native authority: ${JSON.stringify({read:current.body.assessment.authority_revision,catalogue:scopedAuthority})}`);
+    const episodes=current.body.episodes??[];
+    const expectedExposureMap=new Map();
+    for(const member of members){
+      const episode=episodes.find(item=>item.exposure_id===member.exposure);
+      if(!episode)throw new Error(`public finding omitted the writer-created episode ${member.episode}`);
+      if(episode.episode_id!==member.episode)throw new Error(`writer-created episode changed for ${member.occurrence}`);
+      expectedExposureMap.set(episode.exposure_id,{exposure_id:episode.exposure_id,
+        episode_id:episode.episode_id,state_revision:episode.state_revision});
+    }
+    const expectedExposures=[...expectedExposureMap.values()].filter(item=>
+      acceptanceMembers.some(member=>member.exposure===item.exposure_id));
+    const transferredMember=memberByKey.covered_six_hours;
+    const portionId=crypto.randomUUID();
+    const definePortion=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+      command_id:crypto.randomUUID(),target_id:findingId,action:'portion.define',
+      membership_ids:[transferredMember.occurrence],expected_revisions:{
+        target:current.body.assessment.revision,policy:current.body.assessment.policy_revision,
+        authority:current.body.assessment.authority_revision,identity_membership:current.body.assessment.membership.revision,
+        owners:current.body.assessment.owner_revision},payload:{portion_id:portionId,
+        owner_ids:[transferOwnerBeforeId],membership_ids:[transferredMember.occurrence],
+        rationale:'Define exact synthetic membership ownership before transfer'}})});
+    if(definePortion.status!==200)throw new Error(`public portion definition failed ${definePortion.status}: ${JSON.stringify(definePortion.body)}`);
+    const beforeTransfer=await api(`/api/v1/assessment/groups/${findingId}`);
+    const transfer=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+      command_id:crypto.randomUUID(),target_id:findingId,action:'portion.transfer',
+      membership_ids:[transferredMember.occurrence],expected_revisions:{
+        target:beforeTransfer.body.assessment.revision,policy:beforeTransfer.body.assessment.policy_revision,
+        authority:beforeTransfer.body.assessment.authority_revision,
+        identity_membership:beforeTransfer.body.assessment.membership.revision,
+        owners:beforeTransfer.body.assessment.owner_revision},payload:{portion_id:portionId,
+        owner_ids:[transferOwnerAfterId],membership_ids:[transferredMember.occurrence],
+        rationale:'Transfer the exact synthetic membership to a new owner'}})});
+    if(transfer.status!==200)throw new Error(`public owner transfer failed ${transfer.status}: ${JSON.stringify(transfer.body)}`);
+    current=await api(`/api/v1/assessment/groups/${findingId}`);
+    const transferredPortion=current.body.assessment.portions.find(item=>item.portion_id===portionId);
+    if(current.status!==200||!transferredPortion
+        ||JSON.stringify(transferredPortion.owner_ids)!==JSON.stringify([transferOwnerAfterId])
+        ||transferredPortion.membership_ids.length!==1
+        ||transferredPortion.membership_ids[0]!==transferredMember.occurrence)
+      throw new Error(`public owner transfer readback did not preserve exact membership: ${JSON.stringify(transferredPortion)}`);
+    const publicAnchorBefore=beforeTransfer.body.assessment.clocks.find(item=>item.occurrence_id===transferredMember.occurrence);
+    const publicAnchorAfter=current.body.assessment.clocks.find(item=>item.occurrence_id===transferredMember.occurrence);
+    const reportAnchorBefore=g7AtomByOccurrence[transferredMember.occurrence];
+    const reportAfterOwnerTransfer=await api(`/api/v1/reports/${g7Report.body.report_id}`);
+    const atomsAfterOwnerTransfer=await api(`/api/v1/reports/${g7Report.body.report_id}/atoms`);
+    const reportAnchorAfter=atomsAfterOwnerTransfer.body.items.find(item=>item.occurrence_id===transferredMember.occurrence);
+    if(!publicAnchorBefore||!publicAnchorAfter||!reportAnchorBefore||!reportAnchorAfter
+        ||publicAnchorBefore.first_ingested_at!==publicAnchorAfter.first_ingested_at
+        ||reportAnchorBefore.clock.start!==reportAnchorAfter.clock.start
+        ||reportAnchorBefore.clock.original_deadline_at!==reportAnchorAfter.clock.original_deadline_at)
+      throw new Error('fresh public readbacks do not prove the exact membership anchor survived owner transfer');
+    if(reportAfterOwnerTransfer.status!==200
+        ||JSON.stringify(reportAfterOwnerTransfer.body)!==JSON.stringify(reportRead.body)
+        ||atomsAfterOwnerTransfer.status!==200
+        ||JSON.stringify(atomsAfterOwnerTransfer.body)!==JSON.stringify(g7Atoms.body))
+      throw new Error('owner transfer mutated the already-issued G7 continuity report');
+    const g5ReportAfterTransfer=await api(`/api/v1/reports/${g5Report.body.report_id}`);
+    const g5AtomsAfterTransfer=await api(`/api/v1/reports/${g5Report.body.report_id}/atoms`);
+    if(g5ReportAfterTransfer.status!==200||g5AtomsAfterTransfer.status!==200
+        ||JSON.stringify(g5ReportAfterTransfer.body)!==JSON.stringify(g5ReportRead.body)
+        ||JSON.stringify(g5AtomsAfterTransfer.body)!==JSON.stringify(g5Atoms.body))
+      throw new Error('owner transfer or G7 activation mutated the already-issued G5 report');
+    await writeFile(path.join(evidence,'sla-owner-transfer-public-readback.json'),JSON.stringify({
+      define:definePortion.body,transfer:transfer.body,portion:transferredPortion,
+      membership_anchor_before:{source:'public group and report readbacks',
+        group_clock:publicAnchorBefore,report_atom:reportAnchorBefore},
+      membership_anchor_after:{source:'fresh public group and report readbacks',
+        group_clock:publicAnchorAfter,report_atom:reportAnchorAfter},
+      expected_deadline_at:transferredMember.deadline_at,
+      issued_g7_report_id:g7Report.body.report_id,
+      report_unchanged_after_transfer:true,
+      issued_g5_report_id:g5Report.body.report_id,
+      g5_report_unchanged_after_transfer:true},null,2),{mode:0o600});
+    await writeFile(path.join(evidence,'sla-before-exception-readback.json'),JSON.stringify(current.body,null,2),{mode:0o600});
+    const expectedEvaluations=acceptanceMembers.map(member=>({episode_id:member.episode,occurrence_id:member.occurrence,
+      evaluation_id:member.evaluation,revision:member.revision}));
+    const unknownMember=memberByKey.unknown_coverage;
+    const unknownEvaluation=expectedEvaluations.find(item=>item.occurrence_id===unknownMember.occurrence);
+    const unknownExposure=expectedExposures.find(item=>item.exposure_id===unknownMember.exposure);
+    const rejectSubmit=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+      command_id:crypto.randomUUID(),target_id:findingId,action:'acceptance.submit',
+      membership_ids:[unknownMember.occurrence],expected_revisions:{target:current.body.assessment.revision,
+        policy:current.body.assessment.policy_revision,authority:current.body.assessment.authority_revision,
+        identity_membership:current.body.assessment.membership.revision,
+        owners:current.body.assessment.owner_revision},expected_exposures:[unknownExposure],
+      expected_evaluations:[unknownEvaluation],payload:{accountable_owner_id:ownerDirectoryId,
+        rationale:'Exercise public rejection while preserving unknown coverage as a gap',
+        expires_at:expiry.toISOString(),continuity_allowed:false,exception_contract_version:1,
+        context:{environment:'local',evidence:'synthetic-local'},
+        compensating_controls:'Synthetic disposable journey controls.'}})});
+    if(rejectSubmit.status!==200)throw new Error(`public rejection fixture submit failed ${rejectSubmit.status}: ${JSON.stringify(rejectSubmit.body)}`);
+    let rejectState=await api(`/api/v1/assessment/groups/${findingId}`);
+    const rejectAcceptanceId=rejectState.body.assessment.acceptances.find(item=>item.state==='pending'
+      &&item.membership_ids?.length===1&&item.membership_ids[0]===unknownMember.occurrence)?.acceptance_id;
+    if(!rejectAcceptanceId)throw new Error('unknown-coverage rejection request was not pending');
+    const rejectCurrent=rejectState.body.assessment;
+    const rejectCommand=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+      command_id:crypto.randomUUID(),target_id:findingId,action:'acceptance.reject',
+      membership_ids:[unknownMember.occurrence],expected_revisions:{target:rejectCurrent.revision,
+        policy:rejectCurrent.policy_revision,authority:rejectCurrent.authority_revision,
+        identity_membership:rejectCurrent.membership.revision,owners:rejectCurrent.owner_revision},
+      expected_exposures:[unknownExposure],expected_evaluations:[unknownEvaluation],
+      payload:{acceptance_id:rejectAcceptanceId,rationale:'Reject synthetic exception request'}})});
+    if(rejectCommand.status!==200)throw new Error(`public exception rejection failed ${rejectCommand.status}: ${JSON.stringify(rejectCommand.body)}`);
+    rejectState=await api(`/api/v1/assessment/groups/${findingId}`);
+    const rejectedAcceptance=rejectState.body.assessment.acceptances.find(item=>item.acceptance_id===rejectAcceptanceId);
+    if(rejectState.status!==200||rejectedAcceptance?.state!=='rejected')
+      throw new Error(`public exception rejection state was not retained: ${JSON.stringify(rejectedAcceptance)}`);
+    await writeFile(path.join(evidence,'sla-rejected-public-readback.json'),JSON.stringify({
+      submit:rejectSubmit.body,reject:rejectCommand.body,acceptance:rejectedAcceptance,
+      unknown_coverage_remains_gap:true},null,2),{mode:0o600});
+    current=await api(`/api/v1/assessment/groups/${findingId}`);
+    const submit=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+      command_id:crypto.randomUUID(),target_id:findingId,action:'acceptance.submit',membership_ids:occurrenceIds,
+      expected_revisions:{target:current.body.assessment.revision,policy:current.body.assessment.policy_revision,
+        authority:current.body.assessment.authority_revision,
+        identity_membership:current.body.assessment.membership.revision,owners:current.body.assessment.owner_revision},
+      expected_exposures:expectedExposures,expected_evaluations:expectedEvaluations,
+      payload:{accountable_owner_id:ownerDirectoryId,rationale:'Exercise ingestion-anchored G7 pause and resume',
+        expires_at:expiry.toISOString(),continuity_allowed:false,exception_contract_version:1,
+        context:{environment:'local',evidence:'synthetic-local'},
+        compensating_controls:'Synthetic disposable journey controls.'}})});
+    if(submit.status!==200)throw new Error(`G7 SLA public submit failed ${submit.status}: ${JSON.stringify(submit.body)}`);
+    let afterSubmit=await api(`/api/v1/assessment/groups/${findingId}`);
+    const acceptanceId=afterSubmit.body.assessment.acceptances.find(item=>item.state==='pending')?.acceptance_id;
+    if(!acceptanceId)throw new Error(`public submit did not return the pending request: ${JSON.stringify(afterSubmit.body.assessment.acceptances)}`);
+    const approvalBody={command_id:crypto.randomUUID(),target_id:findingId,action:'acceptance.approve',
+      membership_ids:occurrenceIds,expected_revisions:{target:afterSubmit.body.assessment.revision,
+        policy:afterSubmit.body.assessment.policy_revision,authority:afterSubmit.body.assessment.authority_revision,
+        identity_membership:afterSubmit.body.assessment.membership.revision,
+        owners:afterSubmit.body.assessment.owner_revision},expected_exposures:expectedExposures,
+      expected_evaluations:expectedEvaluations,payload:{acceptance_id:acceptanceId,
+        rationale:'Approve the synthetic ingestion-anchored exception',selected_expires_at:expiry.toISOString(),
+        expected_request_revision:1}};
+    const auditBeforeStale=await api(`/api/v1/assessment/audit?group_id=${encodeURIComponent(findingId)}`);
+    if(auditBeforeStale.status!==200)throw new Error(`pre-denial public audit read failed ${auditBeforeStale.status}`);
+    const staleAuthorityRequest={...approvalBody,command_id:crypto.randomUUID(),expected_revisions:{
+      ...approvalBody.expected_revisions,authority:approvalBody.expected_revisions.authority+1}};
+    const staleAuthority=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify(staleAuthorityRequest)});
+    if(staleAuthority.status!==409)throw new Error(`stale authority approval was not denied without effects: ${staleAuthority.status} ${JSON.stringify(staleAuthority.body)}`);
+    const staleMembershipRequest={...approvalBody,command_id:crypto.randomUUID(),expected_revisions:{
+      ...approvalBody.expected_revisions,identity_membership:approvalBody.expected_revisions.identity_membership+1}};
+    const staleMembership=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify(staleMembershipRequest)});
+    if(staleMembership.status!==409)throw new Error(`stale membership approval was not denied without effects: ${staleMembership.status} ${JSON.stringify(staleMembership.body)}`);
+    // A receipt replay would return the committed success. Replaying the exact
+    // denied command IDs must reach the same guards and remain denied.
+    const staleAuthorityReplay=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify(staleAuthorityRequest)});
+    const staleMembershipReplay=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify(staleMembershipRequest)});
+    const afterStaleGuards=await api(`/api/v1/assessment/groups/${findingId}`);
+    const auditAfterStale=await api(`/api/v1/assessment/audit?group_id=${encodeURIComponent(findingId)}`);
+    await writeFile(path.join(evidence,'sla-stale-guard-public-readback.json'),JSON.stringify({
+      stale_authority_request:staleAuthorityRequest,stale_authority_response:staleAuthority.body,
+      stale_membership_request:staleMembershipRequest,stale_membership_response:staleMembership.body,
+      stale_authority_replay_response:staleAuthorityReplay.body,
+      stale_membership_replay_response:staleMembershipReplay.body,
+      latest_receipt_after_denials:afterStaleGuards.body.assessment.latest_receipt,
+      audit_before:auditBeforeStale.body,audit_after:auditAfterStale.body,
+      pending_request_after_denials:afterStaleGuards.body.assessment.acceptances.find(item=>item.acceptance_id===acceptanceId)},null,2),{mode:0o600});
+    if(afterStaleGuards.status!==200||afterStaleGuards.body.assessment.acceptances.some(item=>
+        item.acceptance_id===acceptanceId&&item.state==='active'))
+      throw new Error('denied stale authority or membership command changed exception state');
+    if(staleAuthorityReplay.status!==409||staleMembershipReplay.status!==409)
+      throw new Error(`denied stale command replay found a committed receipt: ${JSON.stringify({
+        authority:staleAuthorityReplay.status,membership:staleMembershipReplay.status})}`);
+    if(auditAfterStale.status!==200||auditAfterStale.body.items.length!==auditBeforeStale.body.items.length
+        ||auditAfterStale.body.items.some(item=>[staleAuthorityRequest.command_id,
+          staleMembershipRequest.command_id].includes(item.command_id)))
+      throw new Error(`denied stale command changed audit: ${JSON.stringify({before:auditBeforeStale.body.items,
+        after:auditAfterStale.body.items,stale:[staleAuthorityRequest.command_id,staleMembershipRequest.command_id]})}`);
+    const approveCommand={
+      command_id:crypto.randomUUID(),target_id:findingId,action:'acceptance.approve',membership_ids:occurrenceIds,
+      expected_revisions:{target:afterSubmit.body.assessment.revision,policy:afterSubmit.body.assessment.policy_revision,
+        authority:afterSubmit.body.assessment.authority_revision,identity_membership:afterSubmit.body.assessment.membership.revision,
+        owners:afterSubmit.body.assessment.owner_revision},expected_exposures:expectedExposures,
+      expected_evaluations:expectedEvaluations,payload:{acceptance_id:acceptanceId,
+        rationale:'Approve the synthetic ingestion-anchored exception',selected_expires_at:expiry.toISOString(),
+        expected_request_revision:1}};
+    const beforeAuditFault=await api(`/api/v1/assessment/groups/${findingId}`);
+    const faultDbBefore=disposableDbSnapshot({commandId:approveCommand.command_id,acceptanceId,groupId:findingId});
+    installApprovalAuditFault({commandId:approveCommand.command_id,groupId:findingId});
+    let failedApproval;
+    try {
+      failedApproval=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify(approveCommand)});
+    } finally {
+      removeApprovalAuditFault();
+    }
+    const afterAuditFault=await api(`/api/v1/assessment/groups/${findingId}`);
+    const faultDbAfter=disposableDbSnapshot({commandId:approveCommand.command_id,acceptanceId,groupId:findingId});
+    const faultAfterAcceptance=afterAuditFault.body.assessment.acceptances.find(item=>item.acceptance_id===acceptanceId);
+    if(failedApproval.status!==503||failedApproval.body?.error?.code!=='dependency_unavailable'
+        ||failedApproval.body?.error?.details?.outcome!=='not_committed'
+        ||faultAfterAcceptance?.state!=='pending'
+        ||JSON.stringify(faultAfterAcceptance)!==JSON.stringify(beforeAuditFault.body.assessment.acceptances.find(item=>item.acceptance_id===acceptanceId))
+        ||JSON.stringify(faultDbAfter)!==JSON.stringify(faultDbBefore))
+      throw new Error(`approval audit failure rollback assertion failed: ${JSON.stringify({status:failedApproval.status,error:failedApproval.body?.error,dbBefore:faultDbBefore,dbAfter:faultDbAfter,acceptanceState:faultAfterAcceptance?.state,acceptanceBefore:beforeAuditFault.body.assessment.acceptances.find(item=>item.acceptance_id===acceptanceId)?.state})}`);
+    await writeFile(path.join(evidence,'sla-approval-audit-failure-rollback.json'),JSON.stringify({
+      failed_request:approveCommand,failed_response:failedApproval,before_public:beforeAuditFault.body,
+      after_public:afterAuditFault.body,db_before:faultDbBefore,db_after:faultDbAfter,
+      rollback_assertions:{request_pending:true,no_pause_events:true,no_warning_intents:true,
+        no_audit_or_receipt:true,no_projection_intents:true,group_document_unchanged:true}},null,2),{mode:0o600});
+    const approve=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify(approveCommand)});
+    if(approve.status!==200)throw new Error(`G7 SLA public approval failed ${approve.status}: ${JSON.stringify(approve.body)}`);
+    const pausedRead=await api(`/api/v1/assessment/groups/${findingId}`);
+    const pausedAcceptance=pausedRead.body.assessment.acceptances.find(item=>item.acceptance_id===acceptanceId);
+    const pausedClocks=Object.fromEntries((pausedAcceptance?.sla_clock??[]).map(clock=>[clock.occurrence_id,clock]));
+    const coveredClock=pausedClocks[memberByKey.covered_six_hours.occurrence];
+    const rebuiltClock=pausedClocks[memberByKey.verified_rebuild_membership.occurrence];
+    const breachedClock=pausedClocks[memberByKey.already_breached.occurrence];
+    const gapClock=pausedClocks[memberByKey.unknown_coverage.occurrence];
+    if(pausedAcceptance?.state!=='active'||coveredClock?.state!=='paused'
+        ||Date.parse(coveredClock?.target_at)!==expiry.getTime()
+        ||Number(coveredClock?.frozen_sla_seconds)!==21600
+        ||rebuiltClock?.state!=='paused'||Date.parse(rebuiltClock?.target_at)!==expiry.getTime()
+        ||Number(rebuiltClock?.frozen_sla_seconds)!==21600
+        ||breachedClock?.state!=='paused'||Number(breachedClock?.frozen_sla_seconds)!==0
+        ||breachedClock?.prior_breach!==true||gapClock?.state!=='gap'
+        ||gapClock?.target_at!=null||gapClock?.remaining_seconds!=null)
+      throw new Error(`public SLA pause failed covered, breached, or unknown atom assertions: ${JSON.stringify({acceptance:pausedAcceptance,expectedExpiry:expiry.toISOString()})}`);
+    await writeFile(path.join(evidence,'sla-paused-public-readback.json'),JSON.stringify({
+      findingId,memberKeys:members.map(member=>member.key),acceptanceId,submit:submit.body,approve:approve.body,
+      public_acceptance:pausedAcceptance,expected_ingest_at:seeded.ingested_at,
+      expected_deadline_at:seeded.deadline_at,readback_at:pauseAt.toISOString()},null,2),{mode:0o600});
+    await page.goto(origin+'/#findings?group='+encodeURIComponent(findingId),{waitUntil:'domcontentloaded'});
+    await page.locator('.assessment-workspace .load-status').filter({hasText:'Finding assessment loaded.'})
+      .waitFor({state:'visible',timeout:20000});
+    const pausedExpected={group_id:findingId,acceptance_id:acceptanceId,state:'active',expires_at:expiry.toISOString(),
+      sla_clock:acceptanceMembers.map(member=>({occurrence_id:member.occurrence,
+        state:member.key==='unknown_coverage'?'gap':'paused',
+        target_at:member.key==='unknown_coverage'?null:expiry.toISOString(),
+        remaining_seconds:member.key==='unknown_coverage'?null:60,
+        frozen_sla_seconds:member.key==='unknown_coverage'?null:member.key==='already_breached'?0:21600,
+        prior_breach:member.key==='already_breached',currently_breached:false}))};
+    await renderCurrentAcceptance(pausedExpected,'paused');
+    await writeFile(clockPath,expiry.toISOString()+'\n',{mode:0o666});
+    await writeFile(path.join(evidence,'sla-paused-clock.json'),expiry.toISOString()+'\n',{mode:0o666});
+    await page.waitForTimeout(1500);
+    const exactExpiryRead=await api(`/api/v1/assessment/groups/${findingId}`);
+    const exactExpiryAcceptance=exactExpiryRead.body.assessment.acceptances.find(item=>item.acceptance_id===acceptanceId);
+    const exactExpiryClock=exactExpiryAcceptance?.sla_clock?.find(item=>item.occurrence_id===memberByKey.covered_six_hours.occurrence);
+    const exactExpiryTarget=expiry.getTime()+21600*1000;
+    if(exactExpiryAcceptance?.state!=='expired'||exactExpiryClock?.state!=='running'
+        ||Date.parse(exactExpiryClock.target_at)!==exactExpiryTarget
+        ||Number(exactExpiryClock.remaining_seconds)!==21600
+        ||exactExpiryClock.frozen_sla_seconds!=null)
+      throw new Error(`public exact-expiry projection did not end the half-open pause: ${JSON.stringify({acceptance:exactExpiryAcceptance,expectedTarget:new Date(exactExpiryTarget).toISOString()})}`);
+    await writeFile(path.join(evidence,'sla-exact-expiry-public-readback.json'),JSON.stringify({
+      effective_at:expiry.toISOString(),acceptance:exactExpiryAcceptance,
+      expected_resumed_target:new Date(exactExpiryTarget).toISOString(),expected_remainder_seconds:21600},null,2),{mode:0o600});
+    const resumedAt=new Date(expiry.getTime()+60*1000);
+    await writeFile(clockPath,resumedAt.toISOString()+'\n',{mode:0o666});
+    await page.waitForTimeout(1500);
+    const resumedRead=await api(`/api/v1/assessment/groups/${findingId}`);
+    const resumedAcceptance=resumedRead.body.assessment.acceptances.find(item=>item.acceptance_id===acceptanceId);
+    const resumedClocks=Object.fromEntries((resumedAcceptance?.sla_clock??[]).map(clock=>[clock.occurrence_id,clock]));
+    const resumedCovered=resumedClocks[memberByKey.covered_six_hours.occurrence];
+    const resumedRebuilt=resumedClocks[memberByKey.verified_rebuild_membership.occurrence];
+    const resumedBreached=resumedClocks[memberByKey.already_breached.occurrence];
+    const resumedGap=resumedClocks[memberByKey.unknown_coverage.occurrence];
+    if(resumedRead.status!==200||resumedCovered?.state!=='running'
+        ||Date.parse(resumedCovered.target_at)!==expiry.getTime()+6*60*60*1000
+        ||Number(resumedCovered.remaining_seconds)!==21540
+        ||resumedRebuilt?.state!=='running'
+        ||Date.parse(resumedRebuilt.target_at)!==expiry.getTime()+6*60*60*1000
+        ||Number(resumedRebuilt.remaining_seconds)!==21540
+        ||resumedBreached?.state!=='running'||Number(resumedBreached.remaining_seconds)!==0
+        ||resumedBreached?.prior_breach!==true||resumedBreached?.currently_breached!==true
+        ||resumedGap?.state!=='gap'||resumedGap?.target_at!=null||resumedGap?.remaining_seconds!=null)
+      throw new Error(`late expiry processing failed resume, prior breach, or gap assertions: ${JSON.stringify({status:resumedRead.status,clocks:resumedAcceptance?.sla_clock,expectedTarget:new Date(expiry.getTime()+6*60*60*1000).toISOString()})}`);
+    await writeFile(path.join(evidence,'sla-resumed-public-readback.json'),JSON.stringify({
+      readback_at:resumedAt.toISOString(),public_acceptance:resumedAcceptance},null,2),{mode:0o600});
+    const resumedExpected={group_id:findingId,acceptance_id:acceptanceId,state:'expired',expires_at:expiry.toISOString(),
+      sla_clock:acceptanceMembers.map(member=>({occurrence_id:member.occurrence,
+        state:member.key==='unknown_coverage'?'gap':'running',
+        target_at:member.key==='unknown_coverage'?null:member.key==='already_breached'?expiry.toISOString():new Date(exactExpiryTarget).toISOString(),
+        remaining_seconds:member.key==='unknown_coverage'?null:member.key==='already_breached'?0:21540,
+        frozen_sla_seconds:null,prior_breach:member.key==='already_breached',currently_breached:member.key==='already_breached'}))};
+    await renderCurrentAcceptance(resumedExpected,'resumed');
+    const beforeRevoke=await api(`/api/v1/assessment/groups/${findingId}`);
+    const expiredRevokeRequest={
+      command_id:crypto.randomUUID(),target_id:findingId,action:'acceptance.revoke',membership_ids:occurrenceIds,
+      expected_revisions:{target:beforeRevoke.body.assessment.revision,
+        policy:beforeRevoke.body.assessment.policy_revision,authority:beforeRevoke.body.assessment.authority_revision,
+        identity_membership:beforeRevoke.body.assessment.membership.revision,
+        owners:beforeRevoke.body.assessment.owner_revision},expected_exposures:expectedExposures,
+      expected_evaluations:expectedEvaluations,payload:{acceptance_id:acceptanceId,
+        rationale:'Attempt to revoke already expired synthetic exception'}};
+    const auditBeforeExpiredRevoke=await api(`/api/v1/assessment/audit?group_id=${encodeURIComponent(findingId)}`);
+    const expiredRevoke=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify(expiredRevokeRequest)});
+    const expiredRevokeReplay=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify(expiredRevokeRequest)});
+    const afterExpiredRevoke=await api(`/api/v1/assessment/groups/${findingId}`);
+    const auditAfterExpiredRevoke=await api(`/api/v1/assessment/audit?group_id=${encodeURIComponent(findingId)}`);
+    const unchangedExpiredAcceptance=afterExpiredRevoke.body.assessment.acceptances.find(item=>item.acceptance_id===acceptanceId);
+    const expiredClockBefore=resumedAcceptance.sla_clock;
+    const expiredClockAfter=unchangedExpiredAcceptance?.sla_clock;
+    if(expiredRevoke.status!==409||expiredRevokeReplay.status!==409
+        ||unchangedExpiredAcceptance?.state!=='expired'
+        ||JSON.stringify(expiredClockAfter)!==JSON.stringify(expiredClockBefore)
+        ||auditAfterExpiredRevoke.status!==200
+        ||auditAfterExpiredRevoke.body.items.length!==auditBeforeExpiredRevoke.body.items.length
+        ||auditAfterExpiredRevoke.body.items.some(item=>item.command_id===expiredRevokeRequest.command_id))
+      throw new Error(`expired exception revoke was not a no-effect denial: ${JSON.stringify({first:expiredRevoke,replay:expiredRevokeReplay,acceptance:unchangedExpiredAcceptance,audit_before:auditBeforeExpiredRevoke.body,audit_after:auditAfterExpiredRevoke.body})}`);
+    await writeFile(path.join(evidence,'sla-expired-revoke-denial-public-readback.json'),JSON.stringify({
+      request:expiredRevokeRequest,response:expiredRevoke.body,replay:expiredRevokeReplay.body,
+      acceptance_before:resumedAcceptance,acceptance_after:unchangedExpiredAcceptance,
+      audit_before:auditBeforeExpiredRevoke.body,audit_after:auditAfterExpiredRevoke.body,
+      clock_unchanged:true},null,2),{mode:0o600});
+
+    // The expired decision remains terminal. A new request demonstrates an
+    // authorised early revocation and resumes its captured remainder exactly.
+    const earlyMember=memberByKey.covered_six_hours;
+    const earlyExposure=expectedExposures.find(item=>item.exposure_id===earlyMember.exposure);
+    const earlyEvaluation=expectedEvaluations.find(item=>item.occurrence_id===earlyMember.occurrence);
+    let earlyBase=await api(`/api/v1/assessment/groups/${findingId}`);
+    const earlyExpiry=new Date(resumedAt.getTime()+60*60*1000);
+    const earlySubmit=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+      command_id:crypto.randomUUID(),target_id:findingId,action:'acceptance.submit',
+      membership_ids:[earlyMember.occurrence],expected_revisions:{target:earlyBase.body.assessment.revision,
+        policy:earlyBase.body.assessment.policy_revision,authority:earlyBase.body.assessment.authority_revision,
+        identity_membership:earlyBase.body.assessment.membership.revision,
+        owners:earlyBase.body.assessment.owner_revision},expected_exposures:[earlyExposure],
+      expected_evaluations:[earlyEvaluation],payload:{accountable_owner_id:ownerDirectoryId,
+        rationale:'Exercise early revocation and exact remainder resumption',expires_at:earlyExpiry.toISOString(),
+        continuity_allowed:false,exception_contract_version:1,
+        context:{environment:'local',evidence:'synthetic-local'},
+        compensating_controls:'Synthetic disposable journey controls.'}})});
+    if(earlySubmit.status!==200)throw new Error(`early-revocation request submit failed ${earlySubmit.status}: ${JSON.stringify(earlySubmit.body)}`);
+    earlyBase=await api(`/api/v1/assessment/groups/${findingId}`);
+    const earlyAcceptance=earlyBase.body.assessment.acceptances.find(item=>item.state==='pending'
+      &&item.membership_ids?.length===1&&item.membership_ids[0]===earlyMember.occurrence);
+    if(!earlyAcceptance)throw new Error('new early-revocation request is not pending');
+    const earlyApprove=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+      command_id:crypto.randomUUID(),target_id:findingId,action:'acceptance.approve',
+      membership_ids:[earlyMember.occurrence],expected_revisions:{target:earlyBase.body.assessment.revision,
+        policy:earlyBase.body.assessment.policy_revision,authority:earlyBase.body.assessment.authority_revision,
+        identity_membership:earlyBase.body.assessment.membership.revision,
+        owners:earlyBase.body.assessment.owner_revision},expected_exposures:[earlyExposure],
+      expected_evaluations:[earlyEvaluation],payload:{acceptance_id:earlyAcceptance.acceptance_id,
+        rationale:'Approve short synthetic exception before early revocation',selected_expires_at:earlyExpiry.toISOString(),
+        expected_request_revision:1}})});
+    if(earlyApprove.status!==200)throw new Error(`early-revocation approval failed ${earlyApprove.status}: ${JSON.stringify(earlyApprove.body)}`);
+    const earlyPausedRead=await api(`/api/v1/assessment/groups/${findingId}`);
+    const earlyPaused=earlyPausedRead.body.assessment.acceptances.find(item=>item.acceptance_id===earlyAcceptance.acceptance_id);
+    const earlyClock=earlyPaused?.sla_clock?.find(item=>item.occurrence_id===earlyMember.occurrence);
+    if(earlyPaused?.state!=='active'||earlyClock?.state!=='paused'
+        ||Number(earlyClock.frozen_sla_seconds)!==21540)
+      throw new Error(`new request did not capture the current running remainder: ${JSON.stringify({state:earlyPaused?.state,clock:earlyClock})}`);
+    const earlyRevokedAt=new Date(resumedAt.getTime()+30*60*1000);
+    await writeFile(clockPath,earlyRevokedAt.toISOString()+'\n',{mode:0o666});
+    const earlyCurrent=await api(`/api/v1/assessment/groups/${findingId}`);
+    const earlyRevoke=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+      command_id:crypto.randomUUID(),target_id:findingId,action:'acceptance.revoke',
+      membership_ids:[earlyMember.occurrence],expected_revisions:{target:earlyCurrent.body.assessment.revision,
+        policy:earlyCurrent.body.assessment.policy_revision,authority:earlyCurrent.body.assessment.authority_revision,
+        identity_membership:earlyCurrent.body.assessment.membership.revision,
+        owners:earlyCurrent.body.assessment.owner_revision},expected_exposures:[earlyExposure],
+      expected_evaluations:[earlyEvaluation],payload:{acceptance_id:earlyAcceptance.acceptance_id,
+        rationale:'End the synthetic exception while its pause remains effective'}})});
+    const afterEarlyRevoke=await api(`/api/v1/assessment/groups/${findingId}`);
+    const earlyRevoked=afterEarlyRevoke.body.assessment.acceptances.find(item=>item.acceptance_id===earlyAcceptance.acceptance_id);
+    const resumedEarlyClock=earlyRevoked?.sla_clock?.find(item=>item.occurrence_id===earlyMember.occurrence);
+    const earlyTarget=earlyRevokedAt.getTime()+21540*1000;
+    if(earlyRevoke.status!==200||earlyRevoked?.state!=='revoked'
+        ||resumedEarlyClock?.state!=='running'||Date.parse(resumedEarlyClock.target_at)!==earlyTarget
+        ||Number(resumedEarlyClock.remaining_seconds)!==21540||resumedEarlyClock.frozen_sla_seconds!=null)
+      throw new Error(`public early revocation failed to resume the stored remainder: ${JSON.stringify({status:earlyRevoke.status,acceptance:earlyRevoked,expectedTarget:new Date(earlyTarget).toISOString()})}`);
+    await writeFile(path.join(evidence,'sla-early-revocation-public-readback.json'),JSON.stringify({
+      submit:earlySubmit.body,approve:earlyApprove.body,paused:earlyPaused,
+      revoke:earlyRevoke.body,revoked:earlyRevoked,readback_at:earlyRevokedAt.toISOString(),
+      expected_remaining_seconds:21540,expected_resumed_target:new Date(earlyTarget).toISOString()},null,2),{mode:0o600});
+
+    const sharedMember=earlyMember;
+    const removedMember=memberByKey.already_breached;
+    const addedMember=memberByKey.replacement_member;
+    const replacementBaseMembers=[sharedMember,removedMember];
+    const replacementExpiry=new Date(earlyRevokedAt.getTime()+60*60*1000);
+    let replacementBaseView=await api(`/api/v1/assessment/groups/${findingId}`);
+    const replacementBaseExposures=[...expectedExposureMap.values()].filter(item=>
+      replacementBaseMembers.some(member=>member.exposure===item.exposure_id));
+    const replacementBaseEvaluations=replacementBaseMembers.map(member=>({episode_id:member.episode,
+      occurrence_id:member.occurrence,evaluation_id:member.evaluation,revision:member.revision}));
+    const initialOwners=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify({command_id:crypto.randomUUID(),target_id:findingId,action:'owners.assign',
+        membership_ids:replacementBaseMembers.map(member=>member.occurrence),
+        expected_revisions:{target:replacementBaseView.body.assessment.revision,
+          policy:replacementBaseView.body.assessment.policy_revision,
+          identity_membership:replacementBaseView.body.assessment.membership.revision,
+          owners:replacementBaseView.body.assessment.owner_revision},
+        payload:{owners:[{owner_id:suspensionOwnerBeforeId,owner_type:'team'}],
+          rationale:'Set current accountable owner before material-change suspension'}})});
+    if(initialOwners.status!==200)
+      throw new Error(`public owner setup for suspension failed ${initialOwners.status}: ${JSON.stringify(initialOwners.body)}`);
+    replacementBaseView=await api(`/api/v1/assessment/groups/${findingId}`);
+    const replacementBaseSubmit=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify({command_id:crypto.randomUUID(),target_id:findingId,
+        action:'acceptance.submit',membership_ids:replacementBaseMembers.map(member=>member.occurrence),
+        expected_revisions:{target:replacementBaseView.body.assessment.revision,
+          policy:replacementBaseView.body.assessment.policy_revision,
+          authority:replacementBaseView.body.assessment.authority_revision,
+          identity_membership:replacementBaseView.body.assessment.membership.revision,
+          owners:replacementBaseView.body.assessment.owner_revision},
+        expected_exposures:replacementBaseExposures,expected_evaluations:replacementBaseEvaluations,
+        payload:{accountable_owner_id:suspensionOwnerBeforeId,
+          rationale:'Create active predecessor for scoped material suspension and replacement',
+          expires_at:replacementExpiry.toISOString(),continuity_allowed:false,
+          exception_contract_version:1,context:{environment:'local',evidence:'synthetic-local'},
+          compensating_controls:'Synthetic disposable fixture controls.'}})});
+    if(replacementBaseSubmit.status!==200)
+      throw new Error(`replacement predecessor submit failed ${replacementBaseSubmit.status}: ${JSON.stringify(replacementBaseSubmit.body)}`);
+    replacementBaseView=await api(`/api/v1/assessment/groups/${findingId}`);
+    const replacementPredecessor=replacementBaseView.body.assessment.acceptances.find(item=>
+      item.state==='pending'&&JSON.stringify([...item.membership_ids].sort())===
+        JSON.stringify(replacementBaseMembers.map(member=>member.occurrence).sort()));
+    if(!replacementPredecessor)throw new Error('replacement predecessor did not read back as pending for the exact atom set');
+    const replacementBaseApprove=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify({command_id:crypto.randomUUID(),target_id:findingId,
+        action:'acceptance.approve',membership_ids:replacementBaseMembers.map(member=>member.occurrence),
+        expected_revisions:{target:replacementBaseView.body.assessment.revision,
+          policy:replacementBaseView.body.assessment.policy_revision,
+          authority:replacementBaseView.body.assessment.authority_revision,
+          identity_membership:replacementBaseView.body.assessment.membership.revision,
+          owners:replacementBaseView.body.assessment.owner_revision},
+        expected_exposures:replacementBaseExposures,expected_evaluations:replacementBaseEvaluations,
+        payload:{acceptance_id:replacementPredecessor.acceptance_id,
+          rationale:'Approve active predecessor before public material suspension',
+          selected_expires_at:replacementExpiry.toISOString(),expected_request_revision:1}})});
+    if(replacementBaseApprove.status!==200)
+      throw new Error(`replacement predecessor approval failed ${replacementBaseApprove.status}: ${JSON.stringify(replacementBaseApprove.body)}`);
+    const basePauseRead=await api(`/api/v1/assessment/groups/${findingId}`);
+    const basePaused=basePauseRead.body.assessment.acceptances.find(item=>
+      item.acceptance_id===replacementPredecessor.acceptance_id);
+    const basePausedClocks=Object.fromEntries((basePaused?.sla_clock??[]).map(clock=>[clock.occurrence_id,clock]));
+    const sharedBaseClock=basePausedClocks[sharedMember.occurrence];
+    const removedBaseClock=basePausedClocks[removedMember.occurrence];
+    if(basePaused?.state!=='active'||sharedBaseClock?.state!=='paused'
+        ||Number(sharedBaseClock.frozen_sla_seconds)!==21540
+        ||removedBaseClock?.state!=='paused'||Number(removedBaseClock.frozen_sla_seconds)!==0
+        ||removedBaseClock.prior_breach!==true)
+      throw new Error(`replacement predecessor did not capture both exact atom remainders: ${JSON.stringify({state:basePaused?.state,clocks:basePaused?.sla_clock})}`);
+    const suspensionCurrent=await api(`/api/v1/assessment/groups/${findingId}`);
+    const materialSuspension=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify({command_id:crypto.randomUUID(),target_id:findingId,
+        action:'owners.assign',membership_ids:replacementBaseMembers.map(member=>member.occurrence),
+        expected_revisions:{target:suspensionCurrent.body.assessment.revision,
+          policy:suspensionCurrent.body.assessment.policy_revision,
+          identity_membership:suspensionCurrent.body.assessment.membership.revision,
+          owners:suspensionCurrent.body.assessment.owner_revision},
+        expected_exposures:replacementBaseExposures,
+        payload:{owners:[{owner_id:suspensionOwnerAfterId,owner_type:'team'}],
+          rationale:'Remove the accountable owner through the public guarded owner command'}})});
+    if(materialSuspension.status!==200)
+      throw new Error(`public material severity suspension command failed ${materialSuspension.status}: ${JSON.stringify(materialSuspension.body)}`);
+    const suspendedRead=await api(`/api/v1/assessment/groups/${findingId}`);
+    const suspendedPredecessor=suspendedRead.body.assessment.acceptances.find(item=>
+      item.acceptance_id===replacementPredecessor.acceptance_id);
+    const suspendedClocks=Object.fromEntries((suspendedPredecessor?.sla_clock??[]).map(clock=>[clock.occurrence_id,clock]));
+    const suspendedSharedClock=suspendedClocks[sharedMember.occurrence];
+    const suspendedRemovedClock=suspendedClocks[removedMember.occurrence];
+    if(suspendedPredecessor?.state!=='suspended'
+        ||suspendedPredecessor.history?.at(-1)?.reason!=='accountable_owner_changed'
+        ||suspendedSharedClock?.state!=='running'
+        ||Date.parse(suspendedSharedClock.target_at)!==earlyRevokedAt.getTime()+21540*1000
+        ||Number(suspendedSharedClock.remaining_seconds)!==21540
+        ||suspendedSharedClock.frozen_sla_seconds!=null
+        ||suspendedRemovedClock?.state!=='running'
+        ||Number(suspendedRemovedClock.remaining_seconds)!==0
+        ||suspendedRemovedClock.prior_breach!==true)
+      throw new Error(`public accountable-owner suspension did not resume both exact atom states: ${JSON.stringify({state:suspendedPredecessor?.state,clocks:suspendedPredecessor?.sla_clock})}`);
+    const suspendedRunningSeconds=120;
+    const replacementAt=await advanceClock(suspendedRunningSeconds*1000);
+    const replacementExpiryExtended=new Date(earlyRevokedAt.getTime()+2*60*60*1000);
+    const successorMembers=[sharedMember,addedMember];
+    const successorExposures=[...expectedExposureMap.values()].filter(item=>
+      successorMembers.some(member=>member.exposure===item.exposure_id));
+    const successorEvaluations=successorMembers.map(member=>({episode_id:member.episode,
+      occurrence_id:member.occurrence,evaluation_id:member.evaluation,revision:member.revision}));
+    const successorSubmitView=await api(`/api/v1/assessment/groups/${findingId}`);
+    const successorSubmit=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify({command_id:crypto.randomUUID(),target_id:findingId,
+        action:'acceptance.submit',membership_ids:successorMembers.map(member=>member.occurrence),
+        expected_revisions:{target:successorSubmitView.body.assessment.revision,
+          policy:successorSubmitView.body.assessment.policy_revision,
+          authority:successorSubmitView.body.assessment.authority_revision,
+          identity_membership:successorSubmitView.body.assessment.membership.revision,
+          owners:successorSubmitView.body.assessment.owner_revision},
+        expected_exposures:successorExposures,expected_evaluations:successorEvaluations,
+        payload:{accountable_owner_id:suspensionOwnerAfterId,
+          rationale:'Extend the paused shared membership and add one newly retained atom',
+          expires_at:replacementExpiryExtended.toISOString(),continuity_allowed:false,
+          predecessor_id:replacementPredecessor.acceptance_id,exception_contract_version:1,
+          context:{environment:'local',evidence:'synthetic-local'},
+          compensating_controls:'Synthetic disposable replacement controls.'}})});
+    if(successorSubmit.status!==200)
+      throw new Error(`linked replacement submit failed ${successorSubmit.status}: ${JSON.stringify(successorSubmit.body)}`);
+    const successorPendingRead=await api(`/api/v1/assessment/groups/${findingId}`);
+    const successorPending=successorPendingRead.body.assessment.acceptances.find(item=>
+      item.state==='pending'&&item.predecessor_id===replacementPredecessor.acceptance_id);
+    if(!successorPending||JSON.stringify([...successorPending.membership_ids].sort())!==
+        JSON.stringify(successorMembers.map(member=>member.occurrence).sort()))
+      throw new Error('linked replacement request did not preserve exact added and removed atom sets');
+    const successorApprove=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify({command_id:crypto.randomUUID(),target_id:findingId,
+        action:'acceptance.approve',membership_ids:successorMembers.map(member=>member.occurrence),
+        expected_revisions:{target:successorPendingRead.body.assessment.revision,
+          policy:successorPendingRead.body.assessment.policy_revision,
+          authority:successorPendingRead.body.assessment.authority_revision,
+          identity_membership:successorPendingRead.body.assessment.membership.revision,
+          owners:successorPendingRead.body.assessment.owner_revision},
+        expected_exposures:successorExposures,expected_evaluations:successorEvaluations,
+        payload:{acceptance_id:successorPending.acceptance_id,
+          rationale:'Approve linked exception replacement with exact shared remainder',
+          selected_expires_at:replacementExpiryExtended.toISOString(),expected_request_revision:1}})});
+    if(successorApprove.status!==200)
+      throw new Error(`linked replacement approval failed ${successorApprove.status}: ${JSON.stringify(successorApprove.body)}`);
+    const replacementAfter=await api(`/api/v1/assessment/groups/${findingId}`);
+    const predecessorAfter=replacementAfter.body.assessment.acceptances.find(item=>
+      item.acceptance_id===replacementPredecessor.acceptance_id);
+    const successorAfter=replacementAfter.body.assessment.acceptances.find(item=>
+      item.acceptance_id===successorPending.acceptance_id);
+    const successorClocks=Object.fromEntries((successorAfter?.sla_clock??[]).map(clock=>[clock.occurrence_id,clock]));
+    const sharedSuccessorClock=successorClocks[sharedMember.occurrence];
+    const addedSuccessorClock=successorClocks[addedMember.occurrence];
+    const addedSuccessorSnapshot=successorAfter?.pause_snapshots?.find(item=>
+      item.occurrence_id===addedMember.occurrence);
+    const removedAfterClock=predecessorAfter?.sla_clock?.find(clock=>clock.occurrence_id===removedMember.occurrence);
+    if(predecessorAfter?.state!=='revoked'||successorAfter?.state!=='active'
+        ||JSON.stringify([...successorAfter.membership_ids].sort())!==
+          JSON.stringify(successorMembers.map(member=>member.occurrence).sort())
+        ||sharedSuccessorClock?.state!=='paused'
+        ||Number(sharedSuccessorClock.frozen_sla_seconds)!==21540-suspendedRunningSeconds
+        ||Date.parse(sharedSuccessorClock.target_at)!==replacementExpiryExtended.getTime()
+        ||addedSuccessorClock?.state!=='paused'
+        ||Number(addedSuccessorClock.frozen_sla_seconds)!==(Date.parse(addedMember.deadline_at)-replacementAt.getTime())/1000
+        ||addedSuccessorSnapshot?.receipt_id!==addedMember.receipt_id
+        ||Date.parse(addedSuccessorSnapshot?.started_at)!==Date.parse(seeded.ingested_at)
+        ||removedAfterClock?.state!=='running'||Number(removedAfterClock.remaining_seconds)!==0
+        ||removedAfterClock.prior_breach!==true
+        ||Date.parse(removedAfterClock.target_at)!==Date.parse(suspendedRemovedClock.target_at))
+      throw new Error(`linked replacement failed shared/replaced/new-atom clock assertions: ${JSON.stringify({predecessor:predecessorAfter,successor:successorAfter,added:addedMember})}`);
+    await writeFile(path.join(evidence,'sla-linked-replacement-public-readback.json'),JSON.stringify({
+      predecessor_submit:replacementBaseSubmit.body,predecessor_approve:replacementBaseApprove.body,
+      predecessor_paused:basePaused,material_suspension:materialSuspension.body,
+      partially_suspended_predecessor:suspendedPredecessor,successor_submit:successorSubmit.body,
+      successor_approve:successorApprove.body,predecessor_after:predecessorAfter,
+      successor_after:successorAfter,added_membership_receipt:addedMember,
+      assertion:{old_frozen_remainder:21540,running_interval_seconds:suspendedRunningSeconds,
+        shared_remaining_recaptured:21540-suspendedRunningSeconds,removed_atom_resumed_with_prior_breach:true,
+        added_atom_has_its_own_first_ingest_receipt:true,exact_added_and_removed_sets:true}},null,2),{mode:0o600});
+
+    // Replace an effectively active predecessor after time passes while its
+    // shared atoms remain paused. Removed and added memberships are distinct.
+    const activeAt=await advanceClock(90000);
+    const activeShared=sharedMember,activeRemoved=addedMember,activeAdded=memberByKey.verified_rebuild_membership;
+    const activeMembers=[activeShared,activeAdded];
+    const activeExpiry=new Date(activeAt.getTime()+7200000).toISOString();
+    const activeCommand=async(action,payload,ids=activeMembers.map(m=>m.occurrence),override={})=>{
+      const [view,heads]=await Promise.all([api(`/api/v1/assessment/groups/${findingId}`),
+        api(`/api/v1/reports/sla-policies?group_id=${findingId}`)]);
+      const command={command_id:crypto.randomUUID(),target_id:findingId,action,membership_ids:ids,
+        expected_revisions:{target:view.body.assessment.revision,policy:view.body.assessment.policy_revision,
+          authority:view.body.assessment.authority_revision,identity_membership:view.body.assessment.membership.revision,
+          owners:view.body.assessment.owner_revision},
+        expected_exposures:heads.body.current_heads.episodes.filter(e=>activeMembers.some(m=>m.exposure===e.exposure_id))
+          .map(({exposure_id,episode_id,state_revision})=>({exposure_id,episode_id,state_revision})),
+        expected_evaluations:heads.body.current_heads.evaluations.filter(e=>ids.includes(e.occurrence_id))
+          .map(({episode_id,occurrence_id,evaluation_id,revision})=>({episode_id,occurrence_id,evaluation_id,revision})),
+        payload,...override};
+      return {command,response:await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify(command)})};
+    };
+    const activeBefore=(await api(`/api/v1/assessment/groups/${findingId}`)).body;
+    const activePredecessor=activeBefore.assessment.acceptances.find(a=>a.acceptance_id===successorAfter.acceptance_id);
+    const activeFrozen=21540-suspendedRunningSeconds;
+    if(activePredecessor.state!=='active'||activePredecessor.sla_clock.find(c=>c.occurrence_id===activeShared.occurrence).frozen_sla_seconds!==activeFrozen)
+      throw new Error('active predecessor lost frozen time while paused');
+    const activeSharedEventsBefore=disposableAtomClockEvents(activeShared.episode,activeShared.occurrence);
+    const activeSubmit=await activeCommand('acceptance.submit',{accountable_owner_id:suspensionOwnerAfterId,
+      rationale:'Uninterrupted active replacement with shared, added and removed memberships',
+      expires_at:activeExpiry,continuity_allowed:false,predecessor_id:activePredecessor.acceptance_id,
+      exception_contract_version:1,context:{environment:'local'},compensating_controls:'Synthetic active replacement controls'});
+    if(activeSubmit.response.status!==200)throw new Error(`active replacement submit failed: ${JSON.stringify(activeSubmit)}`);
+    const activePendingView=(await api(`/api/v1/assessment/groups/${findingId}`)).body;
+    const activePending=activePendingView.assessment.acceptances.find(a=>a.state==='pending'&&a.predecessor_id===activePredecessor.acceptance_id);
+    const activePayload={acceptance_id:activePending.acceptance_id,rationale:'Approve active linked replacement',
+      selected_expires_at:activeExpiry,expected_request_revision:1};
+    const badBefore=disposableDbSnapshot({commandId:'00000000-0000-4000-8000-000000000001',acceptanceId:activePending.acceptance_id,groupId:findingId});
+    const failedActive=await activeCommand('acceptance.approve',activePayload,undefined,
+      {expected_exposures:[{exposure_id:activeShared.exposure,episode_id:activeShared.episode,state_revision:999999}]});
+    const failedActiveAfter=(await api(`/api/v1/assessment/groups/${findingId}`)).body;
+    const badAfter=disposableDbSnapshot({commandId:failedActive.command.command_id,acceptanceId:activePending.acceptance_id,groupId:findingId});
+    if(failedActive.response.status!==409||JSON.stringify(activePendingView)!==JSON.stringify(failedActiveAfter)
+        ||JSON.stringify(badBefore)!==JSON.stringify(badAfter))
+      throw new Error(`failed active replacement changed predecessor/history/clock: ${JSON.stringify(failedActive)}`);
+    const activeSharedEventsAfterFailed=disposableAtomClockEvents(activeShared.episode,activeShared.occurrence);
+    if(JSON.stringify(activeSharedEventsBefore)!==JSON.stringify(activeSharedEventsAfterFailed))
+      throw new Error('failed guarded replacement appended clock events');
+    const activeApproved=await activeCommand('acceptance.approve',activePayload);
+    if(activeApproved.response.status!==200)throw new Error(`active replacement approval failed: ${JSON.stringify(activeApproved)}`);
+    const activeAfter=(await api(`/api/v1/assessment/groups/${findingId}`)).body;
+    const activeSuccessor=activeAfter.assessment.acceptances.find(a=>a.acceptance_id===activePending.acceptance_id);
+    const activeOld=activeAfter.assessment.acceptances.find(a=>a.acceptance_id===activePredecessor.acceptance_id);
+    const activeSharedClock=activeSuccessor.sla_clock.find(c=>c.occurrence_id===activeShared.occurrence);
+    const activeAddedClock=activeSuccessor.sla_clock.find(c=>c.occurrence_id===activeAdded.occurrence);
+    const activeRemovedClock=activeOld.sla_clock.find(c=>c.occurrence_id===activeRemoved.occurrence);
+    const expectedAddedRemainder=(expiry.getTime()+21600*1000-activeAt.getTime())/1000;
+    const expectedRemovedTarget=activeAt.getTime()+addedSuccessorClock.frozen_sla_seconds*1000;
+    if(activeOld.state!=='revoked'||activeSuccessor.state!=='active'
+        ||activeSharedClock.state!=='paused'||activeSharedClock.frozen_sla_seconds!==activeFrozen
+        ||Date.parse(activeSharedClock.target_at)!==Date.parse(activeExpiry)
+        ||activeAddedClock.state!=='paused'||activeAddedClock.frozen_sla_seconds!==expectedAddedRemainder
+        ||activeRemovedClock.state!=='running'||Date.parse(activeRemovedClock.target_at)!==expectedRemovedTarget)
+      throw new Error(`active replacement shared/added/removed assertions failed: ${JSON.stringify({activeOld,activeSuccessor,expectedAddedRemainder,expectedRemovedTarget})}`);
+    const activeSharedEventsAfter=disposableAtomClockEvents(activeShared.episode,activeShared.occurrence);
+    const retarget=activeSharedEventsAfter.at(-1);
+    if(activeSharedEventsAfter.length!==activeSharedEventsBefore.length+1
+        ||retarget.event_type!=='paused'||retarget.decision_id!==activePending.acceptance_id
+        ||retarget.predecessor_event_id!==activeSharedEventsBefore.at(-1).event_id
+        ||retarget.data.remaining_seconds!==activeFrozen)
+      throw new Error(`active shared atom did not carry one uninterrupted pause: ${JSON.stringify({activeSharedEventsBefore,activeSharedEventsAfter})}`);
+    await writeFile(path.join(evidence,'sla-active-linked-replacement-public-readback.json'),JSON.stringify({
+      at:activeAt.toISOString(),predecessor:activePredecessor,submit:activeSubmit,
+      shared_clock_events_before:activeSharedEventsBefore,shared_clock_events_after:activeSharedEventsAfter,
+      failed_guard:failedActive,unchanged_after_failed_guard:failedActiveAfter,
+      approval:activeApproved,successor:activeSuccessor,predecessor_after:activeOld,
+      independently_expected:{shared_frozen:activeFrozen,added_frozen:expectedAddedRemainder,
+        removed_target:new Date(expectedRemovedTarget).toISOString()},db_before_failed:badBefore,db_after_failed:badAfter},null,2),{mode:0o600});
+
+    // Close every membership in the in-scope preactivation exposure, then
+    // recur that exact exposure through the retained writer with a newer fact.
+    const g5Ids=[preactivation.occurrence_id,postLegacy.occurrence_id,postG7.occurrence_id];
+    const g5Portion=crypto.randomUUID();
+    const g5Command=async(action,payload,guarded=false)=>{
+      const [view,heads]=await Promise.all([api(`/api/v1/assessment/groups/${findingId}`),
+        api(`/api/v1/reports/sla-policies?group_id=${findingId}`)]);
+      const response=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+        body:JSON.stringify({command_id:crypto.randomUUID(),target_id:findingId,action,
+          membership_ids:g5Ids,expected_revisions:{target:view.body.assessment.revision,
+            policy:view.body.assessment.policy_revision,authority:view.body.assessment.authority_revision,
+            identity_membership:view.body.assessment.membership.revision,owners:view.body.assessment.owner_revision},
+          ...(guarded?{expected_exposures:heads.body.current_heads.episodes
+            .filter(e=>e.exposure_id===preactivation.exposure_id)
+            .map(({exposure_id,episode_id,state_revision})=>({exposure_id,episode_id,state_revision})),
+            expected_evaluations:heads.body.current_heads.evaluations.filter(e=>g5Ids.includes(e.occurrence_id))
+              .map(({episode_id,occurrence_id,evaluation_id,revision})=>({episode_id,occurrence_id,evaluation_id,revision}))}:{}),payload})});
+      if(response.status!==200)throw new Error(`in-scope G5 ${action} failed: ${JSON.stringify(response)}`);
+      return response.body;
+    };
+    await g5Command('portion.define',{portion_id:g5Portion,owner_ids:[ownerDirectoryId],
+      membership_ids:g5Ids,rationale:'Define every membership of the preactivation exposure'});
+    const g5Closed=await g5Command('remediation.confirm_portion',{portion_id:g5Portion,
+      membership_ids:g5Ids,rationale:'Close the same preactivation exposure before recurrence',
+      evidence_ref:'synthetic:in-scope-g5-close'},true);
+    const g5ClosedAt=await readClock();
+    await advanceClock(1000);
+    const g5Recur=JSON.parse(docker(['exec','-e','UVM_G7_SLA_STAGE=recur',appContainer,
+      '/opt/uvm/venv/bin/python','/opt/uvm/app/tools/g7_recovery_retained_fixture.py']));
+    if(g5Recur.exposure_id!==preactivation.exposure_id||g5Recur.episode_id===preactivation.episode_id
+        ||g5Recur.contract_version!==7||g5Recur.occurrence_id!==postG7.occurrence_id
+        ||Date.parse(g5Recur.observed_at)<=g5ClosedAt.getTime()
+        ||g5Recur.receipt_id===postG7.receipt_id)
+      throw new Error(`same-exposure recurrence lost causal G7 receipt: ${JSON.stringify(g5Recur)}`);
+    const g5IssuedAfterRecurrence=await api(`/api/v1/reports/${legacyReport.body.report_id}/atoms`);
+    if(JSON.stringify(g5IssuedAfterRecurrence.body)!==JSON.stringify(legacyAtoms.body))
+      throw new Error('same-exposure recurrence altered issued G5 atoms');
+    await writeFile(path.join(evidence,'sla-g5-postactivation-continuity.json'),JSON.stringify({
+      preactivation,post_legacy_membership:postLegacy,post_g7_membership:postG7,
+      later_policy:prospectivePolicy,publication:prospectivePublication,closed:g5Closed,
+      closed_at:g5ClosedAt.toISOString(),same_exposure_recurrence:g5Recur,
+      unchanged_pre_activation_report:true},null,2),{mode:0o600});
+
+    const boundaryExposure=[...expectedExposureMap.values()].find(item=>item.exposure_id===deadlineBoundaryMember.exposure);
+    const boundaryEvaluation={episode_id:deadlineBoundaryMember.episode,
+      occurrence_id:deadlineBoundaryMember.occurrence,evaluation_id:deadlineBoundaryMember.evaluation,
+      revision:deadlineBoundaryMember.revision};
+    let boundaryCurrent=await api(`/api/v1/assessment/groups/${findingId}`);
+    const boundaryPortionId=crypto.randomUUID();
+    const boundaryPortion=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
+      command_id:crypto.randomUUID(),target_id:findingId,action:'portion.define',
+      membership_ids:[deadlineBoundaryMember.occurrence],expected_revisions:{
+        target:boundaryCurrent.body.assessment.revision,policy:boundaryCurrent.body.assessment.policy_revision,
+        authority:boundaryCurrent.body.assessment.authority_revision,
+        identity_membership:boundaryCurrent.body.assessment.membership.revision,
+        owners:boundaryCurrent.body.assessment.owner_revision},payload:{portion_id:boundaryPortionId,
+        owner_ids:[ownerDirectoryId],membership_ids:[deadlineBoundaryMember.occurrence],
+        rationale:'Define exact membership for deadline-equality confirmation'}})});
+    if(boundaryPortion.status!==200)
+      throw new Error(`deadline boundary membership setup failed ${boundaryPortion.status}: ${JSON.stringify(boundaryPortion.body)}`);
+    const exactDeadline=deadlineBoundaryMember.deadline_at;
+    await writeFile(clockPath,exactDeadline+'\n',{mode:0o666});
+    await page.waitForTimeout(1500);
+    boundaryCurrent=await api(`/api/v1/assessment/groups/${findingId}`);
+    const exactDeadlineCommandId=crypto.randomUUID();
+    const exactDeadlineConfirmation=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify({command_id:exactDeadlineCommandId,target_id:findingId,
+        action:'remediation.confirm_portion',membership_ids:[deadlineBoundaryMember.occurrence],
+        expected_revisions:{target:boundaryCurrent.body.assessment.revision,
+          policy:boundaryCurrent.body.assessment.policy_revision,
+          identity_membership:boundaryCurrent.body.assessment.membership.revision,
+          owners:boundaryCurrent.body.assessment.owner_revision},
+        expected_exposures:[boundaryExposure],expected_evaluations:[boundaryEvaluation],
+        payload:{portion_id:boundaryPortionId,membership_ids:[deadlineBoundaryMember.occurrence],
+          rationale:'Confirm the synthetic exact-deadline membership on time',
+          evidence_ref:'synthetic:exact-deadline-boundary'}})});
+    if(exactDeadlineConfirmation.status!==200)
+      throw new Error(`public confirmation at exact deadline was not accepted: ${JSON.stringify(exactDeadlineConfirmation.body)}`);
+    const boundaryAfterConfirmation=await api(`/api/v1/assessment/groups/${findingId}`);
+    const boundaryEpisode=boundaryAfterConfirmation.body.episodes.find(item=>item.episode_id===deadlineBoundaryMember.episode);
+    const boundaryEpisodeMember=boundaryEpisode?.members?.find(item=>item.membership_id===deadlineBoundaryMember.occurrence);
+    if(boundaryEpisodeMember?.status!=='confirmed'
+        ||utcMicros(boundaryEpisodeMember.confirmed_at)!==utcMicros(exactDeadline))
+      throw new Error(`exact-deadline confirmation readback differs: ${JSON.stringify(boundaryEpisodeMember)}`);
+    const equalityReportCommand=crypto.randomUUID();
+    const equalityReport=await api('/api/v1/reports',{method:'POST',write:true,body:JSON.stringify({
+      schema_version:1,definition_version:'g7-exception-sla-v1',command_id:equalityReportCommand,
+      mode:'as_known_at',scope:{group_ids:[findingId]},as_of:exactDeadline,
+      known_at:exactDeadline})});
+    if(equalityReport.status!==200||!equalityReport.body.report_id)
+      throw new Error(`public deadline-equality report failed ${equalityReport.status}: ${JSON.stringify(equalityReport.body)}`);
+    let equalityReportRead;
+    for(let attempt=0;attempt<30;attempt++) {
+      equalityReportRead=await api(`/api/v1/reports/${equalityReport.body.report_id}`);
+      if(equalityReportRead.status===200&&equalityReportRead.body.status==='ready')break;
+      await page.waitForTimeout(500);
+    }
+    const equalityAtoms=await api(`/api/v1/reports/${equalityReport.body.report_id}/atoms`);
+    const equalityAtom=equalityAtoms.body.items?.find(item=>item.occurrence_id===deadlineBoundaryMember.occurrence);
+    if(equalityReportRead?.status!==200||equalityReportRead.body.status!=='ready'
+        ||equalityAtoms.status!==200||!equalityAtom
+        ||equalityAtom.completion?.state!=='on_time'
+        ||utcMicros(equalityAtom.completion?.confirmed_at)!==utcMicros(exactDeadline)
+        ||utcMicros(equalityAtom.completion?.deadline_at_confirmation)!==utcMicros(exactDeadline)
+        ||(equalityAtom.clock.overdue_seconds!=null&&Number(equalityAtom.clock.overdue_seconds)!==0))
+      throw new Error(`public consumer treated exact-deadline completion as overdue: ${JSON.stringify({report:equalityReportRead?.body,atom:equalityAtom})}`);
+    await writeFile(path.join(evidence,'sla-exact-deadline-public-readback.json'),JSON.stringify({
+      confirmation:exactDeadlineConfirmation.body,confirmed_member:boundaryEpisodeMember,
+      report:equalityReportRead.body,atom:equalityAtom,command_id:equalityReportCommand,
+      equality_is_on_time:true},null,2),{mode:0o600});
+    process.stdout.write(JSON.stringify({exceptionSlaWorkflow:'paused_then_resumed',findingId,
+      memberKeys:members.map(member=>member.key),acceptanceId})+'\n');
+    process.exit(0);
+  }
 
   if (warningOnly) {
     const seeded=JSON.parse(await readFile(path.join(evidence,'warning-fixture-ids.json'),'utf8'));
@@ -307,7 +1565,7 @@ try {
         authority:(await api('/api/v1/assessment/administration/catalogue')).body.authority_revision,
         identity_membership:current.body.assessment.membership.revision,owners:current.body.assessment.owner_revision},
       expected_exposures:expectedExposures,expected_evaluations:expectedEvaluations,
-      payload:{accountable_owner_id:'synthetic-owner',rationale:'Exercise G7 warning expiry workflow',
+      payload:{accountable_owner_id:ownerDirectoryId,rationale:'Exercise G7 warning expiry workflow',
         expires_at:expiry,continuity_allowed:false,
         exception_contract_version:1,context:{environment:'local'},compensating_controls:'Synthetic local fixture controls.'}})});
     if(submit.status!==200)throw new Error(`G7 exception submit failed ${submit.status}: ${JSON.stringify(submit.body)}`);

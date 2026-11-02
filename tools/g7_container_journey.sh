@@ -3,8 +3,8 @@ set -Eeuo pipefail
 umask 077
 
 MODE=${1-}
-if [[ ( $MODE != --observer-settings-only && $MODE != --backup-recovery-only && $MODE != --upgrade-rollback-only && $MODE != --data-preservation-audit-only && $MODE != --exception-warning-only && $MODE != --identity-access-ownership-only ) || $# != 1 ]]; then
-  echo 'usage: G7_EVIDENCE_DIR=/absolute/path bash tools/g7_container_journey.sh (--observer-settings-only|--backup-recovery-only|--upgrade-rollback-only|--data-preservation-audit-only|--exception-warning-only|--identity-access-ownership-only)' >&2
+if [[ ( $MODE != --observer-settings-only && $MODE != --backup-recovery-only && $MODE != --upgrade-rollback-only && $MODE != --data-preservation-audit-only && $MODE != --exception-warning-only && $MODE != --exception-sla-only && $MODE != --identity-access-ownership-only ) || $# != 1 ]]; then
+  echo 'usage: G7_EVIDENCE_DIR=/absolute/path bash tools/g7_container_journey.sh (--observer-settings-only|--backup-recovery-only|--upgrade-rollback-only|--data-preservation-audit-only|--exception-warning-only|--exception-sla-only|--identity-access-ownership-only)' >&2
   exit 64
 fi
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -31,6 +31,8 @@ if [[ $MODE == --data-preservation-audit-only ]]; then DATA_PRESERVATION_MODE=1;
 UPGRADE_ROLLBACK_MODE=0
 EXCEPTION_WARNING_MODE=0
 if [[ $MODE == --exception-warning-only ]]; then EXCEPTION_WARNING_MODE=1; fi
+EXCEPTION_SLA_MODE=0
+if [[ $MODE == --exception-sla-only ]]; then EXCEPTION_SLA_MODE=1; fi
 IDENTITY_MODE=0
 if [[ $MODE == --identity-access-ownership-only ]]; then IDENTITY_MODE=1; fi
 if [[ $MODE == --upgrade-rollback-only ]]; then
@@ -57,10 +59,10 @@ elif (( DATA_PRESERVATION_MODE )); then
   CANDIDATE_IMAGE=$IMAGE
   RESTORE_IMAGE=$IMAGE
 else
-  if (( EXCEPTION_WARNING_MODE )); then
-    CONTAINER="volt-g7-warning-app-$RUN_ID"
-    ANCHOR_CONTAINER="volt-g7-warning-anchor-$RUN_ID"
-    IMAGE="volt-g7-warning-dev:$RUN_ID"
+  if (( EXCEPTION_WARNING_MODE || EXCEPTION_SLA_MODE )); then
+    CONTAINER="volt-g7-exception-app-$RUN_ID"
+    ANCHOR_CONTAINER="volt-g7-exception-anchor-$RUN_ID"
+    IMAGE="volt-g7-exception-dev:$RUN_ID"
   else
     CONTAINER=volt-g7-observer-journey
     ANCHOR_CONTAINER=volt-g7-observer-anchor
@@ -73,7 +75,7 @@ IS_BACKUP_MODE=0
 if [[ $MODE == --backup-recovery-only || $MODE == --upgrade-rollback-only ]]; then IS_BACKUP_MODE=1; fi
 SCHEMA_MODE_ARGS=()
 if (( UPGRADE_ROLLBACK_MODE )); then SCHEMA_MODE_ARGS=(--env UVM_G7_SCHEMA_MODE=upgrade-verification); fi
-if (( ! DATA_PRESERVATION_MODE && ! EXCEPTION_WARNING_MODE && ! IDENTITY_MODE )); then
+if (( ! DATA_PRESERVATION_MODE && ! EXCEPTION_WARNING_MODE && ! EXCEPTION_SLA_MODE && ! IDENTITY_MODE )); then
   CONTAINER=volt-g7-observer-journey
   ANCHOR_CONTAINER=volt-g7-observer-anchor
 fi
@@ -127,8 +129,8 @@ PICKPORT
   }
   API_PORT=$(choose_port 18080 28080 38080 48080 58080)
   RECOVERY_PORT=$(choose_port 18082 28082 38082 48082 58082)
-  OIDC_PROXY_PORT=$(choose_port 19090 29090 39090 49090 59090)
-elif (( EXCEPTION_WARNING_MODE )); then
+  OIDC_PROXY_PORT=$(choose_port 29090 39090 49090 59090)
+elif (( EXCEPTION_WARNING_MODE || EXCEPTION_SLA_MODE )); then
   choose_port() {
     python3 - "$@" <<'PICKPORT'
 import socket,sys
@@ -499,18 +501,21 @@ if (( ! DATA_PRESERVATION_MODE )) && [[ $OIDC_PROXY_PORT != 9000 ]]; then
   HOST_OIDC_INTERNAL_ARGS=(--oidc-internal)
 fi
 FIXTURE_OIDC_ARGS=(--oidc-port "$OIDC_PROXY_PORT" "${FIXTURE_OIDC_INTERNAL_ARGS[@]}")
-if (( EXCEPTION_WARNING_MODE )); then FIXTURE_OIDC_ARGS+=(--oidc-host "$OIDC_HOST"); fi
+if (( EXCEPTION_WARNING_MODE || EXCEPTION_SLA_MODE )); then FIXTURE_OIDC_ARGS+=(--oidc-host "$OIDC_HOST"); fi
 if (( DATA_PRESERVATION_MODE )); then FIXTURE_OIDC_ARGS=(--oidc-port "$OIDC_PORT" --oidc-internal); fi
 if (( EXCEPTION_WARNING_MODE )); then FIXTURE_OIDC_ARGS+=(--exception-warning); fi
+if (( EXCEPTION_SLA_MODE )); then FIXTURE_OIDC_ARGS+=(--exception-sla); fi
 if (( IDENTITY_MODE )); then FIXTURE_OIDC_ARGS+=(--identity-access-ownership); fi
+if (( UPGRADE_ROLLBACK_MODE )); then FIXTURE_OIDC_ARGS+=(--heartbeat-max-age-seconds 900); fi
 uv run python "$ROOT/tools/g7_observer_fixture.py" create --root "$RUN_ROOT" --image "$IMAGE" \
   "${FIXTURE_OIDC_ARGS[@]}" --api-port "$API_PORT" --recovery-port "$RECOVERY_PORT"
-if (( EXCEPTION_WARNING_MODE )); then
-  mkdir -p "$RUN_ROOT/warning"
-  chmod 0777 "$RUN_ROOT/warning"
+if (( EXCEPTION_WARNING_MODE || EXCEPTION_SLA_MODE )); then
   WARNING_NOW=$(date -u +'%Y-%m-%dT%H:%M:%S+00:00')
   printf '%s\n' "$WARNING_NOW" >"$RUN_ROOT/scheduler/warning-clock.txt"
   chmod 0666 "$RUN_ROOT/scheduler/warning-clock.txt"
+  if (( EXCEPTION_WARNING_MODE )); then
+  mkdir -p "$RUN_ROOT/warning"
+  chmod 0777 "$RUN_ROOT/warning"
   printf '%s\n' 'g7-warning-fixture-token' >"$RUN_ROOT/secrets/slack-warning-token"
   chmod 0600 "$RUN_ROOT/secrets/slack-warning-token"
   printf '%s\n' 'fixture-secret' >"$RUN_ROOT/secrets/smtp-warning-token"
@@ -541,6 +546,11 @@ UVM_EXCEPTION_WARNING_DESTINATIONS={"fixture-destination":{"channel":"slack","se
 WARNINGENV
   printf '%s\n' 'g7-warning-fixture-signing-secret' >"$RUN_ROOT/secrets/slack-signing-secret"
   chmod 0600 "$RUN_ROOT/secrets/slack-signing-secret"
+  else
+    cat >>"$RUN_ROOT/container.env" <<SLAENV
+UVM_G7_TEST_CLOCK_FILE=/run/uvm-g7-scheduler/warning-clock.txt
+SLAENV
+  fi
 fi
 if (( DATA_PRESERVATION_MODE )); then
   PRESERVATION_VOLUME_NAMES=("volt-g7-preservation-$RUN_ID-postgres" "volt-g7-preservation-$RUN_ID-media" "volt-g7-preservation-$RUN_ID-state")
@@ -644,6 +654,7 @@ PYPACKAGE
     "$IMAGE" "$CANDIDATE_IMAGE" "$SOURCE_PACKAGE_DIGEST" "$CANDIDATE_PACKAGE_DIGEST" >"$EVIDENCE/image-bindings.txt"
   UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/volt-uv-cache}" uv run python "$ROOT/tools/g7_schema_migration_probe.py" \
     --image "$RESTORE_IMAGE_DIGEST" --run-id "$RUN_ID" \
+    --source-head 0061 --target-head 0062 \
     --evidence "$EVIDENCE/migration-fault-probe" \
     >"$EVIDENCE/migration-fault-probe.stdout" \
     2>"$EVIDENCE/migration-fault-probe.stderr"
@@ -721,6 +732,8 @@ APP_EXTRA_MOUNTS=()
 APP_EXTRA_PORTS=()
 if (( EXCEPTION_WARNING_MODE )); then
   APP_EXTRA_MOUNTS+=(--mount "type=bind,src=$RUN_ROOT/warning,dst=/run/uvm-g7-warning-fixture")
+fi
+if (( EXCEPTION_WARNING_MODE || EXCEPTION_SLA_MODE )); then
   APP_EXTRA_PORTS+=( -p "127.0.0.1:$OIDC_PROXY_PORT:$OIDC_PROXY_PORT" )
 fi
 docker run -d --name "$CONTAINER" --label uvm.g7.observer-journey=true --label "uvm.g7.run-id=$RUN_ID" \
@@ -749,7 +762,7 @@ if (( ! ready )); then
   echo 'disposable application did not become healthy; see retained redacted startup evidence' >&2
   exit 70
 fi
-if (( ! DATA_PRESERVATION_MODE && ! EXCEPTION_WARNING_MODE )) && [[ $OIDC_PROXY_PORT != 9000 ]]; then
+if (( ! DATA_PRESERVATION_MODE && ! EXCEPTION_WARNING_MODE && ! EXCEPTION_SLA_MODE )) && [[ $OIDC_PROXY_PORT != 9000 ]]; then
   cat >"$RUN_ROOT/host/oidc-container-loopback-proxy.py" <<'PYCONTAINERPROXY'
 import select,socket,socketserver,sys
 port=int(sys.argv[1])
@@ -816,7 +829,7 @@ if (( EXCEPTION_WARNING_MODE )); then
       echo 'disposable SMTP TLS trust/hostname probe failed; see retained probe output' >&2; exit 70;
     }
 fi
-if (( EXCEPTION_WARNING_MODE )); then
+if (( EXCEPTION_WARNING_MODE || EXCEPTION_SLA_MODE )); then
   docker exec -d "$CONTAINER" /opt/uvm/venv/bin/python /opt/uvm/app/tools/g7_exception_warning_oidc_proxy.py \
     --host 0.0.0.0 --port "$OIDC_PROXY_PORT" --upstream-port 9000
   for _ in $(seq 1 30); do
@@ -1335,15 +1348,28 @@ PYSOURCECE
     "$EVIDENCE/source-ce-findings.json" "$EVIDENCE/source-ce-public-sentinel.json"
 fi
 
-if (( EXCEPTION_WARNING_MODE )); then
+if (( EXCEPTION_WARNING_MODE || EXCEPTION_SLA_MODE )); then
+  if (( EXCEPTION_WARNING_MODE )); then
   docker exec -e UVM_G7_WARNING_FIXTURE=1 "$CONTAINER" \
     /opt/uvm/venv/bin/python /opt/uvm/app/tools/g7_recovery_retained_fixture.py \
     >"$EVIDENCE/warning-fixture-ids.json"
-  chmod 0600 "$EVIDENCE/warning-fixture-ids.json"
+    chmod 0600 "$EVIDENCE/warning-fixture-ids.json"
+  else
+    docker exec -e UVM_G7_SLA_STAGE=prepolicy "$CONTAINER" \
+      /opt/uvm/venv/bin/python /opt/uvm/app/tools/g7_recovery_retained_fixture.py \
+      >"$EVIDENCE/sla-preactivation-ids.json"
+    chmod 0600 "$EVIDENCE/sla-preactivation-ids.json"
+    cp "$EVIDENCE/sla-preactivation-ids.json" "$EVIDENCE/sla-g7-target-preactivation-ids.json"
+  fi
 fi
 uv run python "$ROOT/tools/g7_observer_fixture.py" link-actor --root "$RUN_ROOT" \
   --container "$CONTAINER" \
   >"$EVIDENCE/oidc-link.stdout" 2>"$EVIDENCE/oidc-link.stderr"
+if (( EXCEPTION_SLA_MODE )); then
+  uv run python "$ROOT/tools/g7_observer_fixture.py" link-exception-approver --root "$RUN_ROOT" \
+    --container "$CONTAINER" >"$EVIDENCE/oidc-exception-approver-link.stdout" \
+    2>"$EVIDENCE/oidc-exception-approver-link.stderr"
+fi
 uv run python "$ROOT/tools/g7_observer_fixture.py" host-config --root "$RUN_ROOT" --image "$IMAGE" \
   --anchor-port "$ANCHOR_PORT" --api-port "$API_PORT" --recovery-port "$RECOVERY_PORT" \
   --oidc-port "$OIDC_PROXY_PORT" \
@@ -1375,6 +1401,8 @@ PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
   $([[ $IS_BACKUP_MODE == 1 ]] && printf '%s' '--backup-seed-only') \
   $([[ $EXCEPTION_WARNING_MODE == 1 ]] && printf '%s %s' '--oidc-proxy-port' "$OIDC_PROXY_PORT") \
   $([[ $EXCEPTION_WARNING_MODE == 1 ]] && printf '%s' '--exception-warning-only') \
+  $([[ $EXCEPTION_SLA_MODE == 1 ]] && printf '%s %s' '--oidc-proxy-port' "$OIDC_PROXY_PORT") \
+  $([[ $EXCEPTION_SLA_MODE == 1 ]] && printf '%s' '--exception-sla-only') \
   >"$EVIDENCE/browser-journey.stdout" 2>"$EVIDENCE/browser-journey.stderr"
 
 # Retain backup settings only in backup recovery modes. Observer and warning
@@ -1743,7 +1771,7 @@ volumes=json.load(open(sys.argv[1],encoding='utf-8'))
 admission={'admission_id':str(uuid.uuid4()),'recovery_epoch':int(sys.argv[8]),
  'source_image_digest':sys.argv[3],'source_package_manifest_digest':sys.argv[4],
  'target_image_digest':sys.argv[5],'target_package_manifest_digest':sys.argv[6],
- 'archive_digest':sys.argv[7],'from_schema':'0058','to_schema':'0061','volume_ids':volumes}
+ 'archive_digest':sys.argv[7],'from_schema':'0058','to_schema':'0062','volume_ids':volumes}
 json.dump(admission,open(sys.argv[2],'x',encoding='utf-8'),sort_keys=True,separators=(',',':'))
 PYADMISSION
     uv run python "$ROOT/tools/g7_backup_controller.py" --config "$RUN_ROOT/host/backup-controller.json" \
@@ -1923,7 +1951,7 @@ PYCONTROLONLY
     }
     set +e
     docker exec "$RESTORE_CONTAINER" bash -lc \
-      'export UVM_DB_URL="postgresql+psycopg://uvm_app:$(cat /run/secrets/uvm_db_password)@127.0.0.1:5432/uvm"; cd /opt/uvm/app; exec /opt/uvm/venv/bin/python -m alembic -c alembic.ini upgrade 0061' \
+      'export UVM_DB_URL="postgresql+psycopg://uvm_app:$(cat /run/secrets/uvm_db_password)@127.0.0.1:5432/uvm"; cd /opt/uvm/app; exec /opt/uvm/venv/bin/python -m alembic -c alembic.ini upgrade 0062' \
       >"$EVIDENCE/explicit-migration.stdout" 2>"$EVIDENCE/explicit-migration.stderr"
     MIGRATION_EXIT=$?
     set -e
@@ -1942,8 +1970,8 @@ PYCONTROLONLY
     docker exec "$RESTORE_CONTAINER" bash -lc \
       'export UVM_DB_URL="postgresql+psycopg://uvm_app:$(cat /run/secrets/uvm_db_password)@127.0.0.1:5432/uvm"; cd /opt/uvm/app; exec /opt/uvm/venv/bin/python -m alembic -c alembic.ini current' \
       >"$EVIDENCE/post-migration-schema-current.stdout" 2>"$EVIDENCE/post-migration-schema-current.stderr"
-    rg -q '^0061([[:space:]]|$)' "$EVIDENCE/post-migration-schema-current.stdout" || {
-      echo 'explicit migration did not establish exactly schema 0061' >&2; exit 2;
+    rg -q '^0062([[:space:]]|$)' "$EVIDENCE/post-migration-schema-current.stdout" || {
+      echo 'explicit migration did not establish exactly schema 0062' >&2; exit 2;
     }
   fi
   # Renew the startup context, restart verification processes after the explicit
@@ -2092,7 +2120,7 @@ request={'request_id':str(uuid.uuid4()),'state':'development_rollback_requested'
  'source_package_manifest_digest':manifest['package_manifest_digest'],
  'upgraded_image_digest':(root/'image-b-id.txt').read_text().strip(),
  'target_package_manifest_digest':None,
- 'forward_volume_ids':volumes,'schema_head':'0061','inventory_attestation_id':attestation['attestation_id'],
+ 'forward_volume_ids':volumes,'schema_head':'0062','inventory_attestation_id':attestation['attestation_id'],
  'inventory_attestation_digest':attestation_digest,'product_write_count':attestation['product_mutation_count'],
  'control_mutation_count':attestation['control_mutation_count'],
  'unexpected_inventory_change_count':attestation['unexpected_inventory_change_count'],'unresolved_external_effect_count':attestation['unresolved_external_effect_count'],
@@ -2104,7 +2132,7 @@ PYROLLBACKREQUEST
     uv run python "$ROOT/tools/g7_backup_controller.py" --config "$RUN_ROOT/host/backup-controller.json" \
       --development-rollback-request-json "$EVIDENCE/development-rollback-request.json" \
       >"$EVIDENCE/development-rollback-request-ack.json"
-    # Stop B while preserving its volumes, then prove prior image A fails closed on 0061.
+    # Stop B while preserving its volumes, then prove prior image A fails closed on 0062.
     docker inspect "$RESTORE_CONTAINER" >"$EVIDENCE/upgraded-b-container-inspect.json"
     docker logs "$RESTORE_CONTAINER" >"$EVIDENCE/upgraded-b-container.log" 2>&1
     phase_mark rollback_start
@@ -2119,9 +2147,9 @@ PYROLLBACKREQUEST
       --volume-ids-json "$RESTORE_VOLUMES_JSON" --archive-digest "$ARCHIVE_DIGEST" \
       --recovery-epoch 1 --connector-recovery-id "$CONNECTOR_RECOVERY_ID" \
       --key-id g7-host-controller-key --signing-key "$RUN_ROOT/host/ed25519.pem" \
-      --output "$RUN_ROOT/secrets/startup-fence.json" >"$EVIDENCE/a-reject-0061-token.stdout"
+      --output "$RUN_ROOT/secrets/startup-fence.json" >"$EVIDENCE/a-reject-0062-token.stdout"
     set +e
-    docker run --name "${RESTORE_CONTAINER}-reject-0061" --rm --network none \
+    docker run --name "${RESTORE_CONTAINER}-reject-0062" --rm --network none \
       --mount "type=bind,src=$RUN_ROOT/secrets,dst=/run/secrets,readonly" \
       --mount "type=bind,src=$RUN_ROOT/secrets/registry.json,dst=/run/uvm-g7-registry.json,readonly" \
       --mount "type=bind,src=$RUN_ROOT/secrets/host-pub.pem,dst=/run/uvm-g7-host-pub.pem,readonly" \
@@ -2136,12 +2164,12 @@ PYROLLBACKREQUEST
       --env UVM_G7_RECOVERY_VOLUME_IDS="$(cat "$RESTORE_VOLUMES_JSON")" \
       --env UVM_G7_ARCHIVE_DIGEST="$ARCHIVE_DIGEST" --env UVM_G7_RECOVERY_EPOCH=1 \
       --env UVM_G7_CONNECTOR_RECOVERY_ID="$CONNECTOR_RECOVERY_ID" "$IMAGE" \
-      >"$EVIDENCE/a-reject-0061.stdout" 2>"$EVIDENCE/a-reject-0061.stderr"
+      >"$EVIDENCE/a-reject-0062.stdout" 2>"$EVIDENCE/a-reject-0062.stderr"
     A_REJECT_EXIT=$?
     set -e
-    printf '%s\n' "$A_REJECT_EXIT" >"$EVIDENCE/a-reject-0061.exit"
-    (( A_REJECT_EXIT != 0 )) || { echo 'A unexpectedly accepted 0061 schema' >&2; exit 2; }
-    rg -q 'G7_SCHEMA_COMPATIBILITY_REJECTED' "$EVIDENCE/a-reject-0061.stderr" || {
+    printf '%s\n' "$A_REJECT_EXIT" >"$EVIDENCE/a-reject-0062.exit"
+    (( A_REJECT_EXIT != 0 )) || { echo 'A unexpectedly accepted 0062 schema' >&2; exit 2; }
+    rg -q 'G7_SCHEMA_COMPATIBILITY_REJECTED' "$EVIDENCE/a-reject-0062.stderr" || {
       echo 'A rejection did not come from the image schema guard' >&2; exit 2;
     }
     # Restore the same signed archive with A into distinct volumes at epoch 2.
@@ -2164,7 +2192,7 @@ if set(value.values()) & set(json.load(open(sys.argv[3],encoding='utf-8')).value
 json.dump(value,open(sys.argv[2],'x',encoding='utf-8'),sort_keys=True,separators=(',',':'))
 PYROLLBACKVOLS
     RESTORE_VOLUMES_JSON="$EVIDENCE/rollback-volume-ids.json"
-    python3 - "$RUN_ROOT/secrets/startup-fence.json" "$EVIDENCE/a-reject-0061-token-binding.json" <<'PYTOKENBINDING'
+    python3 - "$RUN_ROOT/secrets/startup-fence.json" "$EVIDENCE/a-reject-0062-token-binding.json" <<'PYTOKENBINDING'
 import json,sys
 from pathlib import Path
 x=json.loads(Path(sys.argv[1]).read_text()); x.pop('signature',None)
@@ -2427,10 +2455,16 @@ PHDUR
   fi
   finish_operation_deadline verification
   if (( UPGRADE_ROLLBACK_MODE )); then
-    echo 'G7 current-image 0058-to-0061 verification upgrade rolled back from the signed archive with A at epoch 2; UVM UI and CE public retained-state readback passed' | tee "$EVIDENCE/result.txt"
+    echo 'G7 current-image 0058-to-0062 verification upgrade rolled back from the signed archive with A at epoch 2; UVM UI and CE public retained-state readback passed' | tee "$EVIDENCE/result.txt"
   else
     echo 'G7 recovery-only signed archive restored into new volumes; UVM UI and CE public retained-state readback passed' | tee "$EVIDENCE/result.txt"
   fi
   exit 0
 fi
-echo 'G7 observer-settings-only journey completed' | tee "$EVIDENCE/result.txt"
+if (( EXCEPTION_SLA_MODE )); then
+  echo 'G7 authoritative ingestion and exception SLA pause/resume public journey completed' | tee "$EVIDENCE/result.txt"
+elif (( EXCEPTION_WARNING_MODE )); then
+  echo 'G7 exception warning public lifecycle journey completed' | tee "$EVIDENCE/result.txt"
+else
+  echo 'G7 observer-settings-only journey completed' | tee "$EVIDENCE/result.txt"
+fi

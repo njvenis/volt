@@ -126,7 +126,7 @@ class Controller:
                 or type(admission["recovery_epoch"]) is not int
                 or admission["recovery_epoch"] != self.state["recovery_epoch_floor"]
                 or admission["from_schema"] != "0058"
-                or admission["to_schema"] not in {"0059", "0061"}
+                or admission["to_schema"] not in {"0059", "0061", "0062"}
                 or not isinstance(admission["volume_ids"], dict)
                 or set(admission["volume_ids"]) != {"postgres_cluster", "ce_media", "uvm_state"}
                 or any(not isinstance(value, str) or not value for value in admission["volume_ids"].values())
@@ -160,7 +160,7 @@ class Controller:
                 or request["state"] != "development_rollback_requested"
                 or type(request["recovery_epoch"]) is not int
                 or request["recovery_epoch"] != self.state["recovery_epoch_floor"]
-                or request["schema_head"] != "0061"
+                or request["schema_head"] not in {"0061", "0062"}
                 or any(type(request[name]) is not int or request[name] < 0 for name in
                     ("product_write_count", "unexpected_inventory_change_count", "unresolved_external_effect_count"))
                 or any(request[name] is not True for name in

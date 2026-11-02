@@ -158,6 +158,7 @@ from sqlalchemy import (
     String,
     Text,
     Table,
+    text,
     Uuid,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -185,6 +186,7 @@ identity_rule_definitions = Table(
     Column("rule_id", String, primary_key=True),
     Column("rule_version", Integer, primary_key=True),
     Column("workload_match_fields", _JSON, nullable=False),
+    Column("workload_context_fields", _JSON, nullable=False, server_default=text("'[]'")),
     Column("verified_asset_locator", Boolean, nullable=False),
     Column("definition_digest", String, nullable=False),
     Column("authorisation_decision_id", _ID, ForeignKey("identity_authorisation_decisions.decision_id"), nullable=True),

@@ -9,6 +9,7 @@ import unittest
 from uvm.identity import IdentityState, resolve
 
 from fixtures import T1, RULE, make_observation
+from uvm.identity.resolver import RuleV1
 
 
 def seed_workloads(state):
@@ -21,6 +22,59 @@ def seed_workloads(state):
 
 
 class ResolverOutcomesTest(unittest.TestCase):
+    def test_context_is_retained_but_never_selects_or_conflicts_with_identity(self):
+        rule = RuleV1("context-rule", 1, ("provisioning_key",),
+            workload_context_fields=("environment", "service_key"))
+        state = IdentityState()
+        first = resolve(state, make_observation(native_id_value="ctx-1"), rule,
+            {"provisioning_key": "pk-ctx", "environment": "local",
+             "service_key": "svc"}, T1)
+        self.assertEqual(first.outcome, "new")
+        self.assertEqual(state.workloads[first.workload_id].stable_attrs,
+            {"provisioning_key": "pk-ctx", "environment": "local", "service_key": "svc"})
+
+        omitted = resolve(state, make_observation(native_id_value="ctx-1", run_id="run-2",
+            asset_locator="host-b"), rule,
+            {"provisioning_key": "pk-ctx"}, T1)
+        self.assertEqual(omitted.outcome, "matched")
+        self.assertEqual(state.workloads[first.workload_id].stable_attrs["environment"], "local")
+
+        graph_before = (set(state.groups), set(state.workloads), set(state.incarnations),
+                        set(state.exposures), set(state.occurrences),
+                        {key: set(group.cve_refs) for key, group in state.groups.items()})
+        conflict = resolve(state, make_observation(native_id_value="ctx-2", run_id="run-3",
+            asset_locator="host-c"), rule,
+            {"provisioning_key": "pk-ctx", "environment": "production"}, T1)
+        self.assertEqual(conflict.outcome, "unresolved")
+        self.assertEqual(graph_before, (set(state.groups), set(state.workloads),
+            set(state.incarnations), set(state.exposures), set(state.occurrences),
+            {key: set(group.cve_refs) for key, group in state.groups.items()}))
+
+    def test_context_only_input_does_not_create_workload_and_names_are_strict(self):
+        rule = RuleV1("context-only", 1, ("provisioning_key",),
+            workload_context_fields=("environment",))
+        state = IdentityState()
+        result = resolve(state, make_observation(), rule, {"environment": "local"}, T1)
+        self.assertEqual(result.outcome, "unresolved")
+        self.assertEqual(state.workloads, {})
+        with self.assertRaises(ValueError):
+            RuleV1("bad", 1, ("provisioning_key",), workload_context_fields=["environment"])
+        with self.assertRaises(ValueError):
+            RuleV1("bad", 1, ("provisioning_key",), workload_context_fields=(" provisioning_key",))
+
+    def test_missing_retained_context_is_not_enriched_by_later_input(self):
+        rule = RuleV1("no-enrichment", 1, ("provisioning_key",),
+            workload_context_fields=("environment",))
+        state = IdentityState()
+        first = resolve(state, make_observation(native_id_value="ctx-missing"), rule,
+            {"provisioning_key": "pk-missing"}, T1)
+        self.assertEqual(first.outcome, "new")
+        second = resolve(state, make_observation(native_id_value="ctx-missing", run_id="later",
+            asset_locator="host-later"), rule,
+            {"provisioning_key": "pk-missing", "environment": "local"}, T1)
+        self.assertEqual(second.outcome, "matched")
+        self.assertNotIn("environment", state.workloads[first.workload_id].stable_attrs)
+
     def test_new_group_matched_workload_is_new_identity(self):
         state = IdentityState()
         seed_workloads(state)

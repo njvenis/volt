@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import unittest
 
 from uvm.auth.native_authority import effective_access, effective_team_members
+from uvm.assessment.api import _candidate_permission_actions
 
 
 class NativeIdentityAuthorityTest(unittest.TestCase):
@@ -68,6 +69,24 @@ class NativeIdentityAuthorityTest(unittest.TestCase):
             datetime(2026, 11, 1, tzinfo=timezone.utc)), ())
         self.assertEqual(effective_access(self.policy, "alice", self.now)[0],
             ("group-a", "group-b"))
+
+    def test_permissions_projection_includes_only_current_native_access_group_actions(self):
+        groups = self.policy["native_authority"]["access_groups"]
+        groups["group-a"]["permissions"] = [
+            {"action": "acceptance.submit"}, {"action": "acceptance.approve"},
+            {"action": "owners.directory.read"}]
+        groups["group-b"]["permissions"] = [{"action": "owners.assign"}]
+        groups["expired-group"] = {
+            "enabled": True,
+            "memberships": [{"principal_id": "alice", "effective_from": "2026-10-01T00:00:00Z",
+                "effective_until": "2026-10-29T11:00:00Z", "enabled": True}],
+            "permissions": [{"action": "native.secret"}],
+        }
+        actions = _candidate_permission_actions(self.policy, "alice")
+        self.assertTrue({"acceptance.submit", "acceptance.approve", "owners.directory.read",
+            "owners.assign"} <= actions)
+        self.assertNotIn("native.secret", actions)
+        self.assertNotIn("*", actions)
 
     def test_disabled_account_has_no_native_group_access_or_team_membership(self):
         self.policy["principals"]["alice"]["enabled"] = False

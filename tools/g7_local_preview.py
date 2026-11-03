@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import ipaddress
 import secrets
 import shutil
 import subprocess
@@ -92,6 +93,15 @@ def preview_grantable_envelope() -> dict:
             "prohibited_action_pairs": []}}
 
 
+def ingress_peer_cidrs(gateway: str) -> tuple[str, str]:
+    address = ipaddress.ip_address(gateway)
+    return ("127.0.0.1/32", f"{address}/{address.max_prefixlen}")
+
+
+def ingress_hostnames() -> str:
+    return "127.0.0.1,localhost"
+
+
 def initialize(args) -> None:
     dirty = run("git", "status", "--porcelain", capture=True)
     if dirty:
@@ -119,8 +129,15 @@ def initialize(args) -> None:
         "rationale": "Explicit local preview bootstrap", "evidence_ref": "local-preview-bootstrap"}
     (root / "operator-link.json").write_text(json.dumps(link, separators=(",", ":")) + "\n", encoding="utf-8")
     (root / "operator-link.json").chmod(0o600)
-    metadata = {"instance": args.instance, "container": f"volt-g7-preview-{args.instance}",
-        "volumes": {part: f"volt-g7-preview-{args.instance}-{part}" for part in ("postgres", "media", "state")},
+    owner_token = secrets.token_hex(32)
+    suffix = owner_token[:16]
+    metadata = {"instance": args.instance, "owner_token": owner_token,
+        "container": f"volt-g7-preview-{args.instance}-{suffix}",
+        "container_id": None, "container_resource_id": str(uuid.uuid4()),
+        "network": f"volt-g7-preview-{args.instance}-{suffix}-net",
+        "network_id": None, "network_resource_id": str(uuid.uuid4()),
+        "volumes": {part: f"volt-g7-preview-{args.instance}-{suffix}-{part}" for part in ("postgres", "media", "state")},
+        "volume_resource_ids": {part: str(uuid.uuid4()) for part in ("postgres", "media", "state")},
         "api_port": api_port, "oidc_port": oidc_port, "secrets_dir": str(secrets_dir),
         "source_revision": run("git", "rev-parse", "HEAD", capture=True), "source_status": "clean"}
     (root / "instance.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
@@ -136,8 +153,73 @@ def load(instance: str) -> tuple[Path, dict]:
         raise SystemExit(f"instance is not initialized: {instance}") from exc
 
 
+def save_instance(root: Path, info: dict) -> None:
+    path = root / "instance.json"
+    temporary = root / "instance.json.tmp"
+    temporary.write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
+    temporary.chmod(0o600)
+    temporary.replace(path)
+
+
+def exact_container(info: dict) -> bool:
+    result = subprocess.run(("docker", "inspect", "--format",
+        "{{.Id}}|{{index .Config.Labels \"volt.g7-preview.owner-token\"}}|{{index .Config.Labels \"volt.g7-preview.resource-id\"}}",
+        info["container"]), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if result.returncode:
+        if "No such object" in result.stderr or "not found" in result.stderr.lower():
+            return False
+        raise SystemExit(f"could not inspect preview container safely: {result.stderr.strip()}")
+    fields = result.stdout.strip().split("|")
+    if len(fields) != 3 or fields[0] != info.get("container_id") or fields[1] != info.get("owner_token") or fields[2] != info.get("container_resource_id"):
+        raise SystemExit("refusing preview container: ownership token or exact created container ID does not match")
+    return True
+
+
+def exact_volume(info: dict, part: str) -> bool:
+    name = info["volumes"][part]
+    result = subprocess.run(("docker", "volume", "inspect", "--format",
+        "{{index .Labels \"volt.g7-preview.owner-token\"}}|{{index .Labels \"volt.g7-preview.resource-id\"}}", name),
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if result.returncode:
+        if "No such volume" in result.stderr or "not found" in result.stderr.lower():
+            return False
+        raise SystemExit(f"could not inspect preview volume safely: {result.stderr.strip()}")
+    fields = result.stdout.strip().split("|")
+    if len(fields) != 2 or fields[0] != info.get("owner_token") or fields[1] != info.get("volume_resource_ids", {}).get(part):
+        raise SystemExit(f"refusing preview volume {name}: ownership token or created resource ID does not match")
+    return True
+
+
+def exact_network(info: dict) -> bool:
+    result = subprocess.run(("docker", "network", "inspect", "--format",
+        "{{.Id}}|{{index .Labels \"volt.g7-preview.owner-token\"}}|{{index .Labels \"volt.g7-preview.resource-id\"}}",
+        info["network"]), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if result.returncode:
+        if "No such network" in result.stderr or "not found" in result.stderr.lower():
+            return False
+        raise SystemExit(f"could not inspect preview network safely: {result.stderr.strip()}")
+    fields = result.stdout.strip().split("|")
+    if len(fields) != 3 or fields[0] != info.get("network_id") or fields[1] != info.get("owner_token") or fields[2] != info.get("network_resource_id"):
+        raise SystemExit("refusing preview network: ownership token or exact created network ID does not match")
+    return True
+
+
+def preflight(info: dict, *, require_container: bool = False) -> bool:
+    """Validate every existing resource before any Docker mutation."""
+    container_exists = exact_container(info)
+    if require_container and not container_exists:
+        raise SystemExit("refusing preview operation: the exact owned container is absent")
+    exact_network(info)
+    for part in info["volumes"]:
+        exact_volume(info, part)
+    return container_exists
+
+
 def start(args) -> None:
     root, info = load(args.instance)
+    exists = preflight(info)
+    if exists:
+        raise SystemExit(f"owned container already exists; use restart or stop first: {info['container']}")
     current = run("git", "rev-parse", "HEAD", capture=True)
     if current != info["source_revision"] or run("git", "status", "--porcelain", capture=True):
         raise SystemExit("source revision changed after init; destroy and reinitialize against a committed clean revision")
@@ -145,11 +227,25 @@ def start(args) -> None:
     run("docker", "build", "--label", f"org.opencontainers.image.revision={info['source_revision']}",
         "--label", "org.opencontainers.image.version=local-preview", "-f", "Dockerfile.g7", "-t", image, ".")
     container = info["container"]
-    existing = run("docker", "ps", "-a", "--filter", f"name={container}", "--format", "{{.Names}}", capture=True)
-    if container in existing.splitlines():
-        raise SystemExit(f"owned container already exists; use restart or stop first: {container}")
-    for name in info["volumes"].values():
-        run("docker", "volume", "create", "--label", f"volt.g7-preview.instance={args.instance}", name)
+    if not exact_network(info):
+        run("docker", "network", "create", "--driver", "bridge", "--label",
+            f"volt.g7-preview.owner-token={info['owner_token']}", "--label",
+            f"volt.g7-preview.resource-id={info['network_resource_id']}", info["network"])
+        netid = run("docker", "network", "inspect", "--format", "{{.Id}}", info["network"], capture=True)
+        info["network_id"] = netid
+        save_instance(root, info)
+        if not exact_network(info):
+            raise SystemExit("created private preview network failed ownership verification")
+    for part, name in info["volumes"].items():
+        if not exact_volume(info, part):
+            run("docker", "volume", "create", "--label", f"volt.g7-preview.instance={args.instance}",
+                "--label", f"volt.g7-preview.owner-token={info['owner_token']}", "--label",
+                f"volt.g7-preview.resource-id={info['volume_resource_ids'][part]}", name)
+            if not exact_volume(info, part):
+                raise SystemExit(f"created preview volume failed ownership verification: {name}")
+    gateway = run("docker", "network", "inspect", "--format", "{{(index .IPAM.Config 0).Gateway}}",
+        info["network"], capture=True)
+    allowed_peers = ingress_peer_cidrs(gateway)
     secret_dir = info["secrets_dir"]
     env = {
         "DD_ADMIN_USER": "admin", "DD_ADMIN_MAIL": "admin@localhost.invalid",
@@ -167,9 +263,14 @@ def start(args) -> None:
         "UVM_G7_RECOVERY_TLS_KEY_FILE": "/run/uvm-g7-secrets/recovery-server.key",
         "UVM_G7_RECOVERY_TLS_CA_FILE": "/run/uvm-g7-secrets/recovery-ca.crt",
         "UVM_API_HOST": "0.0.0.0", "UVM_API_PORT": "8000",
+        "UVM_INGRESS_ALLOWED_PEER_CIDRS": ",".join(allowed_peers),
+        "UVM_INGRESS_ALLOWED_HOSTS": ingress_hostnames(),
     }
     cmd = ["docker", "run", "-d", "--name", container,
         "--label", f"volt.g7-preview.instance={args.instance}",
+        "--label", f"volt.g7-preview.owner-token={info['owner_token']}",
+        "--label", f"volt.g7-preview.resource-id={info['container_resource_id']}",
+        "--network", info["network"],
         "--publish", f"127.0.0.1:{info['api_port']}:8000",
         "--publish", f"127.0.0.1:{info['oidc_port']}:9000",
         "--mount", f"type=bind,src={secret_dir},dst=/run/secrets,readonly"]
@@ -179,11 +280,13 @@ def start(args) -> None:
     for key, value in env.items():
         cmd += ["--env", f"{key}={value}"]
     cmd.append(image)
-    run(*cmd)
+    info["container_id"] = run(*cmd, capture=True)
+    save_instance(root, info)
+    if not exact_container(info):
+        raise SystemExit("created preview container failed ownership verification")
     info["image"] = image
     info["image_id"] = run("docker", "inspect", "--format", "{{.Image}}", container, capture=True)
-    (root / "instance.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
-    (root / "instance.json").chmod(0o600)
+    save_instance(root, info)
     print(f"container={container}\nimage={image}\nurl=http://127.0.0.1:{info['api_port']}/")
 
 
@@ -191,17 +294,18 @@ def docker_for(args, action: str) -> None:
     _root, info = load(args.instance)
     container = info["container"]
     if action == "status":
-        names = run("docker", "ps", "-a", "--filter", f"name={container}", "--format", "{{.Names}}", capture=True)
-        if container not in names.splitlines():
+        if not exact_container(info):
             print(f"container=absent name={container}")
             return
         run("docker", "ps", "-a", "--filter", f"name={container}", "--format", "{{.Names}} {{.Status}} {{.Image}}")
         return
+    preflight(info, require_container=True)
     run("docker", action, container)
 
 
 def wait_healthy(args) -> None:
     _root, info = load(args.instance)
+    preflight(info, require_container=True)
     import time
     deadline = time.monotonic() + args.timeout
     while time.monotonic() < deadline:
@@ -217,38 +321,75 @@ def wait_healthy(args) -> None:
 
 def link_admin(args) -> None:
     root, info = load(args.instance)
+    preflight(info, require_container=True)
     link = (root / "operator-link.json").read_text(encoding="utf-8").strip()
     # The operator credential is read inside the container and is never included in argv/output.
     program = "import json,urllib.request; p='/run/uvm-g7-secrets/oidc_operator_secret'; token=open(p).read().strip(); body=" + repr(link) + "; r=urllib.request.Request('http://127.0.0.1:8000/api/v1/auth/operator/links',data=body.encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'}); print(urllib.request.urlopen(r,timeout=10).read().decode())"
     run("docker", "exec", "-i", info["container"], "/opt/uvm/venv/bin/python", "-c", program)
 
 
+def verify_private_ingress(info: dict, evidence: Path) -> None:
+    ip = run("docker", "inspect", "--format",
+        f'{{{{(index .NetworkSettings.Networks "{info["network"]}").IPAddress}}}}',
+        info["container"], capture=True)
+    probe_name = f"{info['container']}-peer-probe"
+    probe = subprocess.run(("docker", "inspect", probe_name),
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if probe.returncode == 0:
+        raise SystemExit("refusing peer probe because its exact one-shot name already exists")
+    script = ("import json,sys,urllib.error,urllib.request; url=sys.argv[1]\n"
+        "try: urllib.request.urlopen(url,timeout=8)\n"
+        "except urllib.error.HTTPError as e:\n"
+        " body=json.loads(e.read()); code=body.get('error',{}).get('code'); "
+        "print(f'status={e.code} code={code}'); sys.exit(0 if e.code==403 and code=='ingress_peer_forbidden' else 3)\n"
+        "except Exception as e: print('unexpected_transport_error='+type(e).__name__); sys.exit(4)\n"
+        "else: print('unexpected_peer_access=allowed'); sys.exit(5)")
+    cidfile = evidence / "ingress-peer-probe.cid"
+    result = subprocess.run(("docker", "run", "--rm", "--cidfile", str(cidfile), "--name", probe_name,
+        "--label", f"volt.g7-preview.owner-token={info['owner_token']}",
+        "--label", f"volt.g7-preview.resource-id={uuid.uuid4()}", "--network", info["network"],
+        "--entrypoint", "/opt/uvm/venv/bin/python", info["image"], "-c", script,
+        f"http://{ip}:8000/healthz"), text=True, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, check=False)
+    peer_id = cidfile.read_text(encoding="ascii").strip() if cidfile.exists() else "missing"
+    cleanup = subprocess.run(("docker", "inspect", peer_id), text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False) if peer_id != "missing" else None
+    cleanup_exit = cleanup.returncode if cleanup else "unavailable"
+    text = (f"command=docker run --rm --cidfile {cidfile} --name {probe_name} --network {info['network']} "
+        f"--entrypoint /opt/uvm/venv/bin/python {info['image']} -c <peer-check> http://{ip}:8000/healthz\n"
+        f"container_id={peer_id}\nexit={result.returncode}\n{result.stdout}"
+        f"post_cleanup_docker_inspect_exit={cleanup_exit}\n")
+    (evidence / "ingress-peer-denial.txt").write_text(text, encoding="utf-8")
+    if result.returncode:
+        raise SystemExit(f"unauthorized peer ingress did not return the expected 403 (exit={result.returncode})")
+
+
 def destroy(args) -> None:
-    _root, info = load(args.instance)
+    root, info = load(args.instance)
     container = info["container"]
-    existing = run("docker", "ps", "-a", "--filter", f"name={container}", "--format", "{{.Names}}", capture=True)
-    if container in existing.splitlines():
-        labels = run("docker", "inspect", "--format", "{{ index .Config.Labels \"volt.g7-preview.instance\" }}", container, capture=True)
-        if labels != args.instance:
-            raise SystemExit("refusing to remove a container without the exact preview ownership label")
+    container_exists = preflight(info)
+    network_exists = exact_network(info)
+    if container_exists:
         run("docker", "rm", "-f", container)
     for volume in info["volumes"].values():
-        listed = run("docker", "volume", "ls", "--filter", f"name={volume}", "--format", "{{.Name}}", capture=True)
-        if volume in listed.splitlines():
-            labels = run("docker", "volume", "inspect", "--format", "{{ index .Labels \"volt.g7-preview.instance\" }}", volume, capture=True)
-            if labels != args.instance:
-                raise SystemExit(f"refusing to remove volume without exact preview ownership label: {volume}")
-            run("docker", "volume", "rm", volume)
-    shutil.rmtree(state_dir(args.instance))
+        run("docker", "volume", "rm", volume)
+    if network_exists:
+        run("docker", "network", "rm", info["network"])
+    shutil.rmtree(root)
     print(f"destroyed_owned_instance={args.instance}")
 
 
 def smoke(args) -> None:
     _root, info = load(args.instance)
+    preflight(info, require_container=True)
     evidence = Path(args.evidence)
     evidence.mkdir(mode=0o700, parents=True, exist_ok=True)
+    verify_private_ingress(info, evidence)
     command = ["node", "tools/g7_local_preview_smoke.mjs", "--origin",
-        f"http://127.0.0.1:{info['api_port']}", "--evidence", str(evidence)]
+        f"http://127.0.0.1:{info['api_port']}", "--issuer",
+        f"http://127.0.0.1:{info['oidc_port']}", "--subject",
+        "volt-local-preview-admin-subject", "--principal", "volt-local-preview-admin",
+        "--evidence", str(evidence)]
     if args.readback:
         command.append("--readback")
     subprocess.run(command, check=True)

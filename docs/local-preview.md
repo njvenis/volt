@@ -28,6 +28,20 @@ python3 tools/g7_local_preview.py smoke demo --evidence "$PREVIEW_EVIDENCE"
 
 `init` generates a new cryptographic ownership token, private secrets, and local recovery TLS material under `$XDG_STATE_HOME/volt/g7-preview/demo`. Container, network, and volume names include the token suffix, and their token/resource identifiers are checked before lifecycle operations. The private custom bridge separates the synthetic OIDC provider from unrelated Docker bridge containers. The existing ingress guard accepts only loopback or the exact private-network gateway peer and exact `127.0.0.1`/`localhost` Host values. The helper publishes UVM and synthetic OIDC on loopback only; recovery control remains unpublished.
 
+The default `start` path builds the revision-qualified local image from this clean helper checkout. To start an image loaded from a separately transferred archive without rebuilding, use `start --no-build` and supply its full immutable image ID, expected OCI source revision, version label, and supported platform. The helper checks all four against Docker image inspect before creating any resource, repeats the check immediately before launch, and passes the immutable image ID to `docker run`. The helper checkout must still be the exact clean revision recorded by `init`; its `helper_revision` is tracked separately from the loaded image's `image_source_revision` so a maintained launcher can operate an older immutable image without claiming to be part of that image.
+
+For example, after loading the image archive, use the verified ID and metadata from its manifest:
+
+```sh
+python3 tools/g7_local_preview.py start demo --no-build \
+  --expected-image-id sha256:FULL_64_HEX_IMAGE_ID \
+  --expected-image-source-revision FULL_40_HEX_SOURCE_REVISION \
+  --expected-image-version local-preview \
+  --expected-platform linux/amd64
+```
+
+This release preview helper currently admits `linux/amd64`. Missing or mismatched image identity, source revision, version, or platform is refused before Docker resource creation.
+
 The helper rejects a symlinked instance directory or `instance.json`, mismatched stored instance names, and private configuration paths outside that instance. An intentionally symlinked `XDG_STATE_HOME` is allowed. During an interrupted first initialization, `start` can complete still-missing resources carrying that initialization's exact ownership token and resource labels. Once a container ID has been recorded, the instance is established: `start`, `stop`, `restart`, `wait`, `link-admin`, and `smoke` require its exact container, private network, and all three volumes. If any established resource is missing, the helper refuses to recreate or rebind it; inspect retained evidence before choosing a recovery path. `destroy` remains available and removes only the still-present resources whose recorded ownership and IDs match.
 
 The smoke command verifies the signed-in session's exact configured issuer, subject, principal, and OIDC mode. It also runs a short-lived peer on the private bridge and requires the middleware's exact `403 ingress_peer_forbidden` response. It opens the actual administration page, waits for the loaded view and enabled create control, performs the bounded public API operation, refreshes the page, and requires the created object to render. The command receipt must match the requested action, target, object, revision, and audit event. Public history must contain the exact receipt audit ID and actor. Browser captures, receipt, public readback, and smoke state are written to the evidence directory.

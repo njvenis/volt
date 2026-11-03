@@ -1,7 +1,11 @@
 """Durable provider-attempt, bounded-retry and crash-recovery checks."""
 from email.message import Message
 import json
+import os
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 import urllib.error
 import uuid
@@ -96,6 +100,40 @@ class OperationalAlertSenderTests(unittest.TestCase):
         size=len(self.journal._read()["records"])
         self.assertEqual(sender.record_interrupted_sends(self.journal,self.journal._read()["records"]),[])
         self.assertEqual(len(self.journal._read()["records"]),size)
+
+    def test_killed_process_after_sending_persists_uncertain_before_offline_return(self):
+        attempt={"schema_version":1,"attempt_id":str(uuid.uuid4()),"outcome":"failed",
+            "attempted_at":"2026-11-02T20:00:00.000000Z","receipt_ref":None,
+            "failure_detail":"provider_unavailable"}
+        marker=self.root/"sending-durable"
+        script=("import json, os, sys, time; from tools.g7_operational_alert_sender import Journal; "
+            "Journal(sys.argv[1]).append('SENDING', {'transition_id':sys.argv[3], "
+            "'attempt':json.loads(sys.argv[2])}); open(sys.argv[4],'w').write('ready'); time.sleep(30)")
+        child=subprocess.Popen([sys.executable,"-c",script,str(self.catalog["journal"]),
+            json.dumps(attempt),self.event["transition_id"],str(marker)])
+        try:
+            deadline=time.monotonic()+5
+            while not marker.exists() and child.poll() is None and time.monotonic()<deadline:
+                time.sleep(.01)
+            self.assertTrue(marker.exists(),"child did not durably append SENDING")
+            child.kill()
+            child.wait(timeout=5)
+        finally:
+            if child.poll() is None:
+                child.kill(); child.wait(timeout=5)
+        inspected={"state":"unknown","container_id":"container-id",
+            "image_id":"sha256:"+"a"*64,"deployment_label":"g7-local",
+            "run_label":"run","boot_id":"boot"}
+        with patch.object(sender,"inspect_target",return_value=inspected), \
+                patch.object(sender,"post_json") as post, \
+                patch.object(sender,"api_post") as project:
+            sender.run_once(self.loaded)
+        records=self.journal._read()["records"]
+        outcome=next(r for r in records if r["kind"]=="ATTEMPT_OUTCOME")
+        self.assertEqual(outcome["attempt"]["outcome"],"uncertain")
+        self.assertEqual(outcome["attempt"]["failure_detail"],"submission_uncertain")
+        self.assertEqual(post.call_count,0)
+        self.assertEqual(project.call_count,0)
 
     def test_bound_context_captures_labels_binding_epoch_and_route(self):
         inspected={"container_id":"container-id","image_id":"sha256:"+"a"*64,

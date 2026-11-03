@@ -385,10 +385,12 @@ def run_once(c):
     if prior_context and prior_context!=ctx:
         j.append('HELD',{'reason':'bound-service-context-changed','prior_context':prior_context,'context':ctx}); return 3
     j.append('INSPECTION',{'state':current['state'],'context_digest':sha(canonical(ctx)),'context':ctx,'reason':current.get('reason')})
-    if current['state']=='unknown': return 0
     # A durable SENDING without a durable result is always uncertain after restart.
     record_interrupted_sends(j,records)
     records=j._read()['records']
+    # Persist the terminal local outcome before trying any app projection. The app
+    # may be offline or the Docker inspection may be unknown during this restart.
+    if current['state']=='unknown': return 0
     project_pending(c,j,records)
     edges=[r for r in records if r['kind']=='TRANSITION_INTENT']
     active_open=None

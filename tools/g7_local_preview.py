@@ -166,7 +166,7 @@ def exact_container(info: dict) -> bool:
         "{{.Id}}|{{index .Config.Labels \"volt.g7-preview.owner-token\"}}|{{index .Config.Labels \"volt.g7-preview.resource-id\"}}",
         info["container"]), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if result.returncode:
-        if "No such object" in result.stderr or "not found" in result.stderr.lower():
+        if "no such object" in result.stderr.lower() or "not found" in result.stderr.lower():
             return False
         raise SystemExit(f"could not inspect preview container safely: {result.stderr.strip()}")
     fields = result.stdout.strip().split("|")
@@ -181,7 +181,7 @@ def exact_volume(info: dict, part: str) -> bool:
         "{{index .Labels \"volt.g7-preview.owner-token\"}}|{{index .Labels \"volt.g7-preview.resource-id\"}}", name),
         text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if result.returncode:
-        if "No such volume" in result.stderr or "not found" in result.stderr.lower():
+        if "no such volume" in result.stderr.lower() or "not found" in result.stderr.lower():
             return False
         raise SystemExit(f"could not inspect preview volume safely: {result.stderr.strip()}")
     fields = result.stdout.strip().split("|")
@@ -195,7 +195,7 @@ def exact_network(info: dict) -> bool:
         "{{.Id}}|{{index .Labels \"volt.g7-preview.owner-token\"}}|{{index .Labels \"volt.g7-preview.resource-id\"}}",
         info["network"]), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if result.returncode:
-        if "No such network" in result.stderr or "not found" in result.stderr.lower():
+        if "no such network" in result.stderr.lower() or "not found" in result.stderr.lower():
             return False
         raise SystemExit(f"could not inspect preview network safely: {result.stderr.strip()}")
     fields = result.stdout.strip().split("|")
@@ -204,21 +204,20 @@ def exact_network(info: dict) -> bool:
     return True
 
 
-def preflight(info: dict, *, require_container: bool = False) -> bool:
+def preflight(info: dict, *, require_container: bool = False) -> dict:
     """Validate every existing resource before any Docker mutation."""
     container_exists = exact_container(info)
     if require_container and not container_exists:
         raise SystemExit("refusing preview operation: the exact owned container is absent")
-    exact_network(info)
-    for part in info["volumes"]:
-        exact_volume(info, part)
-    return container_exists
+    network_exists = exact_network(info)
+    volumes_exist = {part: exact_volume(info, part) for part in info["volumes"]}
+    return {"container": container_exists, "network": network_exists, "volumes": volumes_exist}
 
 
 def start(args) -> None:
     root, info = load(args.instance)
-    exists = preflight(info)
-    if exists:
+    resources = preflight(info)
+    if resources["container"]:
         raise SystemExit(f"owned container already exists; use restart or stop first: {info['container']}")
     current = run("git", "rev-parse", "HEAD", capture=True)
     if current != info["source_revision"] or run("git", "status", "--porcelain", capture=True):
@@ -367,13 +366,13 @@ def verify_private_ingress(info: dict, evidence: Path) -> None:
 def destroy(args) -> None:
     root, info = load(args.instance)
     container = info["container"]
-    container_exists = preflight(info)
-    network_exists = exact_network(info)
-    if container_exists:
+    resources = preflight(info)
+    if resources["container"]:
         run("docker", "rm", "-f", container)
-    for volume in info["volumes"].values():
-        run("docker", "volume", "rm", volume)
-    if network_exists:
+    for part, volume in info["volumes"].items():
+        if resources["volumes"][part]:
+            run("docker", "volume", "rm", volume)
+    if resources["network"]:
         run("docker", "network", "rm", info["network"])
     shutil.rmtree(root)
     print(f"destroyed_owned_instance={args.instance}")

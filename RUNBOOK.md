@@ -29,3 +29,12 @@ The tests above use synthetic or in-process fixtures. They do not verify live sc
 `Dockerfile.g7` describes a development packaging target. Review the image pins in `docker/g7/versions.lock` before building. The image is not a production deployment recipe: storage, ingress, identity, secrets, backups, monitoring and recovery require environment-specific configuration and verification.
 
 Do not use production credentials or data in local runs. Use disposable resources and confirm cleanup before removing them.
+
+### Local G7 preview
+
+The supported local container launcher, generated synthetic OIDC/bootstrap setup,
+loopback ports, persistence, and owned-resource cleanup are documented in
+[`docs/local-preview.md`](docs/local-preview.md). Use only a committed clean
+revision and retain environment-labelled smoke evidence outside the private
+preview state directory. The preview is not a production deployment or G7 gate
+claim.

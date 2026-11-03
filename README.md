@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/volt-wordmark.svg" alt="VOLT — Vulnerability Ownership &amp; Lifecycle Tracking" width="480" />
+</p>
+
 # VOLT
 
 **Vulnerability Ownership & Lifecycle Tracking**

@@ -1,0 +1,25 @@
+VOLT 0.1.0-rc.1 offline archive verification
+
+Do not execute archive-supplied code or load image.tar until verification succeeds.
+
+Trust bootstrap comes first. Obtain the expected source commit, an independently authenticated checkout of that exact VOLT commit (including its verifier), pinned Cosign 3.1.4 binary SHA-256, and Sigstore trusted-root SHA-256 from canonical VOLT release instructions through an independently trusted channel. These bundled instructions are not trusted until verification succeeds. Do not execute archive-supplied verifier/source code or take trust roots or the only expected checksums from this archive or its embedded source bundle. If your Cosign installation has not already been provisioned with the official Sigstore TUF trust root, provision it through the official Sigstore trust procedure before going offline.
+
+1. Inspect the manifest without executing files. Require version 0.1.0-rc.1, linux/amd64, expected source commit, workflow identity https://github.com/njvenis/volt/.github/workflows/release.yml@refs/heads/main, and issuer https://token.actions.githubusercontent.com.
+2. Do not check out a branch or run code from the archive before authenticity succeeds. The verifier checks the manifest signature and every signed payload hash before it opens the source bundle. Once verified, it imports bundle objects without checkout, then checks out only the independently expected, signed source commit detached. Confirm that checkout is clean and verify tools/release/tools.lock and tools/release/archive.py against the independently obtained source commit before using them.
+3. From the independently authenticated source checkout from step 1, verify Cosign 3.1.4 against the independently obtained binary SHA-256. Obtain or provision the official Sigstore trust root independently; never trust trusted_root.json from the archive. Run that independently authenticated checkout's verifier (not source code extracted from this archive). The project archive verifier accepts an external root only when its SHA-256 is supplied separately:
+
+   python3 <trusted-source-checkout>/tools/release/archive.py verify --archive volt-0.1.0-rc.1-linux-amd64.tar \
+     --cosign cosign --trusted-root /trusted/sigstore/trusted_root.json \
+     --trusted-root-sha256 <independently-obtained-root-sha256> \
+     --source-sha <expected-source-commit> --image-id <expected-image-id>
+
+   When using a pre-provisioned Cosign trust store, omit both --trusted-root options; Cosign uses that local trusted store. Never extract a trusted root from this archive as the trust anchor.
+4. The verifier checks the manifest signature, closed signed file inventory, all file hashes, typed VOLT provenance, source bundle/helper agreement, registry digest/provenance/notice image agreement, and classic Docker or OCI/containerd index/platform-manifest/config/layer descriptor chains and uncompressed diff IDs. The manifest keeps local image/index ID, config ID and registry digest as separate identities. To load only after verification:
+
+   python3 <trusted-source-checkout>/tools/release/archive.py load --archive volt-0.1.0-rc.1-linux-amd64.tar \
+     --cosign cosign --trusted-root /trusted/sigstore/trusted_root.json \
+     --trusted-root-sha256 <independently-obtained-root-sha256>
+
+5. Follow launcher-guide.txt from the exact clean source checkout for the no-build private preview, health/readback and owned cleanup path.
+
+SHA256SUMS is checked as an integrity aid, not a trust anchor. The archive verifier rejects unknown or missing payload files, unsafe paths, links, special files, duplicate members, oversized archives, wrong signer identity/issuer, wrong source/image metadata, mismatched registry digests, non-image tar files, corrupt config/layer chains and a launcher that differs from the signed Git bundle.

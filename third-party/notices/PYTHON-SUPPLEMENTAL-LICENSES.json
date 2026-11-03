@@ -1,0 +1,26 @@
+[
+  {
+    "package": "packageurl-python",
+    "version": "0.17.6",
+    "license_expression": "MIT",
+    "copyright": "Copyright (c) the purl authors",
+    "source_url": "https://files.pythonhosted.org/packages/f5/d6/3b5a4e3cfaef7a53869a26ceb034d1ff5e5c27c814ce77260a96d50ab7bb/packageurl_python-0.17.6.tar.gz",
+    "source_sha256": "1252ce3a102372ca6f86eb968e16f9014c4ba511c5c37d95a7f023e2ca6e5c25",
+    "source_size": 50618,
+    "source_member": "packageurl_python-0.17.6/mit.LICENSE",
+    "license_file": "packageurl-python-0.17.6-MIT.txt",
+    "license_sha256": "8e442c79545ac0c0a1a2cf0cf213312a45826acd6cdc6af223447dd5f708ee5d"
+  },
+  {
+    "package": "titlecase",
+    "version": "2.4.1",
+    "license_expression": "MIT",
+    "copyright": "Copyright (c) 2021 Patrick William Pannuto",
+    "source_url": "https://files.pythonhosted.org/packages/63/17/04d2d3e30e2bc5a3eefa1060b08e3fb628510440f938eaecabbe08976a26/titlecase-2.4.1.tar.gz",
+    "source_sha256": "7d83a277ccbbda11a2944e78a63e5ccaf3d32f828c594312e4862f9a07f635f5",
+    "source_size": 14434,
+    "source_member": "titlecase-2.4.1/LICENSE.txt",
+    "license_file": "titlecase-2.4.1-MIT.txt",
+    "license_sha256": "7e31e4b97035a307b2cef4523674dc1b502c5de57387d713e918a9885a6f33f8"
+  }
+]

@@ -1,0 +1,57 @@
+{
+  "copyright": "The wheel's exact LICENSE member contains no copyright notice; PyPI lists Python Packaging Authority as package author.",
+  "distribution": "setuptools",
+  "launcher_files": {
+    "cli-32.exe": {
+      "archive_path": "setuptools/cli-32.exe",
+      "sha256": "32acc1bc543116cbe2cff10cb867772df2f254ff2634c870aef0b46c4b696fdb",
+      "size": 11776
+    },
+    "cli-64.exe": {
+      "archive_path": "setuptools/cli-64.exe",
+      "sha256": "bbb3de5707629e6a60a0c238cd477b28f07f0066982fda953fa6fcec39073a4a",
+      "size": 14336
+    },
+    "cli-arm64.exe": {
+      "archive_path": "setuptools/cli-arm64.exe",
+      "sha256": "b9a7d08da880dfac8bcf548eba4b06fb59b6f09b17d33148a0f6618328926c61",
+      "size": 13824
+    },
+    "cli.exe": {
+      "archive_path": "setuptools/cli.exe",
+      "sha256": "32acc1bc543116cbe2cff10cb867772df2f254ff2634c870aef0b46c4b696fdb",
+      "size": 11776
+    },
+    "gui-32.exe": {
+      "archive_path": "setuptools/gui-32.exe",
+      "sha256": "85dae1e95d77845f2cb59bcac3d4afe74bbe4c91a9bcc5bf4a71cd43104dbe7c",
+      "size": 11776
+    },
+    "gui-64.exe": {
+      "archive_path": "setuptools/gui-64.exe",
+      "sha256": "3471b6140eadc6412277dbbefe3fef8c345a0f1a59776086b80a3618c3a83e3b",
+      "size": 14336
+    },
+    "gui-arm64.exe": {
+      "archive_path": "setuptools/gui-arm64.exe",
+      "sha256": "e694f4743405c8b5926ff457db6fe7f1a12dec7c16a9c3864784d3f4e07ae097",
+      "size": 13824
+    },
+    "gui.exe": {
+      "archive_path": "setuptools/gui.exe",
+      "sha256": "85dae1e95d77845f2cb59bcac3d4afe74bbe4c91a9bcc5bf4a71cd43104dbe7c",
+      "size": 11776
+    }
+  },
+  "license_archive_path": "setuptools-84.0.0.dist-info/licenses/LICENSE",
+  "license_expression": "MIT",
+  "license_file": "SETUPTOOLS-84.0.0-MIT-LICENSE.txt",
+  "license_file_sha256": "86da0f01aeae46348a3c3d465195dc1ceccde79f79e87769a64b8da04b2a4741",
+  "pypi_provenance": "PyPI reports no provenance metadata for this release file; the SHA-256 is the PyPI-published file checksum.",
+  "pypi_release_url": "https://pypi.org/project/setuptools/84.0.0/",
+  "schema": "volt-setuptools-launcher-evidence/v1",
+  "source_resolution": "Each PE artifact is byte-for-byte identical to the named member of the checksum-verified setuptools 84.0.0 wheel. The wheel includes the exact MIT license text at the recorded archive path. This binds the image artifacts to this distribution archive; PyPI reports no provenance metadata.",
+  "version": "84.0.0",
+  "wheel_sha256": "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670",
+  "wheel_url": "https://files.pythonhosted.org/packages/95/9c/c510029fc6ef33a6275cd2c5d3cecd6613dfd6aa401d57c54f1c18852ccf/setuptools-84.0.0-py3-none-any.whl"
+}

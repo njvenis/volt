@@ -26,3 +26,7 @@ Do not add credentials, raw vulnerability records, private environment identifie
 ## Pull requests
 
 Keep changes focused, include a concise rationale, update relevant documentation, and report exact commands and results. Preserve the supported API boundary with DefectDojo CE; VOLT must not write directly to its database tables.
+
+## Security
+
+The project is in early development. Do not report sensitive findings in public issues or pull requests. Follow [SECURITY.md](SECURITY.md); private GitHub reporting is inactive until the repository owner makes the repository public and enables it. Reporting is best effort with no response-time SLA.

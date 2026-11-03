@@ -1,0 +1,31 @@
+VOLT 0.1.0-rc.1 host launcher
+
+RC1 supports fresh installations only. It does not migrate or adopt historical development volumes. The launcher persists the exact image ID, source revision, version and platform before creating Docker resources; interrupted initialization may resume only with the same image binding. An unbound partial instance or attempted image switch requires destroying that instance and initializing a fresh one. Same-image stop/restart remains supported.
+
+Requirements: Docker Engine with linux/amd64 support, Python 3.13+, OpenSSL, Node/npm, and the pinned Playwright Chromium. The image is loaded from image.tar; the launcher never builds it.
+
+1. Verify the archive before extracting or loading. Get the expected source commit and Sigstore trusted-root SHA-256 from the canonical VOLT release instructions through an independently trusted channel. Do not use a root or checksum supplied only by this archive.
+2. Clone source.bundle into a new directory, check out the manifest source_commit, confirm it is clean, and confirm tools-g7-local-preview.py matches tools/g7_local_preview.py from that checkout. The signed archive verifier enforces this source/helper agreement.
+3. From the clean source checkout, install UI dependencies and the matching browser:
+   npm --prefix ui ci
+   (cd ui && npx playwright install chromium)
+4. Load the image only after successful signature and archive verification:
+   docker image load --input image.tar
+5. From the source checkout, set the evidence directory and create/start a private preview:
+   export XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+   export PREVIEW_EVIDENCE="$PWD/evidence/g7-local-preview/rc1"
+   python3 tools/g7_local_preview.py init rc1 --api-port 8180 --oidc-port 8190
+   python3 tools/g7_local_preview.py start rc1 --no-build --expected-image-id <image_id> --expected-image-source-revision <source_commit> --expected-image-version 0.1.0-rc.1 --expected-platform linux/amd64
+   python3 tools/g7_local_preview.py wait rc1
+   python3 tools/g7_local_preview.py status rc1
+   python3 tools/g7_local_preview.py link-admin rc1
+   python3 tools/g7_local_preview.py smoke rc1 --evidence "$PREVIEW_EVIDENCE"
+6. To confirm persistence, stop and restart, then perform readback:
+   python3 tools/g7_local_preview.py stop rc1
+   python3 tools/g7_local_preview.py restart rc1
+   python3 tools/g7_local_preview.py wait rc1
+   python3 tools/g7_local_preview.py smoke rc1 --readback --evidence "$PREVIEW_EVIDENCE"
+7. Remove only this owned preview and retain the evidence directory:
+   python3 tools/g7_local_preview.py destroy rc1
+
+Use only disposable data. The helper owns a private bridge, one container, three named volumes and local private configuration. It does not prune Docker resources.

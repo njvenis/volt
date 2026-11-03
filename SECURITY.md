@@ -9,3 +9,5 @@ Until that route is enabled, do not send sensitive vulnerability details through
 Include the affected revision, impact, and a minimal reproduction that uses synthetic data where possible. Do not attach secrets or production records.
 
 Security reports are reviewed on a best-effort basis. No response-time or remediation SLA is currently offered.
+
+For a published release candidate, use the latest `0.1.0-rc.1` source or image when practical and include its revision or digest in the report. Private reporting must first be enabled by the repository owner; no private route or response SLA is promised before that configuration.

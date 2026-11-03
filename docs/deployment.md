@@ -4,6 +4,8 @@
 
 `Dockerfile.g7` builds a development image from pinned DefectDojo CE and Valkey bases and the VOLT source. The image includes the local application processes and PostgreSQL/Valkey runtime components. The local preview helper currently admits only `linux/amd64` images. Its `start --no-build` mode can run an already loaded image only after checking its immutable image ID, source revision, version label, and platform against operator-supplied expected values; it does not publish or download that image. No public registry, image archive, Compose/Helm chart, general installer, or production deployment workflow is supplied.
 
+RC1 v0.1.0-rc.1 is a fresh-install release. It does not upgrade or adopt historical development volumes. The launcher saves the immutable image binding before creating Docker resources and refuses a changed image or an unbound partial initialization. Same-image stop/restart is supported for an established instance.
+
 For the supported local evaluation path, use [the local preview guide](local-preview.md). The preview exposes the API/UI and synthetic OIDC provider on loopback and isolates its Docker network. It uses three persistent volumes for PostgreSQL data, DefectDojo media, and VOLT state. `stop` retains them; `destroy` removes them.
 
 ## What a deployer must provide

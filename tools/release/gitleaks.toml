@@ -1,0 +1,27 @@
+title = "VOLT default Gitleaks rules with narrow synthetic fixture allowlists"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic preservation record identifiers in fixed browser test fixtures"
+condition = "AND"
+paths = ["^ui/tests/preservation-fixtures\\.mjs$", "^ui/tests/preservation-browser\\.test\\.mjs$"]
+regexes = ["synthetic-record-[12]"]
+targetRules = ["generic-api-key"]
+
+[[allowlists]]
+description = "SHA-256 of PostgreSQL's published public signing key, not a credential"
+condition = "AND"
+paths = ["^tools/notices/debian-source-catalog\\.json$"]
+regexes = ['''^\s*"key_sha256": "0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76",$''']
+regexTarget = "line"
+targetRules = ["generic-api-key"]
+
+[[allowlists]]
+description = "Non-secret correlation labels in the local runtime request fixtures"
+condition = "AND"
+paths = ["^uvm/connectors/runtime\\.py$"]
+regexes = ["origin=\"local_api\", correlation_id=\"g7-(runtime-resolve|runtime-dispatch|preview-secret)\""]
+regexTarget = "line"
+targetRules = ["generic-api-key"]

@@ -1,0 +1,13 @@
+{
+  "copyright": "Rich Felker et al. and third-party contributors, as listed in the exact COPYRIGHT file",
+  "license_expression": "MIT",
+  "license_file": "MUSL-1.2.6-COPYRIGHT",
+  "license_file_sha256": "b870108ec5e7790e9f9919064f1b9421d62d5f9b0e6c230c6adf7ea2da62e97b",
+  "package": "musl",
+  "raw_url": "https://raw.githubusercontent.com/ifduyue/musl/v1.2.6/COPYRIGHT",
+  "schema": "volt-musl-license-evidence/v1",
+  "source_note": "The downloaded text is from a version-tagged GitHub mirror of musl. The official musl release tarball URL is recorded for upstream provenance; direct retrieval was unavailable in this environment. Alpine source-image package metadata independently identifies musl 1.2.6-r2 and its MIT expression.",
+  "source_url": "https://github.com/ifduyue/musl/blob/v1.2.6/COPYRIGHT",
+  "upstream_release_url": "https://musl.libc.org/releases/musl-1.2.6.tar.gz",
+  "version": "1.2.6 upstream; Alpine 1.2.6-r2"
+}

@@ -326,6 +326,46 @@ def admit_loaded_image(expected: dict) -> str:
     return actual_id
 
 
+def admit_built_image(image: str, revision: str) -> dict:
+    """Read back the just-built image's immutable identity and provenance."""
+    result = subprocess.run(("docker", "image", "inspect", image), text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode:
+        raise SystemExit("refusing preview image: built image is unavailable")
+    try:
+        values = json.loads(result.stdout)
+        row = values[0]
+        config = row["Config"]
+        labels = config["Labels"]
+        image_id = row["Id"]
+        platform = f"{row['Os']}/{row['Architecture']}"
+        version = labels["org.opencontainers.image.version"]
+        source = labels["org.opencontainers.image.revision"]
+    except (IndexError, KeyError, TypeError, json.JSONDecodeError):
+        raise SystemExit("refusing preview image: required image metadata is missing or malformed") from None
+    if not isinstance(image_id, str) or not _IMAGE_ID_RE.fullmatch(image_id):
+        raise SystemExit("refusing preview image: immutable image ID is missing")
+    if source != revision or version != "local-preview" or platform != SUPPORTED_PREVIEW_PLATFORM:
+        raise SystemExit("refusing preview image: built image provenance or platform mismatch")
+    return {"id": image_id, "revision": source, "version": version, "platform": platform}
+
+
+def bind_initial_image(root: Path, info: dict, expected: dict) -> None:
+    """Persist image identity before creating any container, network, or volume."""
+    binding = {key: expected[key] for key in ("id", "revision", "version", "platform")}
+    existing = info.get("image_binding")
+    if existing is not None and existing != binding:
+        raise SystemExit("refusing partially initialized preview: image binding differs; destroy and initialize a fresh instance")
+    if existing is None:
+        # Old partial state has resources but no durable image identity. It is
+        # unsafe to infer that those resources belong to this launch attempt.
+        resources = preflight(info, require_complete=False)
+        if resources["container"] or resources["network"] or any(resources["volumes"].values()):
+            raise SystemExit("refusing partially initialized preview without an image binding; destroy and initialize a fresh instance")
+        info["image_binding"] = binding
+        save_instance(root, info)
+
+
 def start(args) -> None:
     no_build, expected_image = start_mode(args)
     root, info = load(args.instance)
@@ -341,10 +381,24 @@ def start(args) -> None:
         # The helper checkout revision is intentionally distinct from the loaded
         # image's source revision. Both identities are recorded and checked.
         image = admit_loaded_image(expected_image)
+    elif info.get("image_binding") is not None:
+        if getattr(args, "image", None) is not None:
+            raise SystemExit("refusing partially initialized preview: use its immutable bound image without --image")
+        expected_image = info["image_binding"]
+        if not info.get("image_mode"):
+            raise SystemExit("refusing partially initialized preview without image mode; continue with the explicit no-build image admission options")
+        image = admit_loaded_image(expected_image)
     else:
         image = getattr(args, "image", None) or f"volt:preview-{helper_revision}"
-        run("docker", "build", "--label", f"org.opencontainers.image.revision={helper_revision}",
+        run("docker", "build", "--platform", SUPPORTED_PREVIEW_PLATFORM,
+            "--label", f"org.opencontainers.image.revision={helper_revision}",
             "--label", "org.opencontainers.image.version=local-preview", "-f", "Dockerfile.g7", "-t", image, ".")
+        expected_image = admit_built_image(image, helper_revision)
+    bind_initial_image(root, info, expected_image)
+
+    if not info.get("image_mode"):
+        info["image_mode"] = "loaded-image" if no_build else "build-from-helper-source"
+        save_instance(root, info)
 
     container = info["container"]
     if not exact_network(info):
@@ -399,28 +453,24 @@ def start(args) -> None:
         cmd += ["--mount", f"type=volume,src={volume},dst={target}"]
     for key, value in env.items():
         cmd += ["--env", f"{key}={value}"]
-    if no_build:
-        # Reinspect after resource creation to close the check/use window, then
-        # launch by content ID rather than any mutable repository tag.
-        image = admit_loaded_image(expected_image)
-    cmd.append(image)
+    # Reinspect after resource creation to close the check/use window, then
+    # launch every path by content ID rather than a mutable repository tag.
+    image = admit_loaded_image(expected_image)
+    cmd.append(expected_image["id"])
     info["image"] = image
-    info["image_mode"] = "loaded-image" if no_build else "build-from-helper-source"
+    info["image_binding"] = {key: expected_image[key] for key in ("id", "revision", "version", "platform")}
+    info["image_mode"] = info.get("image_mode") or ("loaded-image" if no_build else "build-from-helper-source")
     info["helper_revision"] = helper_revision
-    if no_build:
-        info["image_source_revision"] = expected_image["revision"]
-        info["image_version"] = expected_image["version"]
-        info["image_platform"] = expected_image["platform"]
-    else:
-        info["image_source_revision"] = helper_revision
-        info["image_version"] = "local-preview"
+    info["image_source_revision"] = expected_image["revision"]
+    info["image_version"] = expected_image["version"]
+    info["image_platform"] = expected_image["platform"]
     info["container_id"] = run(*cmd, capture=True)
     save_instance(root, info)
     if not exact_container(info):
         raise SystemExit("created preview container failed ownership verification")
     info["image_id"] = run("docker", "inspect", "--format", "{{.Image}}", container, capture=True)
-    if no_build and info["image_id"] != expected_image["id"]:
-        raise SystemExit("refusing no-build container: launched image ID differs from admitted image")
+    if info["image_id"] != expected_image["id"]:
+        raise SystemExit("refusing preview container: launched image ID differs from admitted image")
     info["lifecycle_state"] = "established"
     save_instance(root, info)
     print(f"container={container}\nimage={image}\nimage_id={info['image_id']}\nurl=http://127.0.0.1:{info['api_port']}/")

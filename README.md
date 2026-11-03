@@ -125,6 +125,7 @@ Evidence should identify the exact revision, commands, environment and result. A
 
 | I want to… | Start here |
 | --- | --- |
+| Find configuration, deployment boundaries, and operations guidance | [Documentation index](docs/README.md) |
 | Try the application locally | [Local preview](docs/local-preview.md) |
 | Understand product scope and invariants | [Requirements](REQUIREMENTS.md) |
 | Assess verification and maturity | [Development and verification](GATES.md) |

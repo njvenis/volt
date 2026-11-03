@@ -4,6 +4,16 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.cache/
+.coverage
+.coverage.*
+
+# Local agent state
+/.agents/
+/.codex/
 
 # Node and build output
 node_modules/

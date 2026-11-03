@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import sys
 import subprocess
@@ -18,6 +19,9 @@ SECRET_PATTERNS = (
 )
 ARCHIVE_SUFFIXES = {".7z", ".bz2", ".gz", ".rar", ".tar", ".tgz", ".xz", ".zip"}
 ARCHIVE_MAGIC = (b"PK\x03\x04", b"PK\x05\x06", b"Rar!", b"7z\xbc\xaf\x27\x1c", b"\x1f\x8b", b"BZh")
+APPROVED_PNG_PATH = Path("docs/assets/volt-logo.png")
+APPROVED_PNG_SHA256 = "c4cde9e35d1f4e7ef9993875e0e294e91a6dd6144f16a0d85f1f9ae82be7cf90"
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 REPOSITORY_PREFIXES = (
     ".github/", "design/", "docs/", "docker/", "migrations/", "openspec/",
     "tests/", "tools/", "ui/", "uvm/",
@@ -41,9 +45,19 @@ def tracked_files(root: Path) -> list[Path]:
     return [root / Path(item.decode("utf-8")) for item in result.stdout.split(b"\0") if item]
 
 
+def is_approved_logo_png(rel: Path, raw: bytes) -> bool:
+    """Allow only the exact user-approved upstream VOLT logo PNG."""
+    return (
+        rel == APPROVED_PNG_PATH
+        and raw.startswith(PNG_MAGIC)
+        and hashlib.sha256(raw).hexdigest() == APPROVED_PNG_SHA256
+    )
+
+
 def main(root: Path, private_denylist: Path | None = None) -> int:
     errors: list[str] = []
     text_files: list[tuple[Path, str]] = []
+    approved_pngs = 0
     denied: tuple[str, ...] = ()
     if private_denylist is not None:
         try:
@@ -75,6 +89,9 @@ def main(root: Path, private_denylist: Path | None = None) -> int:
             continue
         if path.suffix.lower() in ARCHIVE_SUFFIXES or raw.startswith(ARCHIVE_MAGIC):
             errors.append(f"{rel}: archive is not approved for the public source tree")
+            continue
+        if is_approved_logo_png(rel, raw):
+            approved_pngs += 1
             continue
         try:
             content = raw.decode("utf-8")
@@ -122,7 +139,8 @@ def main(root: Path, private_denylist: Path | None = None) -> int:
         print("Public source check failed:")
         print("\n".join(errors))
         return 1
-    print(f"Public source check passed: scanned {len(text_files)} UTF-8 files; binaries and archives absent; local Markdown links resolve.")
+    binary_note = f" and {approved_pngs} exact approved PNG asset" if approved_pngs else ""
+    print(f"Public source check passed: scanned {len(text_files)} UTF-8 files{binary_note}; other binaries and archives absent; local Markdown links resolve.")
     return 0
 
 

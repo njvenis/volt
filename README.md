@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/volt-wordmark.svg" alt="VOLT — Vulnerability Ownership &amp; Lifecycle Tracking" width="480" />
+  <img src="docs/assets/volt-logo.png" alt="VOLT — Vulnerability Ownership &amp; Lifecycle Tracking" width="480" />
 </p>
 
 # VOLT

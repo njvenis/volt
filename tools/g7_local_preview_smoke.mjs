@@ -24,6 +24,7 @@ try{
   await page.getByRole('link',{name:/sign in/i}).click({timeout:10000});
   await page.waitForFunction(async()=>{const r=await fetch('/api/v1/auth/session',{cache:'no-store'});if(!r.ok)return false;return (await r.json()).authenticated===true;},null,{timeout:30000});
   const session=(await api('/api/v1/auth/session')).body;
+  if(session.credential_mode!=='oidc_session'||session.principal_id!=='volt-local-preview-admin') console.error(JSON.stringify({session_status:(await api('/api/v1/auth/session')).status,principal_id:session.principal_id,credential_mode:session.credential_mode,subject:session.authority?.subject}));
   ensure(session.credential_mode==='oidc_session'&&session.principal_id==='volt-local-preview-admin','synthetic_browser_login_identity_mismatch');
   await page.goto(origin+'/#administration',{waitUntil:'domcontentloaded'});
   await page.screenshot({path:`${evidence}/admin-signed-in.png`,fullPage:true});

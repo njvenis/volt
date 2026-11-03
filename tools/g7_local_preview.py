@@ -58,6 +58,22 @@ def make_tls(directory: Path) -> None:
     (directory / "recovery-server.key").chmod(0o600)
 
 
+def oidc_configuration(api_origin: str, oidc_origin: str) -> dict:
+    internal_origin = "http://127.0.0.1:9000"
+    return {
+        "schema_version": 1, "provider_id": "volt-local-preview",
+        "issuer": oidc_origin, "discovery_url": internal_origin + "/.well-known/openid-configuration",
+        "client_id": "volt-local-preview", "callback_url": api_origin + "/api/v1/auth/callback",
+        "client_secret_file": "/run/uvm-g7-secrets/oidc_client_secret",
+        "sync_secret_file": "/run/uvm-g7-secrets/oidc_sync_secret",
+        "operator_secret_file": "/run/uvm-g7-secrets/oidc_operator_secret",
+        "operator_actor_id": "volt-local-preview-operator", "allowed_algorithms": ["RS256"],
+        "allowed_endpoint_origins": [api_origin, oidc_origin, internal_origin], "source_scope_ceilings": [],
+        "group_mappings": {}, "mapping_revision": 1,
+        "session_ttl_seconds": 3600, "heartbeat_max_age_seconds": 120,
+    }
+
+
 def initialize(args) -> None:
     dirty = run("git", "status", "--porcelain", capture=True)
     if dirty:
@@ -77,18 +93,7 @@ def initialize(args) -> None:
     make_tls(secrets_dir)
     api_port, oidc_port = args.api_port, args.oidc_port
     api_origin, oidc_origin = f"http://127.0.0.1:{api_port}", f"http://127.0.0.1:{oidc_port}"
-    config = {
-        "schema_version": 1, "provider_id": "volt-local-preview",
-        "issuer": oidc_origin, "discovery_url": oidc_origin + "/.well-known/openid-configuration",
-        "client_id": "volt-local-preview", "callback_url": api_origin + "/api/v1/auth/callback",
-        "client_secret_file": "/run/uvm-g7-secrets/oidc_client_secret",
-        "sync_secret_file": "/run/uvm-g7-secrets/oidc_sync_secret",
-        "operator_secret_file": "/run/uvm-g7-secrets/oidc_operator_secret",
-        "operator_actor_id": "volt-local-preview-operator", "allowed_algorithms": ["RS256"],
-        "allowed_endpoint_origins": [api_origin, oidc_origin, "http://127.0.0.1:9000"], "source_scope_ceilings": [],
-        "group_mappings": {}, "mapping_revision": 1,
-        "session_ttl_seconds": 3600, "heartbeat_max_age_seconds": 120,
-    }
+    config = oidc_configuration(api_origin, oidc_origin)
     (root / "oidc.json").write_text(json.dumps(config, separators=(",", ":")) + "\n", encoding="utf-8")
     (root / "oidc.json").chmod(0o600)
     link = {"issuer": oidc_origin, "subject": "volt-local-preview-admin-subject",

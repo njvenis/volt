@@ -30,6 +30,13 @@ class LocalPreviewSafetyTests(unittest.TestCase):
             self.assertEqual(path.read_text().strip(), value)
             self.assertGreaterEqual(len(value), 16)
 
+    def test_oidc_discovery_uses_private_container_listener_and_public_browser_issuer(self):
+        config = preview.oidc_configuration("http://127.0.0.1:8180", "http://127.0.0.1:8190")
+        self.assertEqual(config["issuer"], "http://127.0.0.1:8190")
+        self.assertEqual(config["discovery_url"], "http://127.0.0.1:9000/.well-known/openid-configuration")
+        self.assertIn("http://127.0.0.1:9000", config["allowed_endpoint_origins"])
+        self.assertEqual(config["callback_url"], "http://127.0.0.1:8180/api/v1/auth/callback")
+
     def test_destroy_targets_only_resources_with_exact_instance_label(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"XDG_STATE_HOME": temp}):
             root = preview.state_dir("demo")

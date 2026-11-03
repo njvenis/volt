@@ -98,6 +98,13 @@ def exercise_provider_scenarios(catalog, event, runroot, evidence):
             scenario_event['transition_sequence']=1; scenario_event['predecessor_id']=None
             now=sender.stamp(); scenario_event['observed_at']=now; scenario_event['first_detected_at']=now
             result=sender.send_provider(loaded,scenario_journal,scenario_event)
+            if scenario=='rate_limited_once':
+                first_records=scenario_journal._read()['records']
+                if result['failure_detail']!='rate_limited' or not any(r['kind']=='RETRY_SCHEDULE' for r in first_records):
+                    raise RuntimeError('rate limit did not persist a deferred retry schedule')
+                # A fresh catalog/journal read models process restart; the retry is admitted once due.
+                loaded=sender.load_catalog(scenario_catalog_path)
+                result=sender.send_provider(loaded,scenario_journal,scenario_event)
             attempts=[r['attempt'] for r in scenario_journal._read()['records'] if r['kind']=='ATTEMPT_OUTCOME']
             received=json.loads(output.read_text()) if output.exists() else []
             failures=[a['failure_detail'] for a in attempts]
@@ -150,7 +157,7 @@ def main():
     provider_out=(evidence/'provider.stdout').open('w'); provider_err=(evidence/'provider.stderr').open('w')
     provider=subprocess.Popen([sys.executable,str(ROOT/'tools/g7_operational_alert_fixture.py'),'--port',str(port),'--output',str(evidence/'provider-requests.json'),'--token-file',str(tokenfile),'--channel','C_G7_OPERATIONAL_FIXTURE','--cert',str(cert),'--key',str(key)],cwd=ROOT,stdout=provider_out,stderr=provider_err)
     sender_out=(evidence/'sender.stdout').open('w'); sender_err=(evidence/'sender.stderr').open('w'); supervisor_out=(evidence/'supervisor.stdout').open('w'); supervisor_err=(evidence/'supervisor.stderr').open('w')
-    sender_proc=supervisor=None; stopped=False
+    sender_proc=supervisor=None; stopped=False; catalog_path=None; catalog=None; health_path=None
     try:
         import ssl
         def provider_ready():
@@ -178,9 +185,37 @@ def main():
         opening=next(r for r in records if r['kind']=='TRANSITION_INTENT' and r['event']['transition_kind']=='opened')
         accepted=next(r for r in records if r['kind']=='ATTEMPT_OUTCOME' and r['attempt']['outcome']=='accepted')
         capture(evidence/'host-send-while-app-down.json',json.dumps({'app_state':'exited','transition_id':opening['event']['transition_id'],'attempt_id':accepted['attempt']['attempt_id'],'outcome':'accepted','provider_acceptance':True},sort_keys=True,separators=(',',':'))+'\n')
+        # Pause before the first recovery opportunity, otherwise a quick healthy
+        # startup can close the episode before the restart-fence exercise begins.
+        os.kill(sender_proc.pid,signal.SIGSTOP)
         docker(['start',a.container]); stopped=False
         wait_for('app-healthy-after-restart',lambda: docker(['inspect',a.container,'--format','{{.State.Health.Status}}'])=='healthy',time.monotonic()+240)
+        # Hold the host sender across recovery and two further target restarts.
+        # The resumed process must rebase qualification on the latest StartedAt.
+        restart_one=docker(['inspect',a.container,'--format','{{.State.StartedAt}}'])
+        docker(['stop','--time','10',a.container]); stopped=True
+        docker(['start',a.container]); stopped=False
+        wait_for('first-post-outage-restart-healthy',lambda: docker(['inspect',a.container,'--format','{{.State.Health.Status}}'])=='healthy',time.monotonic()+240)
+        first_started=docker(['inspect',a.container,'--format','{{.State.StartedAt}}'])
+        docker(['stop','--time','10',a.container]); stopped=True
+        docker(['start',a.container]); stopped=False
+        wait_for('second-post-outage-restart-healthy',lambda: docker(['inspect',a.container,'--format','{{.State.Health.Status}}'])=='healthy',time.monotonic()+240)
+        second_started=docker(['inspect',a.container,'--format','{{.State.StartedAt}}'])
+        os.kill(sender_proc.pid,signal.SIGCONT)
+        capture(evidence/'recovery-restart-barrier-inputs.json',json.dumps(
+            {'first_started_at':first_started,'second_started_at':second_started,
+             'initial_started_at':restart_one,'sender_paused_across_both_restarts':True},
+            sort_keys=True,separators=(',',':'))+'\n')
         deadline=time.monotonic()+360
+        def rebased_barrier():
+            records=read_records(catalog['journal'])
+            return any(r.get('kind')=='RECOVERY_BARRIER' and r.get('started_at')==second_started
+                and any(b.get('kind')=='OUTAGE_BARRIER' and b.get('sequence')==r.get('source_outage_barrier_sequence')
+                    and b.get('target_started_at')==second_started for b in records)
+                for r in records)
+        wait_for('recovery-barrier-rebased-after-second-container-start',rebased_barrier,deadline)
+        capture(evidence/'recovery-rebased-barrier-confirmed.json',json.dumps(
+            {'second_started_at':second_started,'barrier_rebased':True},sort_keys=True,separators=(',',':'))+'\n')
         def caught_up():
             records=read_records(catalog['journal'])
             transitions={r.get('transition_id') for r in records if r['kind']=='TRANSITION_ACK'}
@@ -219,14 +254,23 @@ def main():
         wait_for('app-healthy-after-sender-supervision',
             lambda: docker(['inspect',a.container,'--format','{{.State.Health.Status}}'])=='healthy',
             time.monotonic()+240)
+        # Resume the verified sender. It must make a real notification attempt and
+        # only then project the supervisor's original fault/recovery edges.
+        sender_proc=subprocess.Popen([sys.executable,str(ROOT/'tools/g7_operational_alert_sender.py'),'--catalog',str(catalog_path)],cwd=ROOT,stdout=sender_out,stderr=sender_err,start_new_session=True)
+        capture(evidence/'sender-resumed.pid',str(sender_proc.pid)+'\n')
         health_subject=f"host-sender:{deployment}:{a.run_id}"
         def health_projected():
             rows=read_records(str(health_path))
             intents=[r for r in rows if r.get('kind')=='HEALTH_TRANSITION_INTENT'
                 and r.get('event',{}).get('subject_id')==health_subject]
             acked={r.get('transition_id') for r in rows if r.get('kind')=='HEALTH_TRANSITION_ACK'}
-            return any(r.get('transition_id') in acked for r in intents)
-        wait_for('public-supervisor-health-transition-ack',health_projected,time.monotonic()+60)
+            outcomes=[r for r in rows if r.get('kind')=='ATTEMPT_OUTCOME']
+            attempts={r.get('attempt_id') for r in rows if r.get('kind')=='ATTEMPT_ACK'}
+            return (any(r.get('transition_id') in acked for r in intents) and
+                bool(outcomes) and all(r['attempt']['attempt_id'] in attempts for r in outcomes) and
+                any(r['attempt']['outcome']=='accepted' for r in outcomes) and
+                {r['event']['transition_kind'] for r in intents}>={'opened','recovered'})
+        wait_for('resumed-sender-health-notification-and-projection',health_projected,time.monotonic()+90)
         health_status,health_body=session_request(f'/api/v1/integrations/incidents?deployment_id={deployment}')
         capture(evidence/'public-supervisor-health-response.json',json.dumps(
             {'status':health_status,'body':json.loads(health_body)},sort_keys=True,separators=(',',':'))+'\n')
@@ -234,14 +278,17 @@ def main():
             raise RuntimeError(f'independent sender health public read returned HTTP {health_status}')
         health_items=[item for item in json.loads(health_body).get('items',[])
             if item.get('subject_id')==health_subject]
-        if not any(item.get('condition')=='host_sender_health'
-                and item.get('transition_kind')=='opened' for item in health_items):
-            raise RuntimeError('independent supervisor health transition is absent from the current public projection')
+        if not {'opened','recovered'} <= {item.get('transition_kind') for item in health_items
+                if item.get('condition')=='host_sender_health'}:
+            raise RuntimeError('resumed sender health opened/recovered transitions are absent from public projection')
         capture(evidence/'public-supervisor-health-read.json',json.dumps(
             {'subject_id':health_subject,'transition_kinds':[item.get('transition_kind') for item in health_items]},
             sort_keys=True,separators=(',',':'))+'\n')
         print(json.dumps({'result':'app-down-host-send-and-public-catchup-passed','run_id':a.run_id,'container_id':container_id,'provider_acceptance':'accepted','public_items':len(availability_items),'public_sender_health_items':len(health_items),'sender_death_observed':True}))
     finally:
+        if sender_proc and sender_proc.poll() is None:
+            try: os.kill(sender_proc.pid,signal.SIGCONT)
+            except ProcessLookupError: pass
         if stopped:
             try: docker(['start',a.container])
             except Exception: pass
@@ -251,4 +298,37 @@ def main():
                 try: proc.wait(timeout=5)
                 except subprocess.TimeoutExpired: proc.kill(); proc.wait(timeout=5)
         for stream in (provider_out,provider_err,sender_out,sender_err,supervisor_out,supervisor_err): stream.close()
+        # Preserve the exact private run inputs and durable consumer state before
+        # the enclosing runner removes RUN_ROOT. Files are mode 0600 and contain
+        # no credential material (only protected paths/references).
+        import shutil
+        retain=[]
+        if catalog_path is not None: retain.append((catalog_path,'operational-alert-catalog.json'))
+        if catalog is not None:
+            for key,name in (('journal','operational-alert-journal.json'),
+                    ('health_journal','operational-alert-health-journal.json')):
+                path=pathlib.Path(catalog[key]); retain.append((path,name))
+                retain.append((path.with_suffix(path.suffix+'.genesis'),name+'.genesis'))
+            for key,name in (('observer_state','observer-state.snapshot.json'),
+                    ('active_file','active-timing.snapshot.json'),
+                    ('observer_readback','observer-readback.snapshot.json'),
+                    ('supervisor_state','supervisor-state.snapshot.json'),
+                    ('supervisor_readback','supervisor-readback.snapshot.json')):
+                retain.append((pathlib.Path(catalog[key]),name))
+            retain.append((pathlib.Path(catalog['scheduler_file']),'scheduler-progress.snapshot.json'))
+        for source,name in retain:
+            try:
+                target=evidence/name; target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+                shutil.copyfile(source,target); os.chmod(target,0o600)
+            except FileNotFoundError: pass
+        try:
+            inspected=json.loads(docker(['inspect',a.container]))[0]
+            state=inspected.get('State',{}); config=inspected.get('Config',{})
+            image_context={'container_id':inspected.get('Id'),'image_id':inspected.get('Image'),
+                'labels':{k:v for k,v in (config.get('Labels') or {}).items() if k.startswith('uvm.')},
+                'state':{'Status':state.get('Status'),'Running':state.get('Running'),'Paused':state.get('Paused'),
+                    'StartedAt':state.get('StartedAt'),'FinishedAt':state.get('FinishedAt'),
+                    'Health':(state.get('Health') or {}).get('Status')}}
+            capture(evidence/'inspected-source-context.json',json.dumps(image_context,sort_keys=True,separators=(',',':'))+'\n')
+        except Exception: pass
 if __name__=='__main__': main()

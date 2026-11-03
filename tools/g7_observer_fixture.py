@@ -155,7 +155,7 @@ def run(args: argparse.Namespace) -> None:
                     "backup.settings.read", "backup.settings.configure", "assessment.read", "audit.read",
                     *( ["access_group.read", "ownership.team.read", "ownership.team.manage",
                         "owners.directory.read", "owners.assign", "portion.define", "portion.transfer"]
-                        if args.identity_access_ownership or args.exception_sla else [] ),
+                        if args.identity_access_ownership or args.exception_sla or args.exception_warning else [] ),
                     "preservation.read", "preservation.evidence.read", "audit.read.deployment",
                     "audit.export.deployment",
                     *( ["acceptance.submit", "acceptance.approve", "acceptance.reject", "acceptance.revoke"]

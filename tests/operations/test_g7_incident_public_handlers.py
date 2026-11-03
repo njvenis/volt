@@ -2,8 +2,11 @@
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import tempfile
 import unittest
 import uuid
+import urllib.error
+from unittest.mock import patch
 
 import sqlalchemy as sa
 from fastapi import HTTPException
@@ -118,6 +121,11 @@ class IncidentPublicHandlerTests(unittest.TestCase):
             return tuple(cx.execute(sa.select(sa.func.count()).select_from(t)).scalar_one()
                 for t in (self.streams, self.transitions, self.receipts, self.intents, self.attempts))
 
+    def row_snapshot(self):
+        with self.engine.connect() as cx:
+            return tuple(tuple(repr(dict(row._mapping)) for row in cx.execute(sa.select(table)).all())
+                for table in self.tables)
+
     def test_public_post_requires_exact_role_and_live_binding_without_writes(self):
         event = self.event()
         before = self.counts()
@@ -158,16 +166,26 @@ class IncidentPublicHandlerTests(unittest.TestCase):
         self.assertEqual(self.counts(), before)
 
     def test_public_post_rejects_cross_deployment_gap_changed_id_and_bad_schema_atomically(self):
-        before = self.counts()
+        before = self.counts(); content_before = self.row_snapshot()
         future = self.event()
         future["observed_at"] = "2027-01-01T00:00:00.000000Z"
         malformed_ref = self.event()
         malformed_ref["evidence_refs"] = ["x" * 1001]
-        for event in (self.event(deployment=self.other_deployment),
-                self.event(sequence=2), self.event(schema_version=True), future, malformed_ref):
-            with self.subTest(event=event), self.assertRaises(HTTPException):
+        for index,event in enumerate((self.event(deployment=self.other_deployment),
+                self.event(sequence=2), self.event(schema_version=True), future, malformed_ref)):
+            with self.subTest(event=event), self.assertRaises(HTTPException) as denied:
                 self.post(event, principal=self.service)
+            if index==0:
+                self.assertEqual(denied.exception.status_code,403)
+                self.assertEqual(denied.exception.detail['code'],'incident_ingestion_forbidden')
+            elif index==1:
+                self.assertEqual(denied.exception.status_code,409)
+                self.assertTrue(denied.exception.detail['details']['retryable'])
+                self.assertIn('retryable stream gap',denied.exception.detail['message'])
+            else:
+                self.assertEqual(denied.exception.status_code,409)
             self.assertEqual(self.counts(), before)
+            self.assertEqual(self.row_snapshot(),content_before)
         accepted = self.event()
         # Drop the first handler result to model a lost API acknowledgement.
         self.post(accepted, principal=self.service)
@@ -220,6 +238,84 @@ class IncidentPublicHandlerTests(unittest.TestCase):
         with self.assertRaises(HTTPException):
             self.delivery(event["transition_id"], terminal, principal=self.service)
         self.assertEqual(self.counts(), terminal_counts)
+
+    def test_real_sender_catches_up_lost_transition_and_delivery_acks_without_new_ids(self):
+        from tools import g7_operational_alert_sender as sender
+        event=self.event(); digest=sender.sha(sender.canonical(event))
+        with tempfile.TemporaryDirectory() as directory:
+            journal=sender.Journal(__import__('pathlib').Path(directory)/'sender-catchup.json')
+            self._exercise_real_sender_catchup(sender,event,digest,journal)
+
+    def _exercise_real_sender_catchup(self,sender,event,digest,journal):
+        journal.append('TRANSITION_INTENT',{'transition_id':event['transition_id'],
+            'event':event,'payload_digest':digest})
+        attempt={'schema_version':1,'attempt_id':str(uuid.uuid4()),'outcome':'failed',
+            'attempted_at':event['observed_at'],'receipt_ref':None,'failure_detail':'provider_rejected'}
+        journal.append('ATTEMPT_OUTCOME',{'transition_id':event['transition_id'],'attempt':attempt})
+        transition_calls=0; delivery_calls=0
+        def real_endpoint(c,path,body):
+            nonlocal transition_calls,delivery_calls
+            if path=='/api/v1/integrations/incidents':
+                transition_calls+=1; result=self.post(body,principal=self.service)
+                if transition_calls==1: raise urllib.error.URLError('simulated lost transition ACK')
+                return 200,result
+            delivery_calls+=1; result=self.delivery(event['transition_id'],body,principal=self.service)
+            if delivery_calls==1: raise urllib.error.URLError('simulated lost delivery ACK')
+            return 200,result
+        config={'api_url':'http://in-process','api_token_file':'unused'}
+        with patch.object(sender,'api_post',side_effect=real_endpoint):
+            sender.project_pending(config,journal,journal._read()['records'])
+            sender.project_pending(config,journal,journal._read()['records'])
+            sender.project_pending(config,journal,journal._read()['records'])
+        records=journal._read()['records']
+        self.assertEqual(transition_calls,2)
+        self.assertEqual(delivery_calls,2)
+        self.assertEqual(sum(r['kind']=='TRANSITION_INTENT' for r in records),1)
+        self.assertEqual(sum(r['kind']=='ATTEMPT_OUTCOME' for r in records),1)
+        self.assertEqual(sum(r['kind']=='TRANSITION_ACK' for r in records),1)
+        self.assertEqual(sum(r['kind']=='ATTEMPT_ACK' for r in records),1)
+        self.assertEqual(self.counts(),(1,1,1,1,1))
+
+    def test_failed_delivery_with_receipt_is_rejected_without_row_mutation(self):
+        event = self.event()
+        self.post(event, principal=self.service)
+        before = self.counts()
+        invalid = {"schema_version": 1, "attempt_id": str(uuid.uuid4()),
+            "outcome": "failed", "attempted_at": event["observed_at"],
+            "receipt_ref": "provider:unexpected", "failure_detail": "provider_rejected"}
+        with self.assertRaises(HTTPException) as denied:
+            self.delivery(event["transition_id"], invalid, principal=self.service)
+        self.assertEqual(denied.exception.status_code, 409)
+        self.assertEqual(self.counts(), before)
+
+    def test_last_good_effective_timing_remains_usable_during_failed_desired_apply(self):
+        with self.engine.begin() as cx:
+            cx.execute(self.status.update().values(application_status="failed"))
+        result = self.post(self.event(), principal=self.service)
+        self.assertEqual(result["status"], "projected")
+
+    def test_pending_and_uncertain_desired_status_use_only_fresh_coherent_effective_timing(self):
+        for state in ("pending", "uncertain"):
+            with self.subTest(state=state):
+                with self.engine.begin() as cx:
+                    effective_digest=cx.execute(sa.select(self.revisions.c.digest).where(
+                        self.revisions.c.deployment_id==self.deployment)).scalar_one()
+                    cx.execute(self.status.update().values(application_status=state,
+                        effective_revision=1, effective_digest=effective_digest,
+                        host_policy_observed_at=self.now))
+                from uvm.assessment.incidents import verified_future_skew
+                self.assertEqual(verified_future_skew(self.engine,self.deployment,self.now),60)
+        with self.engine.begin() as cx:
+            cx.execute(self.status.update().values(application_status="pending"))
+        self.assertEqual(self.post(self.event(),principal=self.service)["status"],"projected")
+        with self.engine.begin() as cx:
+            cx.execute(self.status.update().values(application_status="pending",
+                host_policy_observed_at=self.now-timedelta(hours=2)))
+        before=self.counts()
+        with self.assertRaises(HTTPException) as denied:
+            self.post(self.event(),principal=self.service)
+        self.assertEqual(denied.exception.status_code,409)
+        self.assertEqual(self.counts(),before)
 
     def test_public_get_requires_membership_grant_and_exact_source_route(self):
         event = self.event()

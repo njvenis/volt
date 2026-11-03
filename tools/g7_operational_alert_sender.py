@@ -39,34 +39,87 @@ def load_catalog(path):
     api=urlparse(c['api_url']); route=c['route']
     route_fields={'enabled','revision','destination_ref','endpoint','channel_id','credential_file','mentions','installation_id','workspace_id','runbook_url'}
     provider=urlparse(route.get('endpoint','')) if isinstance(route,dict) else urlparse('')
+    runbook=urlparse(route.get('runbook_url','')) if isinstance(route,dict) else urlparse('')
+    endpoint=urlparse(route.get('endpoint','')) if isinstance(route,dict) else urlparse('')
     if (api.scheme not in {'http','https'} or api.hostname not in {'127.0.0.1','localhost','::1'}
             or not isinstance(route,dict) or set(route)!=route_fields
             or type(route.get('enabled')) is not bool or type(route.get('revision')) is not int
             or route['revision']<1 or not isinstance(route.get('destination_ref'),str) or not route['destination_ref']
-            or provider.scheme!='https' or not provider.hostname or not isinstance(route.get('mentions'),list)):
+            or provider.scheme!='https' or not provider.hostname or provider.username or provider.password
+            or provider.query or provider.fragment or not isinstance(route.get('mentions'),list)
+            or any(not isinstance(m,str) or re.fullmatch(r'U[A-Z0-9]{2,32}',m) is None for m in route['mentions'])
+            or not isinstance(route.get('runbook_url'),str) or runbook.scheme!='https'
+            or not runbook.hostname or runbook.username or runbook.password or runbook.query or runbook.fragment):
         raise ValueError('catalog-route-invalid')
     for k in ('binding_revision','retry_count','retry_age_seconds','freshness_seconds','request_deadline_seconds'):
         if type(c[k]) is not int or c[k] < (1 if k!='retry_count' else 0): raise ValueError('catalog-bound-invalid')
     if c['retry_count']>5 or c['retry_age_seconds']>300 or c['freshness_seconds']>86400 or c['request_deadline_seconds']>60:
         raise ValueError('catalog-bound-invalid')
+    generation_file=Path(path).with_suffix(Path(path).suffix+'.generation')
+    if generation_file.exists():
+        try: highwater=json.loads(generation_file.read_bytes())
+        except Exception as exc: raise ValueError('catalog-generation-highwater-invalid') from exc
+        if type(highwater) is not int or c['generation']<highwater:
+            raise ValueError('catalog-generation-rollback')
+    else:
+        atomic(generation_file,canonical(c['generation'])+b'\n')
     c['_path']=str(Path(path).resolve()); c['_digest']=sha(canonical(c)); return c
 
 class Journal:
     def __init__(self,path):
         self.path=Path(path); self.lock=self.path.with_suffix(self.path.suffix+'.lock')
+        self.genesis=self.path.with_suffix(self.path.suffix+'.genesis')
     def _read(self):
-        if not self.path.exists(): return {'version':1,'sequence':0,'head':'0'*64,'records':[]}
+        if not self.path.exists():
+            if self.genesis.exists(): raise RuntimeError('journal-missing-after-genesis')
+            return {'version':1,'sequence':0,'head':'0'*64,'records':[]}
         try: doc=json.loads(self.path.read_bytes())
         except Exception as exc: raise RuntimeError('journal-corrupt') from exc
-        if not isinstance(doc,dict) or set(doc)!={'version','sequence','head','records'} or doc['version']!=1 or not isinstance(doc['records'],list): raise RuntimeError('journal-corrupt')
+        if (not isinstance(doc,dict) or set(doc)!={'version','sequence','head','records'}
+                or type(doc.get('version')) is not int or doc['version']!=1
+                or type(doc.get('sequence')) is not int or not isinstance(doc.get('records'),list)):
+            raise RuntimeError('journal-corrupt')
         prev='0'*64
         for i,r in enumerate(doc['records'],1):
-            if not isinstance(r,dict) or r.get('sequence')!=i or r.get('previous_digest')!=prev: raise RuntimeError('journal-chain-invalid')
+            if (not isinstance(r,dict) or type(r.get('sequence')) is not int
+                    or r.get('sequence')!=i or r.get('previous_digest')!=prev):
+                raise RuntimeError('journal-chain-invalid')
             digest=r.get('digest'); body={k:v for k,v in r.items() if k!='digest'}
             if digest!=sha(canonical(body)): raise RuntimeError('journal-digest-invalid')
             prev=digest
         if doc['sequence']!=len(doc['records']) or doc['head']!=prev: raise RuntimeError('journal-head-invalid')
         return doc
+    def ensure_genesis(self, *, allow_empty=False, context=None):
+        """Consume the one allowed genesis proof and reject later journal loss."""
+        self.lock.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+        fd=os.open(self.lock,os.O_RDWR|os.O_CREAT,0o600)
+        try:
+            fcntl.flock(fd,fcntl.LOCK_EX)
+            if self.genesis.exists():
+                if not self.path.exists(): raise RuntimeError('journal-missing-after-genesis')
+                marker=json.loads(self.genesis.read_bytes())
+                if (not isinstance(marker,dict) or marker.get('version')!=1
+                        or marker.get('journal_id') is None): raise RuntimeError('journal-genesis-invalid')
+                return self._read()
+            if self.path.exists():
+                doc=self._read(); journal_id=str(uuid.uuid4())
+                marker={'version':1,'journal_id':journal_id,'initial_head':doc['head'],
+                    'genesis_kind':'existing-journal-adopted','context_digest':sha(canonical(context or {}))}
+                atomic(self.genesis,canonical(marker)+b'\n')
+                return doc
+            if not allow_empty: raise RuntimeError('journal-genesis-proof-required')
+            journal_id=str(uuid.uuid4())
+            body={'sequence':1,'previous_digest':'0'*64,'at':stamp(),'kind':'GENESIS',
+                'journal_id':journal_id,'context_digest':sha(canonical(context or {}))}
+            body['digest']=sha(canonical(body))
+            doc={'version':1,'sequence':1,'head':body['digest'],'records':[body]}
+            marker={'version':1,'journal_id':journal_id,'initial_head':body['digest'],
+                'genesis_kind':'consumed-app-stream-proof','context_digest':body['context_digest']}
+            atomic(self.genesis,canonical(marker)+b'\n')
+            atomic(self.path,canonical(doc)+b'\n')
+            return doc
+        finally:
+            fcntl.flock(fd,fcntl.LOCK_UN); os.close(fd)
     def append(self,kind,fields):
         self.lock.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
         fd=os.open(self.lock,os.O_RDWR|os.O_CREAT,0o600)
@@ -76,7 +129,9 @@ class Journal:
 
 def inspect_target(c):
     # The only Docker operation this process can invoke is inspect for one configured ID.
+    call_started=time.time()
     p=subprocess.run(['docker','inspect','--type','container',c['container_id']],capture_output=True,text=True,timeout=8,check=False)
+    call_ended=time.time()
     if p.returncode: return {'state':'unknown','reason':'inspect-unavailable'}
     try: data=json.loads(p.stdout)
     except Exception: return {'state':'unknown','reason':'inspect-malformed'}
@@ -84,8 +139,26 @@ def inspect_target(c):
     x=data[0]; labels=x.get('Config',{}).get('Labels') or {}; state=x.get('State',{})
     identity=(x.get('Id')==c['container_id'] and x.get('Image')==c['image_id'] and labels.get('uvm.deployment_id')==c['deployment_label'] and labels.get('uvm.run_id')==c['run_label'])
     if not identity: return {'state':'unknown','reason':'target-context-changed'}
-    status=state.get('Status'); mapped={'running':'running','exited':'exited','created':'unknown','restarting':'unknown','paused':'unknown','dead':'unknown'}
-    return {'state':mapped.get(status,'unknown'),'started_at':state.get('StartedAt'),'container_id':x.get('Id'),'image_id':x.get('Image'),'deployment_label':labels.get('uvm.deployment_id'),'run_label':labels.get('uvm.run_id'),'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip()}
+    status=state.get('Status'); running=state.get('Running'); paused=state.get('Paused')
+    started=state.get('StartedAt'); finished=state.get('FinishedAt')
+    def parse_docker_time(value):
+        if not isinstance(value,str) or value=='0001-01-01T00:00:00Z': return None
+        try: return dt.datetime.fromisoformat(value.replace('Z','+00:00')).timestamp()
+        except Exception: return None
+    started_epoch=parse_docker_time(started); finished_epoch=parse_docker_time(finished)
+    now=call_ended
+    if (type(running) is not bool or type(paused) is not bool or call_ended<call_started
+            or (status=='running' and (running is not True or paused is not False or started_epoch is None or started_epoch>now+OBSERVER_MAX_FUTURE_SKEW_SECONDS))
+            or (status=='exited' and (running is not False or paused is not False or finished_epoch is None))
+            or (status=='paused' and (running is not True or paused is not True))
+            or (status=='restarting' and running is not True)):
+        return {'state':'unknown','reason':'inspect-state-shape-or-time-invalid'}
+    mapped={'running':'running','exited':'exited','created':'unknown','restarting':'unknown','paused':'unknown','dead':'unknown'}
+    return {'state':mapped.get(status,'unknown'),'started_at':started,'started_epoch':started_epoch,
+        'finished_at':finished,'finished_epoch':finished_epoch,'inspect_started_epoch':call_started,
+        'inspect_ended_epoch':call_ended,'container_id':x.get('Id'),'image_id':x.get('Image'),
+        'deployment_label':labels.get('uvm.deployment_id'),'run_label':labels.get('uvm.run_id'),
+        'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip()}
 
 def read_json(path):
     try: return json.loads(Path(path).read_text())
@@ -129,11 +202,29 @@ def current_route(c):
 
 def replace_catalog(path, document):
     """Serialize an operator catalog update against in-flight provider dispatch."""
-    path=Path(path); lock=path.with_suffix('.lock')
+    path=Path(path)
+    candidate_path=path.with_name(path.name+'.candidate-'+uuid.uuid4().hex)
+    atomic(candidate_path,canonical(document)+b'\n')
+    try:
+        candidate=load_catalog(candidate_path)
+    finally:
+        for candidate_sidecar in (candidate_path,
+                candidate_path.with_suffix(candidate_path.suffix+'.generation')):
+            try: candidate_sidecar.unlink()
+            except FileNotFoundError: pass
+    lock=path.with_suffix('.lock')
     fd=os.open(lock,os.O_RDWR|os.O_CREAT,0o600)
     try:
         fcntl.flock(fd,fcntl.LOCK_EX)
+        current=load_catalog(path)
+        highwater_file=path.with_suffix(path.suffix+'.generation')
+        highwater=json.loads(highwater_file.read_bytes())
+        if candidate['generation']<=max(current['generation'],highwater):
+            raise ValueError('catalog-generation-must-increase')
+        if candidate['route']!=current['route'] and candidate['route']['revision']<=current['route']['revision']:
+            raise ValueError('catalog-route-revision-must-increase')
         atomic(path,canonical(document)+b'\n')
+        atomic(highwater_file,canonical(candidate['generation'])+b'\n')
         return load_catalog(path)
     finally:
         fcntl.flock(fd,fcntl.LOCK_UN); os.close(fd)
@@ -147,67 +238,91 @@ def delivery_body(event, route):
     return {'channel':route['channel_id'],'text':text,'metadata':{'event_type':'uvm_g7_operational_alert','event_payload':{'condition':event['condition'],'incident_id':event['episode_id'],'transition_kind':event['transition_kind'],'observed_at':event['observed_at']}}}
 
 
-def send_provider(c,j,event):
+def send_provider(c,j,event,inspection=None):
+    """Admit and perform at most one provider request; retries are durable work."""
     request_body=delivery_body(event,c['route'])
-    first_attempt=time.monotonic()
-    for retry_index in range(c['retry_count']+1):
-        attempt={'schema_version':1,'attempt_id':str(uuid.uuid4()),'outcome':'uncertain','attempted_at':stamp(),'receipt_ref':None,'failure_detail':'submission_uncertain'}
-        catalog_lock=Path(c['_path']).with_suffix('.lock'); fd=os.open(catalog_lock,os.O_RDWR|os.O_CREAT,0o600)
-        retry_after=None
-        try:
-            fcntl.flock(fd,fcntl.LOCK_EX)
-            current=load_catalog(c['_path'])
-            if current['_digest']!=c['_digest'] or current['route']!=c['route']:
-                j.append('HELD',{'reason':'catalog-or-route-changed-before-dispatch','transition_id':event['transition_id']})
-                return attempt
-            route=current_route(current)
-            credential=Path(route['credential_file']).read_text().strip()
-            j.append('SENDING',{'transition_id':event['transition_id'],'attempt':attempt,'route_revision':route['revision'],'route_digest':sha(canonical(route)),'catalog_generation':c['generation'],'catalog_digest':c['_digest'],'request_digest':sha(canonical(request_body))})
-            try:
-                status,response=post_json(route['endpoint'],credential,request_body,ca_file=c['ca_file'],timeout=c['request_deadline_seconds'])
-                if (200<=status<300 and isinstance(response,dict) and response.get('ok') is True
-                        and response.get('channel')==route['channel_id'] and isinstance(response.get('ts'),str) and response['ts']):
-                    attempt.update(outcome='accepted',receipt_ref='provider:'+re.sub(r'[^A-Za-z0-9._:-]','',response['ts'])[:200],failure_detail=None)
-                elif status==429:
-                    attempt.update(outcome='failed',failure_detail='rate_limited')
-                elif 400<=status<500:
-                    attempt.update(outcome='failed',failure_detail='provider_rejected')
-                else:
-                    attempt.update(outcome='uncertain',failure_detail='response_invalid')
-            except urllib.error.HTTPError as exc:
-                if exc.code==429:
-                    attempt.update(outcome='failed',failure_detail='rate_limited')
-                    raw_delay=exc.headers.get('Retry-After','') if exc.headers else ''
-                    if re.fullmatch(r'[0-9]{1,4}',raw_delay): retry_after=min(int(raw_delay),30)
-                elif exc.code in {400,401,403,404,422}:
-                    attempt.update(outcome='failed',failure_detail='provider_rejected')
-                else:
-                    attempt.update(outcome='uncertain',failure_detail='submission_uncertain')
-            except (urllib.error.URLError,TimeoutError,ConnectionError,ssl.SSLError):
-                # Transport failure cannot prove whether the provider saw the request.
-                attempt.update(outcome='uncertain',failure_detail='submission_uncertain')
-            j.append('ATTEMPT_OUTCOME',{'transition_id':event['transition_id'],'attempt':attempt,'outcome_completed_at':stamp()})
-        finally:
-            fcntl.flock(fd,fcntl.LOCK_UN); os.close(fd)
-        if attempt['outcome']!='failed' or attempt['failure_detail']!='rate_limited' or retry_index>=c['retry_count']:
-            return attempt
-        if retry_after is None or time.monotonic()-first_attempt+retry_after>c['retry_age_seconds']:
-            return attempt
-        time.sleep(retry_after)
+    records=j._read()['records']; tid=event['transition_id']
+    outcomes=[r for r in records if r.get('kind')=='ATTEMPT_OUTCOME' and r.get('transition_id')==tid]
+    schedules=[r for r in records if r.get('kind')=='RETRY_SCHEDULE' and r.get('transition_id')==tid]
+    if outcomes and outcomes[-1]['attempt']['outcome'] in {'accepted','uncertain'}: return outcomes[-1]['attempt']
+    if outcomes and outcomes[-1]['attempt'].get('failure_detail')!='rate_limited': return outcomes[-1]['attempt']
+    if schedules:
+        schedule=schedules[-1]
+        consumed={r.get('schedule_sequence') for r in records if r.get('kind')=='RETRY_CONSUMED'}
+        if schedule['sequence'] in consumed: return outcomes[-1]['attempt'] if outcomes else None
+        if time.time()<schedule['due_epoch']: return None
+        if time.time()>schedule['deadline_epoch'] or len(outcomes)>=c['retry_count']+1:
+            j.append('RETRY_EXPIRED',{'transition_id':tid,'schedule_sequence':schedule['sequence']}); return outcomes[-1]['attempt']
+    retry_after=None
+    attempt={'schema_version':1,'attempt_id':str(uuid.uuid4()),'outcome':'uncertain','attempted_at':stamp(),'receipt_ref':None,'failure_detail':'submission_uncertain'}
+    catalog_lock=Path(c['_path']).with_suffix('.lock'); fd=os.open(catalog_lock,os.O_RDWR|os.O_CREAT,0o600)
+    try:
+        fcntl.flock(fd,fcntl.LOCK_EX)
+        current=load_catalog(c['_path'])
+        if current['_digest']!=c['_digest'] or current['route']!=c['route']:
+            j.append('HELD',{'reason':'catalog-or-route-changed-before-dispatch','transition_id':tid}); return attempt
+        route=current_route(current); credential=Path(route['credential_file']).read_text().strip()
+        started_monotonic=time.monotonic_ns(); boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        sending=j.append('SENDING',{'transition_id':tid,'attempt':attempt,
+            'route_revision':route['revision'],'route_digest':sha(canonical(route)),
+            'catalog_generation':c['generation'],'catalog_digest':c['_digest'],
+            'request_digest':sha(canonical(request_body)),
+            'started_monotonic_ns':started_monotonic,'boot_id':boot_id,
+            'started_epoch':time.time(),
+            'target_started_at':inspection.get('started_at') if inspection else None,
+            'target_boot_id':inspection.get('boot_id') if inspection else None,
+            'target_inspect_ended_epoch':inspection.get('inspect_ended_epoch') if inspection else None,
+            'work_deadline_monotonic_ns':started_monotonic+int(c['request_deadline_seconds']*1_000_000_000)})
+        if schedules:
+            j.append('RETRY_CONSUMED',{'transition_id':tid,'schedule_sequence':schedules[-1]['sequence'],'attempt_id':attempt['attempt_id']})
+    finally:
+        fcntl.flock(fd,fcntl.LOCK_UN); os.close(fd)
+    try:
+        status,response=post_json(route['endpoint'],credential,request_body,ca_file=c['ca_file'],timeout=c['request_deadline_seconds'])
+        if (200<=status<300 and isinstance(response,dict) and response.get('ok') is True
+                and response.get('channel')==route['channel_id'] and isinstance(response.get('ts'),str)
+                and re.fullmatch(r'[A-Za-z0-9._:-]{1,200}',response['ts'])):
+            attempt.update(outcome='accepted',receipt_ref='provider:'+response['ts'],failure_detail=None)
+        elif status==429: attempt.update(outcome='failed',failure_detail='rate_limited')
+        elif 400<=status<500: attempt.update(outcome='failed',failure_detail='provider_rejected')
+        else: attempt.update(outcome='uncertain',failure_detail='response_invalid')
+    except urllib.error.HTTPError as exc:
+        if exc.code==429:
+            attempt.update(outcome='failed',failure_detail='rate_limited')
+            raw_delay=exc.headers.get('Retry-After','') if exc.headers else ''
+            if re.fullmatch(r'[0-9]{1,4}',raw_delay): retry_after=min(int(raw_delay),30)
+        elif exc.code in {400,401,403,404,422}: attempt.update(outcome='failed',failure_detail='provider_rejected')
+        else: attempt.update(outcome='uncertain',failure_detail='submission_uncertain')
+    except (urllib.error.URLError,TimeoutError,ConnectionError,ssl.SSLError):
+        attempt.update(outcome='uncertain',failure_detail='submission_uncertain')
+    j.append('ATTEMPT_OUTCOME',{'transition_id':tid,'attempt':attempt,'outcome_completed_at':stamp()})
+    if attempt['outcome']=='failed' and attempt['failure_detail']=='rate_limited' and len(outcomes)+1<c['retry_count']+1 and retry_after is not None:
+        first_epoch=sending.get('started_epoch',time.time())
+        if schedules: first_epoch=schedules[0].get('first_attempt_epoch',first_epoch)
+        deadline=first_epoch+c['retry_age_seconds']
+        due=time.time()+retry_after
+        if due<=deadline:
+            j.append('RETRY_SCHEDULE',{'transition_id':tid,'due_epoch':due,'deadline_epoch':deadline,
+                'first_attempt_epoch':first_epoch,'retry_after_seconds':retry_after,
+                'attempt_number':len(outcomes)+1,'request_digest':sha(canonical(request_body)),
+                'target_started_at':sending.get('target_started_at'),
+                'target_boot_id':sending.get('target_boot_id'),
+                'target_inspect_ended_epoch':sending.get('target_inspect_ended_epoch')})
     return attempt
 
 
 def project_pending(c,j,records):
     for record in records:
-        if record['kind']!='TRANSITION_INTENT': continue
+        if record['kind'] not in {'TRANSITION_INTENT','HEALTH_TRANSITION_INTENT'}: continue
         event=record['event']; tid=event['transition_id']
-        transition_ack=any(r['kind']=='TRANSITION_ACK' and r.get('transition_id')==tid for r in records)
+        ack_kind='HEALTH_TRANSITION_ACK' if record['kind']=='HEALTH_TRANSITION_INTENT' else 'TRANSITION_ACK'
+        transition_ack=any(r['kind']==ack_kind and r.get('transition_id')==tid for r in records)
         if not transition_ack:
             try: status,response=api_post(c,'/api/v1/integrations/incidents',event)
             except Exception: return
             digest=sha(canonical(event))
             if status not in (200,201) or not ack_transition(response,event,digest): return
-            j.append('TRANSITION_ACK',{'transition_id':tid,'ack':response})
+            j.append(ack_kind,{'transition_id':tid,'ack':response})
             records.append(j._read()['records'][-1])
         attempts=[r['attempt'] for r in records if r['kind']=='ATTEMPT_OUTCOME' and r.get('transition_id')==tid]
         for attempt in attempts:
@@ -215,13 +330,51 @@ def project_pending(c,j,records):
             if already: continue
             try: status,response=api_post(c,f"/api/v1/integrations/incidents/{tid}/delivery",attempt)
             except Exception: return
-            if status not in (200,201) or not ack_attempt(response,tid,attempt): return
+            replay=(isinstance(response,dict) and type(response.get('idempotent')) is bool
+                and response['idempotent'] is True)
+            if status not in (200,201) or not ack_attempt(response,tid,attempt,replay=replay): return
             j.append('ATTEMPT_ACK',{'transition_id':tid,'attempt_id':attempt['attempt_id'],'ack':response})
             records.append(j._read()['records'][-1])
 
+
+def dispatch_scheduled_retries(c,j,current,context,records):
+    """Admit at most one persisted retry after rechecking its exact episode context."""
+    consumed={r.get('schedule_sequence') for r in records if r.get('kind')=='RETRY_CONSUMED'}
+    consumed|={r.get('schedule_sequence') for r in records if r.get('kind')=='RETRY_EXPIRED'}
+    consumed|={r.get('schedule_sequence') for r in records if r.get('kind')=='RETRY_SUPERSEDED'}
+    intents={r.get('transition_id'):r for r in records if r.get('kind')=='TRANSITION_INTENT'}
+    for schedule in records:
+        if schedule.get('kind')!='RETRY_SCHEDULE' or schedule.get('sequence') in consumed: continue
+        tid=schedule.get('transition_id'); intent=intents.get(tid)
+        if not intent or time.time()<schedule.get('due_epoch',float('inf')): continue
+        event=intent['event']; kind=event['transition_kind']
+        if time.time()>schedule.get('deadline_epoch',0):
+            j.append('RETRY_EXPIRED',{'transition_id':tid,'schedule_sequence':schedule['sequence']}); continue
+        later=[r['event'] for r in records if r.get('kind')=='TRANSITION_INTENT'
+            and r.get('event',{}).get('episode_id')==event['episode_id']
+            and r.get('event',{}).get('transition_sequence',0)>event['transition_sequence']]
+        if kind=='opened' and any(x['transition_kind']=='recovered' for x in later):
+            j.append('RETRY_SUPERSEDED',{'transition_id':tid,'schedule_sequence':schedule['sequence'],
+                'by_transition_id':next(x['transition_id'] for x in later if x['transition_kind']=='recovered')}); continue
+        expected='exited' if kind=='opened' else 'running'
+        if (current.get('state')!=expected or intent.get('context')!=context
+                or current.get('started_at')!=schedule.get('target_started_at')
+                or current.get('boot_id')!=schedule.get('target_boot_id')
+                or type(current.get('inspect_ended_epoch')) not in (int,float)
+                or time.time()-current['inspect_ended_epoch']>10):
+            continue
+        # A retry is admitted only while the original inspector and source context
+        # remain current; send_provider rechecks route/catalog under its own lock.
+        send_provider(c,j,event,current)
+        records=j._read()['records']
+
 def ack_transition(response,event,digest):
     keys={'schema_version','status','transition_id','transition_sequence','episode_id','episode_generation','payload_digest'}
-    return isinstance(response,dict) and set(response)==keys and type(response['schema_version']) is int and response=={'schema_version':1,'status':'projected','transition_id':event['transition_id'],'transition_sequence':event['transition_sequence'],'episode_id':event['episode_id'],'episode_generation':event['episode_generation'],'payload_digest':digest}
+    return (isinstance(response,dict) and set(response)==keys
+        and type(response.get('schema_version')) is int and response.get('schema_version')==1
+        and type(response.get('transition_sequence')) is int
+        and type(response.get('episode_generation')) is int
+        and response=={'schema_version':1,'status':'projected','transition_id':event['transition_id'],'transition_sequence':event['transition_sequence'],'episode_id':event['episode_id'],'episode_generation':event['episode_generation'],'payload_digest':digest})
 def ack_attempt(response, transition, attempt, replay=False):
     keys={'schema_version','status','transition_id','attempt_id','outcome','idempotent'} | (set() if replay else {'superseded'})
     return isinstance(response,dict) and set(response)==keys and type(response.get('schema_version')) is int and response.get('schema_version')==1 and response.get('status')=='projected' and response.get('transition_id')==transition and response.get('attempt_id')==attempt['attempt_id'] and response.get('outcome')==attempt['outcome'] and response.get('idempotent') is replay and (replay or response.get('superseded') is False)
@@ -247,7 +400,9 @@ def observer_recovery(c, previous):
         try: age=(time.time()-dt.datetime.fromisoformat(row['observed_at'].replace('Z','+00:00')).timestamp())
         except Exception: return False
         return 0<=age<=c['freshness_seconds'] and row.get('revision')==previous.get('timing_revision') and row.get('digest')==previous.get('timing_digest')
-    started=dt.datetime.fromisoformat(current_started(c).replace('Z','+00:00')).timestamp()
+    started_at=current_started(c)
+    if started_at!=previous.get('started_at'): return False
+    started=dt.datetime.fromisoformat(started_at.replace('Z','+00:00')).timestamp()
     floor=max(previous.get('barrier_completed_epoch',0),started)
     skew=previous.get('future_skew_seconds')
     if type(skew) is not int or not 0<=skew<=3600: return False
@@ -327,70 +482,110 @@ def record_interrupted_sends(j, records):
     return recovered
 
 
-def project_supervisor_health(c, health):
-    """Project truthful supervisor fault edges; this path never sends a provider alert."""
+def process_health_stream(c, health):
+    """Resumed trusted sender dispatches and projects supervisor-recorded health edges."""
     records=health._read()['records']
     intents=[r for r in records if r.get('kind')=='HEALTH_TRANSITION_INTENT']
-    acked={r.get('transition_id') for r in records if r.get('kind')=='HEALTH_TRANSITION_ACK'}
+    consumed={r.get('health_edge_sequence') for r in intents}
+    consumed|={r.get('health_edge_sequence') for r in records if r.get('kind')=='HEALTH_EDGE_IGNORED'}
+    active=None; sequence=0; predecessor=None; generation=0
     for intent in intents:
-        event=intent['event']
-        if event['transition_id'] in acked: continue
-        try: status,response=api_post(c,'/api/v1/integrations/incidents',event)
-        except Exception: return
-        digest=sha(canonical(event))
-        if status not in (200,201) or not ack_transition(response,event,digest): return
-        health.append('HEALTH_TRANSITION_ACK',{'transition_id':event['transition_id'],'ack':response})
-        acked.add(event['transition_id'])
-    latest_state=next((r.get('state') for r in reversed(records)
-        if r.get('kind')=='SENDER_HEALTH_EDGE'),None)
-    if latest_state is None or (latest_state=='healthy' and not intents): return
-    active=None
-    for intent in intents:
-        event=intent['event']
-        if event['transition_kind']=='opened': active=intent
+        event=intent['event']; sequence=max(sequence,event['transition_sequence'])
+        predecessor=event['transition_id']
+        if event['transition_kind']=='opened': active=event; generation=event['episode_generation']
         elif event['transition_kind']=='recovered': active=None
-    if latest_state=='healthy' and active is None: return
-    if latest_state!='healthy' and active is not None: return
-    transition_id=str(uuid.uuid4()); now=stamp()
-    sequence=len(intents)+1
-    predecessor=intents[-1]['event']['transition_id'] if intents else None
-    generation=sum(1 for r in intents if r['event']['transition_kind']=='opened')
-    if latest_state!='healthy':
-        kind='opened'; generation+=1; episode=str(uuid.uuid4()); opening=transition_id
-        first=now; recovered=None
-    else:
-        opening_event=active['event']; kind='recovered'; episode=opening_event['episode_id']
-        opening=opening_event['opening_transition_id']; generation=opening_event['episode_generation']
-        first=opening_event['first_detected_at']; recovered=now
-    health_edge=next(r for r in reversed(records) if r.get('kind')=='SENDER_HEALTH_EDGE'
-        and r.get('state')==latest_state)
-    subject=f"host-sender:{c['deployment_id']}:{c['run_label']}"
-    event={'schema_version':1,'deployment_id':c['deployment_id'],'subject_id':subject,
-        'condition':'host_sender_health','transition_id':transition_id,'transition_sequence':sequence,
-        'predecessor_id':predecessor,'episode_id':episode,'opening_transition_id':opening,
-        'episode_generation':generation,'transition_kind':kind,
-        'configuration_revision':c['binding_revision'],'first_detected_at':first,
-        'observed_at':now,'recovered_at':recovered,
-        'evidence_refs':['host-supervisor:'+health_edge['digest'][:24]],'producer_id':c['producer_id']}
-    health.append('HEALTH_TRANSITION_INTENT',{'transition_id':transition_id,'event':event,
-        'actor':'independent_host_supervisor','binding_revision':c['binding_revision'],
-        'route_revision':c['route']['revision'],'health_journal_head':health_edge['digest']})
-    project_supervisor_health(c,health)
+    for health_edge in (r for r in records if r.get('kind')=='SENDER_HEALTH_EDGE'):
+        if health_edge['sequence'] in consumed: continue
+        state=health_edge.get('state'); edge_at=health_edge.get('at')
+        if not isinstance(edge_at,str): continue
+        if state in {'dead','unhealthy'} and active is None:
+            kind='opened'; sequence+=1; generation+=1; tid=str(uuid.uuid4())
+            episode=str(uuid.uuid4()); opening=tid; first=edge_at; recovered=None
+            active={'episode_id':episode,'opening_transition_id':opening,
+                'first_detected_at':first,'episode_generation':generation}
+        elif state=='healthy' and active is not None:
+            kind='recovered'; sequence+=1; tid=str(uuid.uuid4())
+            episode=active['episode_id']; opening=active['opening_transition_id']
+            first=active['first_detected_at']; generation=active['episode_generation']; recovered=edge_at
+            active=None
+        else:
+            health.append('HEALTH_EDGE_IGNORED',{'health_edge_sequence':health_edge['sequence'],
+                'state':state,'at':edge_at,'reason':'no-active-health-episode'})
+            consumed.add(health_edge['sequence']); continue
+        event={'schema_version':1,'deployment_id':c['deployment_id'],
+            'subject_id':f"host-sender:{c['deployment_id']}:{c['run_label']}",
+            'condition':'host_sender_health','transition_id':tid,'transition_sequence':sequence,
+            'predecessor_id':predecessor,'episode_id':episode,'opening_transition_id':opening,
+            'episode_generation':generation,'transition_kind':kind,
+            'configuration_revision':c['binding_revision'],'first_detected_at':first,
+            'observed_at':recovered or edge_at,'recovered_at':recovered,
+            'evidence_refs':['host-supervisor:'+health_edge['digest'][:24]],
+            'producer_id':c['producer_id']}
+        health.append('HEALTH_TRANSITION_INTENT',{'transition_id':tid,
+            'health_edge_sequence':health_edge['sequence'],'event':event,
+            'actor':'resumed_host_sender','binding_revision':c['binding_revision'],
+            'route_revision':c['route']['revision'],'health_journal_head':health_edge['digest']})
+        predecessor=tid; consumed.add(health_edge['sequence'])
+        records=health._read()['records']
+    intents=[r for r in records if r.get('kind')=='HEALTH_TRANSITION_INTENT']
+    for intent in intents:
+        event=intent['event']; tid=event['transition_id']
+        outcomes=[r for r in records if r.get('kind')=='ATTEMPT_OUTCOME' and r.get('transition_id')==tid]
+        if not outcomes or (outcomes[-1]['attempt'].get('failure_detail')=='rate_limited'
+                and any(r.get('kind')=='RETRY_SCHEDULE' and r.get('transition_id')==tid
+                    and r.get('sequence') not in {x.get('schedule_sequence') for x in records
+                        if x.get('kind') in {'RETRY_CONSUMED','RETRY_EXPIRED','RETRY_SUPERSEDED'}}
+                    for r in records)):
+            send_provider(c,health,event)
+            records=health._read()['records']
+        project_pending(c,health,records)
+        records=health._read()['records']
 
-def run_once(c):
-    j=Journal(c['journal']); doc=j._read(); records=doc['records']; current=inspect_target(c)
+
+def health_only_once(c):
+    """Restricted sender path: recover its independent health stream if main journal is corrupt."""
+    lock_path=Path(c['_path']).with_suffix('.sender-owner.lock')
+    fd=os.open(lock_path,os.O_RDWR|os.O_CREAT,0o600)
+    try:
+        fcntl.flock(fd,fcntl.LOCK_EX)
+        health=Journal(c['health_journal'])
+        health.ensure_genesis(allow_empty=True,context={'deployment_id':c['deployment_id'],
+            'subject_id':f"host-sender:{c['deployment_id']}:{c['run_label']}"})
+        record_interrupted_sends(health,health._read()['records'])
+        process_health_stream(c,health)
+    finally:
+        fcntl.flock(fd,fcntl.LOCK_UN); os.close(fd)
+
+def _run_once_locked(c):
+    j=Journal(c['journal'])
+    doc=j.ensure_genesis(allow_empty=c.get('app_stream_absent_verified') is True,
+        context=bound_context(c,{}))
+    records=doc['records']
+    # Resolve durable SENDING before any Docker/context guard can hold or return.
+    record_interrupted_sends(j,records)
+    records=j._read()['records']
+    health=Journal(c['health_journal'])
+    health.ensure_genesis(allow_empty=True,context={'deployment_id':c['deployment_id'],
+        'subject_id':f"host-sender:{c['deployment_id']}:{c['run_label']}"})
+    record_interrupted_sends(health,health._read()['records'])
+    process_health_stream(c,health)
+    current=inspect_target(c)
     ctx=bound_context(c,current)
     prior_context=next((r['context'] for r in reversed(records)
         if r.get('kind')=='TRANSITION_INTENT' and isinstance(r.get('context'),dict)),None)
-    if prior_context and prior_context!=ctx:
+    context_reconciled=any(r.get('kind')=='HELD_RECONCILIATION'
+        and r.get('prior_context_digest')==sha(canonical(prior_context or {}))
+        and r.get('restored_context_digest')==sha(canonical(ctx)) for r in records)
+    if prior_context and prior_context!=ctx and not context_reconciled:
         j.append('HELD',{'reason':'bound-service-context-changed','prior_context':prior_context,'context':ctx}); return 3
     j.append('INSPECTION',{'state':current['state'],'context_digest':sha(canonical(ctx)),'context':ctx,'reason':current.get('reason')})
-    # A durable SENDING without a durable result is always uncertain after restart.
-    record_interrupted_sends(j,records)
     records=j._read()['records']
-    # Persist the terminal local outcome before trying any app projection. The app
-    # may be offline or the Docker inspection may be unknown during this restart.
+    reconciled={r.get('held_sequence') for r in records if r.get('kind')=='HELD_RECONCILIATION'}
+    if any(r.get('sequence') not in reconciled for r in records if r.get('kind')=='HELD'):
+        return 3
     if current['state']=='unknown': return 0
+    dispatch_scheduled_retries(c,j,current,ctx,records)
+    records=j._read()['records']
     project_pending(c,j,records)
     edges=[r for r in records if r['kind']=='TRANSITION_INTENT']
     active_open=None
@@ -406,41 +601,142 @@ def run_once(c):
         j.append('EPISODE_OPEN',{'transition_id':event['transition_id'],'context':ctx})
         state=read_json(c['observer_state']) or {}; active=read_json(c['active_file']) or {}
         identity=observer_identity(c)
-        j.append('OUTAGE_BARRIER',{'transition_id':event['transition_id'],'loop_sequence':state.get('loop_sequence'),'observer_proc':identity,'boot_id':current.get('boot_id'),'timing_revision':active.get('revision'),'timing_digest':active.get('digest'),'outage_observed_epoch':time.time(),'monotonic_ns':time.monotonic_ns()})
+        j.append('OUTAGE_BARRIER',{'transition_id':event['transition_id'],'loop_sequence':state.get('loop_sequence'),'observer_proc':identity,'boot_id':current.get('boot_id'),'target_started_at':current.get('started_at'),'timing_revision':active.get('revision'),'timing_digest':active.get('digest'),'outage_observed_epoch':time.time(),'monotonic_ns':time.monotonic_ns()})
         # Actual provider I/O occurs after the immutable intent is durable.
-        send_provider(c,j,event)
+        send_provider(c,j,event,current)
         records=j._read()['records']; project_pending(c,j,records)
     if current['state']=='running' and active_open is not None:
         tid=active_open['event']['transition_id']
         barriers=[r for r in records if r['kind']=='OUTAGE_BARRIER' and r.get('transition_id')==tid]
-        if not barriers:
-            state=read_json(c['observer_state']) or {}; active=read_json(c['active_file']) or {}; identity=observer_identity(c)
-            j.append('OUTAGE_BARRIER',{'transition_id':tid,'loop_sequence':state.get('loop_sequence'),'observer_proc':identity,'boot_id':current.get('boot_id'),'timing_revision':active.get('revision'),'timing_digest':active.get('digest'),'outage_observed_epoch':time.time(),'monotonic_ns':time.monotonic_ns()})
-        else:
-            barrier=barriers[-1]
-            recovery_context=recovery_barrier(c,barrier)
-            if recovery_context is not None:
-                previous_recovery=[r for r in records if r['kind']=='RECOVERY_BARRIER' and r.get('transition_id')==tid]
-                if not previous_recovery:
-                    j.append('RECOVERY_BARRIER',{'transition_id':tid,**recovery_context})
-                elif observer_recovery(c,previous_recovery[-1]):
-                    seq=len(edges)+1; pred=edges[-1]['event']['transition_id'] if edges else None; opening=active_open['event']
-                    recovered=edge(c,j,'recovered',current,first=opening['first_detected_at'],episode=opening['episode_id'],opening_id=opening['opening_transition_id'],seq=seq,pred=pred,generation=opening['episode_generation'])
-                    send_provider(c,j,recovered); project_pending(c,j,j._read()['records'])
+        state=read_json(c['observer_state']) or {}; active=read_json(c['active_file']) or {}; identity=observer_identity(c)
+        latest=barriers[-1] if barriers else None
+        changed=(latest is None or latest.get('boot_id')!=current.get('boot_id')
+            or latest.get('target_started_at')!=current.get('started_at')
+            or latest.get('observer_proc')!=identity
+            or latest.get('timing_revision')!=active.get('revision')
+            or latest.get('timing_digest')!=active.get('digest'))
+        if changed:
+            barrier=j.append('OUTAGE_BARRIER',{'transition_id':tid,
+                'loop_sequence':state.get('loop_sequence'),'observer_proc':identity,
+                'boot_id':current.get('boot_id'),'target_started_at':current.get('started_at'),
+                'timing_revision':active.get('revision'),'timing_digest':active.get('digest'),
+                'outage_observed_epoch':time.time(),'monotonic_ns':time.monotonic_ns(),
+                'rebased_from_sequence':latest.get('sequence') if latest else None})
+            records=j._read()['records']
+        else: barrier=latest
+        recovery_context=recovery_barrier(c,barrier)
+        if recovery_context is not None:
+            previous_recovery=[r for r in records if r['kind']=='RECOVERY_BARRIER' and r.get('transition_id')==tid]
+            if (not previous_recovery or previous_recovery[-1].get('source_outage_barrier_sequence')!=barrier['sequence']):
+                j.append('RECOVERY_BARRIER',{'transition_id':tid,
+                    'source_outage_barrier_sequence':barrier['sequence'],**recovery_context})
+            elif observer_recovery(c,previous_recovery[-1]):
+                seq=len(edges)+1; pred=edges[-1]['event']['transition_id'] if edges else None; opening=active_open['event']
+                recovered=edge(c,j,'recovered',current,first=opening['first_detected_at'],episode=opening['episode_id'],opening_id=opening['opening_transition_id'],seq=seq,pred=pred,generation=opening['episode_generation'])
+                send_provider(c,j,recovered,current); project_pending(c,j,j._read()['records'])
             # Missing or changed context remains unknown and cannot close the episode.
     return 0
 
 
+def reconcile_held(c, operator_id, evidence_ref):
+    """Explicitly release held work only when its original bound context is restored."""
+    if (not isinstance(operator_id,str) or re.fullmatch(r'[A-Za-z0-9._:@-]{1,128}',operator_id) is None
+            or not isinstance(evidence_ref,str)
+            or re.fullmatch(r'[A-Za-z0-9._:/-]{1,256}',evidence_ref) is None):
+        raise ValueError('held-reconciliation-operator-or-evidence-invalid')
+    lock_path=Path(c['_path']).with_suffix('.sender-owner.lock')
+    fd=os.open(lock_path,os.O_RDWR|os.O_CREAT,0o600)
+    try:
+        fcntl.flock(fd,fcntl.LOCK_EX)
+        journal=Journal(c['journal'])
+        journal.ensure_genesis(allow_empty=c.get('app_stream_absent_verified') is True,
+            context=bound_context(c,{}))
+        records=journal._read()['records']
+        reconciled={r.get('held_sequence') for r in records
+            if r.get('kind')=='HELD_RECONCILIATION'}
+        held=[r for r in records if r.get('kind')=='HELD'
+            and r.get('sequence') not in reconciled]
+        if not held: return 0
+        current=bound_context(c,inspect_target(c))
+        source_context=next((r.get('context') for r in reversed(records)
+            if r.get('kind')=='TRANSITION_INTENT' and isinstance(r.get('context'),dict)),None)
+        excluded={'catalog_generation','catalog_digest'}
+        compatible=(source_context is not None and
+            {k:v for k,v in source_context.items() if k not in excluded}==
+            {k:v for k,v in current.items() if k not in excluded})
+        if not compatible:
+            raise ValueError('held-reconciliation-requires-original-context')
+        for fence in held:
+            journal.append('HELD_RECONCILIATION',{'held_sequence':fence['sequence'],
+                'operator_id':operator_id,'evidence_ref':evidence_ref,
+                'prior_context_digest':sha(canonical(source_context)),
+                'restored_context_digest':sha(canonical(current))})
+        return len(held)
+    finally:
+        fcntl.flock(fd,fcntl.LOCK_UN); os.close(fd)
+
+
+def run_once(c):
+    """Serialize inspection, admission, edge derivation and dispatch per sender."""
+    lock_path=Path(c['_path']).with_suffix('.sender-owner.lock')
+    lock_path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+    fd=os.open(lock_path,os.O_RDWR|os.O_CREAT,0o600)
+    try:
+        fcntl.flock(fd,fcntl.LOCK_EX)
+        rc=_run_once_locked(c)
+        journal=Journal(c['journal']); doc=journal._read()
+        identity=process_identity(os.getpid())
+        journal.append('SENDER_LOOP_COMPLETED',{'actor':'host_sender',
+            'pid':os.getpid(),'start_ticks':identity['start_ticks'],'boot_id':identity['boot_id'],
+            'monotonic_ns':time.monotonic_ns(),'progress_cursor':doc['sequence'],
+            'result_code':rc})
+        return rc
+    finally:
+        fcntl.flock(fd,fcntl.LOCK_UN); os.close(fd)
+
+
 def supervise_once(c):
-    """Independent local supervisor; it never depends on sender health or alert transport."""
-    health=Journal(c['health_journal']); history=health._read()['records']
+    """Observe and durably report sender health; never authenticate or dispatch."""
+    health=Journal(c['health_journal'])
+    health.ensure_genesis(allow_empty=True,context={'deployment_id':c['deployment_id'],
+        'subject_id':f"host-sender:{c['deployment_id']}:{c['run_label']}"})
+    history=health._read()['records']
     sender_pid=Path(c['journal']).with_suffix('.pid')
     prior=next((r.get('state') for r in reversed(history) if r.get('kind')=='SENDER_HEALTH_EDGE'),None)
     state='healthy'; reason=None
     try:
-        pid=int(sender_pid.read_text().strip())
-        os.kill(pid,0)
-        Journal(c['journal'])._read()
+        identity=json.loads(sender_pid.read_text())
+        if (not isinstance(identity,dict) or set(identity)!={'pid','start_ticks','boot_id'}
+                or type(identity['pid']) is not int or type(identity['start_ticks']) is not int
+                or not isinstance(identity['boot_id'],str)):
+            raise ValueError('sender-pid-identity-invalid')
+        pid=identity['pid']; os.kill(pid,0)
+        current=process_identity(pid)
+        if current!=identity: raise ProcessLookupError()
+        doc=Journal(c['journal'])._read()
+        completed=next((r for r in reversed(doc['records'])
+            if r.get('kind')=='SENDER_LOOP_COMPLETED'),None)
+        now_mono=time.monotonic_ns()
+        if completed is None:
+            state='starting'; reason='sender_loop_not_completed'
+        elif (completed.get('pid')!=pid or completed.get('start_ticks')!=identity['start_ticks']
+                or completed.get('boot_id')!=identity['boot_id']
+                or type(completed.get('monotonic_ns')) is not int
+                or type(completed.get('progress_cursor')) is not int
+                or completed['progress_cursor']>doc['sequence']
+                or now_mono<completed['monotonic_ns']
+                or now_mono-completed['monotonic_ns']>c['freshness_seconds']*1_000_000_000):
+            state='unhealthy'; reason='sender_loop_progress_stale_or_invalid'
+        else:
+            known={r.get('attempt',{}).get('attempt_id') for r in doc['records']
+                if r.get('kind')=='ATTEMPT_OUTCOME'}
+            outstanding=[r for r in doc['records'] if r.get('kind')=='SENDING'
+                and r.get('attempt',{}).get('attempt_id') not in known]
+            overdue=[r for r in outstanding if r.get('boot_id')!=identity['boot_id']
+                or type(r.get('work_deadline_monotonic_ns')) is not int
+                or now_mono>r['work_deadline_monotonic_ns']]
+            if overdue: state='unhealthy'; reason='sender_work_deadline_expired'
+            else: state='healthy'; reason=None
     except FileNotFoundError:
         if prior is None:
             first=next((r for r in history if r.get('kind')=='SUPERVISOR_OBSERVATION'
@@ -455,27 +751,48 @@ def supervise_once(c):
     except Exception as exc:
         state='unhealthy'; reason='sender_journal_invalid' if type(exc).__name__=='RuntimeError' else 'sender_supervision_check_failed'
     if state in {'healthy','dead','unhealthy'} and state!=prior:
-        health.append('SENDER_HEALTH_EDGE',{'state':state,'failure_code':reason,'actor':'independent_host_supervisor','deployment_id':c['deployment_id'],'subject_id':'host-sender:'+c['subject_id'],'producer_id':'g7-host-operational-alert-sender/v1','binding_revision':c['binding_revision'],'route_revision':c['route']['revision']})
+        health.append('SENDER_HEALTH_EDGE',{'state':state,'failure_code':reason,
+            'actor':'independent_host_supervisor','deployment_id':c['deployment_id'],
+            'subject_id':f"host-sender:{c['deployment_id']}:{c['run_label']}",
+            'producer_id':c['producer_id'],'binding_revision':c['binding_revision'],
+            'route_revision':c['route']['revision']})
     else:
         health.append('SUPERVISOR_OBSERVATION',{'state':state,'failure_code':reason,'actor':'independent_host_supervisor'})
-    project_supervisor_health(c,health)
     return state
 
+
+def process_identity(pid):
+    stat=Path(f'/proc/{pid}/stat').read_text().split()
+    return {'pid':pid,'start_ticks':int(stat[21]),
+        'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip()}
+
 def main():
-    p=argparse.ArgumentParser(); p.add_argument('--catalog',required=True); p.add_argument('--once',action='store_true'); p.add_argument('--supervise',action='store_true'); a=p.parse_args()
+    p=argparse.ArgumentParser(); p.add_argument('--catalog',required=True); p.add_argument('--once',action='store_true'); p.add_argument('--supervise',action='store_true'); p.add_argument('--health-only',action='store_true'); p.add_argument('--reconcile-held',action='store_true'); p.add_argument('--operator-id'); p.add_argument('--evidence-ref'); a=p.parse_args()
     c=load_catalog(a.catalog)
+    if a.reconcile_held:
+        if not a.operator_id or not a.evidence_ref: p.error('--reconcile-held requires --operator-id and --evidence-ref')
+        print(json.dumps({'reconciled_fences':reconcile_held(c,a.operator_id,a.evidence_ref)},
+            sort_keys=True,separators=(',',':')))
+        return 0
     if a.supervise:
         while True:
             supervise_once(c)
             if a.once: return 0
             time.sleep(min(c['freshness_seconds'],10))
+    if a.health_only:
+        while True:
+            health_only_once(c)
+            if a.once: return 0
+            time.sleep(min(c['freshness_seconds'],10))
     while True:
         try:
-            pidfile=Path(c['journal']).with_suffix('.pid'); pidfile.parent.mkdir(mode=0o700,parents=True,exist_ok=True); pidfile.write_text(str(os.getpid()),encoding='ascii'); os.chmod(pidfile,0o600)
+            pidfile=Path(c['journal']).with_suffix('.pid'); pidfile.parent.mkdir(mode=0o700,parents=True,exist_ok=True); atomic(pidfile,canonical(process_identity(os.getpid()))+b'\n')
             rc=run_once(c)
         except Exception as exc:
             # Avoid recursive external delivery; caller's independent supervisor owns this fault.
+            try: health_only_once(c)
+            except Exception: pass
             print(json.dumps({'sender':'unhealthy','failure_code':type(exc).__name__},separators=(',',':')),file=sys.stderr); return 2
         if a.once: return rc
-        time.sleep(min(c['freshness_seconds'],60))
+        time.sleep(min(c['freshness_seconds'],1))
 if __name__=='__main__': raise SystemExit(main())

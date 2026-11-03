@@ -5070,6 +5070,24 @@ def install_assessment_routes(app: FastAPI) -> None:
             ingest_transition, verified_future_skew)
         try:
             request_now = now_utc()
+            # Reject unbound deployments before consulting deployment-scoped
+            # timing state, so cross-deployment probes get the same nondisclosing
+            # service-binding denial as disabled or reassigned bindings.
+            if not isinstance(payload, dict):
+                _error(409, "incident_transition_conflict", "Incident transition fields do not match the registered schema")
+            from uvm.persistence.incident_schema import g7_incident_service_bindings
+            binding = None
+            with engine.connect() as connection:
+                binding = connection.execute(sa.select(g7_incident_service_bindings).where(
+                    g7_incident_service_bindings.c.principal_id == principal,
+                    g7_incident_service_bindings.c.deployment_id == payload.get("deployment_id"),
+                    g7_incident_service_bindings.c.subject_id == payload.get("subject_id"),
+                    g7_incident_service_bindings.c.condition == payload.get("condition"),
+                    g7_incident_service_bindings.c.enabled.is_(True))).mappings().first()
+            if (binding is None or binding["producer_id"] != payload.get("producer_id")
+                    or type(payload.get("configuration_revision")) is not int
+                    or int(binding["configuration_revision"]) != payload.get("configuration_revision")):
+                _error(403, "incident_ingestion_forbidden", "Current incident service binding is required")
             future_skew = verified_future_skew(engine, payload.get("deployment_id"), request_now)
             return ingest_transition(engine, principal, payload, now=request_now,
                 future_skew_seconds=future_skew)
@@ -5077,6 +5095,8 @@ def install_assessment_routes(app: FastAPI) -> None:
             _error(403, "incident_ingestion_forbidden", "Current incident service binding is required")
         except IncidentConflict as exc:
             _error(409, "incident_transition_conflict", str(exc), {"retryable": "stream gap" in str(exc)})
+        except HTTPException:
+            raise
         except Exception as exc:
             _LOG.exception("incident transition transaction failed: %s", type(exc).__name__)
             _error(503, "incident_projection_unavailable", "Incident transition was not committed")
@@ -5107,6 +5127,8 @@ def install_assessment_routes(app: FastAPI) -> None:
                    "Current incident service binding is required")
         except IncidentConflict as exc:
             _error(409, "incident_transition_conflict", str(exc))
+        except HTTPException:
+            raise
         except Exception as exc:
             _LOG.exception("incident delivery projection failed: %s", type(exc).__name__)
             _error(503, "incident_projection_unavailable",

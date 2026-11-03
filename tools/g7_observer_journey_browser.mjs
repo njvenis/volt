@@ -263,7 +263,8 @@ try {
     required_approver_count:1,prohibited_action_pairs:[]};
   const actions=['observer.timing.read','observer.timing.configure',
     'backup.settings.read','backup.settings.configure','assessment.read','audit.read',
-    ...(warningOnly?['acceptance.submit','acceptance.approve','warning.route.manage','warning.actor_link.manage']:[]),
+    ...(warningOnly?['acceptance.submit','acceptance.approve','warning.route.manage','warning.actor_link.manage',
+      'owners.directory.read','ownership.team.manage']:[]),
     ...(exceptionSlaOnly?['acceptance.submit','acceptance.approve','acceptance.reject','acceptance.revoke',
       'owners.directory.read','owners.assign','ownership.team.manage','portion.define','portion.transfer','remediation.confirm_portion','report.create','report.read',
       'policy.sla.publish','policy.read']:[])];
@@ -1518,6 +1519,19 @@ try {
   if (warningOnly) {
     const seeded=JSON.parse(await readFile(path.join(evidence,'warning-fixture-ids.json'),'utf8'));
     const findingId=seeded.group, occurrenceId=seeded.occurrence;
+    const ownerHead=await api('/api/v1/assessment/administration/catalogue');
+    if(ownerHead.status!==200)throw new Error('warning workflow owner setup could not read authority head');
+    const ownerDirectoryId=crypto.randomUUID();
+    const ownerCreated=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify({command_id:crypto.randomUUID(),target_id:zero,action:'ownership.team.create',
+        membership_ids:[],expected_revisions:{target:ownerHead.body.policy_revision,
+          policy:ownerHead.body.policy_revision,authority:ownerHead.body.authority_revision,
+          ownership:ownerHead.body.ownership_revision,identity_membership:0,owners:0},
+        payload:{team_id:ownerDirectoryId,display_name:'Synthetic warning accountable team',enabled:true,
+          rationale:'Provide a real eligible owner for the disposable public warning workflow',
+          evidence_ref:'g7-observer-warning-fixture'}})});
+    if(ownerCreated.status!==200)
+      throw new Error(`warning workflow owner setup failed ${ownerCreated.status}: ${JSON.stringify(ownerCreated.body)}`);
     let current=await api('/api/v1/assessment/administration/catalogue');
     for(const destination of [
       {channel_id:'C_FIXTURE_SUCCESS',destination_ref:'fixture-destination'},

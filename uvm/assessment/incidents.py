@@ -79,7 +79,8 @@ def verified_future_skew(engine: Engine, deployment_id: str, now: datetime) -> i
     with engine.begin() as connection:
         status = connection.execute(sa.select(g7_observer_status).where(
             g7_observer_status.c.deployment_id == deployment_id)).mappings().first()
-        if (status is None or status["application_status"] != "applied"
+        if (status is None or status["application_status"] not in
+                {"pending", "applied", "failed", "uncertain"}
                 or type(status["effective_revision"]) is not int
                 or not status["effective_digest"] or not status["host_policy_revision"]
                 or not status["host_policy_digest"] or not status["host_policy_key_id"]
@@ -323,6 +324,8 @@ def ingest_delivery_outcome(engine: Engine, principal_id: str, transition_id: st
         raise IncidentConflict("accepted delivery requires its provider receipt")
     if payload["outcome"] == "accepted" and failure is not None:
         raise IncidentConflict("accepted delivery cannot include a failure code")
+    if payload["outcome"] != "accepted" and receipt is not None:
+        raise IncidentConflict("failed or uncertain delivery cannot include a provider receipt")
     if payload["outcome"] != "accepted" and failure is None:
         raise IncidentConflict("failed or uncertain delivery requires a failure code")
     now = (now or datetime.now(UTC)).astimezone(UTC)

@@ -343,7 +343,7 @@ def verify_private_ingress(info: dict, evidence: Path) -> None:
         "print(f'status={e.code} code={code}'); sys.exit(0 if e.code==403 and code=='ingress_peer_forbidden' else 3)\n"
         "except Exception as e: print('unexpected_transport_error='+type(e).__name__); sys.exit(4)\n"
         "else: print('unexpected_peer_access=allowed'); sys.exit(5)")
-    cidfile = evidence / "ingress-peer-probe.cid"
+    cidfile = evidence / f"ingress-peer-probe-{uuid.uuid4()}.cid"
     result = subprocess.run(("docker", "run", "--rm", "--cidfile", str(cidfile), "--name", probe_name,
         "--label", f"volt.g7-preview.owner-token={info['owner_token']}",
         "--label", f"volt.g7-preview.resource-id={uuid.uuid4()}", "--network", info["network"],

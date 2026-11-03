@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import io
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location("g7_local_preview", Path(__file__).with_name("g7_local_preview.py"))
@@ -127,7 +129,7 @@ class LocalPreviewSafetyTests(unittest.TestCase):
             args = type("Args", (), {"instance": "demo"})()
             def inspect(command, **kwargs):
                 if command[1] == "inspect" and command[2] == "--format":
-                    return subprocess.CompletedProcess(command, 0, f"{'d'*64}|{info['owner_token']}|{info['container_resource_id']}\n", "")
+                    return subprocess.CompletedProcess(command, 0, f"{'f'*64}|{info['owner_token']}|{info['container_resource_id']}\n", "")
                 raise AssertionError(command)
             with patch.object(preview.subprocess, "run", side_effect=inspect), patch.object(preview, "run") as docker_run:
                 with self.assertRaisesRegex(SystemExit, "exact created container ID"):
@@ -293,6 +295,212 @@ class LocalPreviewSafetyTests(unittest.TestCase):
                 ("docker", "volume", "rm", info["volumes"]["state"])])
             self.assertFalse(root.exists())
             self.assertGreaterEqual(len(calls), 5)
+
+
+    def test_no_build_requires_complete_admission_metadata_without_docker_io(self):
+        complete = {"no_build": True, "image": None, "expected_image_id": "sha256:" + "a" * 64,
+            "expected_image_source_revision": "b" * 40, "expected_image_version": "local-preview",
+            "expected_platform": "linux/amd64"}
+        for missing in ("expected_image_id", "expected_image_source_revision", "expected_image_version", "expected_platform"):
+            with self.subTest(missing=missing):
+                values = dict(complete); values[missing] = None
+                args = type("Args", (), values)()
+                with patch.object(preview.subprocess, "run") as docker_read, patch.object(preview, "run") as command:
+                    with self.assertRaisesRegex(SystemExit, "requires --expected-image-id"):
+                        preview.start(args)
+                docker_read.assert_not_called()
+                command.assert_not_called()
+
+    def test_invalid_no_build_admission_arguments_are_rejected_before_docker_io(self):
+        base = {"no_build": True, "image": None, "expected_image_id": "sha256:" + "a" * 64,
+            "expected_image_source_revision": "b" * 40, "expected_image_version": "local-preview",
+            "expected_platform": "linux/amd64"}
+        variants = [
+            ("short image id", {"expected_image_id": "sha256:abc"}, "full sha256 ID"),
+            ("short source revision", {"expected_image_source_revision": "deadbeef"}, "full commit SHA"),
+            ("unsafe version", {"expected_image_version": "local-preview\nInjected"}, "version metadata is invalid"),
+            ("unsupported platform", {"expected_platform": "linux/arm64"}, "supported platform must be linux/amd64"),
+            ("mutable tag option", {"image": "volt:mutable"}, "cannot be combined with --no-build"),
+        ]
+        for name, override, reason in variants:
+            with self.subTest(name=name):
+                values = dict(base); values.update(override)
+                args = type("Args", (), values)()
+                with patch.object(preview.subprocess, "run") as docker_read, patch.object(preview, "run") as command:
+                    with self.assertRaisesRegex(SystemExit, reason):
+                        preview.start(args)
+                docker_read.assert_not_called()
+                command.assert_not_called()
+
+    def _run_no_build_start(self, image_result, *, expected_id=None):
+        support_revision = "c" * 40
+        image_source_revision = "b" * 40
+        expected_id = expected_id or ("sha256:" + "a" * 64)
+        info = metadata()
+        info.update({"container_id": None, "network_id": None, "lifecycle_state": "initializing",
+            "source_revision": support_revision, "helper_revision": support_revision,
+            "api_port": 8580, "oidc_port": 8590})
+        docker_commands = []
+        mutations = []
+        timeline = []
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"XDG_STATE_HOME": temp}):
+            root = preview.state_dir("demo")
+            metadata_path = write_instance(root, info)
+            before = metadata_path.read_bytes()
+            args = type("Args", (), {"instance": "demo", "image": None, "no_build": True,
+                "expected_image_id": expected_id, "expected_image_source_revision": image_source_revision,
+                "expected_image_version": "local-preview", "expected_platform": "linux/amd64"})()
+            container_created = False
+            network_created = False
+            created_volumes = set()
+            image_inspects = 0
+
+            def docker_inspect(command, **kwargs):
+                nonlocal image_inspects
+                command = tuple(command)
+                docker_commands.append(command)
+                timeline.append(command)
+                if command[1:3] == ("image", "inspect"):
+                    image_inspects += 1
+                    if isinstance(image_result, subprocess.CompletedProcess):
+                        return image_result
+                    return subprocess.CompletedProcess(command, 0, json.dumps([image_result]), "")
+                if command[1:3] == ("inspect", "--format"):
+                    if command[-1] == info["container"]:
+                        if container_created:
+                            return subprocess.CompletedProcess(command, 0,
+                                f"{'f'*64}|{info['owner_token']}|{info['container_resource_id']}\n", "")
+                        return subprocess.CompletedProcess(command, 1, "", "no such object")
+                if command[1:3] == ("network", "inspect"):
+                    if network_created:
+                        return subprocess.CompletedProcess(command, 0,
+                            f"{'e'*64}|{info['owner_token']}|{info['network_resource_id']}\n", "")
+                    return subprocess.CompletedProcess(command, 1, "", "no such network")
+                if command[1:3] == ("volume", "inspect"):
+                    name = command[-1]
+                    part = next((key for key, value in info["volumes"].items() if value == name), None)
+                    if part in created_volumes:
+                        return subprocess.CompletedProcess(command, 0,
+                            f"{info['owner_token']}|{info['volume_resource_ids'][part]}\n", "")
+                    return subprocess.CompletedProcess(command, 1, "", "no such volume")
+                raise AssertionError(command)
+
+            def helper_run(*command, capture=False):
+                nonlocal container_created, network_created
+                command = tuple(command)
+                if command[0] == "git":
+                    return support_revision if command[1:3] == ("rev-parse", "HEAD") else ""
+                if command[0] != "docker":
+                    raise AssertionError(command)
+                timeline.append(command)
+                if command[1:3] == ("network", "create"):
+                    mutations.append(command); network_created = True; return ""
+                if command[1:3] == ("volume", "create"):
+                    mutations.append(command)
+                    created_volumes.add(next(k for k, value in info["volumes"].items() if value == command[-1]))
+                    return ""
+                if command[1] == "run":
+                    mutations.append(command)
+                    self.assertEqual(image_inspects, 2, "image was not rechecked immediately before launch")
+                    container_created = True
+                    return "f" * 64
+                if command[1:3] == ("network", "inspect") and command[3] == "--format":
+                    if command[4] == "{{.Id}}": return "e" * 64
+                    if command[4] == "{{(index .IPAM.Config 0).Gateway}}": return "172.19.0.1"
+                if command[1:3] == ("inspect", "--format") and command[3] == "{{.Image}}":
+                    return expected_id
+                raise AssertionError(command)
+
+            with patch.object(preview.subprocess, "run", side_effect=docker_inspect), \
+                 patch.object(preview, "run", side_effect=helper_run), redirect_stdout(io.StringIO()):
+                preview.start(args)
+            return {"docker_commands": docker_commands, "mutations": mutations, "timeline": timeline,
+                "metadata": json.loads(metadata_path.read_text()), "before": before,
+                "after": metadata_path.read_bytes(), "expected_id": expected_id,
+                "image_source_revision": image_source_revision, "helper_revision": support_revision,
+                "image_inspects": image_inspects}
+
+    def test_no_build_wrong_or_missing_image_metadata_fails_before_any_mutation(self):
+        expected_id = "sha256:" + "a" * 64
+        expected_revision = "b" * 40
+        good = {"Id": expected_id, "Os": "linux", "Architecture": "amd64", "Config": {"Labels": {
+            "org.opencontainers.image.revision": expected_revision,
+            "org.opencontainers.image.version": "local-preview"}}}
+        cases = [
+            ("image ID mismatch", {**good, "Id": "sha256:" + "f" * 64}, "immutable image ID mismatch"),
+            ("source revision mismatch", {**good, "Config": {"Labels": {
+                "org.opencontainers.image.revision": "d" * 40,
+                "org.opencontainers.image.version": "local-preview"}}}, "source revision label mismatch"),
+            ("version mismatch", {**good, "Config": {"Labels": {
+                "org.opencontainers.image.revision": expected_revision,
+                "org.opencontainers.image.version": "other"}}}, "version label mismatch"),
+            ("platform mismatch", {**good, "Architecture": "arm64"}, "platform metadata mismatch"),
+            ("missing metadata", {"Id": expected_id, "Os": "linux", "Architecture": "amd64", "Config": {}}, "metadata is missing or malformed"),
+            ("missing image", subprocess.CompletedProcess(("docker", "image", "inspect"), 1, "", "not found"), "image ID is unavailable"),
+        ]
+        for name, result, reason in cases:
+            with self.subTest(name=name):
+                support_revision = "c" * 40
+                info = metadata()
+                info.update({"container_id": None, "network_id": None, "lifecycle_state": "initializing",
+                    "source_revision": support_revision, "helper_revision": support_revision})
+                with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"XDG_STATE_HOME": temp}):
+                    root = preview.state_dir("demo"); metadata_path = write_instance(root, info)
+                    before = metadata_path.read_bytes()
+                    args = type("Args", (), {"instance": "demo", "image": None, "no_build": True,
+                        "expected_image_id": expected_id, "expected_image_source_revision": expected_revision,
+                        "expected_image_version": "local-preview", "expected_platform": "linux/amd64"})()
+                    docker_commands = []
+                    def inspect(command, **kwargs):
+                        command = tuple(command); docker_commands.append(command)
+                        if command[1:3] == ("image", "inspect"):
+                            if isinstance(result, subprocess.CompletedProcess): return result
+                            return subprocess.CompletedProcess(command, 0, json.dumps([result]), "")
+                        if command[1:3] == ("inspect", "--format"):
+                            return subprocess.CompletedProcess(command, 1, "", "no such object")
+                        if command[1:3] == ("network", "inspect"):
+                            return subprocess.CompletedProcess(command, 1, "", "no such network")
+                        if command[1:3] == ("volume", "inspect"):
+                            return subprocess.CompletedProcess(command, 1, "", "no such volume")
+                        raise AssertionError(command)
+                    def git_only(*command, capture=False):
+                        if command[0] == "git": return support_revision if command[1:3] == ("rev-parse", "HEAD") else ""
+                        raise AssertionError(f"unexpected mutation command: {command}")
+                    with patch.object(preview.subprocess, "run", side_effect=inspect), \
+                         patch.object(preview, "run", side_effect=git_only):
+                        with self.assertRaisesRegex(SystemExit, reason):
+                            preview.start(args)
+                    self.assertEqual(metadata_path.read_bytes(), before)
+                    self.assertTrue(all(command[1] in {"inspect", "image", "network", "volume"} and
+                        not (command[1] in {"network", "volume"} and len(command) > 2 and command[2] != "inspect")
+                        for command in docker_commands), docker_commands)
+                    self.assertFalse(any(command[1] in {"build", "run", "create", "start", "rm"}
+                        for command in docker_commands))
+
+    def test_no_build_launches_by_admitted_id_with_distinct_helper_revision(self):
+        image_id = "sha256:" + "a" * 64
+        image = {"Id": image_id, "Os": "linux", "Architecture": "amd64", "Config": {"Labels": {
+            "org.opencontainers.image.revision": "b" * 40,
+            "org.opencontainers.image.version": "local-preview"}}}
+        result = self._run_no_build_start(image)
+        run_command = next(command for command in result["mutations"] if command[1] == "run")
+        self.assertEqual(run_command[-1], image_id)
+        self.assertFalse(any(command[1] == "build" for command in result["mutations"]))
+        self.assertEqual(result["image_inspects"], 2)
+        self.assertEqual(result["metadata"]["source_revision"], result["helper_revision"])
+        self.assertEqual(result["metadata"]["helper_revision"], result["helper_revision"])
+        self.assertNotEqual(result["metadata"]["helper_revision"], result["image_source_revision"])
+        self.assertEqual(result["metadata"]["image_source_revision"], "b" * 40)
+        self.assertEqual(result["metadata"]["image_id"], image_id)
+        self.assertEqual(result["metadata"]["image_mode"], "loaded-image")
+        timeline = result["timeline"]
+        first_image_inspect = next(i for i, command in enumerate(timeline) if command[1:3] == ("image", "inspect"))
+        network_create = next(i for i, command in enumerate(timeline) if command[1:3] == ("network", "create"))
+        second_image_inspect = [i for i, command in enumerate(timeline) if command[1:3] == ("image", "inspect")][1]
+        docker_run = next(i for i, command in enumerate(timeline) if command[1] == "run")
+        self.assertLess(first_image_inspect, network_create)
+        self.assertLess(second_image_inspect, docker_run)
+
 
 
 if __name__ == "__main__":

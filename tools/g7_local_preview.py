@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import ipaddress
+import re
 import secrets
 import shutil
 import subprocess
@@ -131,6 +132,7 @@ def initialize(args) -> None:
     (root / "operator-link.json").chmod(0o600)
     owner_token = secrets.token_hex(32)
     suffix = owner_token[:16]
+    helper_revision = run("git", "rev-parse", "HEAD", capture=True)
     metadata = {"instance": args.instance, "owner_token": owner_token,
         "container": f"volt-g7-preview-{args.instance}-{suffix}",
         "container_id": None, "container_resource_id": str(uuid.uuid4()),
@@ -140,7 +142,7 @@ def initialize(args) -> None:
         "volume_resource_ids": {part: str(uuid.uuid4()) for part in ("postgres", "media", "state")},
         "api_port": api_port, "oidc_port": oidc_port, "secrets_dir": str(secrets_dir),
         "lifecycle_state": "initializing",
-        "source_revision": run("git", "rev-parse", "HEAD", capture=True), "source_status": "clean"}
+        "source_revision": helper_revision, "helper_revision": helper_revision, "source_status": "clean"}
     (root / "instance.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     (root / "instance.json").chmod(0o600)
     print(f"initialized={root}")
@@ -254,17 +256,96 @@ def preflight(info: dict, *, require_container: bool = False, require_complete: 
     return resources
 
 
+SUPPORTED_PREVIEW_PLATFORM = "linux/amd64"
+_IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SOURCE_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+_IMAGE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
+
+
+def start_mode(args) -> tuple[bool, dict | None]:
+    no_build = bool(getattr(args, "no_build", False))
+    image_id = getattr(args, "expected_image_id", None)
+    source_revision = getattr(args, "expected_image_source_revision", None)
+    version = getattr(args, "expected_image_version", None)
+    platform = getattr(args, "expected_platform", None)
+    supplied = any(value is not None for value in (image_id, source_revision, version, platform))
+    if not no_build:
+        if supplied:
+            raise SystemExit("image admission metadata requires --no-build")
+        return False, None
+    if getattr(args, "image", None) is not None:
+        raise SystemExit("--image cannot be combined with --no-build; provide an immutable image ID")
+    if any(value is None for value in (image_id, source_revision, version, platform)):
+        raise SystemExit("--no-build requires --expected-image-id, --expected-image-source-revision, --expected-image-version, and --expected-platform")
+    if not _IMAGE_ID_RE.fullmatch(image_id):
+        raise SystemExit("refusing no-build image: expected image ID must be a full sha256 ID")
+    if not _SOURCE_REVISION_RE.fullmatch(source_revision):
+        raise SystemExit("refusing no-build image: expected image source revision must be a full commit SHA")
+    if not _IMAGE_VERSION_RE.fullmatch(version):
+        raise SystemExit("refusing no-build image: expected image version metadata is invalid")
+    if platform != SUPPORTED_PREVIEW_PLATFORM:
+        raise SystemExit(f"refusing no-build image: supported platform must be {SUPPORTED_PREVIEW_PLATFORM}")
+    return True, {"id": image_id, "revision": source_revision, "version": version, "platform": platform}
+
+
+def admit_loaded_image(expected: dict) -> str:
+    """Verify a loaded image's immutable identity and provenance without mutation."""
+    result = subprocess.run(("docker", "image", "inspect", expected["id"]), text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if result.returncode:
+        raise SystemExit("refusing no-build image: expected immutable image ID is unavailable")
+    try:
+        values = json.loads(result.stdout)
+        if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], dict):
+            raise ValueError("inspect result shape")
+        image = values[0]
+        config = image.get("Config")
+        labels = config.get("Labels") if isinstance(config, dict) else None
+        actual_id = image.get("Id")
+        os_name = image.get("Os")
+        architecture = image.get("Architecture")
+        if not isinstance(labels, dict) or not isinstance(os_name, str) or not isinstance(architecture, str):
+            raise ValueError("required metadata absent")
+        actual_platform = f"{os_name}/{architecture}"
+        revision = labels.get("org.opencontainers.image.revision")
+        version = labels.get("org.opencontainers.image.version")
+        if not isinstance(revision, str) or not isinstance(version, str):
+            raise ValueError("required labels absent")
+    except (json.JSONDecodeError, TypeError, ValueError):
+        raise SystemExit("refusing no-build image: required image metadata is missing or malformed") from None
+    if not isinstance(actual_id, str) or not _IMAGE_ID_RE.fullmatch(actual_id):
+        raise SystemExit("refusing no-build image: required immutable image ID metadata is missing")
+    if actual_id != expected["id"]:
+        raise SystemExit("refusing no-build image: immutable image ID mismatch")
+    if revision != expected["revision"]:
+        raise SystemExit("refusing no-build image: source revision label mismatch")
+    if version != expected["version"]:
+        raise SystemExit("refusing no-build image: version label mismatch")
+    if actual_platform != expected["platform"]:
+        raise SystemExit("refusing no-build image: platform metadata mismatch")
+    return actual_id
+
+
 def start(args) -> None:
+    no_build, expected_image = start_mode(args)
     root, info = load(args.instance)
     resources = preflight(info, require_complete=True)
     if resources["container"]:
         raise SystemExit(f"owned container already exists; use restart or stop first: {info['container']}")
     current = run("git", "rev-parse", "HEAD", capture=True)
-    if current != info["source_revision"] or run("git", "status", "--porcelain", capture=True):
-        raise SystemExit("source revision changed after init; destroy and reinitialize against a committed clean revision")
-    image = args.image or f"volt:preview-{info['source_revision']}"
-    run("docker", "build", "--label", f"org.opencontainers.image.revision={info['source_revision']}",
-        "--label", "org.opencontainers.image.version=local-preview", "-f", "Dockerfile.g7", "-t", image, ".")
+    helper_revision = info.get("helper_revision", info.get("source_revision"))
+    if current != helper_revision or run("git", "status", "--porcelain", capture=True):
+        raise SystemExit("source revision changed after init; destroy and reinitialize from a committed clean helper revision")
+
+    if no_build:
+        # The helper checkout revision is intentionally distinct from the loaded
+        # image's source revision. Both identities are recorded and checked.
+        image = admit_loaded_image(expected_image)
+    else:
+        image = getattr(args, "image", None) or f"volt:preview-{helper_revision}"
+        run("docker", "build", "--label", f"org.opencontainers.image.revision={helper_revision}",
+            "--label", "org.opencontainers.image.version=local-preview", "-f", "Dockerfile.g7", "-t", image, ".")
+
     container = info["container"]
     if not exact_network(info):
         run("docker", "network", "create", "--driver", "bridge", "--label",
@@ -318,16 +399,31 @@ def start(args) -> None:
         cmd += ["--mount", f"type=volume,src={volume},dst={target}"]
     for key, value in env.items():
         cmd += ["--env", f"{key}={value}"]
+    if no_build:
+        # Reinspect after resource creation to close the check/use window, then
+        # launch by content ID rather than any mutable repository tag.
+        image = admit_loaded_image(expected_image)
     cmd.append(image)
+    info["image"] = image
+    info["image_mode"] = "loaded-image" if no_build else "build-from-helper-source"
+    info["helper_revision"] = helper_revision
+    if no_build:
+        info["image_source_revision"] = expected_image["revision"]
+        info["image_version"] = expected_image["version"]
+        info["image_platform"] = expected_image["platform"]
+    else:
+        info["image_source_revision"] = helper_revision
+        info["image_version"] = "local-preview"
     info["container_id"] = run(*cmd, capture=True)
     save_instance(root, info)
     if not exact_container(info):
         raise SystemExit("created preview container failed ownership verification")
-    info["image"] = image
     info["image_id"] = run("docker", "inspect", "--format", "{{.Image}}", container, capture=True)
+    if no_build and info["image_id"] != expected_image["id"]:
+        raise SystemExit("refusing no-build container: launched image ID differs from admitted image")
     info["lifecycle_state"] = "established"
     save_instance(root, info)
-    print(f"container={container}\nimage={image}\nurl=http://127.0.0.1:{info['api_port']}/")
+    print(f"container={container}\nimage={image}\nimage_id={info['image_id']}\nurl=http://127.0.0.1:{info['api_port']}/")
 
 
 def docker_for(args, action: str) -> None:
@@ -439,7 +535,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("init"); p.add_argument("instance"); p.add_argument("--api-port", type=int, default=8180); p.add_argument("--oidc-port", type=int, default=8190); p.set_defaults(fn=initialize)
-    p = sub.add_parser("start"); p.add_argument("instance"); p.add_argument("--image"); p.set_defaults(fn=start)
+    p = sub.add_parser("start"); p.add_argument("instance"); p.add_argument("--image", help="build output tag (default: revision-qualified preview tag)"); p.add_argument("--no-build", action="store_true", help="start an already-loaded, exactly admitted image without building"); p.add_argument("--expected-image-id"); p.add_argument("--expected-image-source-revision"); p.add_argument("--expected-image-version"); p.add_argument("--expected-platform"); p.set_defaults(fn=start)
     p = sub.add_parser("status"); p.add_argument("instance"); p.set_defaults(fn=lambda a: docker_for(a, "status"))
     p = sub.add_parser("wait"); p.add_argument("instance"); p.add_argument("--timeout", type=int, default=900); p.set_defaults(fn=wait_healthy)
     for cmd in ("stop", "restart"):

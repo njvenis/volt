@@ -19,7 +19,9 @@ export function requireReceipt(receipt, expected) {
       || receipt.command_id !== expected.commandId || receipt.action !== 'access_group.create'
       || receipt.target_id !== expected.targetId || !isUuid(receipt.decision_id)
       || !isUuid(receipt.audit_event_id) || !Number.isInteger(receipt.committed_revision)
-      || receipt.committed_revision < 1 || receipt.result?.object_kind !== 'access_group'
+      || receipt.committed_revision < 1 || receipt.policy_revision !== receipt.committed_revision
+      || receipt.result?.policy_revision !== receipt.committed_revision
+      || receipt.result?.object_kind !== 'access_group'
       || receipt.result?.object_id !== expected.groupId
       || !Number.isInteger(receipt.result?.object_revision) || receipt.result.object_revision < 1
       || receipt.result.authority_mode !== 'uvm_native_v1') {
@@ -32,7 +34,9 @@ export function requireAudit(item, event, expected) {
       || item.revision !== expected.objectRevision || !event
       || event.event_id !== expected.auditEventId || event.action !== 'access_group.create'
       || event.actor_id !== expected.actorId || event.after_value?.access_group_id !== expected.groupId
-      || event.after_value?.revision !== expected.objectRevision) {
+      || event.after_value?.revision !== expected.objectRevision
+      || event.after_value?.display_name !== item.display_name
+      || event.after_value?.description !== item.description || event.after_value?.enabled !== item.enabled) {
     throw new Error('public_admin_audit_or_object_mismatch');
   }
 }

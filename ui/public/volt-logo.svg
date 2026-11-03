@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="410 160 1230 400" role="img" aria-labelledby="volt-logo-title volt-logo-desc">
+  <title id="volt-logo-title">VOLT</title>
+  <desc id="volt-logo-desc">Vulnerability Ownership and Lifecycle Tracking. Violet lightning bolt beside the VOLT wordmark.</desc>
+  <!-- Vector reconstruction of the approved logo; exact VOLT brand colours.
+       Transparent background. Intended for light surfaces.
+       Letterforms are paths: no fonts, embedded images or external resources. -->
+  <path fill="#6442B5" d="M635 188 647 193 600 314 706 314 503 531 554 392 442 392Z"/>
+  <path fill="#C4B5FD" d="M635 188 530 342 442 392Z"/>
+  <g fill="#252331">
+    <path d="M723 233H793L855 386 918 233H988L886 469H820Z"/>
+    <path fill-rule="evenodd" d="M1107 226C1031 226 977 277 977 350S1030 476 1107 476 1237 424 1237 350 1183 226 1107 226ZM1107 285C1146 285 1170 312 1170 350S1146 418 1107 418 1043 390 1043 350 1068 285 1107 285Z"/>
+    <path d="M1256 233H1322V412H1428V469H1256Z"/>
+    <path d="M1401 233H1608V286H1537V469H1471V286H1401Z"/>
+  </g>
+</svg>

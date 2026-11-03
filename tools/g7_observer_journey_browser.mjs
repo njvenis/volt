@@ -1,3 +1,4 @@
+import {assertOperationalRenderedCards, captureOperationalCards} from './g7_operational_render_assertions.mjs';
 import {assertClock, assertRenderedAcceptance, captureAcceptance} from './g7_sla_render_assertions.mjs';
 import {runBackupBrowserStep} from '../ui/tests/backup-recovery-browser.mjs';
 import { chromium } from '../ui/node_modules/playwright/index.mjs';
@@ -19,6 +20,7 @@ const appContainer = process.argv.includes('--app-container') ? arg('--app-conta
 const backupSeedOnly = process.argv.includes('--backup-seed-only');
 const warningOnly = process.argv.includes('--exception-warning-only');
 const exceptionSlaOnly = process.argv.includes('--exception-sla-only');
+const operationalAlertsOnly = process.argv.includes('--operational-alerts-only');
 const oidcProxyPort = warningOnly || exceptionSlaOnly ? arg('--oidc-proxy-port') : null;
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname),'..');
 const utcMicros=value=>{
@@ -27,7 +29,9 @@ const utcMicros=value=>{
   return Number.isFinite(millis)?millis*1000+Number(fraction||0):NaN;
 };
 await mkdir(evidence, {recursive:true, mode:0o700});
-const browser = await chromium.launch({headless:true});
+const browser = await chromium.launch({headless:true,
+  ...(process.env.CHROMIUM_EXECUTABLE_PATH
+    ? {executablePath:process.env.CHROMIUM_EXECUTABLE_PATH} : {})});
 const context = await browser.newContext({viewport:{width:1440,height:1000},deviceScaleFactor:1});
 const page = await context.newPage();
 const counts = {bootstrap:0, nativeActivation:0, accessGroup:0, membership:0,
@@ -170,7 +174,7 @@ async function waitForHostStatus(status,timeoutMs=60000) {
 async function waitForContainerHealthy(timeoutMs=90000) {
   const until=Date.now()+timeoutMs;
   while(Date.now()<until){
-    try { if(docker(['inspect','--format','{{.State.Health.Status}}','volt-g7-observer-journey'])==='healthy')return; } catch {}
+    try { if(docker(['inspect','--format','{{.State.Health.Status}}',appContainer])==='healthy')return; } catch {}
     await page.waitForTimeout(1000);
   }
   throw new Error('disposable application did not recover to healthy after restart');
@@ -251,7 +255,8 @@ try {
   const catalogue=await api('/api/v1/assessment/administration/catalogue');
   if(catalogue.status!==200)throw new Error(`administration catalogue failed with ${catalogue.status}`);
   const grant=catalogue.body.caller.grantable;
-  const groupId=warningOnly?'00000000-0000-4000-8000-000000000024':crypto.randomUUID();
+  const groupId=warningOnly?'00000000-0000-4000-8000-000000000024':
+    operationalAlertsOnly?'00000000-0000-4000-8000-000000000042':crypto.randomUUID();
   const scope={group_ids:['*'],source_families:['*'],environments:['*'],service_ids:['*'],membership_mode:'all_current'};
   const limits={...grant.limits,allowed_environments:grant.limits.allowed_environments?.length?grant.limits.allowed_environments:['*'],
     allowed_service_ids:grant.limits.allowed_service_ids?.length?grant.limits.allowed_service_ids:['*']};
@@ -259,7 +264,8 @@ try {
     required_approver_count:1,prohibited_action_pairs:[]};
   const actions=['observer.timing.read','observer.timing.configure',
     'backup.settings.read','backup.settings.configure','assessment.read','audit.read',
-    ...(warningOnly?['acceptance.submit','acceptance.approve','warning.route.manage','warning.actor_link.manage']:[]),
+    ...(warningOnly?['acceptance.submit','acceptance.approve','warning.route.manage','warning.actor_link.manage',
+      'owners.directory.read','ownership.team.manage']:[]),
     ...(exceptionSlaOnly?['acceptance.submit','acceptance.approve','acceptance.reject','acceptance.revoke',
       'owners.directory.read','owners.assign','ownership.team.manage','portion.define','portion.transfer','remediation.confirm_portion','report.create','report.read',
       'policy.sla.publish','policy.read']:[])];
@@ -1514,6 +1520,19 @@ try {
   if (warningOnly) {
     const seeded=JSON.parse(await readFile(path.join(evidence,'warning-fixture-ids.json'),'utf8'));
     const findingId=seeded.group, occurrenceId=seeded.occurrence;
+    const ownerHead=await api('/api/v1/assessment/administration/catalogue');
+    if(ownerHead.status!==200)throw new Error('warning workflow owner setup could not read authority head');
+    const ownerDirectoryId=crypto.randomUUID();
+    const ownerCreated=await api('/api/v1/assessment/commands',{method:'POST',write:true,
+      body:JSON.stringify({command_id:crypto.randomUUID(),target_id:zero,action:'ownership.team.create',
+        membership_ids:[],expected_revisions:{target:ownerHead.body.policy_revision,
+          policy:ownerHead.body.policy_revision,authority:ownerHead.body.authority_revision,
+          ownership:ownerHead.body.ownership_revision,identity_membership:0,owners:0},
+        payload:{team_id:ownerDirectoryId,display_name:'Synthetic warning accountable team',enabled:true,
+          rationale:'Provide a real eligible owner for the disposable public warning workflow',
+          evidence_ref:'g7-observer-warning-fixture'}})});
+    if(ownerCreated.status!==200)
+      throw new Error(`warning workflow owner setup failed ${ownerCreated.status}: ${JSON.stringify(ownerCreated.body)}`);
     let current=await api('/api/v1/assessment/administration/catalogue');
     for(const destination of [
       {channel_id:'C_FIXTURE_SUCCESS',destination_ref:'fixture-destination'},
@@ -2083,6 +2102,108 @@ try {
       ||after3.body.effective?.revision!==3||after3.body.desired?.values?.request_deadline_seconds!==values1.request_deadline_seconds)
     throw new Error('rollback did not create and apply revision 3 from revision 1');
 
+  // Run while the authenticated policy and applied host timing are present,
+  // before browser fault cases create intentional unknown anchor telemetry.
+  // Recovery still uses the strict post-restart serial observer barrier.
+  if(operationalAlertsOnly){
+    // The fixture deliberately logged out and refreshed the OIDC session
+    // earlier; persist that current cookie rather than the pre-refresh state.
+    await context.storageState({path:path.join(evidence,'recovery-auth-state.json')});
+    const args=['run','python','tools/g7_operational_alert_journey.py','--container',appContainer,
+      '--run-id',path.basename(fixtureRoot).split('.').at(-1),
+      '--api-port',new URL(origin).port,'--root',fixtureRoot,'--evidence',evidence,
+      '--browser-state',path.join(evidence,'recovery-auth-state.json')];
+    try{
+      const stdout=execFileSync('uv',args,{cwd:repoRoot,encoding:'utf8',maxBuffer:1024*1024,
+        env:{...process.env,UV_CACHE_DIR:process.env.UV_CACHE_DIR??'/tmp/volt-g7-uv-cache',
+          G7_OPERATIONAL_RECIPIENT_GROUP_ID:groupId}});
+      await writeFile(path.join(evidence,'operational-alert-journey.stdout'),stdout,{mode:0o600});
+    }catch(error){
+      await writeFile(path.join(evidence,'operational-alert-journey.stdout'),error.stdout??'',{mode:0o600});
+      await writeFile(path.join(evidence,'operational-alert-journey.stderr'),error.stderr??String(error),{mode:0o600});
+      throw error;
+    }
+    await waitForContainerHealthy();
+    await page.goto(origin+'/#administration?section=observer-timing&deployment_id=g7-local',
+      {waitUntil:'domcontentloaded',timeout:30000});
+    await page.getByRole('heading',{name:'Observer timing'}).waitFor({timeout:20000});
+    await page.getByLabel('Observation interval').waitFor({timeout:15000});
+    await page.getByRole('button',{name:'Refresh observer state'}).click();
+
+    // This mode owns the operational-alert acceptance journey. Do not fall
+    // through into the separate observer fault/restart suite below: that
+    // suite deliberately tears down the browser context after its own proof.
+    // Exercise the real authenticated incidents endpoint and rendered
+    // consumer here before returning to the maintained wrapper.
+    const session=await api('/api/v1/auth/session');
+    const scope=session.body?.authority?.group_scopes?.[groupId]??[];
+    const roles=session.body?.authority?.group_roles?.[groupId]??[];
+    if(session.status!==200||session.body?.authenticated!==true
+      ||!session.body.access_groups?.includes(groupId)
+      ||!roles.includes('g7-operational-alert-reader')
+      ||!scope.some(item=>Array.isArray(item)&&item[0]==='local'&&item[1]==='g7-local'&&item[2]==='all'))
+      throw new Error('operational incident browser read lacks the current recipient group or exact deployment source scope');
+
+    const incidentRead=await api('/api/v1/integrations/incidents?deployment_id=g7-local&limit=50&offset=0');
+    if(incidentRead.status!==200||incidentRead.body?.schema_version!==1
+      ||!Array.isArray(incidentRead.body.items))
+      throw new Error(`scoped operational incident read returned ${incidentRead.status}`);
+    const rows=incidentRead.body.items;
+    const availability=rows.filter(item=>item.deployment_id==='g7-local'
+      &&item.subject_id===`container:g7-local:${path.basename(fixtureRoot).split('.').at(-1)}`
+      &&item.condition==='container_availability');
+    const senderHealth=rows.filter(item=>item.deployment_id==='g7-local'
+      &&item.subject_id===`host-sender:g7-local:${path.basename(fixtureRoot).split('.').at(-1)}`
+      &&item.condition==='host_sender_health');
+    for(const [name,stream,total] of [['availability',availability,4],['senderHealth',senderHealth,2]]){
+      if(stream.length!==total||stream.some((item,index)=>
+        item.transition_kind!==(index%2===0?'opened':'recovered')
+        ||item.transition_sequence!==index+1
+        ||item.predecessor_id!==(index===0?null:stream[index-1].transition_id)
+        ||item.notification?.state!==(name==='availability'&&index===2?'failed':'accepted')
+        ||!Array.isArray(item.notification.attempts)||item.notification.attempts.length!==1
+        ||item.notification.attempts.some(attempt=>!attempt.attempt_id
+          ||attempt.outcome!==(name==='availability'&&index===2?'failed':'accepted'))))
+        throw new Error(`scoped ${name} incident stream is incomplete or lacks truthful delivery attempts`);
+    }
+    await writeFile(path.join(evidence,'operational-browser-consumer.json'),JSON.stringify({
+      session_status:session.status,principal_id:session.body.principal_id,
+      recipient_group_id:groupId,source_scope:['local','g7-local','all'],
+      incident_status:incidentRead.status,item_count:rows.length,
+      streams:[...availability,...senderHealth].map(item=>({
+        condition:item.condition,subject_id:item.subject_id,transition_id:item.transition_id,
+        transition_kind:item.transition_kind,transition_sequence:item.transition_sequence,
+        predecessor_id:item.predecessor_id,notification_state:item.notification.state,
+        attempt_ids:item.notification.attempts.map(attempt=>attempt.attempt_id),
+        attempt_outcomes:item.notification.attempts.map(attempt=>attempt.outcome)}))
+    },null,2)+'\n',{mode:0o600});
+
+    await page.goto(origin+'/#incidents?deployment_id=g7-local',{waitUntil:'domcontentloaded',timeout:30000});
+    await page.getByRole('heading',{name:'Incident history'}).waitFor({timeout:20000});
+    await page.getByText('6 authorised transitions on this page.').waitFor({timeout:20000});
+    const cards=page.locator('.incident-card');
+    if(await cards.count()!==6)throw new Error('rendered scoped incident history did not contain the six verified transitions');
+    for(const card of await cards.all()){
+      await card.locator('details > summary').click();
+      await card.locator('.incident-identifiers').waitFor({timeout:10000});
+    }
+    const rendered=await captureOperationalCards(cards);
+    assertOperationalRenderedCards([...availability,...senderHealth],rendered);
+    const consumerPath=path.join(evidence,'operational-browser-consumer.json');
+    const consumer=JSON.parse(await readFile(consumerPath,'utf8'));
+    consumer.rendered=rendered;
+    await writeFile(consumerPath,JSON.stringify(consumer,null,2)+'\n',{mode:0o600});
+    await page.screenshot({path:path.join(evidence,'operational-incidents-current.png'),fullPage:true});
+    counts.operationalIncidentConsumer={session:session.status,incidentRead:incidentRead.status,
+      recipientGroup:groupId,sourceScope:'local/g7-local/all',transitions:rows.length,
+      renderedCards:await cards.count(),availabilityAcceptedAttempts:availability.reduce((n,item)=>n+item.notification.attempts.length,0),
+      senderHealthAcceptedAttempts:senderHealth.reduce((n,item)=>n+item.notification.attempts.length,0)};
+    counts.status='passed';
+    await writeFile(path.join(evidence,'browser-journey.json'),JSON.stringify(counts,null,2)+'\n',{mode:0o600});
+    await browser.close();
+    process.exit(0);
+  }
+
   // Restart each independent host process and prove its persisted work and
   // consumer progress survive process replacement.
   const hostStateDir=path.join(fixtureRoot,'host','state');
@@ -2112,7 +2233,7 @@ try {
   const progressPath=path.join(fixtureRoot,'scheduler','progress.json');
   const stallMarker='/run/uvm-g7-scheduler/test-stall';
   const lastProgress=JSON.parse(await readFile(progressPath,'utf8'));
-  docker(['exec','volt-g7-observer-journey','touch',stallMarker]);
+  docker(['exec',appContainer,'touch',stallMarker]);
   try {
     await page.waitForTimeout(18000);
     let observerState=JSON.parse(await readFile(observerStatePath,'utf8'));
@@ -2120,7 +2241,7 @@ try {
       throw new Error('real scheduler stall did not fail host scheduler progress health');
     counts.schedulerStall=1;
     counts.healthFaults.push('real_scheduler_stall');
-    docker(['exec','-u','0','volt-g7-observer-journey','rm','-f','/run/uvm-g7-scheduler/progress.json']);
+    docker(['exec','-u','0',appContainer,'rm','-f','/run/uvm-g7-scheduler/progress.json']);
     observerState=await waitForJson(observerStatePath,state=>state.scheduler?.status==='stale_or_nonprogressing'
       &&state.scheduler?.loop_sequence===null);
     counts.healthFaults.push('missing_scheduler_progress');
@@ -2130,14 +2251,14 @@ try {
       monotonic_ns:Number(lastProgress.monotonic_ns)+120_000_000_000};
     const futurePath=path.join('/tmp',`volt-g7-progress-future-${crypto.randomUUID()}.json`);
     await writeFile(futurePath,JSON.stringify(future)+'\n',{mode:0o644});
-    docker(['cp',futurePath,'volt-g7-observer-journey:/tmp/progress.future.json']);
-    docker(['exec','-u','0','volt-g7-observer-journey','cp','/tmp/progress.future.json','/run/uvm-g7-scheduler/progress.json']);
-    docker(['exec','-u','0','volt-g7-observer-journey','chmod','0644','/run/uvm-g7-scheduler/progress.json']);
+    docker(['cp',futurePath,`${appContainer}:/tmp/progress.future.json`]);
+    docker(['exec','-u','0',appContainer,'cp','/tmp/progress.future.json','/run/uvm-g7-scheduler/progress.json']);
+    docker(['exec','-u','0',appContainer,'chmod','0644','/run/uvm-g7-scheduler/progress.json']);
     await unlink(futurePath);
     const futureState=await waitForJson(observerStatePath,state=>state.scheduler?.sample_age_seconds<0);
     if(futureState.scheduler.status!=='stale_or_nonprogressing')throw new Error('future scheduler heartbeat was accepted');
     counts.healthFaults.push('future_scheduler_progress');
-  } finally { docker(['exec','volt-g7-observer-journey','rm','-f',stallMarker]); }
+  } finally { docker(['exec',appContainer,'rm','-f',stallMarker]); }
   await waitForJson(observerStatePath,state=>state.scheduler?.status==='healthy',25000);
   counts.healthFaults.push('scheduler_recovered');
 
@@ -2181,7 +2302,18 @@ try {
   hostControl('controller','stop');
   await fillValues(values4);
   await page.getByRole('button',{name:'Save timing settings'}).click();
-  await page.getByText(/Desired revision 4 recorded/).waitFor({timeout:15000});
+  try {
+    await page.getByText(/Desired revision 4 recorded/).waitFor({timeout:15000});
+  } catch(error) {
+    const readback=await api('/api/v1/operations/observer-settings/g7-local');
+    await writeFile(path.join(evidence,'revision4-save-diagnostics.json'),JSON.stringify({
+      api_status:readback.status,desired:readback.body?.desired,revisions:readback.body?.revisions,
+      notices:await page.locator('.observer-notice').allInnerTexts().catch(()=>[]),
+      state:await page.locator('.observer-state').innerText().catch(()=>null),
+      alert_text:await page.locator('[role=alert]').allInnerTexts().catch(()=>[])
+    },null,2)+'\n',{mode:0o600});
+    throw error;
+  }
   hostControl('controller','tighten-policy');
   const failed=await waitForHostStatus('failed',30000);
   if(failed.body.desired?.revision!==4||failed.body.effective?.revision!==3
@@ -2254,14 +2386,14 @@ try {
     throw new Error('revision 7 was not pending before whole-container outage');
   const beforeOutageObserver=JSON.parse(await readFile(observerStatePath,'utf8'));
   const beforeOutageSupervisor=JSON.parse(await readFile(supervisorStatePath,'utf8'));
-  docker(['stop','volt-g7-observer-journey']);
+  docker(['stop',appContainer]);
   await waitForJson(observerStatePath,state=>state.loop_sequence>beforeOutageObserver.loop_sequence,15000);
   await waitForJson(supervisorStatePath,state=>state.loop_sequence>beforeOutageSupervisor.loop_sequence,15000);
   const outageReadbacks=await Promise.all(['observer-readback.json','supervisor-readback.json'].map(async name=>
     JSON.parse(await readFile(path.join(hostStateDir,name),'utf8'))));
   if(outageReadbacks.some(item=>item.revision!==6))
     throw new Error('host consumers did not preserve revision 6 through the app outage');
-  docker(['start','volt-g7-observer-journey']);
+  docker(['start',appContainer]);
   await waitForContainerHealthy(150000);
   await page.reload({waitUntil:'domcontentloaded'});
   hostControl('controller','resume');
@@ -2334,7 +2466,12 @@ try {
   // API and verify the deployment becomes non-disclosing to that actor.
   const groups=await api('/api/v1/assessment/access-groups');
   const group=groups.body.items?.find(item=>item.display_name==='Disposable observer operators');
-  if(!group)throw new Error('disposable access group missing during grant-withdrawal check');
+  if(!group){
+    await writeFile(path.join(evidence,'grant-withdrawal-group-diagnostics.json'),JSON.stringify({
+      status:groups.status,body:groups.body
+    },null,2)+'\n',{mode:0o600});
+    throw new Error('disposable access group missing during grant-withdrawal check');
+  }
   const cat=await api('/api/v1/assessment/administration/catalogue');
   const withdrawn=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:JSON.stringify({
     command_id:crypto.randomUUID(),target_id:zero,action:'access_group.membership.set',membership_ids:[],

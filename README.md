@@ -10,7 +10,7 @@ This repository is under active development. It contains Python services, a Reac
 
 The design uses namespaced, source-native vulnerability identifiers as the primary grouping key. A shared CVE alone should not merge separate groups. Synthetic local suites currently exercise distinct source-native groups despite shared CVEs, retained identity and detection history across rebuilds, and ingestion completeness and freshness checks with replay and conflict handling. These suites do not establish live scanner, DefectDojo or deployment integration.
 
-The current checkout does not provide an end-user installer or a documented checkout-to-running-application path. `Dockerfile.g7` is a development packaging target, not a supported deployment recipe. Do not treat DefectDojo's own installation instructions as a VOLT installation method.
+The checkout has no end-user installer. It now documents a private, loopback-only local preview built from `Dockerfile.g7`; this is synthetic local development evidence and is not a supported production deployment. Do not treat DefectDojo's own installation instructions as a VOLT installation method.
 
 ## Architecture and dependencies
 
@@ -45,7 +45,7 @@ These checks do not establish compatibility with live scanners, DefectDojo deplo
 
 ## Container packaging
 
-`Dockerfile.g7` describes an optional development packaging target based on pinned DefectDojo CE and Valkey images. Its entrypoint requires external secret files and configuration, and the runbook treats it as a development target. There is no supported public `docker run` command, default login or complete end-user installation procedure in this repository. The image is not a production deployment recipe. Review [RUNBOOK.md](RUNBOOK.md) and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) before working with the packaging target; built-image redistribution notices are not yet complete.
+`Dockerfile.g7` describes an optional development packaging target based on pinned DefectDojo CE and Valkey images. Its entrypoint requires secret files and configuration. The repository now documents a private, loopback-only local preview through [docs/local-preview.md](docs/local-preview.md); this synthetic setup is not a production deployment recipe. Review [RUNBOOK.md](RUNBOOK.md) and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) before working with the packaging target; built-image redistribution notices are not yet complete.
 
 ## Data and security
 

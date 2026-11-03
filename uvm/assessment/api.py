@@ -5067,13 +5067,36 @@ def install_assessment_routes(app: FastAPI) -> None:
             _error(403, "incident_ingestion_forbidden",
                    "A dedicated incident submission service is required")
         from uvm.assessment.incidents import (IncidentConflict, IncidentForbidden,
-                                              ingest_transition)
+            ingest_transition, verified_future_skew)
         try:
-            return ingest_transition(engine, principal, payload, now=now_utc())
+            request_now = now_utc()
+            # Reject unbound deployments before consulting deployment-scoped
+            # timing state, so cross-deployment probes get the same nondisclosing
+            # service-binding denial as disabled or reassigned bindings.
+            if not isinstance(payload, dict):
+                _error(409, "incident_transition_conflict", "Incident transition fields do not match the registered schema")
+            from uvm.persistence.incident_schema import g7_incident_service_bindings
+            binding = None
+            with engine.connect() as connection:
+                binding = connection.execute(sa.select(g7_incident_service_bindings).where(
+                    g7_incident_service_bindings.c.principal_id == principal,
+                    g7_incident_service_bindings.c.deployment_id == payload.get("deployment_id"),
+                    g7_incident_service_bindings.c.subject_id == payload.get("subject_id"),
+                    g7_incident_service_bindings.c.condition == payload.get("condition"),
+                    g7_incident_service_bindings.c.enabled.is_(True))).mappings().first()
+            if (binding is None or binding["producer_id"] != payload.get("producer_id")
+                    or type(payload.get("configuration_revision")) is not int
+                    or int(binding["configuration_revision"]) != payload.get("configuration_revision")):
+                _error(403, "incident_ingestion_forbidden", "Current incident service binding is required")
+            future_skew = verified_future_skew(engine, payload.get("deployment_id"), request_now)
+            return ingest_transition(engine, principal, payload, now=request_now,
+                future_skew_seconds=future_skew)
         except IncidentForbidden:
             _error(403, "incident_ingestion_forbidden", "Current incident service binding is required")
         except IncidentConflict as exc:
             _error(409, "incident_transition_conflict", str(exc), {"retryable": "stream gap" in str(exc)})
+        except HTTPException:
+            raise
         except Exception as exc:
             _LOG.exception("incident transition transaction failed: %s", type(exc).__name__)
             _error(503, "incident_projection_unavailable", "Incident transition was not committed")
@@ -5087,15 +5110,25 @@ def install_assessment_routes(app: FastAPI) -> None:
             _error(403, "incident_ingestion_forbidden",
                    "A dedicated incident submission service is required")
         from uvm.assessment.incidents import (IncidentConflict, IncidentForbidden,
-                                              ingest_delivery_outcome)
+            ingest_delivery_outcome, verified_future_skew)
         try:
+            request_now = now_utc()
+            with engine.begin() as connection:
+                transition = connection.execute(sa.select(g7_incident_transitions.c.deployment_id)
+                    .where(g7_incident_transitions.c.transition_id == transition_id)).scalar_one_or_none()
+            if transition is None:
+                _error(403, "incident_ingestion_forbidden",
+                    "Delivery attempt is not bound to a projected transition")
+            future_skew = verified_future_skew(engine, transition, request_now)
             return ingest_delivery_outcome(engine, principal, transition_id, payload,
-                now=now_utc())
+                now=request_now, future_skew_seconds=future_skew)
         except IncidentForbidden:
             _error(403, "incident_ingestion_forbidden",
                    "Current incident service binding is required")
         except IncidentConflict as exc:
             _error(409, "incident_transition_conflict", str(exc))
+        except HTTPException:
+            raise
         except Exception as exc:
             _LOG.exception("incident delivery projection failed: %s", type(exc).__name__)
             _error(503, "incident_projection_unavailable",

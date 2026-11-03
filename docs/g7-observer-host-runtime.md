@@ -58,7 +58,7 @@ These health observations do not change the meaning of `applied`.
 The maintained integration entry point is:
 
 ```sh
-G7_EVIDENCE_DIR=/tmp/volt-g7-observer-evidence \
+G7_EVIDENCE_DIR="${TMPDIR:-/tmp}/volt-g7-observer-evidence/run-id" \
   bash tools/g7_container_journey.sh --observer-settings-only
 ```
 

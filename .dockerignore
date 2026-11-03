@@ -1,0 +1,40 @@
+# Repository metadata and local agent state
+.git/
+.agents/
+.codex/
+
+# Local environments, credentials, and private evidence
+**/.env*
+!**/.env.example
+**/evidence/
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.crt
+**/*.cer
+**/*.db
+**/*.sqlite
+**/*.log
+
+# Dependency caches and generated outputs
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.coverage*
+**/.tox/
+**/.nox/
+**/.cache/
+**/node_modules/
+**/dist/
+**/test-results/
+**/playwright-report/
+**/build/
+
+# Editor and operating-system state
+**/.DS_Store
+**/.idea/
+**/.vscode/

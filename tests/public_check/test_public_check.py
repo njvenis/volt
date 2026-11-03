@@ -11,6 +11,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 CHECKER = REPO / "tools" / "public_check.py"
+APPROVED_LOGO = REPO / "docs" / "assets" / "volt-logo.png"
 
 
 class TrackedFileScanTests(unittest.TestCase):
@@ -57,6 +58,65 @@ class TrackedFileScanTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("data/payload", result.stdout)
         self.assertIn("non-UTF-8/binary file is not approved", result.stdout)
+
+    def test_exact_approved_logo_png_is_allowed(self) -> None:
+        logo = self.root / "docs" / "assets" / "volt-logo.png"
+        logo.parent.mkdir(parents=True)
+        logo.write_bytes(APPROVED_LOGO.read_bytes())
+        subprocess.run(
+            ["git", "-C", str(self.root), "add", "docs/assets/volt-logo.png"],
+            check=True,
+        )
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("1 exact approved PNG asset", result.stdout)
+
+    def test_different_bytes_at_approved_logo_path_are_rejected(self) -> None:
+        logo = self.root / "docs" / "assets" / "volt-logo.png"
+        logo.parent.mkdir(parents=True)
+        logo.write_bytes(b"\x89PNG\r\n\x1a\nnot the approved logo")
+        subprocess.run(
+            ["git", "-C", str(self.root), "add", "docs/assets/volt-logo.png"],
+            check=True,
+        )
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("docs/assets/volt-logo.png", result.stdout)
+        self.assertIn("non-UTF-8/binary file is not approved", result.stdout)
+
+    def test_approved_logo_bytes_at_another_path_are_rejected(self) -> None:
+        renamed = self.root / "docs" / "assets" / "renamed-secret.png"
+        renamed.parent.mkdir(parents=True)
+        renamed.write_bytes(APPROVED_LOGO.read_bytes())
+        subprocess.run(
+            ["git", "-C", str(self.root), "add", "docs/assets/renamed-secret.png"],
+            check=True,
+        )
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("docs/assets/renamed-secret.png", result.stdout)
+        self.assertIn("non-UTF-8/binary file is not approved", result.stdout)
+
+    def test_archive_remains_rejected(self) -> None:
+        archive = self.root / "docs" / "assets" / "logo.zip"
+        archive.parent.mkdir(parents=True)
+        archive.write_bytes(b"PK\x03\x04synthetic archive")
+        subprocess.run(
+            ["git", "-C", str(self.root), "add", "docs/assets/logo.zip"],
+            check=True,
+        )
+
+        result = self.scan()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("docs/assets/logo.zip", result.stdout)
+        self.assertIn("archive is not approved", result.stdout)
 
 
 if __name__ == "__main__":

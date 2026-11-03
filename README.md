@@ -95,6 +95,10 @@ flowchart TD
     VOLT --> STATE["VOLT persistence: identity, decisions and history"]
     VOLT --> GH["GitHub: remediation coordination"]
     IDP["OIDC identity provider"] --> VOLT
+    classDef surface fill:#FFFFFF,stroke:#86818F,color:#252331
+    classDef primary fill:#C4B5FD,stroke:#6442B5,color:#252331
+    class UI,CE,STATE,GH,IDP surface
+    class VOLT primary
 ```
 
 **DefectDojo boundary.** VOLT uses supported interfaces and does not write directly to DefectDojo database tables. Upstream installation documentation describes DefectDojo itself.

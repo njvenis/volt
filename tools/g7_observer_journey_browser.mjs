@@ -2128,6 +2128,70 @@ try {
     await page.getByRole('heading',{name:'Observer timing'}).waitFor({timeout:20000});
     await page.getByLabel('Observation interval').waitFor({timeout:15000});
     await page.getByRole('button',{name:'Refresh observer state'}).click();
+
+    // This mode owns the operational-alert acceptance journey. Do not fall
+    // through into the separate observer fault/restart suite below: that
+    // suite deliberately tears down the browser context after its own proof.
+    // Exercise the real authenticated incidents endpoint and rendered
+    // consumer here before returning to the maintained wrapper.
+    const session=await api('/api/v1/auth/session');
+    const scope=session.body?.authority?.group_scopes?.[groupId]??[];
+    const roles=session.body?.authority?.group_roles?.[groupId]??[];
+    if(session.status!==200||session.body?.authenticated!==true
+      ||!session.body.access_groups?.includes(groupId)
+      ||!roles.includes('g7-operational-alert-reader')
+      ||!scope.some(item=>Array.isArray(item)&&item[0]==='local'&&item[1]==='g7-local'&&item[2]==='all'))
+      throw new Error('operational incident browser read lacks the current recipient group or exact deployment source scope');
+
+    const incidentRead=await api('/api/v1/integrations/incidents?deployment_id=g7-local&limit=50&offset=0');
+    if(incidentRead.status!==200||incidentRead.body?.schema_version!==1
+      ||!Array.isArray(incidentRead.body.items))
+      throw new Error(`scoped operational incident read returned ${incidentRead.status}`);
+    const rows=incidentRead.body.items;
+    const availability=rows.filter(item=>item.deployment_id==='g7-local'
+      &&item.subject_id===`container:g7-local:${path.basename(fixtureRoot).split('.').at(-1)}`
+      &&item.condition==='container_availability');
+    const senderHealth=rows.filter(item=>item.deployment_id==='g7-local'
+      &&item.subject_id===`host-sender:g7-local:${path.basename(fixtureRoot).split('.').at(-1)}`
+      &&item.condition==='host_sender_health');
+    for(const [name,stream] of [['availability',availability],['senderHealth',senderHealth]]){
+      if(stream.length!==2||stream[0].transition_kind!=='opened'||stream[1].transition_kind!=='recovered'
+        ||stream[0].transition_sequence!==1||stream[1].transition_sequence!==2
+        ||stream[1].predecessor_id!==stream[0].transition_id
+        ||stream.some(item=>item.notification?.state!=='accepted'
+          ||!Array.isArray(item.notification.attempts)||item.notification.attempts.length<1
+          ||item.notification.attempts.some(attempt=>attempt.outcome!=='accepted'||!attempt.attempt_id)))
+        throw new Error(`scoped ${name} incident stream is incomplete or lacks accepted delivery attempts`);
+    }
+    await writeFile(path.join(evidence,'operational-browser-consumer.json'),JSON.stringify({
+      session_status:session.status,principal_id:session.body.principal_id,
+      recipient_group_id:groupId,source_scope:['local','g7-local','all'],
+      incident_status:incidentRead.status,item_count:rows.length,
+      streams:[...availability,...senderHealth].map(item=>({
+        condition:item.condition,subject_id:item.subject_id,transition_id:item.transition_id,
+        transition_kind:item.transition_kind,transition_sequence:item.transition_sequence,
+        predecessor_id:item.predecessor_id,notification_state:item.notification.state,
+        attempt_ids:item.notification.attempts.map(attempt=>attempt.attempt_id),
+        attempt_outcomes:item.notification.attempts.map(attempt=>attempt.outcome)}))
+    },null,2)+'\n',{mode:0o600});
+
+    await page.goto(origin+'/#incidents?deployment_id=g7-local',{waitUntil:'domcontentloaded',timeout:30000});
+    await page.getByRole('heading',{name:'Incident history'}).waitFor({timeout:20000});
+    await page.getByText('4 authorised transitions on this page.').waitFor({timeout:20000});
+    const cards=page.locator('.incident-card');
+    if(await cards.count()!==4)throw new Error('rendered scoped incident history did not contain the four verified transitions');
+    for(const card of await cards.all()){
+      await card.locator('details > summary').click();
+      await card.getByText('accepted',{exact:true}).first().waitFor({timeout:10000});
+    }
+    counts.operationalIncidentConsumer={session:session.status,incidentRead:incidentRead.status,
+      recipientGroup:groupId,sourceScope:'local/g7-local/all',transitions:rows.length,
+      renderedCards:await cards.count(),availabilityAcceptedAttempts:availability.reduce((n,item)=>n+item.notification.attempts.length,0),
+      senderHealthAcceptedAttempts:senderHealth.reduce((n,item)=>n+item.notification.attempts.length,0)};
+    counts.status='passed';
+    await writeFile(path.join(evidence,'browser-journey.json'),JSON.stringify(counts,null,2)+'\n',{mode:0o600});
+    await browser.close();
+    process.exit(0);
   }
 
   // Restart each independent host process and prove its persisted work and

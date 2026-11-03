@@ -37,6 +37,14 @@ class LocalPreviewSafetyTests(unittest.TestCase):
         self.assertIn("http://127.0.0.1:9000", config["allowed_endpoint_origins"])
         self.assertEqual(config["callback_url"], "http://127.0.0.1:8180/api/v1/auth/callback")
 
+    def test_preview_grant_envelope_has_a_synthetic_exact_source_and_complete_bounds(self):
+        envelope = preview.preview_grantable_envelope()
+        self.assertEqual(envelope["source_scopes"], [{"source_family": "local",
+            "source_account_id": "volt-local-preview", "scope_key": "all"}])
+        self.assertEqual(envelope["target_scope"]["source_families"], ["local"])
+        self.assertEqual(envelope["limits"]["allowed_environments"], ["*"])
+        self.assertEqual(envelope["limits"]["allowed_service_ids"], ["*"])
+
     def test_destroy_targets_only_resources_with_exact_instance_label(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"XDG_STATE_HOME": temp}):
             root = preview.state_dir("demo")

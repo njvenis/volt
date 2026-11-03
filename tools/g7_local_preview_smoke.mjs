@@ -45,7 +45,7 @@ try{
     ensure(envelope?.actions?.includes('access_group.read'),'local_bootstrap_action_envelope_missing');
     const groupId=crypto.randomUUID(), commandId=crypto.randomUUID();
     const created=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:{command_id:commandId,target_id:zero,membership_ids:[],action:'access_group.create',expected_revisions:{target:catalogue.policy_revision,policy:catalogue.policy_revision,authority:catalogue.authority_revision,ownership:catalogue.ownership_revision,identity_membership:0,owners:0},payload:{access_group_id:groupId,display_name:'Local preview audit smoke',description:'Synthetic local administrator smoke operation',enabled:true,source_scopes:[{source_family:'local',source_account_id:'volt-local-preview',scope_key:'all'}],permissions:[{permission_id:crypto.randomUUID(),role_id:crypto.randomUUID(),action:'access_group.read',target_scope:{group_ids:[groupId],source_families:['local'],environments:[],service_ids:[],membership_mode:'explicit'},limits:envelope.limits,separation_of_duties:envelope.separation_of_duties??{approval_requires_distinct_actor:true,prohibit_requester_approval:true,required_approver_count:1,prohibited_action_pairs:[]}}],rationale:'Verify a public audited administrator operation in the synthetic local preview',evidence_ref:'local-preview-smoke'}}});
-    ensure(created.status===200,`public_admin_create_failed_${created.status}`);
+    ensure(created.status===200,`public_admin_create_failed_${created.status}_${JSON.stringify(created.body)}`);
     saved={group_id:groupId,command_id:commandId};
     await writeFile(`${evidence}/smoke-state.json`,JSON.stringify(saved,null,2)+'\n',{mode:0o600});
   }

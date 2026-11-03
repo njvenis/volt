@@ -74,6 +74,24 @@ def oidc_configuration(api_origin: str, oidc_origin: str) -> dict:
     }
 
 
+def preview_grantable_envelope() -> dict:
+    return {
+        "actions": ["access_group.read", "ownership.team.read", "ownership.team.manage"],
+        "target_scope": {"group_ids": ["*"], "source_families": ["local"],
+            "environments": ["*"], "service_ids": ["*"], "membership_mode": "all_current"},
+        "source_scopes": [{"source_family": "local", "source_account_id": "volt-local-preview",
+            "scope_key": "all"}],
+        "limits": {"maximum_acceptance_days": None, "maximum_severity": None,
+            "whole_group_confirmation": False, "allowed_environments": ["*"],
+            "allowed_service_ids": ["*"], "allowed_sla_clock_bases": [],
+            "allowed_sla_severities": [], "allowed_sla_start_sources": [],
+            "maximum_sla_duration_seconds": None, "allow_sla_backfill": False,
+            "maximum_deadline_extension_seconds": None, "allowed_identity_scalar_fields": {}},
+        "separation_of_duties": {"approval_requires_distinct_actor": True,
+            "prohibit_requester_approval": True, "required_approver_count": 1,
+            "prohibited_action_pairs": []}}
+
+
 def initialize(args) -> None:
     dirty = run("git", "status", "--porcelain", capture=True)
     if dirty:
@@ -144,20 +162,7 @@ def start(args) -> None:
         "UVM_OIDC_INTERNAL_ENDPOINT_ORIGIN": "http://127.0.0.1:9000",
         "UVM_G3_BOOTSTRAP_PRINCIPAL": "volt-local-preview-admin",
         "UVM_NATIVE_BOOTSTRAP_PRINCIPALS": "volt-local-preview-admin",
-        "UVM_NATIVE_GRANTABLE_ENVELOPE": json.dumps({
-            "actions": ["access_group.read", "ownership.team.read", "ownership.team.manage"],
-            "target_scope": {"group_ids": ["*"], "source_families": ["local"],
-                "environments": ["*"], "service_ids": ["*"], "membership_mode": "all_current"},
-            "source_scopes": [{"source_family": "local", "source_account_id": "volt-local-preview",
-                "scope_key": "all"}],
-            "limits": {"maximum_acceptance_days": None, "maximum_severity": None,
-                "whole_group_confirmation": False, "allowed_environments": [], "allowed_service_ids": [],
-                "allowed_sla_clock_bases": [], "allowed_sla_severities": [], "allowed_sla_start_sources": [],
-                "maximum_sla_duration_seconds": None, "allow_sla_backfill": False,
-                "maximum_deadline_extension_seconds": None, "allowed_identity_scalar_fields": {}},
-            "separation_of_duties": {"approval_requires_distinct_actor": True,
-                "prohibit_requester_approval": True, "required_approver_count": 1,
-                "prohibited_action_pairs": []}}, separators=(",", ":")),
+        "UVM_NATIVE_GRANTABLE_ENVELOPE": json.dumps(preview_grantable_envelope(), separators=(",", ":")),
         "UVM_G7_RECOVERY_TLS_CERT_FILE": "/run/uvm-g7-secrets/recovery-server.crt",
         "UVM_G7_RECOVERY_TLS_KEY_FILE": "/run/uvm-g7-secrets/recovery-server.key",
         "UVM_G7_RECOVERY_TLS_CA_FILE": "/run/uvm-g7-secrets/recovery-ca.crt",

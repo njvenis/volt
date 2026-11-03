@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Host-only durable G7 operational alert sender; never mounted into UVM."""
 from __future__ import annotations
-import argparse, datetime as dt, fcntl, hashlib, json, os, re, ssl, subprocess, sys, time, urllib.error, urllib.request, uuid
+import argparse, datetime as dt, fcntl, hashlib, json, os, re, ssl, subprocess, sys, time, threading, urllib.error, urllib.request, uuid
 from pathlib import Path
+from contextlib import contextmanager
 from urllib.parse import urlparse
 
 UTC = dt.timezone.utc
@@ -30,7 +31,7 @@ def atomic(path, data):
         try: tmp.unlink()
         except FileNotFoundError: pass
 
-def load_catalog(path):
+def parse_catalog(path):
     raw=Path(path).read_bytes(); c=json.loads(raw)
     required={'generation','deployment_id','subject_id','principal_id','producer_id','condition','binding_revision','container_id','image_id','deployment_label','run_label','recovery_epoch','observer_state','supervisor_state','observer_pidfile','active_file','scheduler_file','observer_readback','supervisor_readback','journal','health_journal','api_url','api_token_file','ca_file','route','retry_count','retry_age_seconds','freshness_seconds','request_deadline_seconds','app_stream_absent_verified'}
     if not isinstance(c,dict) or set(c)!=required or type(c['generation']) is not int or c['generation']<1: raise ValueError('catalog-shape-invalid')
@@ -55,15 +56,78 @@ def load_catalog(path):
         if type(c[k]) is not int or c[k] < (1 if k!='retry_count' else 0): raise ValueError('catalog-bound-invalid')
     if c['retry_count']>5 or c['retry_age_seconds']>300 or c['freshness_seconds']>86400 or c['request_deadline_seconds']>60:
         raise ValueError('catalog-bound-invalid')
-    generation_file=Path(path).with_suffix(Path(path).suffix+'.generation')
-    if generation_file.exists():
-        try: highwater=json.loads(generation_file.read_bytes())
-        except Exception as exc: raise ValueError('catalog-generation-highwater-invalid') from exc
-        if type(highwater) is not int or c['generation']<highwater:
-            raise ValueError('catalog-generation-rollback')
-    else:
-        atomic(generation_file,canonical(c['generation'])+b'\n')
     c['_path']=str(Path(path).resolve()); c['_digest']=sha(canonical(c)); return c
+
+_HELD_LOCKS=threading.local()
+
+@contextmanager
+def stream_locks(c, purpose):
+    """Aliases share inode-independent locks on both durable journal names.
+
+    Lock order is owner -> authority -> individual journal; supervisor uses only
+    authority/journal locks so it can observe a wedged owner.
+    """
+    paths=sorted({str(Path(c[key]).resolve()) for key in ('journal','health_journal')})
+    if len(paths)!=2: raise ValueError('catalog-journals-must-be-distinct')
+    lock_paths=[Path(path+'.'+purpose+'.lock') for path in paths]
+    if purpose=='authority':lock_paths.append(Path(c['_path']).with_suffix('.lock'))
+    descriptors=[]
+    owned=getattr(_HELD_LOCKS,'paths',set()); _HELD_LOCKS.paths=owned
+    try:
+        for lock in sorted(set(lock_paths)):
+            lock.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+            if str(lock) in owned: continue
+            fd=os.open(lock,os.O_RDWR|os.O_CREAT,0o600); descriptors.append((str(lock),fd))
+            fcntl.flock(fd,fcntl.LOCK_EX); owned.add(str(lock))
+        yield
+    finally:
+        for name,fd in reversed(descriptors):
+            owned.remove(name); fcntl.flock(fd,fcntl.LOCK_UN); os.close(fd)
+
+
+def reserve_catalog(c):
+    # Each journal independently remembers its companion and authority high-water.
+    # Reserve both before returning authority; partial writes only hold availability.
+    pair={key:str(Path(c[key]).resolve()) for key in ('journal','health_journal')}
+    binding_file=Path(c['_path']+'.journals')
+    if binding_file.exists() and read_json(binding_file)!=pair:
+        raise ValueError('catalog-journal-binding-changed')
+    marks=[]
+    for key in pair:
+        path=Path(pair[key]+'.catalog-authority')
+        old=read_json(path) if path.exists() else None
+        if path.exists() and (not isinstance(old,dict) or set(old)!={'generation','catalog_path','journals','catalog_digest'}
+                or type(old.get('generation')) is not int):
+            raise ValueError('catalog-generation-highwater-invalid')
+        if old and (old['journals']!=pair or old['catalog_path']!=c['_path']):
+            raise ValueError('catalog-journal-binding-mismatch')
+        if old and c['generation']<old['generation']: raise ValueError('catalog-generation-rollback')
+        if old and c['generation']==old['generation'] and c['_digest']!=old['catalog_digest']:
+            raise ValueError('catalog-generation-content-conflict')
+        marks.append((path,old))
+    generation_file=Path(c['_path']+'.generation')
+    if generation_file.exists():
+        highwater=read_json(generation_file)
+        if type(highwater) is not int: raise ValueError('catalog-generation-highwater-invalid')
+        if c['generation']<highwater: raise ValueError('catalog-generation-rollback')
+    if not binding_file.exists():atomic(binding_file,canonical(pair)+b'\n')
+    for path,old in marks:
+        if old is None or old['generation']<c['generation']:
+            atomic(path,canonical({'generation':c['generation'],'catalog_path':c['_path'],'journals':pair,'catalog_digest':c['_digest']})+b'\n')
+    if not generation_file.exists() or read_json(generation_file)<c['generation']:
+        atomic(generation_file,canonical(c['generation'])+b'\n')
+
+
+def load_catalog(path, *, authority_locked=False):
+    candidate=parse_catalog(path)
+    def admit():
+        current=parse_catalog(path)
+        if any(Path(current[k]).resolve()!=Path(candidate[k]).resolve() for k in ('journal','health_journal')):
+            raise ValueError('catalog-journal-binding-changed')
+        reserve_catalog(current)
+        return current
+    if authority_locked: return admit()
+    with stream_locks(candidate,'authority'): return admit()
 
 class Journal:
     def __init__(self,path):
@@ -121,42 +185,68 @@ class Journal:
         finally:
             fcntl.flock(fd,fcntl.LOCK_UN); os.close(fd)
     def append(self,kind,fields):
+        return self.append_many([(kind,fields)])[-1]
+
+    def append_many(self, entries):
+        """Publish an admission's intent and SENDING in one durable replacement."""
         self.lock.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
         fd=os.open(self.lock,os.O_RDWR|os.O_CREAT,0o600)
         try:
-            fcntl.flock(fd,fcntl.LOCK_EX); doc=self._read(); body={'sequence':doc['sequence']+1,'previous_digest':doc['head'],'at':stamp(),'kind':kind,**fields}; body['digest']=sha(canonical(body)); doc['records'].append(body); doc['sequence']=body['sequence']; doc['head']=body['digest']; atomic(self.path,canonical(doc)+b'\n'); return body
+            fcntl.flock(fd,fcntl.LOCK_EX); doc=self._read(); added=[]
+            for kind,fields in entries:
+                body={'sequence':doc['sequence']+1,'previous_digest':doc['head'],
+                    'at':stamp(),'kind':kind,**fields}
+                body['digest']=sha(canonical(body)); doc['records'].append(body)
+                doc['sequence']=body['sequence']; doc['head']=body['digest']; added.append(body)
+            atomic(self.path,canonical(doc)+b'\n')
+            return added
         finally: fcntl.flock(fd,fcntl.LOCK_UN); os.close(fd)
+
 
 def inspect_target(c):
     # The only Docker operation this process can invoke is inspect for one configured ID.
-    call_started=time.time()
+    call_started=time.time(); mono_started=time.monotonic_ns()
     p=subprocess.run(['docker','inspect','--type','container',c['container_id']],capture_output=True,text=True,timeout=8,check=False)
-    call_ended=time.time()
+    call_ended=time.time(); mono_ended=time.monotonic_ns()
     if p.returncode: return {'state':'unknown','reason':'inspect-unavailable'}
     try: data=json.loads(p.stdout)
     except Exception: return {'state':'unknown','reason':'inspect-malformed'}
     if not isinstance(data,list) or len(data)!=1: return {'state':'unknown','reason':'inspect-identity'}
-    x=data[0]; labels=x.get('Config',{}).get('Labels') or {}; state=x.get('State',{})
+    x=data[0]
+    if not isinstance(x,dict) or not isinstance(x.get('Config'),dict) or not isinstance(x.get('State'),dict):
+        return {'state':'unknown','reason':'inspect-state-shape-or-time-invalid'}
+    labels=x['Config'].get('Labels') or {}; state=x['State']
+    if not isinstance(labels,dict): return {'state':'unknown','reason':'inspect-identity'}
     identity=(x.get('Id')==c['container_id'] and x.get('Image')==c['image_id'] and labels.get('uvm.deployment_id')==c['deployment_label'] and labels.get('uvm.run_id')==c['run_label'])
     if not identity: return {'state':'unknown','reason':'target-context-changed'}
     status=state.get('Status'); running=state.get('Running'); paused=state.get('Paused')
     started=state.get('StartedAt'); finished=state.get('FinishedAt')
     def parse_docker_time(value):
-        if not isinstance(value,str) or value=='0001-01-01T00:00:00Z': return None
-        try: return dt.datetime.fromisoformat(value.replace('Z','+00:00')).timestamp()
+        if not isinstance(value,str) or re.fullmatch(r'0001-01-01T00:00:00(?:\.0{1,9})?Z',value): return None
+        try:
+            parsed=dt.datetime.fromisoformat(value.replace('Z','+00:00'))
+            return parsed.timestamp() if parsed.tzinfo is not None else None
         except Exception: return None
     started_epoch=parse_docker_time(started); finished_epoch=parse_docker_time(finished)
     now=call_ended
+    finished_is_zero=isinstance(finished,str) and re.fullmatch(r'0001-01-01T00:00:00(?:\.0{1,9})?Z',finished) is not None
     if (type(running) is not bool or type(paused) is not bool or call_ended<call_started
+            or abs((call_ended-call_started)-(mono_ended-mono_started)/1e9)>1
+            or call_ended-call_started>10
+            or (status in {'running','exited'} and (started_epoch is None or started_epoch>now+OBSERVER_MAX_FUTURE_SKEW_SECONDS))
             or (status=='running' and (running is not True or paused is not False or started_epoch is None or started_epoch>now+OBSERVER_MAX_FUTURE_SKEW_SECONDS))
-            or (status=='exited' and (running is not False or paused is not False or finished_epoch is None))
+            or (status=='running' and ((finished_epoch is None and not finished_is_zero)
+                or (finished_epoch is not None and finished_epoch>started_epoch)))
+            or (status=='exited' and (running is not False or paused is not False or finished_epoch is None
+                or finished_epoch>now+OBSERVER_MAX_FUTURE_SKEW_SECONDS or finished_epoch<started_epoch))
             or (status=='paused' and (running is not True or paused is not True))
             or (status=='restarting' and running is not True)):
         return {'state':'unknown','reason':'inspect-state-shape-or-time-invalid'}
     mapped={'running':'running','exited':'exited','created':'unknown','restarting':'unknown','paused':'unknown','dead':'unknown'}
     return {'state':mapped.get(status,'unknown'),'started_at':started,'started_epoch':started_epoch,
         'finished_at':finished,'finished_epoch':finished_epoch,'inspect_started_epoch':call_started,
-        'inspect_ended_epoch':call_ended,'container_id':x.get('Id'),'image_id':x.get('Image'),
+        'inspect_ended_epoch':call_ended,'inspect_started_monotonic_ns':mono_started,
+        'inspect_ended_monotonic_ns':mono_ended,'container_id':x.get('Id'),'image_id':x.get('Image'),
         'deployment_label':labels.get('uvm.deployment_id'),'run_label':labels.get('uvm.run_id'),
         'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip()}
 
@@ -201,33 +291,26 @@ def current_route(c):
 
 
 def replace_catalog(path, document):
-    """Serialize an operator catalog update against in-flight provider dispatch."""
+    """Reserve authority before publishing a catalog under dispatch's stable lock."""
     path=Path(path)
     candidate_path=path.with_name(path.name+'.candidate-'+uuid.uuid4().hex)
     atomic(candidate_path,canonical(document)+b'\n')
-    try:
-        candidate=load_catalog(candidate_path)
-    finally:
-        for candidate_sidecar in (candidate_path,
-                candidate_path.with_suffix(candidate_path.suffix+'.generation')):
-            try: candidate_sidecar.unlink()
-            except FileNotFoundError: pass
-    lock=path.with_suffix('.lock')
-    fd=os.open(lock,os.O_RDWR|os.O_CREAT,0o600)
-    try:
-        fcntl.flock(fd,fcntl.LOCK_EX)
-        current=load_catalog(path)
-        highwater_file=path.with_suffix(path.suffix+'.generation')
-        highwater=json.loads(highwater_file.read_bytes())
-        if candidate['generation']<=max(current['generation'],highwater):
+    try: candidate=parse_catalog(candidate_path)
+    finally: candidate_path.unlink()
+    current=parse_catalog(path)
+    if any(Path(candidate[k]).resolve()!=Path(current[k]).resolve() for k in ('journal','health_journal')):
+        raise ValueError('catalog-journal-binding-changed')
+    with stream_locks(current,'authority'):
+        current=load_catalog(path,authority_locked=True)
+        if candidate['generation']<=current['generation']:
             raise ValueError('catalog-generation-must-increase')
         if candidate['route']!=current['route'] and candidate['route']['revision']<=current['route']['revision']:
             raise ValueError('catalog-route-revision-must-increase')
+        candidate['_path']=current['_path']
+        candidate['_digest']=sha(canonical({k:v for k,v in candidate.items() if k!='_digest'}))
+        reserve_catalog(candidate)
         atomic(path,canonical(document)+b'\n')
-        atomic(highwater_file,canonical(candidate['generation'])+b'\n')
-        return load_catalog(path)
-    finally:
-        fcntl.flock(fd,fcntl.LOCK_UN); os.close(fd)
+        return load_catalog(path,authority_locked=True)
 
 
 def delivery_body(event, route):
@@ -239,44 +322,111 @@ def delivery_body(event, route):
 
 
 def send_provider(c,j,event,inspection=None):
-    """Admit and perform at most one provider request; retries are durable work."""
-    request_body=delivery_body(event,c['route'])
-    records=j._read()['records']; tid=event['transition_id']
-    outcomes=[r for r in records if r.get('kind')=='ATTEMPT_OUTCOME' and r.get('transition_id')==tid]
-    schedules=[r for r in records if r.get('kind')=='RETRY_SCHEDULE' and r.get('transition_id')==tid]
-    if outcomes and outcomes[-1]['attempt']['outcome'] in {'accepted','uncertain'}: return outcomes[-1]['attempt']
-    if outcomes and outcomes[-1]['attempt'].get('failure_detail')!='rate_limited': return outcomes[-1]['attempt']
-    if schedules:
-        schedule=schedules[-1]
-        consumed={r.get('schedule_sequence') for r in records if r.get('kind')=='RETRY_CONSUMED'}
-        if schedule['sequence'] in consumed: return outcomes[-1]['attempt'] if outcomes else None
-        if time.time()<schedule['due_epoch']: return None
-        if time.time()>schedule['deadline_epoch'] or len(outcomes)>=c['retry_count']+1:
-            j.append('RETRY_EXPIRED',{'transition_id':tid,'schedule_sequence':schedule['sequence']}); return outcomes[-1]['attempt']
+    """One durable-stream owner through admission/outcome, authority released for I/O."""
+    with stream_locks(c,'sender-owner'):
+        return _send_provider_locked(c,j,event,inspection)
+
+
+def _send_provider_locked(c,j,event,inspection=None):
+    request_body=delivery_body(event,c['route']); tid=event['transition_id']
+    before_epoch=time.time(); before_mono=time.monotonic_ns()
+    before_boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
     retry_after=None
-    attempt={'schema_version':1,'attempt_id':str(uuid.uuid4()),'outcome':'uncertain','attempted_at':stamp(),'receipt_ref':None,'failure_detail':'submission_uncertain'}
-    catalog_lock=Path(c['_path']).with_suffix('.lock'); fd=os.open(catalog_lock,os.O_RDWR|os.O_CREAT,0o600)
-    try:
-        fcntl.flock(fd,fcntl.LOCK_EX)
-        current=load_catalog(c['_path'])
+    with stream_locks(c,'authority'):
+        current=load_catalog(c['_path'],authority_locked=True)
         if current['_digest']!=c['_digest'] or current['route']!=c['route']:
-            j.append('HELD',{'reason':'catalog-or-route-changed-before-dispatch','transition_id':tid}); return attempt
+            j.append('HELD',{'reason':'catalog-or-route-changed-before-dispatch','transition_id':tid}); return None
+        records=j._read()['records']
+        health=event.get('condition')=='host_sender_health'
+        fresh=None if health else inspect_target(c)
+        context=health_context(c) if health else bound_context(c,fresh)
+        if context_fenced(j,context,{'HEALTH_TRANSITION_INTENT','SENDER_HEALTH_EDGE'} if health else {'TRANSITION_INTENT'}): return None
+        intents=[r for r in records if r.get('kind') in {'TRANSITION_INTENT','HEALTH_TRANSITION_INTENT'}]
+        intent=next((r for r in intents if r.get('transition_id')==tid),None)
+        outcomes=[r for r in records if r.get('kind')=='ATTEMPT_OUTCOME' and r.get('transition_id')==tid]
+        if outcomes and (outcomes[-1]['attempt']['outcome'] in {'accepted','uncertain'}
+                or outcomes[-1]['attempt'].get('failure_detail')!='rate_limited'): return outcomes[-1]['attempt']
+        schedules=[r for r in records if r.get('kind')=='RETRY_SCHEDULE' and r.get('transition_id')==tid]
+        consumed={r.get('schedule_sequence') for r in records if r.get('kind') in {'RETRY_CONSUMED','RETRY_EXPIRED','RETRY_SUPERSEDED'}}
+        later=[r['event'] for r in intents if r['event'].get('episode_id')==event.get('episode_id')
+            and r['event'].get('transition_kind')=='recovered' and r.get('transition_id')!=tid]
+        if outcomes and not schedules: return outcomes[-1]['attempt']
+        if schedules:
+            schedule=schedules[-1]
+            if schedule['sequence'] in consumed: return None
+            if event['transition_kind']=='opened' and later:
+                j.append('RETRY_SUPERSEDED',{'transition_id':tid,'schedule_sequence':schedule['sequence'],
+                    'by_transition_id':later[-1]['transition_id']}); return None
+            if time.time()<schedule['due_epoch']: return None
+            if time.time()>schedule['deadline_epoch'] or len(outcomes)>=c['retry_count']+1:
+                j.append('RETRY_EXPIRED',{'transition_id':tid,'schedule_sequence':schedule['sequence']}); return None
+        now_epoch=time.time(); now_mono=time.monotonic_ns()
+        try:
+            observed=dt.datetime.fromisoformat(event['observed_at'].replace('Z','+00:00')).timestamp()
+            attempted_at=stamp(); attempted_epoch=dt.datetime.fromisoformat(attempted_at.replace('Z','+00:00')).timestamp()
+            last_attempt=max((dt.datetime.fromisoformat(r['attempt']['attempted_at'].replace('Z','+00:00')).timestamp() for r in outcomes),default=0)
+            clock_ok=(now_mono>=before_mono and abs(now_epoch-before_epoch-(now_mono-before_mono)/1e9)<=1
+                and Path('/proc/sys/kernel/random/boot_id').read_text().strip()==before_boot
+                and observed<=attempted_epoch and attempted_epoch>last_attempt
+                and abs(attempted_epoch-now_epoch)<=1)
+            prior_clock=next((r for r in reversed(records) if r.get('kind') in {'SENDING','INSPECTION'}
+                and type(r.get('clock_monotonic_ns')) is int),None)
+            if prior_clock:
+                clock_ok=clock_ok and prior_clock['clock_boot_id']==before_boot and now_mono>=prior_clock['clock_monotonic_ns'] and abs(now_epoch-prior_clock['clock_epoch']-(now_mono-prior_clock['clock_monotonic_ns'])/1e9)<=1
+        except (KeyError,TypeError,ValueError,OverflowError): clock_ok=False
+        if not clock_ok:
+            j.append('HELD',{'reason':'dispatch-clock-continuity-invalid','transition_id':tid}); return None
+        if not health:
+            expected='exited' if event['transition_kind']=='opened' else 'running'
+            recent=(type(fresh.get('inspect_ended_epoch')) in (int,float)
+                and 0<=now_epoch-fresh['inspect_ended_epoch']<=min(10,c['freshness_seconds']))
+            same=(inspection is None or (bound_context(c,inspection)==context
+                and inspection.get('started_at')==fresh.get('started_at')
+                and type(inspection.get('inspect_ended_epoch')) in (int,float)
+                and 0<=now_epoch-inspection['inspect_ended_epoch']<=min(10,c['freshness_seconds'])))
+            if not recent or not same or fresh.get('state')!=expected:
+                j.append('CANCELED_BEFORE_SUBMISSION' if intent is None else 'DISPATCH_SUPPRESSED',
+                    {'transition_id':tid,'reason':'target-no-longer-qualifies','context':context})
+                return None
+            if event['transition_kind']=='recovered':
+                barrier=next((r for r in reversed(records) if r.get('kind')=='RECOVERY_BARRIER'
+                    and r.get('transition_id')==event.get('opening_transition_id')),None)
+                if not barrier or not observer_recovery(c,barrier,j): return None
         route=current_route(current); credential=Path(route['credential_file']).read_text().strip()
-        started_monotonic=time.monotonic_ns(); boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
-        sending=j.append('SENDING',{'transition_id':tid,'attempt':attempt,
+        admission=[]
+        if intent is None:
+            # No API sequence is allocated for a candidate canceled before SENDING.
+            if not set(event)=={'schema_version','deployment_id','subject_id','condition','transition_id',
+                    'transition_sequence','predecessor_id','episode_id','opening_transition_id','episode_generation',
+                    'transition_kind','configuration_revision','first_detected_at','observed_at','recovered_at','evidence_refs','producer_id'}:
+                raise ValueError('dispatch-requires-complete-transition')
+            expected_seq=len(intents)+1
+            if event['transition_sequence']!=expected_seq or event['predecessor_id']!=(intents[-1]['transition_id'] if intents else None):
+                raise ValueError('dispatch-stream-head-changed')
+            admission.append(('TRANSITION_INTENT',{'transition_id':tid,'api_sequence':expected_seq,
+                'payload_digest':sha(canonical(event)),'event':event,'context':context}))
+        attempt={'schema_version':1,'attempt_id':str(uuid.uuid4()),'outcome':'uncertain',
+            'attempted_at':attempted_at,'receipt_ref':None,'failure_detail':'submission_uncertain'}
+        admission.append(('SENDING',{'transition_id':tid,'attempt':attempt,
             'route_revision':route['revision'],'route_digest':sha(canonical(route)),
             'catalog_generation':c['generation'],'catalog_digest':c['_digest'],
             'request_digest':sha(canonical(request_body)),
-            'started_monotonic_ns':started_monotonic,'boot_id':boot_id,
-            'started_epoch':time.time(),
-            'target_started_at':inspection.get('started_at') if inspection else None,
-            'target_boot_id':inspection.get('boot_id') if inspection else None,
-            'target_inspect_ended_epoch':inspection.get('inspect_ended_epoch') if inspection else None,
-            'work_deadline_monotonic_ns':started_monotonic+int(c['request_deadline_seconds']*1_000_000_000)})
+            'started_monotonic_ns':now_mono,'boot_id':before_boot,'started_epoch':now_epoch,
+            'clock_monotonic_ns':now_mono,'clock_epoch':now_epoch,'clock_boot_id':before_boot,
+            'target_started_at':fresh.get('started_at') if fresh else None,
+            'target_boot_id':fresh.get('boot_id') if fresh else None,
+            'target_inspect_ended_epoch':fresh.get('inspect_ended_epoch') if fresh else None,
+            'work_deadline_monotonic_ns':now_mono+int(c['request_deadline_seconds']*1_000_000_000)}))
+        sending=j.append_many(admission)[-1]
+        if event['transition_kind']=='recovered':
+            opening_ids={r['transition_id'] for r in intents if r['event'].get('episode_id')==event['episode_id']
+                and r['event'].get('transition_kind')=='opened'}
+            for queued in records:
+                if queued.get('kind')=='RETRY_SCHEDULE' and queued.get('transition_id') in opening_ids and queued['sequence'] not in consumed:
+                    j.append('RETRY_SUPERSEDED',{'transition_id':queued['transition_id'],
+                        'schedule_sequence':queued['sequence'],'by_transition_id':tid})
         if schedules:
             j.append('RETRY_CONSUMED',{'transition_id':tid,'schedule_sequence':schedules[-1]['sequence'],'attempt_id':attempt['attempt_id']})
-    finally:
-        fcntl.flock(fd,fcntl.LOCK_UN); os.close(fd)
     try:
         status,response=post_json(route['endpoint'],credential,request_body,ca_file=c['ca_file'],timeout=c['request_deadline_seconds'])
         if (200<=status<300 and isinstance(response,dict) and response.get('ok') is True
@@ -312,9 +462,20 @@ def send_provider(c,j,event,inspection=None):
 
 
 def project_pending(c,j,records):
+    with stream_locks(c,'authority'):
+        return _project_pending_locked(c,j,records)
+
+
+def _project_pending_locked(c,j,records):
+    if load_catalog(c['_path'],authority_locked=True)['_digest']!=c['_digest']:
+        j.append('HELD',{'reason':'catalog-or-route-changed-before-projection'}); return
+    expected=health_context(c) if Path(j.path).resolve()==Path(c['health_journal']).resolve() else bound_context(c,inspect_target(c))
+    kinds={'HEALTH_TRANSITION_INTENT','SENDER_HEALTH_EDGE'} if expected['condition']=='host_sender_health' else {'TRANSITION_INTENT'}
+    if context_fenced(j,expected,kinds): return
     for record in records:
         if record['kind'] not in {'TRANSITION_INTENT','HEALTH_TRANSITION_INTENT'}: continue
         event=record['event']; tid=event['transition_id']
+        if not any(r.get('kind')=='ATTEMPT_OUTCOME' and r.get('transition_id')==tid for r in records): return
         ack_kind='HEALTH_TRANSITION_ACK' if record['kind']=='HEALTH_TRANSITION_INTENT' else 'TRANSITION_ACK'
         transition_ack=any(r['kind']==ack_kind and r.get('transition_id')==tid for r in records)
         if not transition_ack:
@@ -379,7 +540,7 @@ def ack_attempt(response, transition, attempt, replay=False):
     keys={'schema_version','status','transition_id','attempt_id','outcome','idempotent'} | (set() if replay else {'superseded'})
     return isinstance(response,dict) and set(response)==keys and type(response.get('schema_version')) is int and response.get('schema_version')==1 and response.get('status')=='projected' and response.get('transition_id')==transition and response.get('attempt_id')==attempt['attempt_id'] and response.get('outcome')==attempt['outcome'] and response.get('idempotent') is replay and (replay or response.get('superseded') is False)
 
-def observer_recovery(c, previous):
+def _observer_recovery(c, previous):
     """Conservative two-loop barrier; missing fields remain unknown."""
     state=read_json(c['observer_state'])
     if not isinstance(state,dict): return False
@@ -391,7 +552,7 @@ def observer_recovery(c, previous):
     if not proc or previous.get('boot_id')!=Path('/proc/sys/kernel/random/boot_id').read_text().strip(): return False
     try:
         stat=Path(f"/proc/{proc['pid']}/stat").read_text().split()
-        if stat[21]!=proc['start_ticks']: return False
+        if stat[21]!=proc['start_ticks'] or stat[2] in {'Z','X'}: return False
     except Exception: return False
     supervisor=read_json(c['supervisor_state']) or {}; active=read_json(c['active_file']) or {}
     scheduler=read_json(c['scheduler_file']) or {}
@@ -406,7 +567,54 @@ def observer_recovery(c, previous):
     floor=max(previous.get('barrier_completed_epoch',0),started)
     skew=previous.get('future_skew_seconds')
     if type(skew) is not int or not 0<=skew<=3600: return False
+    now=time.time()
+    try:
+        completed_epoch=done.timestamp(); checked_epoch=at.timestamp()
+        supervisor_epoch=dt.datetime.fromisoformat(supervisor['last_completed_loop_at'].replace('Z','+00:00')).timestamp()
+        scheduler_epoch=dt.datetime.fromisoformat(scheduler['completed_at'].replace('Z','+00:00')).timestamp()
+    except (KeyError,TypeError,ValueError): return False
+    if not (0<=now-completed_epoch<=c['freshness_seconds']
+            and checked_epoch<=completed_epoch and 0<=now-supervisor_epoch<=c['freshness_seconds']
+            and 0<=now-scheduler_epoch<=c['freshness_seconds']): return False
     return (seq>previous.get('loop_sequence',0) and causal_sample(completed,floor,future_skew_seconds=skew) and causal_sample(last['at'],floor,future_skew_seconds=skew) and last.get('http_status')==200 and last.get('error') is None and (last.get('anchor_export') or {}).get('status') in {'healthy','late'} and (last.get('incident_projection') or {}).get('status') in {'healthy','late'} and (state.get('scheduler') or {}).get('status')=='healthy' and type(scheduler.get('loop_sequence')) is int and scheduler.get('boot_id')==previous.get('boot_id') and state.get('active_revision')==previous.get('timing_revision') and state.get('active_digest')==previous.get('timing_digest') and active.get('revision')==previous.get('timing_revision') and active.get('digest')==previous.get('timing_digest') and (supervisor.get('supervision') or {}).get('status')=='healthy' and fresh_readback(c['observer_readback']) and fresh_readback(c['supervisor_readback']) and time.monotonic_ns()>previous.get('monotonic_ns',0))
+
+
+def recovery_read_context(c):
+    inspected=inspect_target(c)
+    identity=observer_identity(c)
+    active=read_json(c['active_file']) or {}
+    if inspected.get('state')!='running' or not identity: return None
+    return {'target_context':bound_context(c,inspected),'started_at':inspected.get('started_at'),
+        'observer_proc':identity,'boot_id':inspected.get('boot_id'),
+        'timing_revision':active.get('revision'),'timing_digest':active.get('digest')}
+
+
+def bracket_recovery(c, previous, read, journal=None):
+    start_epoch=time.time(); start_mono=time.monotonic_ns()
+    before=recovery_read_context(c)
+    expected_started=previous.get('started_at',previous.get('target_started_at'))
+    valid=(before is not None and before['started_at']==expected_started
+        and all(before[k]==previous.get(k) for k in ('observer_proc','boot_id','timing_revision','timing_digest'))
+        and type(previous.get('monotonic_ns')) is int and start_mono>=previous['monotonic_ns'])
+    result=read() if valid else None
+    after=recovery_read_context(c)
+    end_epoch=time.time(); end_mono=time.monotonic_ns()
+    stable=(valid and before==after and end_mono>=start_mono
+        and abs(end_epoch-start_epoch-(end_mono-start_mono)/1e9)<=1
+        and end_epoch-start_epoch<=min(10,c['freshness_seconds']))
+    if journal is not None:
+        journal.append('RECOVERY_READ',{'read_started_epoch':start_epoch,'read_ended_epoch':end_epoch,
+            'read_started_monotonic_ns':start_mono,'read_ended_monotonic_ns':end_mono,
+            'before':before,'after':after,'stable':bool(stable),'qualified':bool(stable and result)})
+    return result if stable else None
+
+
+def observer_recovery(c, previous, journal=None):
+    return bool(bracket_recovery(c,previous,lambda:_observer_recovery(c,previous),journal))
+
+
+def recovery_barrier(c, prior, journal=None):
+    return bracket_recovery(c,prior,lambda:_recovery_barrier(c,prior),journal)
 
 
 def current_started(c):
@@ -419,6 +627,7 @@ def observer_identity(c):
     try:
         pid=int(Path(c['observer_pidfile']).read_text().strip())
         fields=Path(f'/proc/{pid}/stat').read_text().split()
+        if fields[2] in {'Z','X'}: return None
         return {'pid':pid,'start_ticks':fields[21]}
     except Exception: return None
 
@@ -440,7 +649,7 @@ def bound_context(c, inspected):
     }
 
 
-def recovery_barrier(c, prior):
+def _recovery_barrier(c, prior):
     state=read_json(c['observer_state']) or {}; seq=state.get('loop_sequence'); completed=state.get('last_completed_loop_at')
     identity=observer_identity(c); ctx=inspect_target(c)
     if type(seq) is not int or not isinstance(completed,str) or not identity or ctx.get('state')!='running' or ctx.get('boot_id')!=prior.get('boot_id'): return None
@@ -453,17 +662,18 @@ def recovery_barrier(c, prior):
     if type(skew) is not int or not 0<=skew<=3600: return None
     floor=max(started.timestamp(),prior.get('outage_observed_epoch',0))
     if (type(baseline) is not int or seq<=baseline or not causal_sample(completed,floor,future_skew_seconds=skew)
-            or identity!=prior.get('observer_proc') or ctx.get('boot_id')!=prior.get('boot_id')): return None
+            or identity!=prior.get('observer_proc') or ctx.get('boot_id')!=prior.get('boot_id')
+            or ctx.get('started_at')!=prior.get('target_started_at')): return None
     if (type(active.get('revision')) is not int or not isinstance(active.get('digest'),str)
             or active.get('revision')!=prior.get('timing_revision')
             or active.get('digest')!=prior.get('timing_digest')): return None
     return {'loop_sequence':seq,'barrier_completed_epoch':done.timestamp(),'observer_proc':identity,'boot_id':ctx['boot_id'],'timing_revision':active['revision'],'timing_digest':active['digest'],'future_skew_seconds':skew,'monotonic_ns':time.monotonic_ns(),'started_at':ctx['started_at']}
 
-def edge(c,j,kind,inspection,first=None,episode=None,opening_id=None,seq=1,pred=None,generation=1):
+def edge(c,j,kind,inspection,first=None,episode=None,opening_id=None,seq=1,pred=None,generation=1,persist=True):
     now=stamp(); tid=str(uuid.uuid4()); ep=episode or str(uuid.uuid4())
     opening_id=tid if kind=='opened' else opening_id
     event={'schema_version':1,'deployment_id':c['deployment_id'],'subject_id':c['subject_id'],'condition':c['condition'],'transition_id':tid,'transition_sequence':seq,'predecessor_id':pred,'episode_id':ep,'opening_transition_id':opening_id,'episode_generation':generation,'transition_kind':kind,'configuration_revision':c['binding_revision'],'first_detected_at':first or now,'observed_at':now,'recovered_at':now if kind=='recovered' else None,'evidence_refs':['host-inspection:'+sha(canonical(inspection))[:24]],'producer_id':c['producer_id']}
-    j.append('TRANSITION_INTENT',{'transition_id':tid,'api_sequence':seq,'payload_digest':sha(canonical(event)),'event':event,'context':bound_context(c,inspection)})
+    if persist: j.append('TRANSITION_INTENT',{'transition_id':tid,'api_sequence':seq,'payload_digest':sha(canonical(event)),'event':event,'context':bound_context(c,inspection)})
     return event
 
 
@@ -482,8 +692,37 @@ def record_interrupted_sends(j, records):
     return recovered
 
 
+def health_context(c):
+    # Configured exact target identity, independent of Docker availability/main log.
+    inspected={'container_id':c['container_id'],'image_id':c['image_id'],
+        'deployment_label':c['deployment_label'],'run_label':c['run_label'],
+        'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip()}
+    return dict(bound_context(c,inspected),subject_id=f"host-sender:{c['deployment_id']}:{c['run_label']}",
+        condition='host_sender_health')
+
+
+def context_fenced(j, context, kinds):
+    records=j._read()['records']
+    reconciled={r.get('held_sequence') for r in records if r.get('kind')=='HELD_RECONCILIATION'}
+    if any(r.get('kind')=='HELD' and r['sequence'] not in reconciled for r in records): return True
+    for record in records:
+        if record.get('kind') not in kinds: continue
+        original=record.get('context')
+        accepted=any(r.get('kind')=='HELD_RECONCILIATION'
+            and r.get('prior_context_digest')==sha(canonical(original or {}))
+            and r.get('restored_context_digest')==sha(canonical(context)) for r in records)
+        if original!=context and not accepted:
+            j.append('HELD',{'reason':'bound-service-context-changed','prior_context':original,'context':context})
+            return True
+    return False
+
+
 def process_health_stream(c, health):
     """Resumed trusted sender dispatches and projects supervisor-recorded health edges."""
+    if load_catalog(c['_path'])['_digest']!=c['_digest']:
+        health.append('HELD',{'reason':'catalog-or-route-changed-before-dispatch'}); return 3
+    ctx=health_context(c)
+    if context_fenced(health,ctx,{'SENDER_HEALTH_EDGE','HEALTH_TRANSITION_INTENT'}): return 3
     records=health._read()['records']
     intents=[r for r in records if r.get('kind')=='HEALTH_TRANSITION_INTENT']
     consumed={r.get('health_edge_sequence') for r in intents}
@@ -523,7 +762,7 @@ def process_health_stream(c, health):
             'producer_id':c['producer_id']}
         health.append('HEALTH_TRANSITION_INTENT',{'transition_id':tid,
             'health_edge_sequence':health_edge['sequence'],'event':event,
-            'actor':'resumed_host_sender','binding_revision':c['binding_revision'],
+            'context':ctx,'actor':'resumed_host_sender','binding_revision':c['binding_revision'],
             'route_revision':c['route']['revision'],'health_journal_head':health_edge['digest']})
         predecessor=tid; consumed.add(health_edge['sequence'])
         records=health._read()['records']
@@ -544,17 +783,13 @@ def process_health_stream(c, health):
 
 def health_only_once(c):
     """Restricted sender path: recover its independent health stream if main journal is corrupt."""
-    lock_path=Path(c['_path']).with_suffix('.sender-owner.lock')
-    fd=os.open(lock_path,os.O_RDWR|os.O_CREAT,0o600)
-    try:
-        fcntl.flock(fd,fcntl.LOCK_EX)
+    with stream_locks(c,'sender-owner'):
         health=Journal(c['health_journal'])
         health.ensure_genesis(allow_empty=True,context={'deployment_id':c['deployment_id'],
             'subject_id':f"host-sender:{c['deployment_id']}:{c['run_label']}"})
         record_interrupted_sends(health,health._read()['records'])
         process_health_stream(c,health)
-    finally:
-        fcntl.flock(fd,fcntl.LOCK_UN); os.close(fd)
+
 
 def _run_once_locked(c):
     j=Journal(c['journal'])
@@ -578,7 +813,13 @@ def _run_once_locked(c):
         and r.get('restored_context_digest')==sha(canonical(ctx)) for r in records)
     if prior_context and prior_context!=ctx and not context_reconciled:
         j.append('HELD',{'reason':'bound-service-context-changed','prior_context':prior_context,'context':ctx}); return 3
-    j.append('INSPECTION',{'state':current['state'],'context_digest':sha(canonical(ctx)),'context':ctx,'reason':current.get('reason')})
+    prior_clock=next((r for r in reversed(records) if r.get('kind') in {'SENDING','INSPECTION'} and type(r.get('clock_monotonic_ns')) is int),None)
+    now_epoch=time.time(); now_mono=time.monotonic_ns(); now_boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    if prior_clock and (prior_clock.get('clock_boot_id')!=now_boot or now_mono<prior_clock['clock_monotonic_ns']
+            or abs(now_epoch-prior_clock['clock_epoch']-(now_mono-prior_clock['clock_monotonic_ns'])/1e9)>1):
+        j.append('HELD',{'reason':'observation-clock-continuity-invalid','context':ctx}); return 3
+    j.append('INSPECTION',{'clock_monotonic_ns':time.monotonic_ns(),'clock_epoch':time.time(),
+        'clock_boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),'state':current['state'],'context_digest':sha(canonical(ctx)),'context':ctx,'reason':current.get('reason')})
     records=j._read()['records']
     reconciled={r.get('held_sequence') for r in records if r.get('kind')=='HELD_RECONCILIATION'}
     if any(r.get('sequence') not in reconciled for r in records if r.get('kind')=='HELD'):
@@ -592,12 +833,12 @@ def _run_once_locked(c):
     for r in edges:
         if r['event']['transition_kind']=='opened': active_open=r
         elif r['event']['transition_kind']=='recovered': active_open=None
-    if current['state']=='exited' and active_open is None and not any(r['kind']=='HELD' for r in records):
+    if current['state']=='exited' and active_open is None:
         seq=len(edges)+1; pred=edges[-1]['event']['transition_id'] if edges else None
         # A new host genesis is admitted only for an explicitly verified absent app stream.
         if not c.get('app_stream_absent_verified',False) and not edges:
             j.append('HELD',{'reason':'app-stream-genesis-not-proven','context':ctx}); return 3
-        event=edge(c,j,'opened',current,seq=seq,pred=pred,generation=sum(1 for r in edges if r['event']['transition_kind']=='opened')+1)
+        event=edge(c,j,'opened',current,seq=seq,pred=pred,generation=sum(1 for r in edges if r['event']['transition_kind']=='opened')+1,persist=False)
         j.append('EPISODE_OPEN',{'transition_id':event['transition_id'],'context':ctx})
         state=read_json(c['observer_state']) or {}; active=read_json(c['active_file']) or {}
         identity=observer_identity(c)
@@ -624,65 +865,59 @@ def _run_once_locked(c):
                 'rebased_from_sequence':latest.get('sequence') if latest else None})
             records=j._read()['records']
         else: barrier=latest
-        recovery_context=recovery_barrier(c,barrier)
+        recovery_context=recovery_barrier(c,barrier,j)
         if recovery_context is not None:
             previous_recovery=[r for r in records if r['kind']=='RECOVERY_BARRIER' and r.get('transition_id')==tid]
             if (not previous_recovery or previous_recovery[-1].get('source_outage_barrier_sequence')!=barrier['sequence']):
                 j.append('RECOVERY_BARRIER',{'transition_id':tid,
                     'source_outage_barrier_sequence':barrier['sequence'],**recovery_context})
-            elif observer_recovery(c,previous_recovery[-1]):
+            elif observer_recovery(c,previous_recovery[-1],j):
                 seq=len(edges)+1; pred=edges[-1]['event']['transition_id'] if edges else None; opening=active_open['event']
-                recovered=edge(c,j,'recovered',current,first=opening['first_detected_at'],episode=opening['episode_id'],opening_id=opening['opening_transition_id'],seq=seq,pred=pred,generation=opening['episode_generation'])
+                recovered=edge(c,j,'recovered',current,first=opening['first_detected_at'],episode=opening['episode_id'],opening_id=opening['opening_transition_id'],seq=seq,pred=pred,generation=opening['episode_generation'],persist=False)
                 send_provider(c,j,recovered,current); project_pending(c,j,j._read()['records'])
             # Missing or changed context remains unknown and cannot close the episode.
     return 0
 
 
-def reconcile_held(c, operator_id, evidence_ref):
+def reconcile_held(c, operator_id, evidence_ref, *, health_only=False):
     """Explicitly release held work only when its original bound context is restored."""
     if (not isinstance(operator_id,str) or re.fullmatch(r'[A-Za-z0-9._:@-]{1,128}',operator_id) is None
             or not isinstance(evidence_ref,str)
             or re.fullmatch(r'[A-Za-z0-9._:/-]{1,256}',evidence_ref) is None):
         raise ValueError('held-reconciliation-operator-or-evidence-invalid')
-    lock_path=Path(c['_path']).with_suffix('.sender-owner.lock')
-    fd=os.open(lock_path,os.O_RDWR|os.O_CREAT,0o600)
-    try:
-        fcntl.flock(fd,fcntl.LOCK_EX)
-        journal=Journal(c['journal'])
-        journal.ensure_genesis(allow_empty=c.get('app_stream_absent_verified') is True,
-            context=bound_context(c,{}))
-        records=journal._read()['records']
-        reconciled={r.get('held_sequence') for r in records
-            if r.get('kind')=='HELD_RECONCILIATION'}
-        held=[r for r in records if r.get('kind')=='HELD'
-            and r.get('sequence') not in reconciled]
-        if not held: return 0
-        current=bound_context(c,inspect_target(c))
-        source_context=next((r.get('context') for r in reversed(records)
-            if r.get('kind')=='TRANSITION_INTENT' and isinstance(r.get('context'),dict)),None)
-        excluded={'catalog_generation','catalog_digest'}
-        compatible=(source_context is not None and
-            {k:v for k,v in source_context.items() if k not in excluded}==
-            {k:v for k,v in current.items() if k not in excluded})
-        if not compatible:
-            raise ValueError('held-reconciliation-requires-original-context')
-        for fence in held:
-            journal.append('HELD_RECONCILIATION',{'held_sequence':fence['sequence'],
-                'operator_id':operator_id,'evidence_ref':evidence_ref,
-                'prior_context_digest':sha(canonical(source_context)),
-                'restored_context_digest':sha(canonical(current))})
-        return len(held)
-    finally:
-        fcntl.flock(fd,fcntl.LOCK_UN); os.close(fd)
+    count=0
+    with stream_locks(c,'sender-owner'), stream_locks(c,'authority'):
+        if load_catalog(c['_path'],authority_locked=True)['_digest']!=c['_digest']:
+            raise ValueError('reconciliation-catalog-changed')
+        for key in (('health_journal',) if health_only else ('journal','health_journal')):
+            journal=Journal(c[key]); health=key=='health_journal'
+            current=health_context(c) if health else bound_context(c,inspect_target(c))
+            journal.ensure_genesis(allow_empty=True if health else c.get('app_stream_absent_verified') is True,context=current)
+            records=journal._read()['records']
+            reconciled={r.get('held_sequence') for r in records if r.get('kind')=='HELD_RECONCILIATION'}
+            held=[r for r in records if r.get('kind')=='HELD' and r['sequence'] not in reconciled]
+            if not held: continue
+            kinds={'SENDER_HEALTH_EDGE','HEALTH_TRANSITION_INTENT'} if health else {'TRANSITION_INTENT'}
+            contexts=[r.get('context') for r in records if r.get('kind') in kinds]
+            excluded={'catalog_generation','catalog_digest'}
+            if not contexts or any(not isinstance(ctx,dict) or
+                    {k:v for k,v in ctx.items() if k not in excluded}!=
+                    {k:v for k,v in current.items() if k not in excluded} for ctx in contexts):
+                raise ValueError('held-reconciliation-requires-original-context')
+            for fence in held:
+                for source in contexts:
+                    journal.append('HELD_RECONCILIATION',{'held_sequence':fence['sequence'],
+                        'operator_id':operator_id,'evidence_ref':evidence_ref,
+                        'prior_context_digest':sha(canonical(source)),
+                        'restored_context_digest':sha(canonical(current))})
+            count+=len(held)
+    return count
+
 
 
 def run_once(c):
     """Serialize inspection, admission, edge derivation and dispatch per sender."""
-    lock_path=Path(c['_path']).with_suffix('.sender-owner.lock')
-    lock_path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
-    fd=os.open(lock_path,os.O_RDWR|os.O_CREAT,0o600)
-    try:
-        fcntl.flock(fd,fcntl.LOCK_EX)
+    with stream_locks(c,'sender-owner'):
         rc=_run_once_locked(c)
         journal=Journal(c['journal']); doc=journal._read()
         identity=process_identity(os.getpid())
@@ -691,8 +926,7 @@ def run_once(c):
             'monotonic_ns':time.monotonic_ns(),'progress_cursor':doc['sequence'],
             'result_code':rc})
         return rc
-    finally:
-        fcntl.flock(fd,fcntl.LOCK_UN); os.close(fd)
+
 
 
 def supervise_once(c):
@@ -717,8 +951,17 @@ def supervise_once(c):
         completed=next((r for r in reversed(doc['records'])
             if r.get('kind')=='SENDER_LOOP_COMPLETED'),None)
         now_mono=time.monotonic_ns()
-        if completed is None:
-            state='starting'; reason='sender_loop_not_completed'
+        work_records=doc['records']+history
+        known={r.get('attempt',{}).get('attempt_id') for r in work_records if r.get('kind')=='ATTEMPT_OUTCOME'}
+        outstanding=[r for r in work_records if r.get('kind')=='SENDING' and r.get('attempt',{}).get('attempt_id') not in known]
+        overdue=any(r.get('boot_id')!=identity['boot_id'] or type(r.get('work_deadline_monotonic_ns')) is not int
+            or now_mono>r['work_deadline_monotonic_ns'] for r in outstanding)
+        if overdue:
+            state='unhealthy'; reason='sender_work_deadline_expired'
+        elif completed is None:
+            age=time.clock_gettime(time.CLOCK_BOOTTIME)-identity['start_ticks']/os.sysconf('SC_CLK_TCK')
+            state='starting' if 0<=age<30 else 'unhealthy'
+            reason='sender_loop_not_completed' if state=='starting' else 'sender_startup_deadline_expired'
         elif (completed.get('pid')!=pid or completed.get('start_ticks')!=identity['start_ticks']
                 or completed.get('boot_id')!=identity['boot_id']
                 or type(completed.get('monotonic_ns')) is not int
@@ -755,7 +998,7 @@ def supervise_once(c):
             'actor':'independent_host_supervisor','deployment_id':c['deployment_id'],
             'subject_id':f"host-sender:{c['deployment_id']}:{c['run_label']}",
             'producer_id':c['producer_id'],'binding_revision':c['binding_revision'],
-            'route_revision':c['route']['revision']})
+            'route_revision':c['route']['revision'],'context':health_context(c)})
     else:
         health.append('SUPERVISOR_OBSERVATION',{'state':state,'failure_code':reason,'actor':'independent_host_supervisor'})
     return state
@@ -771,7 +1014,7 @@ def main():
     c=load_catalog(a.catalog)
     if a.reconcile_held:
         if not a.operator_id or not a.evidence_ref: p.error('--reconcile-held requires --operator-id and --evidence-ref')
-        print(json.dumps({'reconciled_fences':reconcile_held(c,a.operator_id,a.evidence_ref)},
+        print(json.dumps({'reconciled_fences':reconcile_held(c,a.operator_id,a.evidence_ref,health_only=a.health_only)},
             sort_keys=True,separators=(',',':')))
         return 0
     if a.supervise:

@@ -242,13 +242,16 @@ class IncidentPublicHandlerTests(unittest.TestCase):
     def test_real_sender_catches_up_lost_transition_and_delivery_acks_without_new_ids(self):
         from tools import g7_operational_alert_sender as sender
         event=self.event(); digest=sender.sha(sender.canonical(event))
-        with tempfile.TemporaryDirectory() as directory:
-            journal=sender.Journal(__import__('pathlib').Path(directory)/'sender-catchup.json')
-            self._exercise_real_sender_catchup(sender,event,digest,journal)
+        from tests.operations.test_g7_operational_alert_sender import OperationalAlertSenderTests
+        fixture=OperationalAlertSenderTests();fixture.setUp()
+        try:
+            self._exercise_real_sender_catchup(sender,event,digest,fixture.journal,fixture.loaded,fixture.inspected)
+        finally:
+            fixture.doCleanups();fixture.tearDown()
 
-    def _exercise_real_sender_catchup(self,sender,event,digest,journal):
+    def _exercise_real_sender_catchup(self,sender,event,digest,journal,config,inspection):
         journal.append('TRANSITION_INTENT',{'transition_id':event['transition_id'],
-            'event':event,'payload_digest':digest})
+            'event':event,'payload_digest':digest,'context':sender.bound_context(config,inspection)})
         attempt={'schema_version':1,'attempt_id':str(uuid.uuid4()),'outcome':'failed',
             'attempted_at':event['observed_at'],'receipt_ref':None,'failure_detail':'provider_rejected'}
         journal.append('ATTEMPT_OUTCOME',{'transition_id':event['transition_id'],'attempt':attempt})
@@ -262,7 +265,6 @@ class IncidentPublicHandlerTests(unittest.TestCase):
             delivery_calls+=1; result=self.delivery(event['transition_id'],body,principal=self.service)
             if delivery_calls==1: raise urllib.error.URLError('simulated lost delivery ACK')
             return 200,result
-        config={'api_url':'http://in-process','api_token_file':'unused'}
         with patch.object(sender,'api_post',side_effect=real_endpoint):
             sender.project_pending(config,journal,journal._read()['records'])
             sender.project_pending(config,journal,journal._read()['records'])

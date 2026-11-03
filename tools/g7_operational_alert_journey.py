@@ -87,6 +87,7 @@ def exercise_provider_scenarios(catalog, event, runroot, evidence):
             scenario_catalog=copy.deepcopy({k:v for k,v in catalog.items() if not k.startswith('_')})
             scenario_catalog['route']['endpoint']=f'https://127.0.0.1:{port}/api/chat.postMessage'
             scenario_catalog['journal']=str(host_dir/'state'/f'provider-{scenario}.json')
+            scenario_catalog['health_journal']=str(host_dir/'state'/f'provider-{scenario}-health.json')
             scenario_catalog_path=host_dir/f'provider-{scenario}-catalog.json'
             capture(scenario_catalog_path,json.dumps(scenario_catalog,sort_keys=True,separators=(',',':'))+'\n')
             loaded=sender.load_catalog(scenario_catalog_path)
@@ -96,7 +97,11 @@ def exercise_provider_scenarios(catalog, event, runroot, evidence):
             scenario_event['episode_id']=str(uuid.uuid4())
             scenario_event['opening_transition_id']=scenario_event['transition_id']
             scenario_event['transition_sequence']=1; scenario_event['predecessor_id']=None
+            scenario_event['condition']='host_sender_health'
+            scenario_event['subject_id']=f"host-sender:{catalog['deployment_id']}:{catalog['run_label']}"
             now=sender.stamp(); scenario_event['observed_at']=now; scenario_event['first_detected_at']=now
+            scenario_journal.append('HEALTH_TRANSITION_INTENT',{'transition_id':scenario_event['transition_id'],
+                'event':scenario_event,'context':sender.health_context(loaded),'health_edge_sequence':0})
             result=sender.send_provider(loaded,scenario_journal,scenario_event)
             if scenario=='rate_limited_once':
                 first_records=scenario_journal._read()['records']
@@ -155,7 +160,8 @@ def main():
     ca=sec/'recovery-ca.crt'; cert=sec/'recovery-server.crt'; key=sec/'recovery-server.key'; tokenfile=host/'provider-token'; tokenfile.write_text(os.urandom(32).hex()); os.chmod(tokenfile,0o600)
     sock=socket.socket(); sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]; sock.close()
     provider_out=(evidence/'provider.stdout').open('w'); provider_err=(evidence/'provider.stderr').open('w')
-    provider=subprocess.Popen([sys.executable,str(ROOT/'tools/g7_operational_alert_fixture.py'),'--port',str(port),'--output',str(evidence/'provider-requests.json'),'--token-file',str(tokenfile),'--channel','C_G7_OPERATIONAL_FIXTURE','--cert',str(cert),'--key',str(key)],cwd=ROOT,stdout=provider_out,stderr=provider_err)
+    scenario_file=host/'provider-scenario'; scenario_file.write_text('accepted\n')
+    provider=subprocess.Popen([sys.executable,str(ROOT/'tools/g7_operational_alert_fixture.py'),'--port',str(port),'--output',str(evidence/'provider-requests.json'),'--token-file',str(tokenfile),'--channel','C_G7_OPERATIONAL_FIXTURE','--cert',str(cert),'--key',str(key),'--scenario-file',str(scenario_file)],cwd=ROOT,stdout=provider_out,stderr=provider_err)
     sender_out=(evidence/'sender.stdout').open('w'); sender_err=(evidence/'sender.stderr').open('w'); supervisor_out=(evidence/'supervisor.stdout').open('w'); supervisor_err=(evidence/'supervisor.stderr').open('w')
     sender_proc=supervisor=None; stopped=False; catalog_path=None; catalog=None; health_path=None
     try:
@@ -243,6 +249,44 @@ def main():
         availability_items=[item for item in items if item.get('subject_id')==subject]
         if len(availability_items)<2: raise RuntimeError('current recipient group did not read both public availability incident edges')
         capture(evidence/'public-current-recipient-read.json',json.dumps({'schema_version':public.get('schema_version'),'item_count':len(availability_items),'transition_kinds':[x.get('transition_kind') for x in availability_items],'subject_id':subject},sort_keys=True,separators=(',',':'))+'\n')
+        # Real main-loop 429 opening with durable queued retry. Restart the exact
+        # target before any retry admission; qualified recovery suppresses that
+        # queue while retaining/projection of the actual rejected attempt.
+        scenario_file.write_text('rate_limited_next\n')
+        docker(['stop','--time','10',a.container]); stopped=True
+        def retry_queued():
+            rows=read_records(catalog['journal'])
+            opening3=next((r for r in rows if r.get('kind')=='TRANSITION_INTENT'
+                and r['event']['transition_sequence']==3),None)
+            return opening3 if opening3 and any(r.get('kind')=='RETRY_SCHEDULE'
+                and r.get('transition_id')==opening3['transition_id'] for r in rows) else None
+        retry_opening=wait_for('real429-opening-queued-by-main-loop',retry_queued,time.monotonic()+30,.1)
+        docker(['start',a.container]); stopped=False
+        wait_for('app-healthy-before-queued-retry',lambda:docker(['inspect',a.container,'--format','{{.State.Health.Status}}'])=='healthy',time.monotonic()+240)
+        def retry_recovered():
+            rows=read_records(catalog['journal'])
+            recovered=next((r for r in rows if r.get('kind')=='TRANSITION_INTENT'
+                and r['event']['transition_sequence']==4),None)
+            return recovered if recovered and any(r.get('kind')=='ATTEMPT_ACK'
+                and r.get('transition_id')==recovered['transition_id'] for r in rows) else None
+        retry_recovery=wait_for('queued429-recovery-projected',retry_recovered,time.monotonic()+180,.25)
+        retry_rows=read_records(catalog['journal'])
+        real_attempts=[r for r in retry_rows if r.get('kind')=='ATTEMPT_OUTCOME'
+            and r.get('transition_id')==retry_opening['transition_id']]
+        if (len(real_attempts)!=1 or real_attempts[0]['attempt']['failure_detail']!='rate_limited'
+                or not any(r.get('kind')=='RETRY_SUPERSEDED' and r.get('transition_id')==retry_opening['transition_id'] for r in retry_rows)
+                or not any(r.get('kind')=='ATTEMPT_ACK' and r.get('attempt_id')==real_attempts[0]['attempt']['attempt_id'] for r in retry_rows)):
+            raise RuntimeError('actual queued429 retry was not suppressed/projected truthfully after recovery')
+        provider_rows=json.loads((evidence/'provider-requests.json').read_text())
+        episode=retry_opening['event']['episode_id']
+        retry_requests=[r for r in provider_rows if r['body']['metadata']['event_payload']['incident_id']==episode]
+        if [r['body']['metadata']['event_payload']['transition_kind'] for r in retry_requests]!=['opened','recovered']:
+            raise RuntimeError('actual main-loop queued429 opening was resent after target recovery')
+        capture(evidence/'queued429-recovery-suppression.json',json.dumps({
+            'opening_transition_id':retry_opening['transition_id'],'recovery_transition_id':retry_recovery['transition_id'],
+            'opening_attempt_id':real_attempts[0]['attempt']['attempt_id'],'opening_outcome':'failed',
+            'opening_failure_detail':'rate_limited','opening_projected':True,
+            'provider_opening_requests':1,'provider_recovery_requests':1,'retry_suppressed':True},sort_keys=True,separators=(',',':'))+'\n')
         exercise_provider_scenarios(catalog,opening['event'],runroot,evidence)
         # The separate supervisor remains observable if the sender dies while UVM is unavailable.
         docker(['stop','--time','10',a.container]); stopped=True
@@ -303,12 +347,17 @@ def main():
         # no credential material (only protected paths/references).
         import shutil
         retain=[]
-        if catalog_path is not None: retain.append((catalog_path,'operational-alert-catalog.json'))
+        if catalog_path is not None:
+            retain.append((catalog_path,'operational-alert-catalog.json'))
+            retain.append((pathlib.Path(str(catalog_path)+'.generation'),'operational-alert-catalog.generation'))
+            retain.append((pathlib.Path(str(catalog_path)+'.journals'),'operational-alert-catalog.journals'))
+        retain.extend([(ca,'operational-provider-ca.pem'),(cert,'operational-provider-certificate.pem')])
         if catalog is not None:
             for key,name in (('journal','operational-alert-journal.json'),
                     ('health_journal','operational-alert-health-journal.json')):
                 path=pathlib.Path(catalog[key]); retain.append((path,name))
                 retain.append((path.with_suffix(path.suffix+'.genesis'),name+'.genesis'))
+                retain.append((pathlib.Path(str(path.resolve())+'.catalog-authority'),name+'.catalog-authority'))
             for key,name in (('observer_state','observer-state.snapshot.json'),
                     ('active_file','active-timing.snapshot.json'),
                     ('observer_readback','observer-readback.snapshot.json'),

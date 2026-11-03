@@ -1,3 +1,4 @@
+import {assertOperationalRenderedCards, captureOperationalCards} from './g7_operational_render_assertions.mjs';
 import {assertClock, assertRenderedAcceptance, captureAcceptance} from './g7_sla_render_assertions.mjs';
 import {runBackupBrowserStep} from '../ui/tests/backup-recovery-browser.mjs';
 import { chromium } from '../ui/node_modules/playwright/index.mjs';
@@ -2154,14 +2155,16 @@ try {
     const senderHealth=rows.filter(item=>item.deployment_id==='g7-local'
       &&item.subject_id===`host-sender:g7-local:${path.basename(fixtureRoot).split('.').at(-1)}`
       &&item.condition==='host_sender_health');
-    for(const [name,stream] of [['availability',availability],['senderHealth',senderHealth]]){
-      if(stream.length!==2||stream[0].transition_kind!=='opened'||stream[1].transition_kind!=='recovered'
-        ||stream[0].transition_sequence!==1||stream[1].transition_sequence!==2
-        ||stream[1].predecessor_id!==stream[0].transition_id
-        ||stream.some(item=>item.notification?.state!=='accepted'
-          ||!Array.isArray(item.notification.attempts)||item.notification.attempts.length<1
-          ||item.notification.attempts.some(attempt=>attempt.outcome!=='accepted'||!attempt.attempt_id)))
-        throw new Error(`scoped ${name} incident stream is incomplete or lacks accepted delivery attempts`);
+    for(const [name,stream,total] of [['availability',availability,4],['senderHealth',senderHealth,2]]){
+      if(stream.length!==total||stream.some((item,index)=>
+        item.transition_kind!==(index%2===0?'opened':'recovered')
+        ||item.transition_sequence!==index+1
+        ||item.predecessor_id!==(index===0?null:stream[index-1].transition_id)
+        ||item.notification?.state!==(name==='availability'&&index===2?'failed':'accepted')
+        ||!Array.isArray(item.notification.attempts)||item.notification.attempts.length!==1
+        ||item.notification.attempts.some(attempt=>!attempt.attempt_id
+          ||attempt.outcome!==(name==='availability'&&index===2?'failed':'accepted'))))
+        throw new Error(`scoped ${name} incident stream is incomplete or lacks truthful delivery attempts`);
     }
     await writeFile(path.join(evidence,'operational-browser-consumer.json'),JSON.stringify({
       session_status:session.status,principal_id:session.body.principal_id,
@@ -2177,13 +2180,20 @@ try {
 
     await page.goto(origin+'/#incidents?deployment_id=g7-local',{waitUntil:'domcontentloaded',timeout:30000});
     await page.getByRole('heading',{name:'Incident history'}).waitFor({timeout:20000});
-    await page.getByText('4 authorised transitions on this page.').waitFor({timeout:20000});
+    await page.getByText('6 authorised transitions on this page.').waitFor({timeout:20000});
     const cards=page.locator('.incident-card');
-    if(await cards.count()!==4)throw new Error('rendered scoped incident history did not contain the four verified transitions');
+    if(await cards.count()!==6)throw new Error('rendered scoped incident history did not contain the six verified transitions');
     for(const card of await cards.all()){
       await card.locator('details > summary').click();
-      await card.getByText('accepted',{exact:true}).first().waitFor({timeout:10000});
+      await card.locator('.incident-identifiers').waitFor({timeout:10000});
     }
+    const rendered=await captureOperationalCards(cards);
+    assertOperationalRenderedCards([...availability,...senderHealth],rendered);
+    const consumerPath=path.join(evidence,'operational-browser-consumer.json');
+    const consumer=JSON.parse(await readFile(consumerPath,'utf8'));
+    consumer.rendered=rendered;
+    await writeFile(consumerPath,JSON.stringify(consumer,null,2)+'\n',{mode:0o600});
+    await page.screenshot({path:path.join(evidence,'operational-incidents-current.png'),fullPage:true});
     counts.operationalIncidentConsumer={session:session.status,incidentRead:incidentRead.status,
       recipientGroup:groupId,sourceScope:'local/g7-local/all',transitions:rows.length,
       renderedCards:await cards.count(),availabilityAcceptedAttempts:availability.reduce((n,item)=>n+item.notification.attempts.length,0),

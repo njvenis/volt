@@ -47,6 +47,13 @@ class OperationalAlertSenderTests(unittest.TestCase):
         self.catalog_path.write_text(json.dumps(self.catalog))
         self.loaded = sender.load_catalog(self.catalog_path)
         self.journal = sender.Journal(self.catalog["journal"])
+        self.inspected={"state":"exited","container_id":"container-id",
+            "image_id":"sha256:"+"a"*64,"deployment_label":"g7-local","run_label":"run",
+            "boot_id":"boot","started_at":"2026-11-01T00:00:00Z",
+            "inspect_started_epoch":time.time(),"inspect_ended_epoch":time.time()}
+        self.inspect_patch=patch.object(sender,"inspect_target",side_effect=lambda c:dict(self.inspected,inspect_ended_epoch=time.time()))
+        self.inspect_patch.start(); self.addCleanup(self.inspect_patch.stop)
+        self.event=sender.edge(self.loaded,self.journal,"opened",self.inspected,persist=False)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -105,7 +112,7 @@ class OperationalAlertSenderTests(unittest.TestCase):
                 (urllib.error.URLError("connection reset after submit"),"uncertain")):
             with self.subTest(expected=expected):
                 path=self.root/f"{expected}-{uuid.uuid4()}.json"
-                catalog=dict(self.catalog,journal=str(path))
+                catalog=dict(self.catalog,journal=str(path),health_journal=str(path)+".health")
                 catalog_path=self.root/f"{path.stem}-catalog.json"
                 catalog_path.write_text(json.dumps(catalog))
                 loaded=sender.load_catalog(catalog_path)
@@ -135,7 +142,7 @@ class OperationalAlertSenderTests(unittest.TestCase):
             "attempted_at":"2026-11-02T20:00:00.000000Z","receipt_ref":None,
             "failure_detail":"provider_unavailable"}
         marker=self.root/"sending-durable"
-        inspected={"state":"exited","container_id":"container-id",
+        inspected={**self.inspected,"state":"exited","container_id":"container-id",
             "image_id":"sha256:"+"a"*64,"deployment_label":"g7-local",
             "run_label":"run","boot_id":"boot"}
         event=sender.edge(self.loaded,self.journal,"opened",inspected)
@@ -187,7 +194,7 @@ class OperationalAlertSenderTests(unittest.TestCase):
 
     def test_concurrent_run_once_admits_one_opening_and_provider_send(self):
         from concurrent.futures import ThreadPoolExecutor
-        inspected={"state":"exited","container_id":"container-id",
+        inspected={**self.inspected,"state":"exited","container_id":"container-id",
             "image_id":"sha256:"+"a"*64,"deployment_label":"g7-local",
             "run_label":"run","boot_id":"boot"}
         with patch.object(sender,"inspect_target",return_value=inspected), \
@@ -203,7 +210,7 @@ class OperationalAlertSenderTests(unittest.TestCase):
         self.assertEqual(post.call_count,1)
 
     def test_public_delivery_ack_lost_then_idempotent_replay_is_consumed(self):
-        inspected={"state":"exited","container_id":"container-id",
+        inspected={**self.inspected,"state":"exited","container_id":"container-id",
             "image_id":"sha256:"+"a"*64,"deployment_label":"g7-local",
             "run_label":"run","boot_id":"boot"}
         event=sender.edge(self.loaded,self.journal,"opened",inspected)
@@ -249,13 +256,13 @@ class OperationalAlertSenderTests(unittest.TestCase):
         self.assertEqual(context["route_digest"],sender.sha(sender.canonical(self.loaded["route"])))
 
     def test_changed_recovery_epoch_holds_old_journal_before_projection(self):
-        inspected={"state":"unknown","container_id":"container-id",
+        inspected={**self.inspected,"state":"unknown","container_id":"container-id",
             "image_id":"sha256:"+"a"*64,"deployment_label":"g7-local",
             "run_label":"run","boot_id":"boot"}
         old_context=sender.bound_context(self.loaded,inspected)
         self.journal.append("TRANSITION_INTENT",{"transition_id":self.event["transition_id"],
             "event":self.event,"context":old_context})
-        changed=dict(self.catalog,recovery_epoch=2)
+        changed=dict(self.catalog,recovery_epoch=2,generation=2)
         self.catalog_path.write_text(json.dumps(changed))
         current=sender.load_catalog(self.catalog_path)
         with patch.object(sender,"inspect_target",return_value=inspected):
@@ -274,7 +281,7 @@ class OperationalAlertSenderTests(unittest.TestCase):
         with patch.object(sender,"post_json") as post:
             result=sender.send_provider(self.loaded,self.journal,self.event)
         records=self.journal._read()["records"]
-        self.assertEqual(result["failure_detail"],"submission_uncertain")
+        self.assertIsNone(result)
         self.assertEqual(post.call_count,0)
         self.assertTrue(any(r["kind"]=="HELD" and r["reason"]=="catalog-or-route-changed-before-dispatch" for r in records))
         self.assertFalse(any(r["kind"]=="SENDING" for r in records))
@@ -296,7 +303,7 @@ class OperationalAlertSenderTests(unittest.TestCase):
         health.append("SENDER_HEALTH_EDGE",{"state":"dead","failure_code":"sender_process_missing",
             "actor":"independent_host_supervisor","deployment_id":"g7-local",
             "subject_id":"host-sender:g7-local:run","producer_id":self.loaded["producer_id"],
-            "binding_revision":1,"route_revision":1})
+            "binding_revision":1,"route_revision":1,"context":sender.health_context(self.loaded)})
         dead_edge=health._read()["records"][-1]
         api_calls=[]; provider_calls=[]
         def accept(_catalog,path,body):
@@ -319,7 +326,7 @@ class OperationalAlertSenderTests(unittest.TestCase):
             health.append("SENDER_HEALTH_EDGE",{"state":"healthy","failure_code":None,
                 "actor":"independent_host_supervisor","deployment_id":"g7-local",
                 "subject_id":"host-sender:g7-local:run","producer_id":self.loaded["producer_id"],
-                "binding_revision":1,"route_revision":1})
+                "binding_revision":1,"route_revision":1,"context":sender.health_context(self.loaded)})
             sender.process_health_stream(self.loaded,health)
         records=health._read()["records"]
         intents=[r for r in records if r["kind"]=="HEALTH_TRANSITION_INTENT"]
@@ -350,14 +357,14 @@ class OperationalAlertSenderTests(unittest.TestCase):
     def test_pre_fault_healthy_edge_is_consumed_and_cannot_recover_later_fault(self):
         health=sender.Journal(self.catalog['health_journal'])
         health.ensure_genesis(allow_empty=True,context={'deployment_id':'g7-local','subject_id':'health'})
-        health.append('SENDER_HEALTH_EDGE',{'state':'healthy','at':'2026-11-03T00:00:10.000000Z'})
-        health.append('SENDER_HEALTH_EDGE',{'state':'dead','at':'2026-11-03T00:00:20.000000Z'})
+        health.append('SENDER_HEALTH_EDGE',{'context':sender.health_context(self.loaded),'state':'healthy','at':'2026-11-03T00:00:10.000000Z'})
+        health.append('SENDER_HEALTH_EDGE',{'context':sender.health_context(self.loaded),'state':'dead','at':'2026-11-03T00:00:20.000000Z'})
         with patch.object(sender,'send_provider'),patch.object(sender,'project_pending'):
             sender.process_health_stream(self.loaded,health)
             records=health._read()['records']
             intents=[r for r in records if r['kind']=='HEALTH_TRANSITION_INTENT']
             self.assertEqual([r['event']['transition_kind'] for r in intents],['opened'])
-            health.append('SENDER_HEALTH_EDGE',{'state':'healthy','at':'2026-11-03T00:00:30.000000Z'})
+            health.append('SENDER_HEALTH_EDGE',{'context':sender.health_context(self.loaded),'state':'healthy','at':'2026-11-03T00:00:30.000000Z'})
             sender.process_health_stream(self.loaded,health)
         intents=[r for r in health._read()['records'] if r['kind']=='HEALTH_TRANSITION_INTENT']
         self.assertEqual([r['event']['transition_kind'] for r in intents],['opened','recovered'])
@@ -376,7 +383,7 @@ class OperationalAlertSenderTests(unittest.TestCase):
             'observed_at':'2026-11-03T00:00:00.000000Z','recovered_at':None,
             'evidence_refs':['host-supervisor:test']}
         health.append('HEALTH_TRANSITION_INTENT',{'transition_id':event['transition_id'],
-            'health_edge_sequence':1,'event':event})
+            'health_edge_sequence':1,'event':event,'context':sender.health_context(self.loaded)})
         attempt={'schema_version':1,'attempt_id':str(uuid.uuid4()),'outcome':'failed',
             'attempted_at':event['observed_at'],'receipt_ref':None,'failure_detail':'rate_limited'}
         health.append('ATTEMPT_OUTCOME',{'transition_id':event['transition_id'],'attempt':attempt})

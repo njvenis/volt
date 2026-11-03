@@ -145,7 +145,7 @@ jobs:
       - name: Fail-closed full-image vulnerability scan
         run: |
           python3 tools/release/install_trivy.py
-          echo /tmp/volt-release-tools >> "$GITHUB_PATH"
+          export PATH="/tmp/volt-release-tools:$PATH"
           python3 tools/release/scan.py --image "$(cat "$RELEASE_OUT/image-id.txt")" --expected-image-id "$(cat "$RELEASE_OUT/image-id.txt")" --exceptions tools/release/exceptions.example.json --output "$RELEASE_OUT/release-scan.json"
       - name: Retain full scan report on success or failure
         if: always()

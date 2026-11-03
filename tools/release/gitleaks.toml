@@ -1,0 +1,19 @@
+title = "VOLT default Gitleaks rules with narrow synthetic fixture allowlists"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic preservation record identifiers in fixed browser test fixtures"
+condition = "AND"
+paths = ["^ui/tests/preservation-fixtures\\.mjs$", "^ui/tests/preservation-browser\\.test\\.mjs$"]
+regexes = ["synthetic-record-[12]"]
+ruleIDs = ["generic-api-key"]
+
+[[allowlists]]
+description = "Non-secret correlation labels in the local runtime request fixtures"
+condition = "AND"
+paths = ["^uvm/connectors/runtime\\.py$"]
+regexes = ["origin=\"local_api\", correlation_id=\"g7-(runtime-resolve|runtime-dispatch|preview-secret)\""]
+regexTarget = "line"
+ruleIDs = ["generic-api-key"]

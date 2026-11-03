@@ -1,6 +1,6 @@
 # UVM G7 packaging image. CE is the runtime base so its supported Django,
-# uwsgi and Celery installation is exactly the approved 3.3.100 build.
-ARG CE_IMAGE=defectdojo/defectdojo-django@sha256:c597abdbb5350315cfd73a2fb2004c8ff93293c3a2b05605aa7966638410ffcc
+# uwsgi and Celery installation is exactly the candidate CE 3.5.0 build.
+ARG CE_IMAGE=defectdojo/defectdojo-django@sha256:cb027c6e84adfe9cfe7de07863eeaae4a4375ff4420b7c41ea4e563631f4359e
 ARG VALKEY_IMAGE=valkey/valkey:9.1.2-alpine@sha256:a174b894902bd3367e330d47cc2054367dc4917701776aaf336f41d83b65ec7a
 FROM ${CE_IMAGE} AS uvm-build
 USER root
@@ -126,6 +126,8 @@ COPY --from=uvm-build --chown=uvm:uvm /build/alembic.ini ./alembic.ini
 COPY --from=uvm-build --chown=uvm:uvm /build/pyproject.toml ./pyproject.toml
 COPY --from=uvm-build --chown=uvm:uvm /build/uv.lock ./uv.lock
 COPY --from=ui-build --chown=uvm:uvm /ui/dist /opt/uvm/ui
+COPY --chown=uvm:uvm THIRD-PARTY-NOTICES.md LICENSE /usr/share/doc/volt/third-party/
+COPY --chown=uvm:uvm third-party/notices/ /usr/share/doc/volt/third-party/source/
 WORKDIR /app
 COPY docker/g7/entrypoint.sh /usr/local/bin/uvm-g7-entrypoint
 COPY docker/g7/schema-head /etc/uvm-g7-schema-head
@@ -133,6 +135,23 @@ COPY docker/g7/healthcheck.sh /usr/local/bin/uvm-g7-healthcheck
 COPY docker/g7/valkey-server /usr/local/bin/valkey-server
 COPY docker/g7/valkey-cli /usr/local/bin/valkey-cli
 RUN chmod 0755 /usr/local/bin/uvm-g7-entrypoint /usr/local/bin/uvm-g7-healthcheck /usr/local/bin/valkey-server /usr/local/bin/valkey-cli
+# pip is retained in the build stage for uv installation only. The final CE
+# runtime installs no packages dynamically; remove its installer and vendored
+# wheels so they do not ship as an unused, independently vulnerable toolchain.
+RUN python3 - <<'PY'
+from pathlib import Path
+import shutil
+
+site = Path('/usr/local/lib/python3.14/site-packages')
+pip = site / 'pip'
+shutil.rmtree(pip, ignore_errors=True)
+for path in site.glob('pip-*.dist-info'):
+    shutil.rmtree(path, ignore_errors=True)
+for path in (Path('/usr/local/bin/pip'), Path('/usr/local/bin/pip3'), Path('/usr/local/bin/pip3.14')):
+    path.unlink(missing_ok=True)
+if pip.exists() or list(site.glob('pip-*.dist-info')):
+    raise SystemExit('pip remains in final runtime')
+PY
 ENV PATH=/opt/uvm/venv/bin:$PATH \
     PYTHONPATH=/opt/uvm/app \
     PGDATA=/var/lib/postgresql/data \

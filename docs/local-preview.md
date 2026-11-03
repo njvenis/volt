@@ -30,6 +30,8 @@ python3 tools/g7_local_preview.py smoke demo --evidence "$PREVIEW_EVIDENCE"
 
 The default `start` path builds the revision-qualified local image from this clean helper checkout. To start an image loaded from a separately transferred archive without rebuilding, use `start --no-build` and supply its full immutable image ID, expected OCI source revision, version label, and supported platform. The helper checks all four against Docker image inspect before creating any resource, repeats the check immediately before launch, and passes the immutable image ID to `docker run`. The helper checkout must still be the exact clean revision recorded by `init`; its `helper_revision` is tracked separately from the loaded image's `image_source_revision` so a maintained launcher can operate an older immutable image without claiming to be part of that image.
 
+Before creating a container, network or volume, the helper persists the admitted image ID, source revision, version and platform in the instance record. An interrupted initialization can resume only with that exact binding. A partial state with no binding, or an attempted image switch, is refused; destroy the verified owned resources and initialize a new instance. RC1 is for fresh installations and does not adopt historical development volumes.
+
 For example, after loading the image archive, use the verified ID and metadata from its manifest:
 
 ```sh

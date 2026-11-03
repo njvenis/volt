@@ -394,6 +394,9 @@ class LocalPreviewSafetyTests(unittest.TestCase):
                     raise AssertionError(command)
                 timeline.append(command)
                 if command[1:3] == ("network", "create"):
+                    self.assertEqual(json.loads(metadata_path.read_text()).get("image_binding"), {
+                        "id": expected_id, "revision": image_source_revision,
+                        "version": "local-preview", "platform": "linux/amd64"})
                     mutations.append(command); network_created = True; return ""
                 if command[1:3] == ("volume", "create"):
                     mutations.append(command)
@@ -500,6 +503,115 @@ class LocalPreviewSafetyTests(unittest.TestCase):
         docker_run = next(i for i, command in enumerate(timeline) if command[1] == "run")
         self.assertLess(first_image_inspect, network_create)
         self.assertLess(second_image_inspect, docker_run)
+
+    def test_partial_start_persists_image_binding_and_refuses_image_switch(self):
+        first = {"id": "sha256:" + "a" * 64, "revision": "b" * 40,
+            "version": "0.1.0-rc.1", "platform": "linux/amd64"}
+        second = {**first, "id": "sha256:" + "c" * 64}
+        info = metadata()
+        info.update({"container_id": None, "network_id": None, "lifecycle_state": "initializing"})
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"XDG_STATE_HOME": temp}):
+            root = preview.state_dir("demo")
+            path = write_instance(root, info)
+            with patch.object(preview, "preflight", return_value={"container": False, "network": False,
+                    "volumes": {"postgres": False, "media": False, "state": False}}):
+                preview.bind_initial_image(root, info, first)
+                self.assertEqual(json.loads(path.read_text())["image_binding"], first)
+                with self.assertRaisesRegex(SystemExit, "image binding differs"):
+                    preview.bind_initial_image(root, info, second)
+            self.assertEqual(json.loads(path.read_text())["image_binding"], first)
+
+    def test_build_start_launches_admitted_immutable_id_even_if_tag_is_retargeted(self):
+        image_id = "sha256:" + "a" * 64
+        revision = "c" * 40
+        tag = f"volt:preview-{revision}"
+        info = metadata()
+        info.update({"container_id": None, "network_id": None, "lifecycle_state": "initializing",
+            "helper_revision": revision, "source_revision": revision, "api_port": 8180, "oidc_port": 8190})
+        state = {"network": False, "volumes": set(), "container": False}
+        commands = []
+        image_row = {"Id": image_id, "Os": "linux", "Architecture": "amd64", "Config": {"Labels": {
+            "org.opencontainers.image.revision": revision, "org.opencontainers.image.version": "local-preview"}}}
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"XDG_STATE_HOME": temp}):
+            root = preview.state_dir("demo")
+            path = write_instance(root, info)
+            def command(*args, capture=False):
+                args = tuple(args); commands.append(args)
+                if args[:2] == ("git", "rev-parse"): return revision
+                if args[:2] == ("git", "status"): return ""
+                if args[:2] == ("docker", "build"): return ""
+                if args[:3] == ("docker", "network", "create"):
+                    state["network"] = True  # a competing client may retarget `tag` here
+                    return ""
+                if args[:3] == ("docker", "volume", "create"):
+                    state["volumes"].add(next(k for k, v in info["volumes"].items() if v == args[-1])); return ""
+                if args[:3] == ("docker", "network", "inspect"):
+                    return "e" * 64 if args[4] == "{{.Id}}" else "172.19.0.1"
+                if args[:2] == ("docker", "run"):
+                    state["container"] = True; return "f" * 64
+                if args[:3] == ("docker", "inspect", "--format"): return image_id
+                raise AssertionError(args)
+            def inspect(args, **kwargs):
+                args = tuple(args)
+                if args[:3] == ("docker", "image", "inspect"):
+                    return subprocess.CompletedProcess(args, 0, json.dumps([image_row]), "")
+                raise AssertionError(args)
+            output = io.StringIO()
+            with patch.object(preview, "run", side_effect=command), \
+                 patch.object(preview.subprocess, "run", side_effect=inspect), \
+                 patch.object(preview, "preflight", return_value={"container": False, "network": False,
+                     "volumes": {part: False for part in info["volumes"]}}), \
+                 patch.object(preview, "exact_network", side_effect=lambda _: state["network"]), \
+                 patch.object(preview, "exact_volume", side_effect=lambda _, part: part in state["volumes"]), \
+                 patch.object(preview, "exact_container", side_effect=lambda _: state["container"]), \
+                 redirect_stdout(output):
+                preview.start(type("Args", (), {"instance": "demo", "image": None, "no_build": False})())
+            saved = json.loads(path.read_text())
+        launch = next(args for args in commands if args[:2] == ("docker", "run"))
+        self.assertEqual(launch[-1], image_id)
+        self.assertNotEqual(launch[-1], tag)
+        self.assertEqual(saved["image_binding"]["id"], image_id)
+        self.assertEqual(saved["image_id"], image_id)
+        self.assertEqual(saved["lifecycle_state"], "established")
+        self.assertEqual(saved["image_source_revision"], revision)
+        self.assertEqual(saved["image_version"], "local-preview")
+        self.assertIn(f"image_id={image_id}", output.getvalue())
+
+    def test_default_retry_of_bound_partial_without_saved_mode_fails_closed(self):
+        info = metadata()
+        info.update({"container_id": None, "network_id": None, "lifecycle_state": "initializing",
+            "helper_revision": "c" * 40, "source_revision": "c" * 40,
+            "image_binding": {"id": "sha256:" + "a" * 64, "revision": "b" * 40,
+                "version": "0.1.0-rc.1", "platform": "linux/amd64"}})
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"XDG_STATE_HOME": temp}):
+            root = preview.state_dir("demo")
+            path = write_instance(root, info)
+            before = path.read_bytes()
+            with patch.object(preview, "preflight", return_value={"container": False, "network": False,
+                    "volumes": {part: False for part in info["volumes"]}}), \
+                 patch.object(preview, "run", side_effect=lambda *a, capture=False:
+                     "c" * 40 if a[:2] == ("git", "rev-parse") else "") as docker_mutation, redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(SystemExit, "without image mode") as result:
+                    preview.start(type("Args", (), {"instance": "demo", "image": None, "no_build": False})())
+            self.assertIn("explicit no-build image admission options", str(result.exception))
+            self.assertEqual([call.args[0] for call in docker_mutation.call_args_list], ["git", "git"])
+            self.assertEqual(path.read_bytes(), before)
+            result = json.loads(path.read_text())
+            self.assertEqual(result["image_binding"]["revision"], "b" * 40)
+            self.assertNotIn("image_mode", result)
+            self.assertEqual(result["lifecycle_state"], "initializing")
+
+    def test_unbound_partial_resources_are_not_adopted(self):
+        info = metadata()
+        info.update({"container_id": None, "network_id": None, "lifecycle_state": "initializing"})
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"XDG_STATE_HOME": temp}):
+            root = preview.state_dir("demo")
+            write_instance(root, info)
+            with patch.object(preview, "preflight", return_value={"container": False, "network": True,
+                    "volumes": {"postgres": True, "media": False, "state": False}}):
+                with self.assertRaisesRegex(SystemExit, "without an image binding"):
+                    preview.bind_initial_image(root, info, {"id": "sha256:" + "a" * 64,
+                        "revision": "b" * 40, "version": "local-preview", "platform": "linux/amd64"})
 
 
 

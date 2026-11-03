@@ -1,0 +1,11 @@
+# Exact scanner release asset pins for linux/amd64.
+trivy_version=0.76.1
+trivy_release=https://github.com/aquasecurity/trivy/releases/download/v0.76.1/trivy_0.76.1_Linux-64bit.tar.gz
+trivy_linux_amd64_sha256=c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0
+gitleaks_image=ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:b109bc5f8f76a38196a3e413704fc5b9e3c32360bce4e4b603bd6f45b3721dbb
+cosign_version=3.1.4
+cosign_release=https://github.com/sigstore/cosign/releases/download/v3.1.4/cosign-linux-amd64
+cosign_linux_amd64_sha256=424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa
+actionlint_version=1.7.12
+actionlint_release=https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+actionlint_linux_amd64_sha256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8

@@ -1,0 +1,72 @@
+{
+  "distlib": {
+    "copyright": "Vinay Sajip, 2011-2022",
+    "license_expression": "BSD-2-Clause",
+    "license_file": "DISTLIB-LAUNCHER-BSD-2.txt",
+    "license_file_sha256": "36b5db420258d6b8b6765144a922d8b6bcc0f18e789efeafee05b17cba0d90ef",
+    "source_urls": [
+      "https://github.com/pypa/pip/blob/26.2.1/src/pip/_vendor/vendor.txt",
+      "https://github.com/pypa/distlib/blob/0.4.2/PC/launcher.c"
+    ],
+    "vendored_by": "pip 26.2.1",
+    "version": "0.4.2"
+  },
+  "pip_launchers": {
+    "copyright": "Vinay Sajip, 2011-2022",
+    "distlib_launcher_source_url": "https://raw.githubusercontent.com/pypa/distlib/0.4.2/PC/launcher.c",
+    "distlib_launcher_source_sha256": "a0e60a3e9717a2e519120ae19d9c81564f934f38aa322062c26dc21e6c10c0fd",
+    "launcher_files": {
+      "t32.exe": {
+        "archive_path": "pip/_vendor/distlib/t32.exe",
+        "sha256": "6b4195e640a85ac32eb6f9628822a622057df1e459df7c17a12f97aeabc9415b",
+        "size": 97792
+      },
+      "t64-arm.exe": {
+        "archive_path": "pip/_vendor/distlib/t64-arm.exe",
+        "sha256": "ebc4c06b7d95e74e315419ee7e88e1d0f71e9e9477538c00a93a9ff8c66a6cfc",
+        "size": 182784
+      },
+      "t64.exe": {
+        "archive_path": "pip/_vendor/distlib/t64.exe",
+        "sha256": "81a618f21cb87db9076134e70388b6e9cb7c2106739011b6a51772d22cae06b7",
+        "size": 108032
+      },
+      "w32.exe": {
+        "archive_path": "pip/_vendor/distlib/w32.exe",
+        "sha256": "47872cc77f8e18cf642f868f23340a468e537e64521d9a3a416c8b84384d064b",
+        "size": 91648
+      },
+      "w64-arm.exe": {
+        "archive_path": "pip/_vendor/distlib/w64-arm.exe",
+        "sha256": "c5dc9884a8f458371550e09bd396e5418bf375820a31b9899f6499bf391c7b2e",
+        "size": 168448
+      },
+      "w64.exe": {
+        "archive_path": "pip/_vendor/distlib/w64.exe",
+        "sha256": "7a319ffaba23a017d7b1e18ba726ba6c54c53d6446db55f92af53c279894f8ad",
+        "size": 101888
+      }
+    },
+    "launcher_root": "/usr/local/lib/python3.14/site-packages/pip/_vendor/distlib/",
+    "license_archive_path": "pip/_vendor/distlib/LICENSE.txt",
+    "license_expression": "BSD-2-Clause",
+    "license_file": "DISTLIB-PIP-WHEEL-LICENSE.txt",
+    "license_file_sha256": "808e10c8a6ab8deb149ff9b3fb19f447a808094606d712a9ca57fead3552599d",
+    "pypi_release_url": "https://pypi.org/pypi/pip/26.2.1/json",
+    "vendor_manifest_archive_path": "pip/_vendor/vendor.txt",
+    "vendor_manifest_sha256": "3df0c9601bfa2e0dca23cc574a4f900a4d7fdad060ab203fab8354350ed93320",
+    "vendor_manifest_text": "distlib==0.4.2",
+    "vendor_path": "/usr/local/lib/python3.14/site-packages/pip/_vendor/vendor.txt",
+    "version": "26.2.1",
+    "wheel_sha256": "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e",
+    "wheel_size": 1816632,
+    "wheel_url": "https://files.pythonhosted.org/packages/f3/6e/1736e5b4ae2b778ef2f81c47d797de9f891d4d8acb047a24ca37a60294dd/pip-26.2.1-py3-none-any.whl"
+  },
+  "schema": "volt-vendored-launchers/v1",
+  "setuptools_launchers": {
+    "distribution_version": "84.0.0",
+    "evidence_manifest": "SETUPTOOLS-LAUNCHERS.json",
+    "license_file": "SETUPTOOLS-84.0.0-MIT-LICENSE.txt",
+    "status": "exact wheel archive checksum and all eight image PE file digests are validated by the collector"
+  }
+}

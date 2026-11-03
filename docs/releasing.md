@@ -1,0 +1,23 @@
+# Release preparation and publication
+
+VOLT's first candidate is designated `0.1.0-rc.1`. Its intended source release is Apache-2.0 and its intended image is `ghcr.io/njvenis/volt:0.1.0-rc.1` for `linux/amd64`, alongside an offline archive. The project license file is the license authority; this designation does not itself publish or alter it. There is no `latest` tag for a release candidate.
+
+## Required preparation
+
+Run the release workflow manually from `main`. It accepts only the clean, exact source revision dispatched from `main`, fails if `v0.1.0-rc.1` already exists, and records the source revision and immutable local Docker image ID. It runs the existing portable checks and must build the image once. All reports, SBOMs, notices, archive content and signatures must identify that same image and source revision. A rebuilt image must never replace the candidate after scanning.
+
+The image inventory contract is `python3 tools/notices/collect.py --image <immutable-image-id> --output <empty-directory>` followed by `python3 tools/notices/verify.py --directory <directory> --image <immutable-image-id>`. Collection must finish with no unresolved license findings. The full Trivy image report is retained; scanner errors, a missing vulnerability database, or fixable High/Critical findings fail the gate. Any exception names the advisory, package and version, rationale, approving maintainer and expiry no more than 30 days away. Broad ignores are not permitted.
+
+Before collection, the workflow runs `tools/notices/prepare_release_sources.py --output <directory>`. It must retain `debian-source-dispositions.json` and its pinned Debian developer keyring; collection receives both explicitly through `--debian-dispositions` and `--debian-developer-keyring`. The workflow also loads the one built image from its saved archive into a fresh local preview using `start --no-build`, then exercises authenticated browser operation, denied peer ingress, restart persistence and owned-resource cleanup before publication can proceed.
+
+RC1 v0.1.0-rc.1 supports fresh installations only. It does not migrate, upgrade or repair historical development volumes. The preview launcher binds the immutable image ID and its revision, version and platform into instance state before creating Docker resources. A resumed partial initialization must use that same binding; an unbound partial state or image change requires destroying that instance and initializing a new one. Established same-image stop/restart remains supported.
+
+The publication job is downstream of the full gates and requires an explicit maintainer dispatch approval. Configure the `volt-rc1-publication` GitHub environment with required human reviewers before enabling any registry or signing command. The publish job alone receives package-write and OIDC-token permissions. It must push immutable version and source-SHA tags without replacement, sign the image digest using GitHub OIDC keyless signing, and attach SBOM and provenance attestations. It must not create `latest`.
+
+The offline archive contains the loadable image, source tar and Git bundle, the maintained `tools/g7_local_preview.py` host launcher, generated notices, both SBOMs, full scan report, provenance, registry digest, signed file manifest, checksums and verification instructions. The launcher is checked against the exact clean source bundle and starts the already-loaded image without rebuilding. Sigstore trust is provisioned independently; a root or checksum carried only inside the archive is never a trust anchor. Corrupt archives, wrong signatures, wrong signer identity, unsigned extra files and mismatched image, scan, notice or registry metadata must be rejected. The same immutable image is scanned and published; publication must not rebuild it. See [launcher-guide.txt](../tools/release/launcher-guide.txt) and [VERIFY.txt](../tools/release/VERIFY.txt).
+
+## Current boundary
+
+The repository owner must first make the repository public and enable GitHub private vulnerability reporting. The reporting route remains inactive until then. Public security reports are best effort and have no SLA; see [SECURITY.md](../SECURITY.md).
+
+Registry publication, production OIDC signing, GitHub setting changes, release creation and tags are not performed by local preparation. Hosted CI and environment protection settings have not been exercised here. The current source candidate is uncommitted, so final release image preparation remains blocked until the authorized clean `main` revision exists. Do not describe this candidate as published, signed, remotely scanned, production-ready, or approved by hosted CI.

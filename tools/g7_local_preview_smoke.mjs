@@ -54,8 +54,9 @@ try{
   const item=readback.body.items?.find(x=>x.access_group_id===saved.group_id);
   ensure(item,'created_public_access_group_missing');
   const audit=item.history??[];
-  ensure(audit.some(x=>x.command_id===saved.command_id&&x.action==='access_group.create'),'audited_admin_create_missing_from_public_history');
-  await writeFile(`${evidence}/public-admin-smoke${readbackOnly?'-restart':''}.json`,JSON.stringify({environment:'local synthetic OIDC container',principal_id:session.principal_id,credential_mode:session.credential_mode,group_id:saved.group_id,command_id:saved.command_id,public_readback_status:readback.status,audit_actions:audit.map(x=>x.action),audit_command_ids:audit.map(x=>x.command_id),restart_readback:readbackOnly},null,2)+'\n',{mode:0o600});
+  const auditEvent=audit.find(x=>x.action==='access_group.create'&&x.actor_id===session.principal_id&&x.after_value?.access_group_id===saved.group_id);
+  ensure(auditEvent,'audited_admin_create_missing_from_public_history');
+  await writeFile(`${evidence}/public-admin-smoke${readbackOnly?'-restart':''}.json`,JSON.stringify({environment:'local synthetic OIDC container',principal_id:session.principal_id,credential_mode:session.credential_mode,group_id:saved.group_id,command_id:saved.command_id,public_readback_status:readback.status,audit_event:{event_id:auditEvent.event_id,action:auditEvent.action,actor_id:auditEvent.actor_id,after_value:auditEvent.after_value},restart_readback:readbackOnly},null,2)+'\n',{mode:0o600});
   await page.screenshot({path:`${evidence}/admin-operation-readback.png`,fullPage:true});
   console.log(JSON.stringify({browser_login:'passed',principal_id:session.principal_id,...(readbackOnly?{restart_readback:readback.status}:{public_admin_readback:readback.status}),audited:true,group_id:saved.group_id,command_id:saved.command_id}));
 }finally{await context.close();await browser.close();}

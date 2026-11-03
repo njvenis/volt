@@ -139,6 +139,7 @@ def initialize(args) -> None:
         "volumes": {part: f"volt-g7-preview-{args.instance}-{suffix}-{part}" for part in ("postgres", "media", "state")},
         "volume_resource_ids": {part: str(uuid.uuid4()) for part in ("postgres", "media", "state")},
         "api_port": api_port, "oidc_port": oidc_port, "secrets_dir": str(secrets_dir),
+        "lifecycle_state": "initializing",
         "source_revision": run("git", "rev-parse", "HEAD", capture=True), "source_status": "clean"}
     (root / "instance.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     (root / "instance.json").chmod(0o600)
@@ -147,10 +148,41 @@ def initialize(args) -> None:
 
 def load(instance: str) -> tuple[Path, dict]:
     root = state_dir(instance)
+    # Allow an intentionally symlinked XDG_STATE_HOME, but never let an
+    # instance-name alias or metadata symlink redirect a lifecycle command.
+    if root.is_symlink():
+        raise SystemExit(f"refusing preview instance path: instance directory is a symlink: {instance}")
     try:
-        return root, json.loads((root / "instance.json").read_text(encoding="utf-8"))
+        admitted_root = root.resolve(strict=True)
+        if not admitted_root.is_dir():
+            raise SystemExit(f"refusing preview instance path: instance root is not a directory: {instance}")
+        metadata_path = root / "instance.json"
+        if metadata_path.is_symlink():
+            raise SystemExit(f"refusing preview metadata: instance.json is a symlink: {instance}")
+        metadata_real = metadata_path.resolve(strict=True)
+        metadata_real.relative_to(admitted_root)
+        info = json.loads(metadata_real.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise SystemExit(f"instance is not initialized: {instance}") from exc
+    except ValueError as exc:
+        raise SystemExit(f"refusing preview metadata outside instance root: {instance}") from exc
+    if info.get("instance") != instance:
+        raise SystemExit(f"refusing preview metadata: stored instance does not match requested instance {instance}")
+    try:
+        secrets_dir = Path(info["secrets_dir"]).resolve(strict=True)
+        expected_secrets = (admitted_root / "secrets").resolve(strict=True)
+        private_files = [(root / name).resolve(strict=True) for name in ("oidc.json", "operator-link.json")]
+    except (KeyError, TypeError, OSError) as exc:
+        raise SystemExit("refusing preview metadata: private files are missing or outside the instance root") from exc
+    try:
+        secrets_dir.relative_to(admitted_root)
+        for private_file in private_files:
+            private_file.relative_to(admitted_root)
+    except ValueError as exc:
+        raise SystemExit("refusing preview metadata: private files are outside the instance root") from exc
+    if secrets_dir != expected_secrets:
+        raise SystemExit("refusing preview metadata: secrets_dir does not reference this instance")
+    return admitted_root, info
 
 
 def save_instance(root: Path, info: dict) -> None:
@@ -204,19 +236,27 @@ def exact_network(info: dict) -> bool:
     return True
 
 
-def preflight(info: dict, *, require_container: bool = False) -> dict:
+def preflight(info: dict, *, require_container: bool = False, require_complete: bool = False) -> dict:
     """Validate every existing resource before any Docker mutation."""
     container_exists = exact_container(info)
-    if require_container and not container_exists:
-        raise SystemExit("refusing preview operation: the exact owned container is absent")
     network_exists = exact_network(info)
     volumes_exist = {part: exact_volume(info, part) for part in info["volumes"]}
-    return {"container": container_exists, "network": network_exists, "volumes": volumes_exist}
+    resources = {"container": container_exists, "network": network_exists, "volumes": volumes_exist}
+    established = info.get("lifecycle_state") == "established" or info.get("container_id") is not None
+    if require_complete and established:
+        missing = [name for name, present in (("container", container_exists), ("network", network_exists),
+            *((f"volume:{part}", present) for part, present in volumes_exist.items())) if not present]
+        if missing:
+            raise SystemExit("refusing established preview with missing owned resources: " + ", ".join(missing) +
+                "; inspect retained evidence and use explicit destroy only for verified survivors")
+    if require_container and not container_exists:
+        raise SystemExit("refusing preview operation: the exact owned container is absent")
+    return resources
 
 
 def start(args) -> None:
     root, info = load(args.instance)
-    resources = preflight(info)
+    resources = preflight(info, require_complete=True)
     if resources["container"]:
         raise SystemExit(f"owned container already exists; use restart or stop first: {info['container']}")
     current = run("git", "rev-parse", "HEAD", capture=True)
@@ -285,6 +325,7 @@ def start(args) -> None:
         raise SystemExit("created preview container failed ownership verification")
     info["image"] = image
     info["image_id"] = run("docker", "inspect", "--format", "{{.Image}}", container, capture=True)
+    info["lifecycle_state"] = "established"
     save_instance(root, info)
     print(f"container={container}\nimage={image}\nurl=http://127.0.0.1:{info['api_port']}/")
 
@@ -298,13 +339,13 @@ def docker_for(args, action: str) -> None:
             return
         run("docker", "ps", "-a", "--filter", f"name={container}", "--format", "{{.Names}} {{.Status}} {{.Image}}")
         return
-    preflight(info, require_container=True)
+    preflight(info, require_container=True, require_complete=True)
     run("docker", action, container)
 
 
 def wait_healthy(args) -> None:
     _root, info = load(args.instance)
-    preflight(info, require_container=True)
+    preflight(info, require_container=True, require_complete=True)
     import time
     deadline = time.monotonic() + args.timeout
     while time.monotonic() < deadline:
@@ -320,7 +361,7 @@ def wait_healthy(args) -> None:
 
 def link_admin(args) -> None:
     root, info = load(args.instance)
-    preflight(info, require_container=True)
+    preflight(info, require_container=True, require_complete=True)
     link = (root / "operator-link.json").read_text(encoding="utf-8").strip()
     # The operator credential is read inside the container and is never included in argv/output.
     program = "import json,urllib.request; p='/run/uvm-g7-secrets/oidc_operator_secret'; token=open(p).read().strip(); body=" + repr(link) + "; r=urllib.request.Request('http://127.0.0.1:8000/api/v1/auth/operator/links',data=body.encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'}); print(urllib.request.urlopen(r,timeout=10).read().decode())"
@@ -380,7 +421,7 @@ def destroy(args) -> None:
 
 def smoke(args) -> None:
     _root, info = load(args.instance)
-    preflight(info, require_container=True)
+    preflight(info, require_container=True, require_complete=True)
     evidence = Path(args.evidence)
     evidence.mkdir(mode=0o700, parents=True, exist_ok=True)
     verify_private_ingress(info, evidence)

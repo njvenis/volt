@@ -32,6 +32,11 @@ RUN npm run build
 FROM ${VALKEY_IMAGE} AS valkey-bin
 
 FROM ${CE_IMAGE} AS runtime
+ARG VOLT_OIDC_DEPLOYMENT_MODES=demo,external
+ARG VOLT_SOURCE_SNAPSHOT=unspecified
+LABEL org.volt.oidc-deployment-modes=${VOLT_OIDC_DEPLOYMENT_MODES} \
+      org.volt.compose.source-snapshot=${VOLT_SOURCE_SNAPSHOT} \
+      org.volt.compose-install.contract=1
 USER root
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN python3 - <<'PY'

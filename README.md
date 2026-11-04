@@ -15,7 +15,7 @@ Its focus is continuity and accountability: understanding which workloads are af
 [RC1 release](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.1) · [Install RC1](docs/installation.md) · [Getting started](#getting-started) · [Architecture](#architecture) · [Documentation](#documentation) · [Contributing](CONTRIBUTING.md) · [Apache-2.0 licence](LICENSE)
 
 > [!IMPORTANT]
-> **RC1 available for evaluation — not production-ready.** The published `0.1.0-rc.1` image supports fresh installations on Linux/amd64 using the maintained local launcher and synthetic identity provider. Historical development volumes are not supported upgrade inputs. There is no general production installer or supported production deployment. See [RC1 installation](docs/installation.md) and [verification boundaries](GATES.md).
+> **Primary installation: source-free Docker Compose evaluation bundle.** The Compose bundle is under development and currently requires an explicitly built compatible candidate image; it is not backed by a published Compose-compatible release. Published RC1 remains available through the historical launcher instructions and does not satisfy the Compose runtime contract. Neither path is production-ready. See [Compose installation](deploy/compose/README.md), [historical RC1 installation](docs/installation.md), and [verification boundaries](GATES.md).
 
 ## Why VOLT?
 
@@ -47,11 +47,15 @@ The design treats **evidence, decisions and remediation as distinct concepts**. 
 
 ## Getting started
 
-### Evaluate RC1
+### Install the current Compose candidate
+
+Use the [source-free Compose bundle](deploy/compose/README.md) for new installations. It requires Docker Compose, Python and OpenSSL, plus an explicitly built candidate image. External evaluation also requires a provider-specific trusted identity-sync publisher; OIDC login alone does not establish current source permissions.
+
+### Historical RC1 launcher
 
 Follow **[Install RC1](docs/installation.md)** to verify and pull the published image, start it without rebuilding, link the synthetic administrator and check persistence. The [release page](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.1) provides the immutable digest, signed offline bundle, SBOMs and verification evidence.
 
-The launcher binds the application and synthetic OIDC provider to loopback, generates private local secrets and creates owned persistent volumes. Use synthetic data and disposable resources. RC1 is an evaluation release, not a production installation recipe; installing DefectDojo separately does not install VOLT.
+The historical launcher binds the application and synthetic OIDC provider to loopback, generates private local secrets and creates owned persistent volumes. Use synthetic data and disposable resources. RC1 is an evaluation release, not a production installation recipe; installing DefectDojo separately does not install VOLT.
 
 For source builds, use the [development preview guide](docs/local-preview.md).
 

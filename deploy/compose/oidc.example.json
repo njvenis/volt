@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "provider_id": "your-provider-id",
+  "issuer": "https://id.example.org/",
+  "discovery_url": "https://id.example.org/.well-known/openid-configuration",
+  "client_id": "your-client-id",
+  "callback_url": "https://volt.example.org/api/v1/auth/callback",
+  "client_secret_file": "/run/uvm-g7-secrets/oidc_client_secret",
+  "sync_secret_file": "/run/uvm-g7-secrets/oidc_sync_secret",
+  "operator_secret_file": "/run/uvm-g7-secrets/oidc_operator_secret",
+  "operator_actor_id": "volt-external-oidc-operator",
+  "allowed_algorithms": ["RS256"],
+  "allowed_endpoint_origins": ["https://id.example.org", "https://volt.example.org"],
+  "source_scope_ceilings": [],
+  "group_mappings": {},
+  "mapping_revision": 1,
+  "session_ttl_seconds": 3600,
+  "heartbeat_max_age_seconds": 120
+}

@@ -17,3 +17,6 @@ At startup, `docker/g7/entrypoint.sh` requires these files in `/run/secrets`:
 OIDC mode additionally requires `oidc_client_secret`, `oidc_sync_secret`, and `oidc_operator_secret`, with references supplied by the OIDC configuration. Connector tokens, webhook secrets, local signing keys, and notification credentials are optional inputs when the corresponding integration is configured. File contents must be managed by the operator and kept outside source control; no real values belong in the example file.
 
 The recovery TLS files are for the image's recovery-control boundary. They do not configure public ingress TLS. See [packaging/deployment boundaries](deployment.md) before adapting this target to another environment.
+# Compose configuration
+
+For the Compose installation, use the exact-schema `oidc.example.json` and setup flow in [`deploy/compose`](../deploy/compose/README.md). Provider issuer, discovery, callback and trusted origins must use HTTPS in external mode. Set exact hostnames accepted by the UVM ingress guard and use the configured callback through a TLS proxy. Forwarded host/protocol headers do not establish authority. Secret values belong in private files, not OIDC JSON or environment examples.

@@ -26,11 +26,38 @@ class FreshInstallWorkflowTests(unittest.TestCase):
         self.assertIn('printf \'%s\\n\' "$GITHUB_RUN_ID" > "$out/prepare-run-id.txt"', workflow)
         self.assertIn('"voltCandidatePreparationRun": os.environ["VOLT_PREPARE_RUN_ID"]', workflow)
         self.assertIn('"voltPublicationRun": os.environ["GITHUB_RUN_ID"]', workflow)
+        self.assertIn("candidate_source_sha", workflow)
+        self.assertIn("candidate_artifact_id", workflow)
+        self.assertIn("candidate_artifact_digest", workflow)
+        self.assertIn("candidate_archive_sha256", workflow)
+        self.assertIn("git merge-base --is-ancestor \"$CANDIDATE_SOURCE_SHA\" origin/main", workflow)
+        publish = workflow.split("  publish:", 1)[1]
+        identity = publish.split("- name: Verify named successful candidate run identity", 1)[1].split("- uses: actions/download-artifact", 1)[0]
+        self.assertIn('git merge-base --is-ancestor "$source_sha" origin/main', identity)
+        self.assertIn('git merge-base --is-ancestor "$GITHUB_SHA" origin/main', identity)
+        self.assertIn('source_sha="$GITHUB_SHA"', identity)
+        self.assertIn('test -z "$REQUESTED_CANDIDATE_SOURCE"', identity)
+        self.assertLess(publish.index("Verify named successful candidate run identity"),
+                        publish.index("actions/download-artifact"))
+        self.assertLess(publish.index("actions/download-artifact"),
+                        publish.index("Revalidate retained candidate contents before registry writes"))
+        self.assertLess(publish.index("Revalidate retained candidate contents before registry writes"),
+                        publish.index("Verify explicit approval and required environment reviewers"))
+        self.assertLess(publish.index("Verify explicit approval and required environment reviewers"),
+                        publish.index("Publish the already-gated image without rebuilding"))
+        self.assertIn('"voltReleaseController"', workflow)
+        self.assertIn('"candidate_source_commit": sha', workflow)
+        self.assertIn('"commit": os.environ["VOLT_CONTROLLER_COMMIT"]', workflow)
+        self.assertIn('git show "$CANDIDATE_SOURCE_SHA:tools/release/VERIFY.txt"', workflow)
+        self.assertIn("--source-root \"$RUNNER_TEMP/volt-rc2-approved-source\"", workflow)
         publish = workflow.split("  publish:",1)[1]
         self.assertIn("environment: volt-rc1-publication", publish)
         self.assertIn("packages: write", publish)
         self.assertIn("id-token: write", publish)
         self.assertNotIn("docker build", publish)
+        self.assertIn('docker tag "$image_id" "$registry:sha-$CANDIDATE_SOURCE_SHA"', publish)
+        self.assertIn('docker push "$registry:sha-$CANDIDATE_SOURCE_SHA"', publish)
+        self.assertNotIn('docker push "$registry:sha-$GITHUB_SHA"', publish)
         self.assertIn("volt-rc2-compose-qualification", workflow)
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn("uv run python -m unittest discover -s tests/release -v", ci)
@@ -108,7 +135,7 @@ class FreshInstallWorkflowTests(unittest.TestCase):
             os.link(original, linked)
             self.assertEqual(original.stat().st_ino, linked.stat().st_ino)
             files[linked_name] = original.read_bytes()
-            environment = dict(os.environ, RELEASE_OUT=str(source), RUNNER_TEMP=str(directory))
+            environment = dict(os.environ, RELEASE_OUT=str(source), RUNNER_TEMP=str(directory), RECOVERY_MODE="false", EXPECTED_CANDIDATE_ARCHIVE_SHA256="")
             packed = subprocess.run(["/bin/bash", "-e", "-c", script("Pack exact candidate inputs for portable artifact transfer")], cwd=ROOT, env=environment, text=True, capture_output=True)
             self.assertEqual(packed.returncode, 0, packed.stdout + packed.stderr)
             with tarfile.open(directory / "volt-rc2-candidate.tar") as archive:

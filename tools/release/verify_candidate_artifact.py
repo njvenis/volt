@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 
@@ -17,6 +19,34 @@ def sha(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             h.update(block)
     return h.hexdigest()
+
+
+def host_tool_diagnostics() -> None:
+    """Record only the tools and home-directory paths relevant to notice verification."""
+    print(f"notice_verifier_python={sys.version.split()[0]}", file=sys.stderr)
+    executable = shutil.which("gpgv")
+    print(f"notice_verifier_gpgv_path={executable or 'missing'}", file=sys.stderr)
+    if executable:
+        try:
+            version = subprocess.run([executable, "--version"], capture_output=True, text=True,
+                                     check=False, timeout=10)
+            first_line = (version.stdout or version.stderr).splitlines()
+            print(f"notice_verifier_gpgv_version={first_line[0] if first_line else 'unknown'}",
+                  file=sys.stderr)
+        except (OSError, subprocess.TimeoutExpired):
+            print("notice_verifier_gpgv_version=unavailable", file=sys.stderr)
+    print(f"notice_verifier_home={Path.home()}", file=sys.stderr)
+    gnupghome = Path(os.environ["GNUPGHOME"]) if os.environ.get("GNUPGHOME") else None
+    print(f"notice_verifier_gnupghome={gnupghome or '<unset>'}", file=sys.stderr)
+
+
+def verify_child(command: list[str], *, label: str) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode:
+        detail = "\n".join(part.rstrip() for part in (result.stdout, result.stderr) if part.strip())
+        suffix = f":\n{detail}" if detail else " (no child diagnostic output)"
+        raise ValueError(f"{label} failed with exit {result.returncode}{suffix}")
+    return result
 
 
 def main() -> int:
@@ -46,15 +76,13 @@ def main() -> int:
         report=json.loads((root/"release-scan.json").read_text())
         if report.get("Metadata",{}).get("ImageID") != image_id:
             raise ValueError("retained full scan is not bound to the candidate image ID")
-        verified=subprocess.run([sys.executable,str(Path(__file__).parents[1]/"notices/verify.py"),
-            "--directory",str(root/"notices"),"--image",image_id],capture_output=True,text=True)
-        if verified.returncode:
-            raise ValueError("retained image-bound notice inventory failed verification")
+        host_tool_diagnostics()
+        verify_child([sys.executable,str(Path(__file__).parents[1]/"notices/verify.py"),
+            "--directory",str(root/"notices"),"--image",image_id],
+            label="retained image-bound notice inventory verification")
         bundle=root/"compose-qualification.tar.gz"
-        bundle_check=subprocess.run([sys.executable,str(Path(__file__).parents[1]/"build_compose_bundle.py"),
-            "verify","--archive",str(bundle)],capture_output=True,text=True)
-        if bundle_check.returncode:
-            raise ValueError("retained source-free qualification bundle failed verification")
+        verify_child([sys.executable,str(Path(__file__).parents[1]/"build_compose_bundle.py"),
+            "verify","--archive",str(bundle)], label="retained source-free qualification bundle verification")
         print(json.dumps({"source_commit":args.source,"image_id":image_id,"source_snapshot":snapshot,
             "image_archive":"verified","notice_manifest":"verified","scan_image_id":"verified",
             "qualification_bundle_sha256":sha(bundle)},sort_keys=True))

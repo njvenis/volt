@@ -20,6 +20,10 @@ Trust bootstrap comes first. Obtain the expected source commit, an independently
      --cosign cosign --trusted-root /trusted/sigstore/trusted_root.json \
      --trusted-root-sha256 <independently-obtained-root-sha256>
 
-5. Follow launcher-guide.txt from the exact clean source checkout for the no-build private preview, health/readback and owned cleanup path.
+5. Pull the verified published image by the signed digest and follow README.md in the signed volt-compose.tar.gz bundle for source-free installation:
 
-SHA256SUMS is checked as an integrity aid, not a trust anchor. The archive verifier rejects unknown or missing payload files, unsafe paths, links, special files, duplicate members, oversized archives, wrong signer identity/issuer, wrong source/image metadata, mismatched registry digests, non-image tar files, corrupt config/layer chains and a launcher that differs from the signed Git bundle.
+   docker pull "ghcr.io/njvenis/volt@$(python3 -c 'import json; print(json.load(open("manifest.json"))["registry_digest"])')"
+
+   The digest comes from signed manifest.json and must agree with registry-digest.txt. The bundle's README.md contains the same rendered digest-pinned image reference. Do not use a mutable tag in place of that reference.
+
+SHA256SUMS is checked as an integrity aid, not a trust anchor. The archive verifier rejects unknown or missing payload files, unsafe paths, links, special files, duplicate members, oversized archives, wrong signer identity/issuer, wrong source/image metadata, mismatched registry digests, non-image tar files, corrupt config/layer chains and a Compose bundle that differs from the signed Git source except for substitution of the exact published image digest.

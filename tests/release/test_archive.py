@@ -5,8 +5,10 @@ import subprocess
 import sys
 import tarfile
 import gzip
+import io
 import shutil
 import base64
+import contextlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -101,6 +103,68 @@ class OfflineArchiveTests(unittest.TestCase):
             self.assertEqual(archive.main(), 0)
         return package, result
 
+    def build_rc2_signed(self, root):
+        package = root / "rc2-bundle"
+        (package / "notices").mkdir(parents=True)
+        repo = root / "rc2-source"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+        compose_source = Path(__file__).parents[2] / "deploy" / "compose"
+        (repo / "deploy" / "compose").mkdir(parents=True)
+        for name in archive.COMPOSE_BUNDLE_FILES:
+            shutil.copy2(compose_source / name, repo / "deploy" / "compose" / name)
+        (repo / "tools").mkdir()
+        shutil.copy2(Path(__file__).parents[2] / "tools" / "build_compose_bundle.py", repo / "tools" / "build_compose_bundle.py")
+        env = {**os.environ, "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+               "GIT_COMMITTER_NAME": "Fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid"}
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-m", "RC2 compose source"], check=True, env=env, capture_output=True)
+        source_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+        subprocess.run(["git", "-C", str(repo), "bundle", "create", str(package / "source.bundle"), "HEAD"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "archive", "--format=tar", "--output", str(package / "source.tar"), "HEAD"], check=True)
+        source_snapshot = "sha256:" + archive.sha(package / "source.tar")
+        registry_digest = "sha256:" + "c" * 64
+        bundle = package / "volt-compose.tar.gz"
+        subprocess.run([sys.executable, str(repo / "tools" / "build_compose_bundle.py"), "build",
+                        "--output", str(bundle), "--image-reference", f"ghcr.io/njvenis/volt@{registry_digest}"],
+                       cwd=repo, check=True, capture_output=True, text=True)
+        layer = b"fixture RC2 layer bytes"
+        diff = "sha256:" + hashlib.sha256(layer).hexdigest()
+        config = {"os": "linux", "architecture": "amd64", "config": {"Labels": {
+            "org.opencontainers.image.revision": source_sha, "org.opencontainers.image.version": archive.EXPECTED_VERSION,
+            "org.volt.oidc-deployment-modes": "demo,external", "org.volt.compose-install.contract": "1",
+            "org.volt.compose.source-snapshot": source_snapshot}}, "rootfs": {"type": "layers", "diff_ids": [diff]}}
+        config_bytes = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+        image_id = "sha256:" + hashlib.sha256(config_bytes).hexdigest()
+        with tarfile.open(package / "image.tar", "w") as image:
+            import io
+            entries = [(image_id.split(":", 1)[1] + ".json", config_bytes), ("layer.tar", layer),
+                       ("manifest.json", json.dumps([{"Config": image_id.split(":", 1)[1] + ".json", "RepoTags": ["volt:rc2-fixture"], "Layers": ["layer.tar"]}]).encode())]
+            for name, data in entries:
+                info = tarfile.TarInfo(name); info.size = len(data); image.addfile(info, io.BytesIO(data))
+        payload = {
+            "sbom.syft.json": b'{"artifacts": []}\n', "sbom.spdx.json": b'{"packages": []}\n',
+            "release-scan.json": json.dumps({"SchemaVersion": 2, "ArtifactType": "container_image", "Metadata": {"ImageID": image_id}, "Results": [{"Target": "fixture", "Class": "os-pkgs", "Type": "debian"}]}).encode()+b"\n",
+            "notices/example.txt": b"fixture RC2 notice\n", "notice-manifest.json": json.dumps({"schema": "volt-notice-inventory/v1", "image_id": image_id, "platform": "linux/amd64"}).encode()+b"\n",
+            "VERIFY.txt": b"test-only RC2 verification instructions\n",
+            "provenance.json": json.dumps({"buildDefinition": {"buildType": "https://github.com/Attestations/GitHubActionsWorkflow@v1", "externalParameters": {"workflow": {"ref": "njvenis/volt/.github/workflows/release.yml@refs/heads/main", "repository": "https://github.com/njvenis/volt"}, "source": {"uri": "https://github.com/njvenis/volt", "ref": source_sha}}, "internalParameters": {}, "resolvedDependencies": [{"uri": "git+https://github.com/njvenis/volt", "digest": {"gitCommit": source_sha}}]}, "runDetails": {"builder": {"id": "https://github.com/actions/runner"}, "metadata": {"invocationId": "https://github.com/njvenis/volt/actions/runs/123"}}}).encode()+b"\n",
+            "registry-digest.txt": (registry_digest+"\n").encode(),
+        }
+        for name, contents in payload.items():
+            (package / name).write_bytes(contents)
+        self.source_sha, self.image_id = source_sha, image_id
+        for command in (
+            ["archive.py", "prepare", "--directory", str(package), "--version", archive.EXPECTED_VERSION,
+             "--source-sha", source_sha, "--image-id", image_id, "--registry-digest", registry_digest, "--platform", "linux/amd64"],
+            ["archive.py", "sign", "--directory", str(package), "--key", str(self.key)],
+        ):
+            with patch.object(sys, "argv", command):
+                self.assertEqual(archive.main(), 0)
+        result = root / "volt-rc2.tar"
+        with patch.object(sys, "argv", ["archive.py", "pack", "--directory", str(package), "--archive", str(result), "--test-public-key", str(self.public)]):
+            self.assertEqual(archive.main(), 0)
+        return package, result
+
     def test_release_workflow_bundle_command_works_in_exact_detached_checkout(self):
         workflow = (Path(__file__).parents[2] / ".github/workflows/release.yml").read_text()
         self.assertIn('git bundle create "$out/source.bundle" HEAD', workflow)
@@ -130,6 +194,55 @@ class OfflineArchiveTests(unittest.TestCase):
                                                             "--source-sha", self.source_sha,
                                                             "--image-id", self.image_id]):
                 self.assertEqual(archive.main(), 0)
+
+    def test_rc2_signed_archive_prepare_pack_verify_binds_digest_bundle_to_source(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package, packed = self.build_rc2_signed(Path(temp))
+            self.assertFalse((package / "tools-g7-local-preview.py").exists())
+            with patch.object(sys, "argv", ["archive.py", "verify", "--archive", str(packed),
+                                            "--test-public-key", str(self.public),
+                                            "--source-sha", self.source_sha, "--image-id", self.image_id]), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(archive.main(), 0)
+
+    def test_rc2_archive_requires_bundle_and_checksum(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package, _ = self.build_rc2_signed(Path(temp))
+            bundle = (package / "volt-compose.tar.gz").read_bytes()
+            (package / "volt-compose.tar.gz").unlink()
+            with self.assertRaisesRegex(ValueError, "required offline release file missing: volt-compose.tar.gz"):
+                archive.build_manifest(package, archive.EXPECTED_VERSION, self.source_sha, self.image_id,
+                    "linux/amd64", archive.EXPECTED_IDENTITY, archive.EXPECTED_ISSUER,
+                    "sha256:" + "c" * 64)
+            (package / "volt-compose.tar.gz").write_bytes(bundle)
+            (package / "volt-compose.tar.gz.sha256").unlink()
+            with self.assertRaisesRegex(ValueError, "required offline release file missing: volt-compose.tar.gz.sha256"):
+                archive.build_manifest(package, archive.EXPECTED_VERSION, self.source_sha, self.image_id,
+                    "linux/amd64", archive.EXPECTED_IDENTITY, archive.EXPECTED_ISSUER,
+                    "sha256:" + "c" * 64)
+
+    def test_rc2_archive_rejects_digest_consistent_bundle_source_contradiction(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package, _ = self.build_rc2_signed(Path(temp))
+            bundle = package / "volt-compose.tar.gz"
+            with tarfile.open(bundle, "r:gz") as original:
+                entries = {member.name: original.extractfile(member).read() for member in original.getmembers()}
+            setup_name = f"volt-compose-{archive.EXPECTED_VERSION}/setup.py"
+            entries[setup_name] += b"\n# fixture contradiction\n"
+            manifest_name = f"volt-compose-{archive.EXPECTED_VERSION}/manifest.json"
+            bundle_manifest = json.loads(entries[manifest_name])
+            bundle_manifest["files"]["setup.py"] = hashlib.sha256(entries[setup_name]).hexdigest()
+            entries[manifest_name] = (json.dumps(bundle_manifest, sort_keys=True, indent=2) + "\n").encode()
+            with tarfile.open(bundle, "w:gz", format=tarfile.PAX_FORMAT) as rewritten:
+                for name, contents in sorted(entries.items()):
+                    member = tarfile.TarInfo(name); member.size = len(contents); rewritten.addfile(member, __import__("io").BytesIO(contents))
+            (package / "volt-compose.tar.gz.sha256").write_text(f"{archive.sha(bundle)}  {bundle.name}\n")
+            manifest = archive.build_manifest(package, archive.EXPECTED_VERSION, self.source_sha, self.image_id,
+                "linux/amd64", archive.EXPECTED_IDENTITY, archive.EXPECTED_ISSUER, "sha256:" + "c" * 64)
+            (package / "manifest.json").write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
+            with patch.object(sys, "argv", ["archive.py", "sign", "--directory", str(package), "--key", str(self.key)]):
+                self.assertEqual(archive.main(), 0)
+            with self.assertRaisesRegex(ValueError, "Compose bundle source file differs from signed source.*setup.py"):
+                archive.verify_directory(package, "cosign", public_key=self.public)
 
     def test_wrong_signer_identity_and_wrong_key_are_rejected(self):
         with tempfile.TemporaryDirectory() as temp:

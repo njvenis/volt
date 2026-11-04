@@ -15,7 +15,7 @@ class CandidateIdentityTests(unittest.TestCase):
     def test_candidate_run_requires_same_successful_main_source_and_artifact(self):
         sha = "a" * 40
         run = {"id": 123, "repository": {"full_name": "njvenis/volt"},
-               "workflow_path": ".github/workflows/release.yml", "event": "workflow_dispatch",
+               "path": ".github/workflows/release.yml@refs/heads/main", "event": "workflow_dispatch",
                "head_branch": "main", "head_sha": sha, "status": "completed", "conclusion": "success"}
         artifact = {"artifacts": [{"id": 44, "name": f"volt-rc2-candidate-{sha}",
                                    "expired": False, "digest": "sha256:" + "b" * 64}]}
@@ -31,6 +31,20 @@ class CandidateIdentityTests(unittest.TestCase):
              patch("sys.argv", ["verify_candidate_run.py", "--run-id", "123", "--source", sha,
                                 "--repository", "njvenis/volt"]), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(verify_candidate_run.main(), 2)
+
+    def test_candidate_run_rejects_wrong_workflow_or_non_main_path_suffix(self):
+        for path in (".github/workflows/other.yml@refs/heads/main",
+                     ".github/workflows/release.yml@refs/heads/feature"):
+            with self.subTest(path=path):
+                sha = "a" * 40
+                run = {"id": 123, "repository": {"full_name": "njvenis/volt"},
+                       "path": path, "event": "workflow_dispatch", "head_branch": "main",
+                       "head_sha": sha, "status": "completed", "conclusion": "success"}
+                with patch.object(verify_candidate_run, "api", return_value=run), \
+                     patch.dict("os.environ", {"GH_TOKEN": "fixture-token"}), \
+                     patch("sys.argv", ["verify_candidate_run.py", "--run-id", "123", "--source", sha,
+                                        "--repository", "njvenis/volt"]), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(verify_candidate_run.main(), 2)
 
     def test_candidate_artifact_rejects_source_snapshot_drift_before_image_import(self):
         import hashlib

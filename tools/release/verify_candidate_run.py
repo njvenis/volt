@@ -27,6 +27,13 @@ def api(path: str, token: str) -> dict:
     return value
 
 
+def workflow_path_matches(value: object, workflow: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    path, separator, ref = value.partition("@")
+    return path == workflow and (not separator or ref in {"main", "refs/heads/main"})
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-id", required=True)
@@ -43,7 +50,7 @@ def main() -> int:
         prefix = f"repos/{args.repository}/actions"
         run = api(f"{prefix}/runs/{args.run_id}", token)
         if (run.get("id") != int(args.run_id) or run.get("repository", {}).get("full_name") != args.repository
-                or run.get("workflow_path") != args.workflow or run.get("event") != "workflow_dispatch"
+                or not workflow_path_matches(run.get("path"), args.workflow) or run.get("event") != "workflow_dispatch"
                 or run.get("head_branch") != "main" or run.get("head_sha") != args.source
                 or run.get("status") != "completed" or run.get("conclusion") != "success"):
             raise RuntimeError("candidate run must be a successful, completed main dispatch for this exact source and workflow")
@@ -53,7 +60,7 @@ def main() -> int:
         if len(matches) != 1 or not isinstance(matches[0].get("digest"), str):
             raise RuntimeError("candidate run must contain exactly one retained candidate artifact with a digest")
         print(json.dumps({"run_id": int(args.run_id), "repository": args.repository,
-                          "workflow_path": args.workflow, "source_commit": args.source,
+                          "workflow_path": run["path"], "source_commit": args.source,
                           "artifact_name": expected_name, "artifact_id": matches[0]["id"],
                           "artifact_digest": matches[0]["digest"]}, sort_keys=True))
         return 0

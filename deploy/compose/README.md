@@ -19,10 +19,11 @@ python3 setup.py link-admin /var/lib/volt/demo
 
 Open `http://127.0.0.1:8180/` and sign in. Copy the `uvm_session` cookie value from the browser's storage inspector, then run `python3 setup.py initialize-authority /var/lib/volt/demo` and paste it at the hidden prompt. The source-free installer verifies the exact configured principal, bootstraps the initial policy, activates native authority once, waits for readiness, and checks a permission-scoped public readback. Repeating it preserves existing grants and audit history. The browser smoke only verifies this initialized state and performs its separate audited readback operation. `link-admin` explicitly links the fixed synthetic issuer and exact subject to the demo bootstrap principal; it uses the protected operator credential inside the container. The provider is only published on loopback. Use `--http-port` and `--oidc-port` at initialization when those defaults are occupied.
 
-For external OIDC, prepare a config based on [`oidc.example.json`](oidc.example.json), set the exact application callback and trusted origins, and provide the client secret as a private file:
+For external OIDC, prepare a config based on [`oidc.example.json`](oidc.example.json), set the exact application callback and trusted origins, and provide the client secret as a private file. Pull the same digest-pinned release image shown in `VOLT_RELEASE_IMAGE_REFERENCE`, then initialize using that reference:
 
 ```sh
-python3 setup.py init /var/lib/volt/evaluation --mode external --image sha256:REPLACE_WITH_LOCAL_CANDIDATE_ID \
+docker pull VOLT_RELEASE_IMAGE_REFERENCE
+python3 setup.py init /var/lib/volt/evaluation --mode external --image VOLT_RELEASE_IMAGE_REFERENCE \
   --project volt-evaluation --external-config ./oidc.json \
   --client-secret-file ./oidc-client-secret \
   --bootstrap-principal volt-admin \

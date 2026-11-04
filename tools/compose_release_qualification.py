@@ -188,16 +188,22 @@ def main() -> int:
             raise RuntimeError("cold backup did not create all three private store archives")
         saved_state = private/"established-instance"
         shutil.copytree(state,saved_state)
-        wrong_image = json.loads((saved_state/"instance.json").read_text())
-        wrong_image["image"] = "sha256:"+"0"*64
-        (saved_state/"instance.json").write_text(json.dumps(wrong_image,indent=2)+"\n")
-        image_negative = run("restore-image-binding-negative", [*cli,"restore-provision",str(saved_state)], evidence,check=False)
-        if image_negative.returncode == 0:
-            raise RuntimeError("restore provisioning accepted a different image identity")
-        shutil.copy2(state/"instance.json", saved_state/"instance.json")
         run("destroy-before-restore", [*cli,"cleanup",str(state),"--remove-data","--confirm-project",project], evidence)
         if state.exists(): state.rmdir()
         shutil.copytree(saved_state,state)
+        wrong_image = json.loads((state/"instance.json").read_text())
+        wrong_id = "sha256:"+"0"*64
+        wrong_image["image_admission"]["id"] = wrong_id
+        env_path = state/".env"
+        env_content = env_path.read_text()
+        env_path.write_text(re.sub(r"(?m)^VOLT_IMAGE_ID=.*$", f"VOLT_IMAGE_ID={wrong_id}", env_content))
+        wrong_image["env_sha256"] = hashlib.sha256(env_path.read_bytes()).hexdigest()
+        (state/"instance.json").write_text(json.dumps(wrong_image,indent=2)+"\n")
+        image_negative = run("restore-image-binding-negative", [*cli,"restore-provision",str(state)], evidence,check=False)
+        if image_negative.returncode == 0 or "restore image differs from captured identity" not in image_negative.stderr:
+            raise RuntimeError("restore image-binding negative did not fail at the captured image identity check")
+        shutil.copy2(saved_state/"instance.json", state/"instance.json")
+        shutil.copy2(saved_state/".env", state/".env")
         # Provision only the three uniquely owned volumes and network; imports precede admission/start.
         run("restore-provision", [*cli,"restore-provision",str(state)], evidence)
         corrupted = backup/"corrupt-state.tar"

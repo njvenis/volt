@@ -10,7 +10,7 @@ import urllib.error
 
 import pytest
 
-from tools.notices.prepare_release_sources import CATALOG, catalog_matches, digest, fetch, release_sha256_row
+from tools.notices.prepare_release_sources import CATALOG, acquire_group, catalog_matches, digest, fetch, release_sha256_row
 
 
 def test_developer_keyring_lock_matches_acquisition_catalog():
@@ -46,6 +46,81 @@ def test_catalog_is_portable_and_keeps_six_distinct_index_routes():
     assert keyring["package_sha256"] == "7f48a8f7cd846f8b01d7a0fc65b1dc93c1a6d06981683b9db97e407c7908f0ae"
     assert keyring["sha256"] == "81e08f47b0dd8a563a2742ad90878ccefe53aa0728b095acbea3efda84381ea9"
     assert not (CATALOG.parent / "keyrings" / "debian-developer-keyring.gpg").exists()
+    acl = next(x for x in catalog["groups"] if x["source_package"] == "acl" and x["source_version"] == "2.3.2-2")
+    assert acl["immutable_dsc_sha1"] == "a78c0a5e511ee122ba5976bbd7cabeff0fd7cbe6"
+    assert sum("immutable_dsc_sha1" in x for x in catalog["groups"]) == 1
+
+
+def _immutable_dsc_fixture(source="demo", version="1-1", member_size=None):
+    from tools.notices.prepare_release_sources import digest
+    member_name = "demo_1.orig.tar.xz"
+    member_data = b"exact source archive"
+    size = len(member_data) if member_size is None else member_size
+    member_sha1 = __import__("hashlib").sha1(member_data).hexdigest()
+    member_sha256 = digest(member_data)
+    dsc = ("-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\n"
+           f"Source: {source}\nVersion: {version}\n"
+           f"Checksums-Sha1:\n {member_sha1} {size} {member_name}\n"
+           f"Checksums-Sha256:\n {member_sha256} {len(member_data)} {member_name}\n"
+           "-----BEGIN PGP SIGNATURE-----\nfake signature fixture\n-----END PGP SIGNATURE-----\n").encode()
+    return dsc, member_name, member_data, member_sha1
+
+
+def _acquire_immutable_fixture(monkeypatch, tmp_path, *, source="demo", version="1-1", member_size=None,
+                               descriptor_signature_ok=True, catalog_dsc_sha256=None, descriptor_sha1=None):
+    import hashlib
+    from types import SimpleNamespace
+    from tools.notices import prepare_release_sources as preparer
+
+    dsc, member_name, member_data, member_sha1 = _immutable_dsc_fixture(source, version, member_size)
+    actual_descriptor_sha1 = hashlib.sha1(dsc).hexdigest()
+    locator = descriptor_sha1 or actual_descriptor_sha1
+    entry = {
+        "source_package": "demo", "source_version": "1-1",
+        "immutable_dsc_sha1": locator,
+        "dsc_sha256": catalog_dsc_sha256 or digest(dsc),
+        "source_files": [{"filename": member_name, "sha256": digest(member_data)}],
+    }
+    urls = []
+
+    def fake_fetch(url):
+        urls.append(url)
+        if url.endswith("/" + locator):
+            return dsc
+        if url.endswith("/" + member_sha1):
+            return member_data
+        raise AssertionError(f"unexpected immutable source URL: {url}")
+
+    def fake_run(args, **kwargs):
+        assert args[0] == "gpgv"
+        return SimpleNamespace(returncode=0 if descriptor_signature_ok else 1, stderr="", stdout="")
+
+    monkeypatch.setattr(preparer, "fetch", fake_fetch)
+    monkeypatch.setattr(preparer.subprocess, "run", fake_run)
+    result = acquire_group(entry, tmp_path, tmp_path / "keyring.gpg", {}, {})
+    return result, urls
+
+
+def test_immutable_dsc_route_uses_only_file_urls_and_checks_members(monkeypatch, tmp_path):
+    result, urls = _acquire_immutable_fixture(monkeypatch, tmp_path)
+    assert len(result["files"]) == 1
+    assert all("snapshot.debian.org/file/" in url for url in urls)
+    assert not any("/mr/" in url for url in urls)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"source": "other"}, "identity differs"),
+        ({"descriptor_signature_ok": False}, "maintainer signature check failed"),
+        ({"member_size": 999}, "immutable locator SHA-1/size mismatch"),
+        ({"catalog_dsc_sha256": "0" * 64}, "exact .dsc differs from catalog"),
+        ({"descriptor_sha1": "0" * 40}, "immutable .dsc locator SHA-1 mismatch"),
+    ],
+)
+def test_immutable_dsc_route_rejects_unbound_inputs(monkeypatch, tmp_path, kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        _acquire_immutable_fixture(monkeypatch, tmp_path, **kwargs)
 
 
 def test_documented_direct_cli_starts_without_repository_pythonpath():

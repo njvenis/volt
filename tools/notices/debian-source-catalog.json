@@ -15,6 +15,7 @@
         }
       ],
       "dsc_sha256": "1f42130ccb5442fe2db2aee1dcc03c51a31512dd2519a38e8fc9270c5abbc807",
+      "immutable_dsc_sha1": "a78c0a5e511ee122ba5976bbd7cabeff0fd7cbe6",
       "file_stanzas": [
         {
           "copyright_path": "/usr/share/doc/libacl1/copyright",

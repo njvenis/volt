@@ -261,6 +261,20 @@ def catalog_matches(catalog: dict, candidates: list[dict]) -> None:
             raise ValueError(f"catalog drift in copyright files for {key[0]}@{key[1]}")
 
 
+def parse_sha1_members(value: str) -> dict[str, tuple[str, int]]:
+    members = {}
+    for line in value.splitlines():
+        parts = line.split()
+        if len(parts) != 3 or not re.fullmatch(r"[0-9a-f]{40}", parts[0]) or not parts[1].isdigit() or not parts[2]:
+            raise ValueError("malformed SHA-1 member row")
+        if parts[2] in members:
+            raise ValueError("duplicate SHA-1 member filename")
+        members[parts[2]] = (parts[0], int(parts[1]))
+    if not members:
+        raise ValueError("empty SHA-1 member list")
+    return members
+
+
 def acquire_group(entry: dict, root: Path, keyring_path: Path, repository_keyrings: dict[str, Path], trust: dict) -> dict:
     package, version = entry["source_package"], entry["source_version"]
     material = root / "debian-source-material"
@@ -268,16 +282,23 @@ def acquire_group(entry: dict, root: Path, keyring_path: Path, repository_keyrin
     target_dir.mkdir(parents=True, exist_ok=True)
     signed_index = entry.get("index_authentication")
     is_repository_signed = bool(signed_index)
+    immutable_dsc_sha1 = entry.get("immutable_dsc_sha1")
+    if immutable_dsc_sha1 is not None and not re.fullmatch(r"[0-9a-f]{40}", immutable_dsc_sha1):
+        raise ValueError(f"{package}@{version}: invalid immutable .dsc SHA-1 locator")
     repository_source = repository_evidence = None
     if is_repository_signed:
         repository_source, repository_evidence = signed_repository_source_index(
             root, entry, repository_keyrings[signed_index["trust_root"]], trust)
         locators = {}
+    elif immutable_dsc_sha1:
+        locators = {}
     else:
         locators = snapshot_files(package, version)
     names = [x["filename"] for x in entry["source_files"]]
-    if len(names) != len(set(names)) or (not is_repository_signed and not set(names).issubset(locators)):
+    if len(names) != len(set(names)) or (not (is_repository_signed or immutable_dsc_sha1) and not set(names).issubset(locators)):
         raise ValueError(f"snapshot file set does not contain every catalogued member for {package}@{version}")
+
+    immutable_members = None
 
     def get_blob(name: str) -> bytes:
         if is_repository_signed:
@@ -290,6 +311,14 @@ def acquire_group(entry: dict, root: Path, keyring_path: Path, repository_keyrin
             if len(data) != size or digest(data) != checksum:
                 raise ValueError(f"{package}@{version} {name}: current signed member SHA-256/size mismatch")
             return data
+        if immutable_dsc_sha1:
+            if immutable_members is None or name not in immutable_members:
+                raise ValueError(f"{package}@{version}: signed immutable .dsc omits {name}")
+            blob, size = immutable_members[name]
+            data = fetch(f"{DEBIAN_SNAPSHOT}/file/{blob}")
+            if len(data) != size or hashlib.sha1(data).hexdigest() != blob:
+                raise ValueError(f"{package}@{version} {name}: immutable locator SHA-1/size mismatch")
+            return data
         blob, size = locators[name]
         data = fetch(f"{DEBIAN_SNAPSHOT}/file/{blob}")
         if len(data) != size:
@@ -298,10 +327,20 @@ def acquire_group(entry: dict, root: Path, keyring_path: Path, repository_keyrin
             raise ValueError(f"{package}@{version} {name}: public locator digest mismatch")
         return data
 
-    dsc_names = [repository_source["dsc_name"]] if is_repository_signed else [name for name in locators if name.endswith(".dsc")]
+    dsc_names = ([repository_source["dsc_name"]] if is_repository_signed else
+                 [f"{package}_{version}.dsc"] if immutable_dsc_sha1 else
+                 [name for name in locators if name.endswith(".dsc")])
     if not dsc_names:
         raise ValueError(f"exact .dsc locator is missing for {package}@{version}")
-    dsc_matches = [(repository_source["dsc_name"], repository_source["dsc_path"].read_bytes())] if is_repository_signed else [(name, get_blob(name)) for name in dsc_names]
+    if is_repository_signed:
+        dsc_matches = [(repository_source["dsc_name"], repository_source["dsc_path"].read_bytes())]
+    elif immutable_dsc_sha1:
+        immutable_dsc = fetch(f"{DEBIAN_SNAPSHOT}/file/{immutable_dsc_sha1}")
+        if hashlib.sha1(immutable_dsc).hexdigest() != immutable_dsc_sha1:
+            raise ValueError(f"{package}@{version}: immutable .dsc locator SHA-1 mismatch")
+        dsc_matches = [(dsc_names[0], immutable_dsc)]
+    else:
+        dsc_matches = [(name, get_blob(name)) for name in dsc_names]
     dsc_matches = [(name, data) for name, data in dsc_matches if digest(data) == entry["dsc_sha256"]]
     if len(dsc_matches) != 1:
         raise ValueError(f"{package}@{version}: exact .dsc differs from catalog")
@@ -316,6 +355,8 @@ def acquire_group(entry: dict, root: Path, keyring_path: Path, repository_keyrin
     dsc_fields = parse_dsc_control(dsc_path)
     if dsc_fields.get("Source", "").split()[0] != package or dsc_fields.get("Version") != version:
         raise ValueError(f"{package}@{version}: signed .dsc identity differs from catalog")
+    if immutable_dsc_sha1:
+        immutable_members = parse_sha1_members(dsc_fields.get("Checksums-Sha1") or "")
     dsc_members = {}
     for line in (dsc_fields.get("Checksums-Sha256") or "").splitlines():
         parts = line.split()
@@ -328,6 +369,8 @@ def acquire_group(entry: dict, root: Path, keyring_path: Path, repository_keyrin
     if (not dsc_members or set(dsc_members) != set(catalog_members)
             or any(dsc_members[name][0] != checksum for name, checksum in catalog_members.items())):
         raise ValueError(f"{package}@{version}: catalog source-member set differs from signed .dsc")
+    if immutable_dsc_sha1 and set(immutable_members) != set(catalog_members):
+        raise ValueError(f"{package}@{version}: immutable .dsc SHA-1 member set differs from catalog")
 
     files = []
     for row in entry["source_files"]:

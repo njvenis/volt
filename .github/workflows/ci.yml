@@ -46,6 +46,11 @@ jobs:
           uv run python -m unittest discover -s tests/engine -v
           uv run python -m unittest discover -s tests/identity -v
           uv run python -m unittest tests.ingestion.test_run -v
+          uv run python -m unittest tests.operations.test_compose_bundle -v
+          uv run python -m unittest tests.operations.test_compose_oidc_mode -v
+          mkdir -p "$RUNNER_TEMP/volt-compose-bundle"
+          uv run python tools/build_compose_bundle.py build --output "$RUNNER_TEMP/volt-compose-bundle/volt-compose.tar.gz"
+          uv run python tools/build_compose_bundle.py verify --archive "$RUNNER_TEMP/volt-compose-bundle/volt-compose.tar.gz"
 
       - name: Install UI dependencies and build
         run: |

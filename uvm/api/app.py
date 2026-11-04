@@ -388,6 +388,14 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
             response.headers["Cache-Control"] = "no-store"
         return response
     app.state.engine = engine
+    @app.get("/api/v1/deployment/mode")
+    def deployment_mode():
+        mode = os.environ.get("UVM_OIDC_DEPLOYMENT_MODE", "external")
+        if mode not in {"demo", "external"}:
+            raise HTTPException(status_code=503, detail={"code": "deployment_mode_unavailable"})
+        return {"schema_version": 1, "mode": mode,
+                "label": "Synthetic local demo" if mode == "demo" else "External OIDC evaluation"}
+
     # Trusted construction-time seam for deterministic disposable journeys.
     # Network requests cannot override this clock; production defaults to UTC now.
     def runtime_utc_now():

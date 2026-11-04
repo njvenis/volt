@@ -1,4 +1,8 @@
-# Install RC1 for local evaluation
+# Primary Compose installation
+
+The maintained installation path is the versioned, source-free Compose bundle in [`deploy/compose`](../deploy/compose/README.md). It does not clone source or run Node/npm during install. External OIDC is the default profile; the local synthetic demo is an explicit overlay. The published RC1 image remains a historical local-evaluation artifact and does not include the later external-OIDC mode split.
+
+## Historical RC1 launcher
 
 VOLT `0.1.0-rc.1` supports fresh Linux/amd64 installations with synthetic data and a local synthetic OIDC provider. It does not upgrade historical development volumes or establish production readiness. The launcher binds the UI/API and identity provider to loopback; run the browser on the same host. Do not expose this preview publicly or supply production credentials.
 

@@ -7,7 +7,7 @@ description = "VOLT — DefectDojo CE-based vulnerability ownership and lifecycl
 requires-python = ">=3.13.15"
 dependencies = [
     "fastapi==0.141.1",
-    "sqlalchemy==2.0.54",
+    "sqlalchemy==2.1.6",
     "alembic==1.20.0",
     "psycopg[binary]==3.3.6",
     "uvicorn==0.53.0",

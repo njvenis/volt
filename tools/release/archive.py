@@ -242,12 +242,27 @@ def _validate_oci(tf: tarfile.TarFile, members: dict, manifest: dict) -> dict:
     if not isinstance(compat_ref, list) or len(compat_ref) != 1 or not isinstance(compat_ref[0], str):
         raise ValueError("OCI Docker-compatibility manifest must contain exactly one import tag")
     image_ref = next(iter(image_refs))
-    if image_ref != compat_ref[0] and not image_ref.endswith("/" + compat_ref[0]):
+    if image_ref not in {compat_ref[0], "docker.io/library/" + compat_ref[0]}:
         raise ValueError("OCI image reference disagrees with Docker-compatibility import tag")
     used.add("manifest.json")
     unexpected = set(members) - used
-    if unexpected:
+    if "repositories" in unexpected:
+        try:
+            repositories = json.loads(_member_bytes(tf, members, "repositories"))
+        except json.JSONDecodeError as exc:
+            raise ValueError("OCI Docker-compatibility repositories map is malformed") from exc
+        image_name, _, image_tag = compat_ref[0].rpartition(":")
+        image_name = image_name.rsplit("/", 1)[-1]
+        if (not image_name or not image_tag or not diff_ids
+                or repositories != {image_name: {image_tag: diff_ids[-1].removeprefix("sha256:")}}):
+            raise ValueError("OCI Docker-compatibility repositories map disagrees with selected image")
+        used.add("repositories")
+        unexpected.remove("repositories")
+    non_blob_extras = {name for name in unexpected if not name.startswith("blobs/sha256/")}
+    if non_blob_extras:
         raise ValueError("OCI archive contains unreferenced image blobs")
+    if unexpected:
+        _validate_exporter_layer_metadata(tf, members, unexpected, diff_ids, config)
     if manifest.get("image_id") not in {image_id, config_digest}:
         raise ValueError(f"OCI image/index ID disagrees with signed identity: {manifest.get('image_id')} != {image_id} or {config_digest}")
     if manifest.get("image_config_id") not in {None, config_digest}:
@@ -261,6 +276,156 @@ def _check_image_labels(config: dict, manifest: dict) -> None:
     labels = config.get("config", {}).get("Labels") or {}
     if labels.get("org.opencontainers.image.revision") != manifest.get("source_commit") or labels.get("org.opencontainers.image.version") != manifest.get("version"):
         raise ValueError("image labels disagree with signed source/version")
+
+
+def _raw_json_object_fields(raw: bytes) -> dict[str, bytes]:
+    """Return exact encoded values from one JSON object without reserializing children."""
+    try:
+        text = raw.decode("utf-8")
+        decoder = json.JSONDecoder()
+        offset = 1
+        fields = {}
+        while True:
+            while text[offset].isspace() or text[offset] == ",":
+                offset += 1
+            if text[offset] == "}":
+                return fields
+            key, offset = decoder.raw_decode(text, offset)
+            if not isinstance(key, str):
+                raise ValueError("legacy exporter metadata key is malformed")
+            while text[offset].isspace():
+                offset += 1
+            if text[offset] != ":":
+                raise ValueError("legacy exporter metadata object is malformed")
+            offset += 1
+            while text[offset].isspace():
+                offset += 1
+            start = offset
+            _value, offset = decoder.raw_decode(text, offset)
+            fields[key] = text[start:offset].encode("utf-8")
+    except (UnicodeDecodeError, json.JSONDecodeError, IndexError) as exc:
+        raise ValueError("legacy exporter metadata object is malformed") from exc
+
+
+def _docker_config_equivalent(legacy: object, selected: object) -> bool:
+    if not isinstance(legacy, dict) or not isinstance(selected, dict):
+        return False
+    zero_values = {
+        "Hostname": "", "Domainname": "", "User": "", "AttachStdin": False,
+        "AttachStdout": False, "AttachStderr": False, "Tty": False,
+        "OpenStdin": False, "StdinOnce": False, "Env": None, "Cmd": None,
+        "Image": "", "Volumes": None, "WorkingDir": "", "Entrypoint": None,
+        "OnBuild": None, "Labels": None,
+    }
+    keys = set(legacy) | set(selected)
+    for key in keys:
+        if key in legacy and key in selected:
+            if legacy[key] != selected[key]:
+                return False
+        elif key not in zero_values or legacy.get(key, selected.get(key)) != zero_values[key]:
+            return False
+    return True
+
+
+def _validate_exporter_layer_metadata(tf: tarfile.TarFile, members: dict, extras: set[str],
+                                     diff_ids: list, config: dict) -> None:
+    """Validate Moby docker-save v1 IDs against the selected ordered layer chain."""
+    if len(extras) != len(diff_ids) or not diff_ids:
+        raise ValueError("OCI archive contains unreferenced image blobs")
+    records: dict[str, tuple[dict, bytes]] = {}
+    for name in extras:
+        digest = name.removeprefix("blobs/sha256/")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("OCI archive contains unsupported unreferenced image blobs")
+        raw = _member_bytes(tf, members, name)
+        if hashlib.sha256(raw).hexdigest() != digest:
+            raise ValueError("OCI exporter metadata content address mismatch")
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("OCI exporter layer metadata is malformed") from exc
+        layer_id = record.get("id") if isinstance(record, dict) else None
+        if not isinstance(layer_id, str) or not re.fullmatch(r"[0-9a-f]{64}", layer_id):
+            raise ValueError("OCI exporter layer metadata identity is malformed")
+        if layer_id in records:
+            raise ValueError("OCI exporter layer metadata contains duplicate identities")
+        parent = record.get("parent")
+        if parent is not None and (not isinstance(parent, str) or not re.fullmatch(r"[0-9a-f]{64}", parent)):
+            raise ValueError("OCI exporter layer metadata parent is malformed")
+        if (not isinstance(record.get("created"), str) or record.get("os") != "linux"
+                or not isinstance(record.get("container_config"), dict)):
+            raise ValueError("OCI exporter layer metadata has unsupported fields")
+        allowed = {"id", "created", "container_config", "os"}
+        if "parent" in record:
+            allowed.add("parent")
+        if "config" in record:
+            allowed |= {"config", "architecture"}
+            legacy_config = record.get("config")
+            if (not isinstance(legacy_config, dict) or record.get("architecture") != config.get("architecture")
+                    or record.get("os") != config.get("os")
+                    or (legacy_config.get("Labels") or {}) != (config.get("config", {}).get("Labels") or {})):
+                raise ValueError("OCI exporter final layer metadata disagrees with image config")
+        if set(record) != allowed:
+            raise ValueError("OCI exporter layer metadata has unsupported fields")
+        if record["container_config"] != _docker_zero_container_config():
+            raise ValueError("OCI exporter container_config is not the supported zero-value form")
+        records[layer_id] = (record, raw)
+
+    ordered = []
+    previous_id = None
+    for index, diff_id in enumerate(diff_ids):
+        if not isinstance(diff_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", diff_id):
+            raise ValueError("OCI layer diff ID is malformed")
+        chain_id = diff_id if not ordered else "sha256:" + hashlib.sha256((ordered[-1][1] + " " + diff_id).encode()).hexdigest()
+        matches = [(layer_id, record_raw) for layer_id, (record, record_raw) in records.items()
+                   if record.get("parent") == previous_id]
+        # The root record omits parent; non-root records store the previous bare v1 ID.
+        if index == 0:
+            matches = [(layer_id, record_raw) for layer_id, (record, record_raw) in records.items()
+                       if "parent" not in record]
+        if len(matches) != 1:
+            raise ValueError("OCI exporter legacy layer chain does not match selected layer order")
+        _stored_id, raw = matches[0]
+        record = json.loads(raw)
+        is_final = index == len(diff_ids) - 1
+        expected_parent = None if index == 0 else ordered[-1][0]
+        if record.get("parent") != expected_parent:
+            raise ValueError("OCI exporter legacy parent chain disagrees with selected layer order")
+        if record.get("created") != (config.get("created") if is_final else "1970-01-01T00:00:00Z"):
+            raise ValueError("OCI exporter legacy created metadata disagrees with selected image")
+        if record.get("os") != config.get("os"):
+            raise ValueError("OCI exporter legacy OS metadata disagrees with selected image")
+        if is_final:
+            if (record.get("architecture") != config.get("architecture")
+                    or not _docker_config_equivalent(record.get("config"), config.get("config"))):
+                raise ValueError("OCI exporter final runtime config disagrees with selected image config")
+        elif "config" in record or "architecture" in record:
+            raise ValueError("OCI exporter intermediate layer contains final image config fields")
+
+        fields = _raw_json_object_fields(raw)
+        fields.pop("id", None)
+        if not is_final:
+            # Moby sets V1Image.OS after computing every intermediate v1.CreateID.
+            fields.pop("os", None)
+        fields["layer_id"] = json.dumps(chain_id, separators=(",", ":")).encode()
+        if index:
+            # Moby's v1.CreateID hashes the full digest parent; the saved record stores its bare encoding.
+            fields["parent"] = json.dumps("sha256:" + expected_parent, separators=(",", ":")).encode()
+        material = b"{" + b",".join(json.dumps(key).encode() + b":" + fields[key] for key in sorted(fields)) + b"}"
+        expected_id = hashlib.sha256(material).hexdigest()
+        if expected_id not in records or expected_id != record["id"]:
+            raise ValueError("OCI exporter legacy layer ID does not derive from selected layer/config")
+        ordered.append((record["id"], chain_id))
+        previous_id = record["id"]
+    if len(ordered) != len(records):
+        raise ValueError("OCI archive contains unrelated exporter layer metadata")
+
+
+def _docker_zero_container_config() -> dict:
+    return {"Hostname": "", "Domainname": "", "User": "", "AttachStdin": False,
+            "AttachStdout": False, "AttachStderr": False, "Tty": False, "OpenStdin": False,
+            "StdinOnce": False, "Env": None, "Cmd": None, "Image": "", "Volumes": None,
+            "WorkingDir": "", "Entrypoint": None, "OnBuild": None, "Labels": None}
 
 
 def validate_docker_archive(image_tar: Path, manifest: dict) -> dict:

@@ -89,6 +89,25 @@ jobs:
           git bundle create "$out/source.bundle" HEAD
           install -m 0755 tools/g7_local_preview.py "$out/tools-g7-local-preview.py"
           install -m 0644 tools/release/launcher-guide.txt "$out/launcher-guide.txt"
+      - name: Validate saved image archive before import and transfer
+        run: |
+          python3 - <<'PYIMAGE'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, "tools/release")
+          from archive import validate_docker_archive
+          root = Path(os.environ["RELEASE_OUT"])
+          expected = {
+              "image_id": (root / "image-id.txt").read_text().strip(),
+              "source_commit": os.environ["GITHUB_SHA"],
+              "version": "0.1.0-rc.1",
+              "platform": "linux/amd64",
+          }
+          identity = validate_docker_archive(root / "image.tar", expected)
+          print(json.dumps(identity, sort_keys=True))
+          PYIMAGE
       - name: Exercise fresh offline image load and no-build release path
         run: |
           out="$RUNNER_TEMP/volt-rc1"

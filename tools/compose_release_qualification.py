@@ -103,17 +103,26 @@ def main() -> int:
                    help="label evidence as development-only when testing the runner against a non-RC2 image")
     p.add_argument("--bundle", type=Path, required=True)
     p.add_argument("--evidence", type=Path, required=True)
+    p.add_argument("--private-tmp", type=Path, default=Path("/tmp"),
+                   help="parent directory for private generated state and backup fixtures")
+    p.add_argument("--project-prefix", default="volt-rc2-qual",
+                   help="unique Compose project prefix used for owned disposable resources")
     args = p.parse_args()
     if (not re.fullmatch(r"sha256:[0-9a-f]{64}",args.image_id)
             or not re.fullmatch(r"sha256:[0-9a-f]{64}",args.source_snapshot)
             or not re.fullmatch(r"[0-9a-f]{40}",args.source_commit)):
         p.error("immutable image ID and source snapshot SHA-256 are required")
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,30}", args.project_prefix):
+        p.error("project prefix must be a short lowercase Compose-safe identifier")
+    private_tmp = args.private_tmp.resolve(strict=True)
+    if not private_tmp.is_dir():
+        p.error("private temporary parent must be an existing directory")
     evidence = args.evidence.resolve()
     evidence.mkdir(parents=True, exist_ok=False, mode=0o700)
     os.chmod(evidence, 0o700)
-    private = Path(tempfile.mkdtemp(prefix="volt-rc2-compose-", dir="/tmp"))
+    private = Path(tempfile.mkdtemp(prefix=f"{args.project_prefix}-state-", dir=private_tmp))
     os.chmod(private, 0o700)
-    project = f"volt-rc2-qual-{os.getpid()}"
+    project = f"{args.project_prefix}-{os.getpid()}"
     state = private / "instance"
     extracted = private / "bundle"
     cookie = private / "cookie"

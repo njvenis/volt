@@ -98,6 +98,7 @@ RUN set -eu; \
     printf '%s' "$expected_delta" | sort > /tmp/g7-packages-expected; \
     diff -u /tmp/g7-packages-expected /tmp/g7-packages-added-or-upgraded; \
     test ! -s /tmp/g7-packages-removed; \
+    rm -f /etc/ssl/private/ssl-cert-snakeoil.key /etc/ssl/certs/ssl-cert-snakeoil.pem; \
     cd / && rm -rf /tmp/os-packages /var/lib/apt/lists/* \
     && groupadd --system --gid 1800 uvm \
     && useradd --system --uid 1800 --gid uvm --home-dir /opt/uvm --create-home uvm \

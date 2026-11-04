@@ -187,6 +187,27 @@ def _uncompressed_layer_digest(data: bytes, media: str | None) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def _reject_rc2_snakeoil_key(data: bytes, media: str | None = None) -> None:
+    """Reject Debian's generated TLS private key in an RC2 image layer."""
+    if media and ("+zstd" in media or media.endswith(".zstd")):
+        stream_context = tempfile.TemporaryFile()
+        subprocess.run(["zstd", "-q", "-d", "-c"], input=data, stdout=stream_context,
+                       stderr=subprocess.PIPE, check=True)
+        stream_context.seek(0)
+    elif media and ("+gzip" in media or media.endswith(".gzip")) or data.startswith(b"\x1f\x8b"):
+        stream_context = gzip.GzipFile(fileobj=io.BytesIO(data))
+    else:
+        stream_context = io.BytesIO(data)
+    try:
+        with stream_context, tarfile.open(fileobj=stream_context, mode="r:") as layer:
+            for member in layer:
+                parts = tuple(part for part in PurePosixPath(member.name).parts if part not in {"", "."})
+                if parts == ("etc", "ssl", "private", "ssl-cert-snakeoil.key"):
+                    raise ValueError("RC2 image layer contains a generated TLS private key")
+    except tarfile.TarError as exc:
+        raise ValueError("RC2 image layer is not a readable tar archive") from exc
+
+
 def _validate_oci(tf: tarfile.TarFile, members: dict, manifest: dict) -> dict:
     layout = json.loads(_member_bytes(tf, members, "oci-layout"))
     if not isinstance(layout, dict) or layout.get("imageLayoutVersion") != "1.0.0":
@@ -287,6 +308,8 @@ def _validate_oci(tf: tarfile.TarFile, members: dict, manifest: dict) -> dict:
         used.add(layer_path)
         if not isinstance(diff_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", diff_id) or _uncompressed_layer_digest(compressed, media) != diff_id:
             raise ValueError("OCI uncompressed layer diff ID disagrees with config")
+        if manifest.get("version") == EXPECTED_VERSION:
+            _reject_rc2_snakeoil_key(compressed, media)
     compat_rows = json.loads(_member_bytes(tf, members, "manifest.json"))
     if not isinstance(compat_rows, list) or len(compat_rows) != 1 or not isinstance(compat_rows[0], dict):
         raise ValueError("OCI Docker-compatibility manifest must select exactly one image")
@@ -541,6 +564,8 @@ def validate_docker_archive(image_tar: Path, manifest: dict) -> dict:
                 digest = _uncompressed_layer_digest(compressed, None)
                 if digest != diff_id:
                     raise ValueError("Docker archive layer digest differs from config diff ID")
+                if manifest.get("version") == EXPECTED_VERSION:
+                    _reject_rc2_snakeoil_key(compressed)
             allowed = {"manifest.json", config_name, *layer_names}
             if "repositories" in members:
                 allowed.add("repositories")

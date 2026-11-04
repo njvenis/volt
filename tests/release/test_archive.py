@@ -70,7 +70,6 @@ class OfflineArchiveTests(unittest.TestCase):
         config_bytes = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
         image_id = "sha256:" + hashlib.sha256(config_bytes).hexdigest()
         with tarfile.open(package / "image.tar", "w") as image:
-            import io
             entries = [(image_id.split(":", 1)[1] + ".json", config_bytes), ("layer.tar", layer),
                        ("manifest.json", json.dumps([{"Config": image_id.split(":", 1)[1] + ".json", "RepoTags": ["volt:fixture"], "Layers": ["layer.tar"]}]).encode())]
             for name, data in entries:
@@ -128,7 +127,12 @@ class OfflineArchiveTests(unittest.TestCase):
         subprocess.run([sys.executable, str(repo / "tools" / "build_compose_bundle.py"), "build",
                         "--output", str(bundle), "--image-reference", f"ghcr.io/njvenis/volt@{registry_digest}"],
                        cwd=repo, check=True, capture_output=True, text=True)
-        layer = b"fixture RC2 layer bytes"
+        layer_io = io.BytesIO()
+        with tarfile.open(fileobj=layer_io, mode="w") as layer_archive:
+            member = tarfile.TarInfo("opt/fixture.txt")
+            member.size = 9
+            layer_archive.addfile(member, io.BytesIO(b"rc2 layer"))
+        layer = layer_io.getvalue()
         diff = "sha256:" + hashlib.sha256(layer).hexdigest()
         config = {"os": "linux", "architecture": "amd64", "config": {"Labels": {
             "org.opencontainers.image.revision": source_sha, "org.opencontainers.image.version": archive.EXPECTED_VERSION,
@@ -137,7 +141,6 @@ class OfflineArchiveTests(unittest.TestCase):
         config_bytes = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
         image_id = "sha256:" + hashlib.sha256(config_bytes).hexdigest()
         with tarfile.open(package / "image.tar", "w") as image:
-            import io
             entries = [(image_id.split(":", 1)[1] + ".json", config_bytes), ("layer.tar", layer),
                        ("manifest.json", json.dumps([{"Config": image_id.split(":", 1)[1] + ".json", "RepoTags": ["volt:rc2-fixture"], "Layers": ["layer.tar"]}]).encode())]
             for name, data in entries:
@@ -164,6 +167,44 @@ class OfflineArchiveTests(unittest.TestCase):
         with patch.object(sys, "argv", ["archive.py", "pack", "--directory", str(package), "--archive", str(result), "--test-public-key", str(self.public)]):
             self.assertEqual(archive.main(), 0)
         return package, result
+
+    def build_image_with_layer(self, root: Path, version: str, layer_bytes: bytes) -> tuple[Path, dict]:
+        revision = "a" * 40
+        source_snapshot = "sha256:" + "b" * 64
+        diff = "sha256:" + hashlib.sha256(layer_bytes).hexdigest()
+        config = {"os": "linux", "architecture": "amd64", "config": {"Labels": {
+            "org.opencontainers.image.revision": revision, "org.opencontainers.image.version": version,
+            "org.volt.oidc-deployment-modes": "demo,external", "org.volt.compose-install.contract": "1",
+            "org.volt.compose.source-snapshot": source_snapshot}},
+            "rootfs": {"type": "layers", "diff_ids": [diff]}}
+        config_bytes = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+        image_id = "sha256:" + hashlib.sha256(config_bytes).hexdigest()
+        image_tar = root / "image.tar"
+        with tarfile.open(image_tar, "w") as image:
+            entries = [(image_id.split(":", 1)[1] + ".json", config_bytes), ("layer.tar", layer_bytes),
+                       ("manifest.json", json.dumps([{"Config": image_id.split(":", 1)[1] + ".json",
+                                                      "RepoTags": ["volt:fixture"], "Layers": ["layer.tar"]}]).encode())]
+            for name, data in entries:
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                image.addfile(info, io.BytesIO(data))
+        manifest = {"version": version, "source_commit": revision, "source_snapshot": source_snapshot,
+                    "image_id": image_id, "platform": "linux/amd64"}
+        return image_tar, manifest
+
+    def test_rc2_rejects_generated_private_key_in_saved_layer_but_rc1_history_remains_verifiable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            layer_io = io.BytesIO()
+            with tarfile.open(fileobj=layer_io, mode="w") as layer:
+                secret_member = tarfile.TarInfo("etc/ssl/private/ssl-cert-snakeoil.key")
+                secret_member.size = 64
+                layer.addfile(secret_member, io.BytesIO(b"fixture key bytes never emitted".ljust(64, b"x")))
+            layer_bytes = layer_io.getvalue()
+            rc2_tar, rc2_manifest = self.build_image_with_layer(Path(temp), archive.EXPECTED_VERSION, layer_bytes)
+            with self.assertRaisesRegex(ValueError, "RC2 image layer contains a generated TLS private key"):
+                archive.validate_docker_archive(rc2_tar, rc2_manifest)
+            rc1_tar, rc1_manifest = self.build_image_with_layer(Path(temp), "0.1.0-rc.1", layer_bytes)
+            self.assertEqual(archive.validate_docker_archive(rc1_tar, rc1_manifest)["image_id"], rc1_manifest["image_id"])
 
     def test_release_workflow_bundle_command_works_in_exact_detached_checkout(self):
         workflow = (Path(__file__).parents[2] / ".github/workflows/release.yml").read_text()

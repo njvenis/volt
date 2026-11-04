@@ -109,8 +109,8 @@ def main() -> int:
     parser.add_argument("--expected-digest")
     parser.add_argument("--anonymous", action="store_true", help="verify public pull access without credentials")
     args = parser.parse_args()
-    if args.version_tag != "0.1.0-rc.1" or not re.fullmatch(r"sha-[0-9a-f]{40}", args.sha_tag):
-        parser.error("only the approved RC1 and full source SHA tag are accepted")
+    if args.version_tag != "0.1.0-rc.2" or not re.fullmatch(r"sha-[0-9a-f]{40}", args.sha_tag):
+        parser.error("only the prepared RC2 and full source SHA tag are accepted")
     username = password = None
     if not args.anonymous:
         username = os.environ.get("GITHUB_ACTOR")

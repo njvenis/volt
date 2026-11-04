@@ -13,9 +13,21 @@
 
 Use [RC1 installation](installation.md) for evaluation. The release page is the canonical artifact/evidence handoff; the sections below document maintainer controls, not installation steps or a request to republish RC1.
 
-## Maintainer preparation and publication controls
+## RC2 candidate preparation and publication controls
 
-The existing workflow is specific to RC1 and must not be rerun to replace it. A future candidate needs a separately reviewed version/workflow change; preserve the published RC1 tag and artifacts. The original RC1 procedure follows for maintenance and recovery reference.
+RC2 (`0.1.0-rc.2`, prospective tag `v0.1.0-rc.2`) is a separate Compose-compatible candidate. RC1's tag, image, archive and evidence remain historical and unchanged. The candidate has not been published by these instructions.
+
+Dispatch the RC2 release workflow from `main` with `candidate_run_id` empty and `publish_approved` false. This first phase has read-only repository permissions: it checks exact clean main, unused version tag, and all existing gates; captures `source.tar` before the one image build; labels that image with the source snapshot digest and Compose contract; and runs both the existing launcher regression and the maintained source-free Compose demo/backup/restore qualification against that same image. It retains a versioned candidate artifact for 30 days. Compose qualification runs use only `volt-rc2-*` resources and private state/backups remain in the runner's temporary directory.
+
+Publication is a distinct dispatch from the same exact main commit. Set `candidate_run_id` to the successful preparation run ID and set `publish_approved` to `true`. The publish job rejects missing or nonnumeric IDs and verifies through the GitHub API that the run belongs to `njvenis/volt`, this workflow, `main`, this exact SHA, and completed successfully; it requires the uniquely named retained artifact. After download it revalidates image archive identity and Compose labels, source snapshot digest, notices, scan image ID, and qualification bundle before checking the protected `volt-rc1-publication` environment and immutable GHCR destinations. Do not merge or commit between the two dispatches: a changed SHA intentionally cannot publish the retained candidate. The publish job consumes the retained image and never builds. Its only publication approval is the explicit input plus the existing required human reviewer gate; neither grants permission to create a Git tag or GitHub Release.
+
+After pushing the unchanged image, publication records its registry digest, builds the final source-free `0.1.0-rc.2` Compose bundle with `ghcr.io/njvenis/volt@sha256:…`, verifies the bundle and checksum, and includes both in the signed offline archive. The signed manifest binds that bundle, image ID, registry digest, source tar and source-snapshot label. Ordinary bundle consumers need Docker Compose v2, Python 3.11+, OpenSSL and the image pull; Git, Node, npm, browser dependencies and application build tools are not installation prerequisites. The browser is installed only in the hosted verification job.
+
+Compose evidence is a local synthetic demo with loopback ingress and exact owned-resource cleanup. It demonstrates the tested same-image cold restore; it does not establish Okta/AWS compatibility, production readiness, identity-sync integration or independent-host recovery. Until the candidate completes the hosted run and publication handoff, Compose release availability remains pending RC2 image and bundle qualification.
+
+## RC1 historical preparation and publication controls
+
+The original RC1 procedure follows for maintenance and recovery reference. It is retained for interpreting its published evidence and artifacts; do not rerun it to replace RC1.
 
 Run the release workflow manually from `main`. It accepts only the clean, exact source revision dispatched from `main`, fails if `v0.1.0-rc.1` already exists, and records the source revision and immutable local Docker image ID. It runs the existing portable checks and must build the image once. All reports, SBOMs, notices, archive content and signatures must identify that same image and source revision. A rebuilt image must never replace the candidate after scanning.
 

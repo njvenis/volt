@@ -25,3 +25,10 @@ paths = ["^uvm/connectors/runtime\\.py$"]
 regexes = ["origin=\"local_api\", correlation_id=\"g7-(runtime-resolve|runtime-dispatch|preview-secret)\""]
 regexTarget = "line"
 targetRules = ["generic-api-key"]
+
+[[allowlists]]
+description = "Retired synthetic RC2 ingress-probe marker in one historical runner revision"
+condition = "AND"
+paths = ["^tools/compose_release_qualification\\.py$"]
+regexes = ["^volt-rc2-qualification-probe$"]
+targetRules = ["generic-api-key"]

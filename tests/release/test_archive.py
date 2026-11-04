@@ -204,6 +204,21 @@ class OfflineArchiveTests(unittest.TestCase):
                                             "--source-sha", self.source_sha, "--image-id", self.image_id]), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(archive.main(), 0)
 
+    def test_rc2_offline_instructions_select_local_image_id(self):
+        verify = (Path(__file__).parents[2] / "tools" / "release" / "VERIFY.txt").read_text()
+        readme = (Path(__file__).parents[2] / "deploy" / "compose" / "README.md").read_text()
+        self.assertIn('["registry_digest"]', verify)
+        self.assertIn('["image_id"]', verify)
+        self.assertIn('--image "$image_id"', verify)
+        self.assertIn("docker pull VOLT_RELEASE_IMAGE_REFERENCE", readme)
+        self.assertIn("signed `manifest.json` `image_id` field", readme)
+        with tempfile.TemporaryDirectory() as temp:
+            package, _ = self.build_rc2_signed(Path(temp))
+            manifest = json.loads((package / "manifest.json").read_text())
+            self.assertRegex(manifest["image_id"], r"^sha256:[0-9a-f]{64}$")
+            self.assertRegex(manifest["registry_digest"], r"^sha256:[0-9a-f]{64}$")
+            self.assertNotEqual(manifest["image_id"], manifest["registry_digest"])
+
     def test_rc2_archive_requires_bundle_and_checksum(self):
         with tempfile.TemporaryDirectory() as temp:
             package, _ = self.build_rc2_signed(Path(temp))

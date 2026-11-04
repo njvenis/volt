@@ -2,7 +2,7 @@
 
 This bundle installs an existing VOLT supervised image. It does not clone VOLT source, install Node.js, run npm, or build the application. Bundle version is in `VERSION`; the archive manifest covers every installation file. Runtime prerequisites are Docker Engine with Compose v2, Python 3.11+, OpenSSL, and an admitted `linux/amd64` image.
 
-The default Compose profile uses external OIDC. The local synthetic demo requires the explicit `demo` overlay. Demo identity is generated and labelled as synthetic; it does not establish Okta, AWS, or production integration. Supply the digest-pinned release image reference printed in this bundle. RC1 remains a historical launcher-only release and is rejected by this Compose bundle.
+The default Compose profile uses external OIDC. The local synthetic demo requires the explicit `demo` overlay. Demo identity is generated and labelled as synthetic; it does not establish Okta, AWS, or production integration. For online installs, supply the digest-pinned release image reference printed in this bundle; for offline installs, use the verified local image ID described below. RC1 remains a historical launcher-only release and is rejected by this Compose bundle.
 
 ## Verify and initialize
 
@@ -34,6 +34,14 @@ python3 setup.py link-admin /var/lib/volt/evaluation \
   --rationale 'Approved evaluation bootstrap' \
   --evidence-ref change-123
 ```
+
+For an offline install, first verify and load the signed release archive using its `VERIFY.txt` instructions. Initialize with the loaded local Docker image ID from the archive's signed `manifest.json` `image_id` field, for example:
+
+```sh
+python3 setup.py init /var/lib/volt/demo --mode demo --project volt-demo --image sha256:<verified-local-image-id>
+```
+
+Use the `image_id` value as-is. It is the local Docker image ID, distinct from the registry digest used by the online pull command above.
 
 After the exact subject is linked, sign in through the configured browser callback, copy that session's `uvm_session` cookie value using the browser storage inspector, and run `python3 setup.py initialize-authority /var/lib/volt/evaluation`. The command accepts the cookie only at a hidden terminal prompt and forwards it over stdin to the container. It rejects any session whose principal differs from `--bootstrap-principal`. This explicit operator step initializes policy/native authority and verifies permission-scoped readback; browser smoke does not establish authority.
 

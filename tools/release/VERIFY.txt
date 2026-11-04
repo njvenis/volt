@@ -20,10 +20,27 @@ Trust bootstrap comes first. Obtain the expected source commit, an independently
      --cosign cosign --trusted-root /trusted/sigstore/trusted_root.json \
      --trusted-root-sha256 <independently-obtained-root-sha256>
 
-5. Pull the verified published image by the signed digest and follow README.md in the signed volt-compose.tar.gz bundle for source-free installation:
+5. For an online install, pull the published image by its signed registry digest, then use the digest-pinned reference shown in README.md inside the Compose bundle:
 
    docker pull "ghcr.io/njvenis/volt@$(python3 -c 'import json; print(json.load(open("manifest.json"))["registry_digest"])')"
 
    The digest comes from signed manifest.json and must agree with registry-digest.txt. The bundle's README.md contains the same rendered digest-pinned image reference. Do not use a mutable tag in place of that reference.
+
+   For an offline install, step 4 has loaded the verified image from image.tar. Extract the signed Compose bundle and manifest from the outer archive, then initialize with the local Docker image ID:
+
+   mkdir volt-offline
+   tar -xOf volt-0.1.0-rc.2-linux-amd64.tar manifest.json > volt-offline/manifest.json
+   tar -xOf volt-0.1.0-rc.2-linux-amd64.tar volt-compose.tar.gz > volt-offline/volt-compose.tar.gz
+   tar -xOf volt-0.1.0-rc.2-linux-amd64.tar volt-compose.tar.gz.sha256 > volt-offline/volt-compose.tar.gz.sha256
+   (cd volt-offline && sha256sum -c volt-compose.tar.gz.sha256)
+   (
+     cd volt-offline
+     image_id="$(python3 -c 'import json; print(json.load(open("manifest.json"))["image_id"])')"
+     tar -xzf volt-compose.tar.gz
+     cd volt-compose-0.1.0-rc.2
+     python3 setup.py init /var/lib/volt/demo --mode demo --project volt-demo --image "$image_id"
+   )
+
+   manifest.json's image_id is the local Docker image ID passed to setup.py. It is distinct from image_config_id, image_index_id and registry_digest; do not use the registry digest as the --image value for this offline path. For external mode, use the same local image_id with the external configuration options documented in the bundle README.md.
 
 SHA256SUMS is checked as an integrity aid, not a trust anchor. The archive verifier rejects unknown or missing payload files, unsafe paths, links, special files, duplicate members, oversized archives, wrong signer identity/issuer, wrong source/image metadata, mismatched registry digests, non-image tar files, corrupt config/layer chains and a Compose bundle that differs from the signed Git source except for substitution of the exact published image digest.

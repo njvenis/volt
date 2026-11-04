@@ -12,10 +12,10 @@ VOLT is an open-source vulnerability lifecycle application built around [DefectD
 
 Its focus is continuity and accountability: understanding which workloads are affected, who owns the outstanding work, which decisions apply and what evidence supports a change in status.
 
-[Getting started](#getting-started) · [Architecture](#architecture) · [Documentation](#documentation) · [Contributing](CONTRIBUTING.md) · [Apache-2.0 licence](LICENSE)
+[RC1 release](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.1) · [Install RC1](docs/installation.md) · [Getting started](#getting-started) · [Architecture](#architecture) · [Documentation](#documentation) · [Contributing](CONTRIBUTING.md) · [Apache-2.0 licence](LICENSE)
 
 > [!IMPORTANT]
-> **Active development — not production-ready.** VOLT has a private local development preview using synthetic data. There is no end-user installer or supported production deployment. Capability descriptions below explain the product's scope; verification remains bounded to the environments recorded in [Development and verification](GATES.md).
+> **RC1 available for evaluation — not production-ready.** The published `0.1.0-rc.1` image supports fresh installations on Linux/amd64 using the maintained local launcher and synthetic identity provider. Historical development volumes are not supported upgrade inputs. There is no general production installer or supported production deployment. See [RC1 installation](docs/installation.md) and [verification boundaries](GATES.md).
 
 ## Why VOLT?
 
@@ -47,42 +47,13 @@ The design treats **evidence, decisions and remediation as distinct concepts**. 
 
 ## Getting started
 
-### Evaluate the local preview
+### Evaluate RC1
 
-Start with the **[local preview guide](docs/local-preview.md)**. It covers prerequisites, initialisation, startup, synthetic sign-in, browser/API smoke checks, persistence and cleanup.
+Follow **[Install RC1](docs/installation.md)** to verify and pull the published image, start it without rebuilding, link the synthetic administrator and check persistence. The [release page](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.1) provides the immutable digest, signed offline bundle, SBOMs and verification evidence.
 
-The preview:
+The launcher binds the application and synthetic OIDC provider to loopback, generates private local secrets and creates owned persistent volumes. Use synthetic data and disposable resources. RC1 is an evaluation release, not a production installation recipe; installing DefectDojo separately does not install VOLT.
 
-- Builds from a committed, clean source revision using pinned dependencies.
-- Publishes the application and synthetic OIDC provider on loopback only.
-- Generates private local secrets and uses owned persistent volumes.
-- Records smoke-test evidence and supports restart/readback checks.
-
-Use synthetic data and disposable resources. Follow the guide's full sequence, including its one-time administrator linking step and cleanup instructions. The preview is a development evaluation environment, not a production installation recipe. Installing DefectDojo separately does not install VOLT.
-
-### Set up for development
-
-Prerequisites: Python 3.13.15 or later, [uv](https://docs.astral.sh/uv/) (CI pins 0.12.18), Node.js 24.21.0 and npm. From the repository root:
-
-```sh
-uv sync --locked
-npm --prefix ui ci
-npm --prefix ui run build
-npm --prefix tools/g0_ci/openspec ci
-tools/g0_ci/openspec/node_modules/.bin/openspec validate --all --strict
-```
-
-These commands install development dependencies, build the UI and validate specifications. They do not start the complete application.
-
-Run the core synthetic and in-process checks:
-
-```sh
-uv run python -m unittest discover -s tests/engine -v
-uv run python -m unittest discover -s tests/identity -v
-uv run python -m unittest tests.ingestion.test_run -v
-```
-
-See the [development runbook](RUNBOOK.md) and [contribution guide](CONTRIBUTING.md) for the workflow and change-specific checks.
+For source builds, use the [development preview guide](docs/local-preview.md).
 
 ## Architecture
 
@@ -107,14 +78,14 @@ flowchart TD
 
 **Identity and authority.** OIDC establishes identity; VOLT's access model governs application actions and scopes. Ownership-team membership is separate from access-group authority. The [native access contract](docs/g7-native-access-ownership-api-contract.md) details current authority checks, bounded grants and audited administration.
 
-**Packaging.** `Dockerfile.g7` describes a development packaging target using pinned DefectDojo CE and Valkey images. Review the runbook and third-party notices before building or distributing an image.
+**Packaging.** RC1 is distributed as a signed Linux/amd64 image and an offline bundle. `Dockerfile.g7` remains the build recipe using pinned DefectDojo CE and Valkey images. See [installation](docs/installation.md), [deployment boundaries](docs/deployment.md) and [third-party notices](THIRD-PARTY-NOTICES.md).
 
 ## Verification and deployment status
 
 | Area | Current position |
 | --- | --- |
 | Identity and ingestion | Synthetic local suites exercise source-native grouping, rebuild history, completeness, freshness, replay and conflict handling. |
-| Local application preview | Documented loopback-only container evaluation with synthetic identity, smoke checks and persistent-state readback. |
+| RC1 evaluation | Published image and offline bundle; the [release workflow](https://github.com/njvenis/volt/actions/runs/41804175229) passed synthetic sign-in, audited-operation, ingress-denial and restart-persistence checks. |
 | External integrations | Local tests do not establish compatibility with live scanners, enterprise identity providers, GitHub or other external services. |
 | Enterprise deployment | No supported production deployment or end-user installer. Security, recovery, operational and integration qualification remain separate requirements. |
 | G7 operational scenarios | Acceptance goals in OpenSpec; their presence does not establish implementation or successful execution. |
@@ -126,7 +97,8 @@ Evidence should identify the exact revision, commands, environment and result. A
 | I want to… | Start here |
 | --- | --- |
 | Find configuration, deployment boundaries, and operations guidance | [Documentation index](docs/README.md) |
-| Try the application locally | [Local preview](docs/local-preview.md) |
+| Try the released application locally | [Install RC1](docs/installation.md) |
+| Build a development preview | [Development preview](docs/local-preview.md) |
 | Understand product scope and invariants | [Requirements](REQUIREMENTS.md) |
 | Assess verification and maturity | [Development and verification](GATES.md) |
 | Build and validate the project | [Development runbook](RUNBOOK.md) |
@@ -135,15 +107,39 @@ Evidence should identify the exact revision, commands, environment and result. A
 | Report a security concern | [Security policy](SECURITY.md) |
 | Review licensing and redistribution | [Licence](LICENSE) · [Third-party notices](THIRD-PARTY-NOTICES.md) |
 
+## Development
+
+Prerequisites: Python 3.13.15 (matching CI), [uv](https://docs.astral.sh/uv/) (CI pins 0.12.18), Node.js 24.21.0 and npm. From the repository root:
+
+```sh
+uv sync --locked --python 3.13.15
+npm --prefix ui ci
+npm --prefix ui run build
+npm --prefix tools/g0_ci/openspec ci
+tools/g0_ci/openspec/node_modules/.bin/openspec validate --all --strict
+```
+
+These commands install development dependencies, build the UI and validate specifications. They do not start the complete application.
+
+Run the core synthetic and in-process checks:
+
+```sh
+uv run python -m unittest discover -s tests/engine -v
+uv run python -m unittest discover -s tests/identity -v
+uv run python -m unittest tests.ingestion.test_run -v
+```
+
+See the [development runbook](RUNBOOK.md) and [contribution guide](CONTRIBUTING.md) for the workflow and change-specific checks.
+
 ## Security and responsible evaluation
 
 Use synthetic data for development and evaluation. Keep credentials, raw vulnerability records, private environment identifiers, reports and production exports out of commits, issues and pull requests.
 
-Read [SECURITY.md](SECURITY.md) before reporting a vulnerability. A private reporting route is not active until the repository owner enables it. Until then, arrange a secure route through an already-established private channel; do not disclose sensitive details in public issues. Security reports are handled on a best-effort basis, with no response-time or remediation SLA.
+Report vulnerabilities through [GitHub private vulnerability reporting](https://github.com/njvenis/volt/security/advisories/new), which is enabled. Read [SECURITY.md](SECURITY.md) for the requested details. Do not disclose sensitive details in public issues. Reports are handled on a best-effort basis, with no response-time or remediation SLA.
 
 ## Contributing
 
-Contributions should be focused, reproducible and supported by evidence. Open an issue or discussion before starting a large change so its scope and interfaces can be reviewed. Include the rationale, relevant documentation changes and exact check results, identifying any services replaced by fixtures.
+Contributions should be focused, reproducible and supported by evidence. Open an issue before starting a large change so its scope and interfaces can be reviewed. Include the rationale, relevant documentation changes and exact check results, identifying any services replaced by fixtures.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
 
@@ -151,6 +147,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
 
 VOLT source is licensed under the [Apache License 2.0](LICENSE). DefectDojo CE and Valkey are upstream dependencies with their own licences; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
-**Built-image redistribution notices are not yet complete.** Do not redistribute a built image until the package-level notices have been collected and included as described in that document.
+RC1 includes image-specific notices and source evidence in its signed offline bundle. The [notice manifest](https://github.com/njvenis/volt/releases/download/v0.1.0-rc.1/notice-manifest.json) identifies that inventory. Every new image build requires its own collection and verification; source notices alone do not cover a changed image.
 
 The name **VOLT** is provisional and subject to trademark clearance.

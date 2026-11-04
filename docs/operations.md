@@ -1,6 +1,6 @@
 # Operations and troubleshooting
 
-This guide covers the disposable local preview. It is not a production operations runbook.
+This guide covers disposable local evaluation using either [the released RC1 image](installation.md) or [a development source build](local-preview.md). It is not a production operations runbook. Examples below use the instance name `demo`; substitute `rc1` if you followed the RC1 installation guide.
 
 ## Preview status and health
 

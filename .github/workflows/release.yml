@@ -293,7 +293,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          export VOLT_PREPARE_RUN_ID="$(cat "$RUNNER_TEMP/volt-rc2/prepare-run-id.txt")"
+          VOLT_PREPARE_RUN_ID="$(cat "$RUNNER_TEMP/volt-rc2/prepare-run-id.txt")"
+          export VOLT_PREPARE_RUN_ID
           image_id=$(cat "$RUNNER_TEMP/volt-rc2/image-id.txt")
           docker load --input "$RUNNER_TEMP/volt-rc2/image.tar"
           docker image inspect "$image_id" --format '{{.Id}}' | grep -Fx "$image_id"

@@ -15,6 +15,7 @@
         }
       ],
       "dsc_sha256": "1f42130ccb5442fe2db2aee1dcc03c51a31512dd2519a38e8fc9270c5abbc807",
+      "immutable_dsc_sha1": "a78c0a5e511ee122ba5976bbd7cabeff0fd7cbe6",
       "file_stanzas": [
         {
           "copyright_path": "/usr/share/doc/libacl1/copyright",
@@ -587,7 +588,8 @@
         }
       ],
       "source_package": "adduser",
-      "source_version": "3.152"
+      "source_version": "3.152",
+      "immutable_dsc_sha1": "bdab140a97be1a3e233bb499af126b6b6ff781ea"
     },
     {
       "copyright_files": [
@@ -834,7 +836,8 @@
         }
       ],
       "source_package": "apparmor",
-      "source_version": "4.1.0-1"
+      "source_version": "4.1.0-1",
+      "immutable_dsc_sha1": "24d37928cc39329baa79e6a8b0207c1ca048f267"
     },
     {
       "copyright_files": [
@@ -960,7 +963,8 @@
         }
       ],
       "source_package": "apt",
-      "source_version": "3.0.3"
+      "source_version": "3.0.3",
+      "immutable_dsc_sha1": "75cc2d8a7adec664f1b1058dcab263372da25df5"
     },
     {
       "copyright_files": [
@@ -1062,7 +1066,8 @@
         }
       ],
       "source_package": "attr",
-      "source_version": "1:2.5.2-3"
+      "source_version": "1:2.5.2-3",
+      "immutable_dsc_sha1": "cd31cdd7a10abf9f6edd5a3050bed9eaf4cd4c9d"
     },
     {
       "copyright_files": [
@@ -1125,7 +1130,8 @@
         }
       ],
       "source_package": "base-passwd",
-      "source_version": "3.6.7"
+      "source_version": "3.6.7",
+      "immutable_dsc_sha1": "c9a3fe0b6da25cfac124b9ace5c5882606f9235b"
     },
     {
       "copyright_files": [
@@ -1329,7 +1335,8 @@
         }
       ],
       "source_package": "bash",
-      "source_version": "5.2.37-2"
+      "source_version": "5.2.37-2",
+      "immutable_dsc_sha1": "d32750d217c43dabc3b63b1d6431071e6cd506dc"
     },
     {
       "copyright_files": [
@@ -1386,7 +1393,8 @@
         }
       ],
       "source_package": "bzip2",
-      "source_version": "1.0.8-6"
+      "source_version": "1.0.8-6",
+      "immutable_dsc_sha1": "d6f4c6bc376a703658ee6a6811c4e876944c3f13"
     },
     {
       "copyright_files": [
@@ -1553,7 +1561,8 @@
         }
       ],
       "source_package": "cdebconf",
-      "source_version": "0.280"
+      "source_version": "0.280",
+      "immutable_dsc_sha1": "94a37e191c3df033a9ae39bfbe6d7acd11c8d996"
     },
     {
       "copyright_files": [
@@ -1701,7 +1710,8 @@
         }
       ],
       "source_package": "coreutils",
-      "source_version": "9.7-3"
+      "source_version": "9.7-3",
+      "immutable_dsc_sha1": "8cab01ea1c688c66c5b76274f92f6a36d27aba71"
     },
     {
       "copyright_files": [
@@ -2309,7 +2319,8 @@
         }
       ],
       "source_package": "cyrus-sasl2",
-      "source_version": "2.1.28+dfsg1-9"
+      "source_version": "2.1.28+dfsg1-9",
+      "immutable_dsc_sha1": "2f08868e2d7e0632213ee739e5bef3576e451607"
     },
     {
       "copyright_files": [
@@ -2397,7 +2408,8 @@
         }
       ],
       "source_package": "dash",
-      "source_version": "0.5.12-12"
+      "source_version": "0.5.12-12",
+      "immutable_dsc_sha1": "6dfbaf7435adb82d03033aabb3f06783fc7cbb23"
     },
     {
       "copyright_files": [
@@ -2593,7 +2605,8 @@
         }
       ],
       "source_package": "db5.3",
-      "source_version": "5.3.28+dfsg2-9"
+      "source_version": "5.3.28+dfsg2-9",
+      "immutable_dsc_sha1": "5a9565fb65d95f3c03d77fe053950451242c133f"
     },
     {
       "copyright_files": [
@@ -3066,7 +3079,8 @@
         }
       ],
       "source_package": "diffutils",
-      "source_version": "1:3.10-4"
+      "source_version": "1:3.10-4",
+      "immutable_dsc_sha1": "0cb61e8a7c5802e7bf8c70c9168105d9eebec476"
     },
     {
       "copyright_files": [
@@ -3144,7 +3158,8 @@
         }
       ],
       "source_package": "dpkg",
-      "source_version": "1.22.22"
+      "source_version": "1.22.22",
+      "immutable_dsc_sha1": "e0dbbfa6400dc9a838176b4e046b7a57ce844c85"
     },
     {
       "copyright_files": [
@@ -4072,7 +4087,8 @@
         }
       ],
       "source_package": "e2fsprogs",
-      "source_version": "1.47.2-3"
+      "source_version": "1.47.2-3",
+      "immutable_dsc_sha1": "28a1166f329eebcacd6efea5d08b84543e01ec43"
     },
     {
       "copyright_files": [
@@ -5106,7 +5122,8 @@
         }
       ],
       "source_package": "findutils",
-      "source_version": "4.10.0-3"
+      "source_version": "4.10.0-3",
+      "immutable_dsc_sha1": "c2274f0252eda9175f71c9233e9fef87be421678"
     },
     {
       "copyright_files": [
@@ -5264,7 +5281,8 @@
         }
       ],
       "source_package": "gdbm",
-      "source_version": "1.24-2"
+      "source_version": "1.24-2",
+      "immutable_dsc_sha1": "90c37917d703605e2a6846ab36c60702ba276ebc"
     },
     {
       "copyright_files": [
@@ -10668,7 +10686,8 @@
         }
       ],
       "source_package": "glibc",
-      "source_version": "2.41-12+deb13u4"
+      "source_version": "2.41-12+deb13u4",
+      "immutable_dsc_sha1": "f291d4082eef7e094241a1a87585f275cf336149"
     },
     {
       "copyright_files": [
@@ -10876,7 +10895,8 @@
         }
       ],
       "source_package": "gmp",
-      "source_version": "2:6.3.0+dfsg-3"
+      "source_version": "2:6.3.0+dfsg-3",
+      "immutable_dsc_sha1": "89d865c92f775ca7c7affc74388c204365268ac2"
     },
     {
       "copyright_files": [
@@ -10920,7 +10940,8 @@
         }
       ],
       "source_package": "hostname",
-      "source_version": "3.25"
+      "source_version": "3.25",
+      "immutable_dsc_sha1": "bdc52533af77ed664f9f91ecb72e786e4ff90251"
     },
     {
       "copyright_files": [
@@ -10981,7 +11002,8 @@
         }
       ],
       "source_package": "icu",
-      "source_version": "76.1-4"
+      "source_version": "76.1-4",
+      "immutable_dsc_sha1": "b34171ef258f7d6f36bb2a4afd7a63ad521db1ec"
     },
     {
       "copyright_files": [
@@ -11077,7 +11099,8 @@
         }
       ],
       "source_package": "init-system-helpers",
-      "source_version": "1.69~deb13u1"
+      "source_version": "1.69~deb13u1",
+      "immutable_dsc_sha1": "b79c1fca08ca8c538a5967b46f9af5fd767308ae"
     },
     {
       "copyright_files": [
@@ -11182,7 +11205,8 @@
         }
       ],
       "source_package": "keyutils",
-      "source_version": "1.6.3-6"
+      "source_version": "1.6.3-6",
+      "immutable_dsc_sha1": "454956ba1efae8fc78ae0e38e2aaa6c1e1f91fe6"
     },
     {
       "copyright_files": [
@@ -11310,7 +11334,8 @@
         }
       ],
       "source_package": "libcap2",
-      "source_version": "1:2.75-10+deb13u1"
+      "source_version": "1:2.75-10+deb13u1",
+      "immutable_dsc_sha1": "c8c3bd695ab0cac34ea0ac0c395fa0777dec1105"
     },
     {
       "copyright_files": [
@@ -11496,7 +11521,8 @@
         }
       ],
       "source_package": "libffi",
-      "source_version": "3.4.8-2"
+      "source_version": "3.4.8-2",
+      "immutable_dsc_sha1": "d5dfb5128d4b50eb0f00e306d46cea06ab299bdc"
     },
     {
       "copyright_files": [
@@ -11679,7 +11705,8 @@
         }
       ],
       "source_package": "libgpg-error",
-      "source_version": "1.51-4"
+      "source_version": "1.51-4",
+      "immutable_dsc_sha1": "444abd7c6d0adc9281c03c340b8feafc83b264cf"
     },
     {
       "copyright_files": [
@@ -11947,7 +11974,8 @@
         }
       ],
       "source_package": "libidn2",
-      "source_version": "2.3.8-2"
+      "source_version": "2.3.8-2",
+      "immutable_dsc_sha1": "f209cb443ca61fa0a9f55e603f20c98628f25a4e"
     },
     {
       "copyright_files": [
@@ -12017,7 +12045,8 @@
         }
       ],
       "source_package": "libjson-perl",
-      "source_version": "4.10000-1"
+      "source_version": "4.10000-1",
+      "immutable_dsc_sha1": "9108bd01c0fde97ef014b27f13c6e48dcd0e8cdb"
     },
     {
       "copyright_files": [
@@ -12114,7 +12143,8 @@
         }
       ],
       "source_package": "libmaxminddb",
-      "source_version": "1.12.2-1"
+      "source_version": "1.12.2-1",
+      "immutable_dsc_sha1": "ef990462615d0c186621b23adcd83d0f4a7727c2"
     },
     {
       "copyright_files": [
@@ -12193,7 +12223,8 @@
         }
       ],
       "source_package": "libseccomp",
-      "source_version": "2.6.0-2"
+      "source_version": "2.6.0-2",
+      "immutable_dsc_sha1": "6cfdde70eba246af6ae8fc25814318164e80f72f"
     },
     {
       "copyright_files": [
@@ -12263,7 +12294,8 @@
         }
       ],
       "source_package": "libselinux",
-      "source_version": "3.8.1-1"
+      "source_version": "3.8.1-1",
+      "immutable_dsc_sha1": "6af7920fefad36d817bb5f4e39507de9a08668dd"
     },
     {
       "copyright_files": [
@@ -12372,7 +12404,8 @@
         }
       ],
       "source_package": "libsemanage",
-      "source_version": "3.8.1-1"
+      "source_version": "3.8.1-1",
+      "immutable_dsc_sha1": "74bd19c38e0821c833f2c3b70f0dd14e5dad7b20"
     },
     {
       "copyright_files": [
@@ -12491,7 +12524,8 @@
         }
       ],
       "source_package": "libsepol",
-      "source_version": "3.8.1-1"
+      "source_version": "3.8.1-1",
+      "immutable_dsc_sha1": "fc4625ed3b1317ca6ced73b6a64a9438fa7946f5"
     },
     {
       "copyright_files": [
@@ -12548,7 +12582,8 @@
         }
       ],
       "source_package": "libtext-charwidth-perl",
-      "source_version": "0.04-11"
+      "source_version": "0.04-11",
+      "immutable_dsc_sha1": "fca06bf0f28d8e8e9811bd2f2cd7b4bd98c9f902"
     },
     {
       "copyright_files": [
@@ -12618,7 +12653,8 @@
         }
       ],
       "source_package": "libtext-wrapi18n-perl",
-      "source_version": "0.06-10"
+      "source_version": "0.06-10",
+      "immutable_dsc_sha1": "48c1902de8d2f19800e52009d5c3ed23537e8c5f"
     },
     {
       "copyright_files": [
@@ -14198,7 +14234,8 @@
         }
       ],
       "source_package": "libunistring",
-      "source_version": "1.3-2"
+      "source_version": "1.3-2",
+      "immutable_dsc_sha1": "fccacc11ee45d9a30933cb8fac837a72524b4a04"
     },
     {
       "copyright_files": [
@@ -15232,7 +15269,8 @@
         }
       ],
       "source_package": "liburcu",
-      "source_version": "0.15.2-2"
+      "source_version": "0.15.2-2",
+      "immutable_dsc_sha1": "f12a575af58b19ec573113a96a47bd7e372ed165"
     },
     {
       "copyright_files": [
@@ -15346,7 +15384,8 @@
         }
       ],
       "source_package": "liburing",
-      "source_version": "2.9-1"
+      "source_version": "2.9-1",
+      "immutable_dsc_sha1": "54c6d6010d8ef8af135029a84f3f855987bbf1ac"
     },
     {
       "copyright_files": [
@@ -15815,7 +15854,8 @@
         }
       ],
       "source_package": "libuv1",
-      "source_version": "1.50.0-2"
+      "source_version": "1.50.0-2",
+      "immutable_dsc_sha1": "f385cb0d5704523f100c1cf95eb295372818e98c"
     },
     {
       "copyright_files": [
@@ -15966,7 +16006,8 @@
         }
       ],
       "source_package": "libzstd",
-      "source_version": "1.5.7+dfsg-1"
+      "source_version": "1.5.7+dfsg-1",
+      "immutable_dsc_sha1": "5882e87bb6e8f39c83044b4aefa3b819b1310e67"
     },
     {
       "copyright_files": [
@@ -16190,7 +16231,8 @@
         }
       ],
       "source_package": "lz4",
-      "source_version": "1.10.0-4"
+      "source_version": "1.10.0-4",
+      "immutable_dsc_sha1": "6d870247eeda54129ef9a6b7a81d7f8d5377ff31"
     },
     {
       "copyright_files": [
@@ -16283,7 +16325,8 @@
         }
       ],
       "source_package": "mawk",
-      "source_version": "1.3.4.20250131-1"
+      "source_version": "1.3.4.20250131-1",
+      "immutable_dsc_sha1": "8f63fbdec6d94845289d707e25efdb74f0a1ac8e"
     },
     {
       "copyright_files": [
@@ -16327,7 +16370,8 @@
         }
       ],
       "source_package": "netbase",
-      "source_version": "6.5"
+      "source_version": "6.5",
+      "immutable_dsc_sha1": "9fbe719ac17e35471b0080d3e062caaf7c9eec7a"
     },
     {
       "copyright_files": [
@@ -19204,7 +19248,8 @@
         }
       ],
       "source_package": "nettle",
-      "source_version": "3.10.1-1"
+      "source_version": "3.10.1-1",
+      "immutable_dsc_sha1": "9f8922b81b23705fcacf6c8f5dcd6727523250b2"
     },
     {
       "copyright_files": [
@@ -19368,7 +19413,8 @@
         }
       ],
       "source_package": "nghttp2",
-      "source_version": "1.64.0-1.1+deb13u1"
+      "source_version": "1.64.0-1.1+deb13u1",
+      "immutable_dsc_sha1": "2bace9a54aa2669f85232c8967da5895d06e9127"
     },
     {
       "copyright_files": [
@@ -19766,7 +19812,8 @@
         }
       ],
       "source_package": "nghttp3",
-      "source_version": "1.8.0-1"
+      "source_version": "1.8.0-1",
+      "immutable_dsc_sha1": "9add331c308c2b7d75de6b9d6aedd4326f310469"
     },
     {
       "copyright_files": [
@@ -21028,7 +21075,8 @@
         }
       ],
       "source_package": "p11-kit",
-      "source_version": "0.25.5-3"
+      "source_version": "0.25.5-3",
+      "immutable_dsc_sha1": "793354334de312a68b5c0dfc3e36eb93a731333d"
     },
     {
       "copyright_files": [
@@ -21557,7 +21605,8 @@
         }
       ],
       "source_package": "pam",
-      "source_version": "1.7.0-5"
+      "source_version": "1.7.0-5",
+      "immutable_dsc_sha1": "dc44d975a3cee93b2e116db4682b90abc8a11f31"
     },
     {
       "copyright_files": [
@@ -21806,7 +21855,8 @@
         }
       ],
       "source_package": "pkgconf",
-      "source_version": "1.8.1-4"
+      "source_version": "1.8.1-4",
+      "immutable_dsc_sha1": "ad8c3b9d46fd84101e6a9c6be788ae8eda986efc"
     },
     {
       "copyright_files": [
@@ -22040,7 +22090,8 @@
         }
       ],
       "source_package": "procps",
-      "source_version": "2:4.0.4-9"
+      "source_version": "2:4.0.4-9",
+      "immutable_dsc_sha1": "fc0381a50c53b2520c68d75f242370cc730c17e4"
     },
     {
       "copyright_files": [
@@ -22230,7 +22281,8 @@
         }
       ],
       "source_package": "readline",
-      "source_version": "8.2-6"
+      "source_version": "8.2-6",
+      "immutable_dsc_sha1": "11fada837fc736ca00a95e3a91d85491bec07c99"
     },
     {
       "copyright_files": [
@@ -22465,7 +22517,8 @@
         }
       ],
       "source_package": "rpcsvc-proto",
-      "source_version": "1.4.3-1"
+      "source_version": "1.4.3-1",
+      "immutable_dsc_sha1": "3f1e8f97337839199af2b9500a54c88f3e82a657"
     },
     {
       "copyright_files": [
@@ -22535,7 +22588,8 @@
         }
       ],
       "source_package": "rust-sequoia-sqv",
-      "source_version": "1.3.0-3"
+      "source_version": "1.3.0-3",
+      "immutable_dsc_sha1": "2fa9c040526922b732991ab5e752c7f4b32c2006"
     },
     {
       "copyright_files": [
@@ -22651,7 +22705,8 @@
         }
       ],
       "source_package": "sed",
-      "source_version": "4.9-2+deb13u1"
+      "source_version": "4.9-2+deb13u1",
+      "immutable_dsc_sha1": "a20e0007bcf83fd3d4af77f6dfc40067dfb620b9"
     },
     {
       "copyright_files": [
@@ -22880,7 +22935,8 @@
         }
       ],
       "source_package": "sensible-utils",
-      "source_version": "0.0.25"
+      "source_version": "0.0.25",
+      "immutable_dsc_sha1": "3f9112c1e14242805206d553b20059c8ea6caad0"
     },
     {
       "copyright_files": [
@@ -23435,7 +23491,8 @@
         }
       ],
       "source_package": "shadow",
-      "source_version": "1:4.17.4-2"
+      "source_version": "1:4.17.4-2",
+      "immutable_dsc_sha1": "e4d18b937f954167778fbeb365b5661658a97780"
     },
     {
       "copyright_files": [
@@ -23949,7 +24006,8 @@
         }
       ],
       "source_package": "systemd",
-      "source_version": "257.13-1~deb13u1"
+      "source_version": "257.13-1~deb13u1",
+      "immutable_dsc_sha1": "fc07f2628e44c0ddbcc964768730cab7b094d627"
     },
     {
       "copyright_files": [
@@ -24092,7 +24150,8 @@
         }
       ],
       "source_package": "sysvinit",
-      "source_version": "3.14-4"
+      "source_version": "3.14-4",
+      "immutable_dsc_sha1": "f8c0e7ebbc91f5312e19f9d97bd4747d007c6b24"
     },
     {
       "copyright_files": [
@@ -24360,7 +24419,8 @@
         }
       ],
       "source_package": "tar",
-      "source_version": "1.35+dfsg-3.1"
+      "source_version": "1.35+dfsg-3.1",
+      "immutable_dsc_sha1": "f0a9bdc3c47cf3b0e7864db3e7a8876a9d61ebf1"
     },
     {
       "copyright_files": [
@@ -24575,7 +24635,8 @@
         }
       ],
       "source_package": "ucf",
-      "source_version": "3.0052"
+      "source_version": "3.0052",
+      "immutable_dsc_sha1": "7b3fd4eb88ebb437392a318960be5065dbdc4935"
     },
     {
       "copyright_files": [
@@ -31560,7 +31621,8 @@
         }
       ],
       "source_package": "util-linux",
-      "source_version": "2.41.5-0+deb13u1"
+      "source_version": "2.41.5-0+deb13u1",
+      "immutable_dsc_sha1": "af0f23320ed30c50ca540273f6f659b152be2c6f"
     },
     {
       "copyright_files": [
@@ -31677,7 +31739,8 @@
         }
       ],
       "source_package": "xxhash",
-      "source_version": "0.8.3-2"
+      "source_version": "0.8.3-2",
+      "immutable_dsc_sha1": "226be1e33182d1835530149ecbd67c4a6dc4cca8"
     },
     {
       "copyright_files": [
@@ -35725,7 +35788,8 @@
         }
       ],
       "source_package": "audit",
-      "source_version": "1:4.0.2-2+deb13u1"
+      "source_version": "1:4.0.2-2+deb13u1",
+      "immutable_dsc_sha1": "f318926afbbfa4cc8f96188d7907199116567d72"
     },
     {
       "copyright_files": [
@@ -35803,7 +35867,8 @@
         }
       ],
       "source_package": "base-files",
-      "source_version": "13.8+deb13u7"
+      "source_version": "13.8+deb13u7",
+      "immutable_dsc_sha1": "09c6e9bef6e1c0234e4cd91d2a7ac5d52f6dc8b3"
     },
     {
       "copyright_files": [
@@ -35985,7 +36050,8 @@
         }
       ],
       "source_package": "bind9",
-      "source_version": "1:9.20.30-1~deb13u1"
+      "source_version": "1:9.20.30-1~deb13u1",
+      "immutable_dsc_sha1": "5df77dc26b12e7a638e236ee39eaa60bf63cc577"
     },
     {
       "copyright_files": [
@@ -36069,7 +36135,8 @@
         }
       ],
       "source_package": "ca-certificates",
-      "source_version": "20250419+deb13u1"
+      "source_version": "20250419+deb13u1",
+      "immutable_dsc_sha1": "44effdeab045b9b4749c3e21df2308a2ef7587ee"
     },
     {
       "copyright_files": [
@@ -37706,7 +37773,8 @@
         }
       ],
       "source_package": "curl",
-      "source_version": "8.14.1-2+deb13u7"
+      "source_version": "8.14.1-2+deb13u7",
+      "immutable_dsc_sha1": "a52b26b71ab211b478dbcd7c1399578b52d912d4"
     },
     {
       "copyright_files": [
@@ -37797,7 +37865,8 @@
         }
       ],
       "source_package": "gzip",
-      "source_version": "1.13-1+deb13u1"
+      "source_version": "1.13-1+deb13u1",
+      "immutable_dsc_sha1": "da29a1d6cbffd22cf19ba0acb51355aedae2c985"
     },
     {
       "copyright_files": [
@@ -38111,7 +38180,8 @@
         }
       ],
       "source_package": "libevent",
-      "source_version": "2.1.13-stable-1~deb13u1"
+      "source_version": "2.1.13-stable-1~deb13u1",
+      "immutable_dsc_sha1": "98ef582410ee3735fb8da955770bc1a9dc8ee903"
     },
     {
       "copyright_files": [
@@ -38298,7 +38368,8 @@
         }
       ],
       "source_package": "linux",
-      "source_version": "6.12.115-2"
+      "source_version": "6.12.115-2",
+      "immutable_dsc_sha1": "392fc47bff05a3eaf352d9782c83392d29f2706c"
     },
     {
       "copyright_files": [
@@ -38474,7 +38545,8 @@
         }
       ],
       "source_package": "openssl",
-      "source_version": "3.5.7-1~deb13u3"
+      "source_version": "3.5.7-1~deb13u3",
+      "immutable_dsc_sha1": "db56cd5070f847d98b8fec3dde05ce8ee276ba64"
     },
     {
       "copyright_files": [
@@ -46395,7 +46467,8 @@
         }
       ],
       "source_package": "perl",
-      "source_version": "5.40.1-6+deb13u1"
+      "source_version": "5.40.1-6+deb13u1",
+      "immutable_dsc_sha1": "735f1a33e381a4037b22f895726d2ffce281b39a"
     },
     {
       "copyright_files": [
@@ -46506,7 +46579,8 @@
         }
       ],
       "source_package": "sqlite3",
-      "source_version": "3.46.1-7+deb13u2"
+      "source_version": "3.46.1-7+deb13u2",
+      "immutable_dsc_sha1": "e9d9d4e7b5c82a96d3f233e46eb23a35376700eb"
     },
     {
       "copyright_files": [
@@ -46761,7 +46835,8 @@
         }
       ],
       "source_package": "unbound",
-      "source_version": "1.26.2-0+deb13u1"
+      "source_version": "1.26.2-0+deb13u1",
+      "immutable_dsc_sha1": "aae78304b0da9904f4315a7971b8be477632d3be"
     },
     {
       "copyright_files": [
@@ -47003,7 +47078,8 @@
         }
       ],
       "source_package": "xz-utils",
-      "source_version": "5.8.1-1+deb13u2"
+      "source_version": "5.8.1-1+deb13u2",
+      "immutable_dsc_sha1": "183b0cf1dce421176532909902d728165be3748b"
     }
   ],
   "schema": "volt-debian-source-catalog/v1",

@@ -1,9 +1,12 @@
 from pathlib import Path
+import hashlib
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 
@@ -59,6 +62,47 @@ class FreshInstallWorkflowTests(unittest.TestCase):
             result = subprocess.run(["/bin/bash", "-e", "-c", broken], cwd=ROOT, env=environment, text=True, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("pinned Trivy binary is required", result.stderr)
+
+    def test_candidate_transfer_preserves_debian_epoch_paths_and_exact_files(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+
+        def script(name):
+            step = workflow.split("- name: " + name, 1)[1].split("\n      - name:", 1)[0]
+            return "\n".join(line[10:] for line in step.split("run: |\n", 1)[1].splitlines())
+
+        upload = workflow.split("- name: Upload exact candidate inputs; no publication credentials", 1)[1].split("\n  publish:", 1)[0]
+        self.assertIn("path: ${{ runner.temp }}/volt-rc1-candidate.tar", upload)
+        self.assertIn("path: ${{ runner.temp }}/volt-rc1-transfer", workflow)
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source = directory / "candidate"
+            source.mkdir()
+            files = {"image.tar": b"immutable-image-bytes", "image-id.txt": b"sha256:fixture", "notices/notices/debian-source-material/attr-1:2.5.2-3/attr_2.5.2-3.dsc": b"signed-source-fixture", "notices/.retained": b"hidden-control", "release-scan.json": b"complete-scan-fixture"}
+            for name, data in files.items():
+                path = source / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+            original = source / "notices/notices/debian-source-material/attr-1:2.5.2-3/attr_2.5.2-3.dsc"
+            linked_name = "source-preparation/debian-source-material/attr_2.5.2-3.dsc"
+            linked = source / linked_name
+            linked.parent.mkdir(parents=True)
+            os.link(original, linked)
+            self.assertEqual(original.stat().st_ino, linked.stat().st_ino)
+            files[linked_name] = original.read_bytes()
+            environment = dict(os.environ, RELEASE_OUT=str(source), RUNNER_TEMP=str(directory))
+            packed = subprocess.run(["/bin/bash", "-e", "-c", script("Pack exact candidate inputs for portable artifact transfer")], cwd=ROOT, env=environment, text=True, capture_output=True)
+            self.assertEqual(packed.returncode, 0, packed.stdout + packed.stderr)
+            with tarfile.open(directory / "volt-rc1-candidate.tar") as archive:
+                self.assertTrue(all(member.isfile() or member.isdir() for member in archive))
+            shutil.rmtree(source)
+            transfer = directory / "volt-rc1-transfer"
+            transfer.mkdir()
+            (directory / "volt-rc1-candidate.tar").rename(transfer / "volt-rc1-candidate.tar")
+            restored = subprocess.run(["/bin/bash", "-e", "-c", script("Restore exact candidate inputs")], cwd=ROOT, env=environment, text=True, capture_output=True)
+            self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+            output = directory / "volt-rc1"
+            observed = {path.relative_to(output).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in output.rglob("*") if path.is_file()}
+            self.assertEqual(observed, {name: hashlib.sha256(data).hexdigest() for name, data in files.items()})
 
     def test_release_scope_is_explicitly_fresh_install_only(self):
         for name in ("docs/releasing.md", "docs/deployment.md", "tools/release/launcher-guide.txt"):

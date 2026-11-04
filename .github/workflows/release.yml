@@ -155,12 +155,24 @@ jobs:
           path: ${{ runner.temp }}/volt-rc1/release-scan.json*
           if-no-files-found: ignore
           retention-days: 30
+      - name: Pack exact candidate inputs for portable artifact transfer
+        run: |
+          python3 - <<'PYTRANSFER'
+          import os
+          import tarfile
+          from pathlib import Path
+          root = Path(os.environ["RELEASE_OUT"])
+          archive = Path(os.environ["RUNNER_TEMP"]) / "volt-rc1-candidate.tar"
+          with tarfile.open(archive, "w", dereference=True) as output:
+              for path in sorted(root.iterdir()):
+                  output.add(path, arcname=path.name)
+          PYTRANSFER
       - name: Upload exact candidate inputs; no publication credentials
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: volt-rc1-candidate-${{ github.sha }}
-          path: ${{ runner.temp }}/volt-rc1/
+          path: ${{ runner.temp }}/volt-rc1-candidate.tar
           if-no-files-found: error
           retention-days: 7
 
@@ -183,7 +195,18 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v4.3.0
         with:
           name: volt-rc1-candidate-${{ github.sha }}
-          path: ${{ runner.temp }}/volt-rc1
+          path: ${{ runner.temp }}/volt-rc1-transfer
+      - name: Restore exact candidate inputs
+        run: |
+          python3 - <<'PYTRANSFER'
+          import os
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, "tools/release")
+          from archive import safe_extract
+          root = Path(os.environ["RUNNER_TEMP"])
+          safe_extract(root / "volt-rc1-transfer/volt-rc1-candidate.tar", root / "volt-rc1")
+          PYTRANSFER
       - name: Verify explicit approval and required environment reviewers
         env:
           GH_TOKEN: ${{ github.token }}

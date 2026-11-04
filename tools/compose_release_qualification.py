@@ -105,6 +105,8 @@ def main() -> int:
     p.add_argument("--evidence", type=Path, required=True)
     p.add_argument("--private-tmp", type=Path, default=Path("/tmp"),
                    help="parent directory for private generated state and backup fixtures")
+    p.add_argument("--bundle-tmp", type=Path, default=Path("/tmp"),
+                   help="parent directory for the small source-free installer extraction")
     p.add_argument("--project-prefix", default="volt-rc2-qual",
                    help="unique Compose project prefix used for owned disposable resources")
     args = p.parse_args()
@@ -115,8 +117,9 @@ def main() -> int:
     if not re.fullmatch(r"[a-z][a-z0-9-]{1,30}", args.project_prefix):
         p.error("project prefix must be a short lowercase Compose-safe identifier")
     private_tmp = args.private_tmp.resolve(strict=True)
-    if not private_tmp.is_dir():
-        p.error("private temporary parent must be an existing directory")
+    bundle_tmp = args.bundle_tmp.resolve(strict=True)
+    if not private_tmp.is_dir() or not bundle_tmp.is_dir():
+        p.error("temporary parents must be existing directories")
     evidence = args.evidence.resolve()
     evidence.mkdir(parents=True, exist_ok=False, mode=0o700)
     os.chmod(evidence, 0o700)
@@ -124,7 +127,8 @@ def main() -> int:
     os.chmod(private, 0o700)
     project = f"{args.project_prefix}-{os.getpid()}"
     state = private / "instance"
-    extracted = private / "bundle"
+    extracted = Path(tempfile.mkdtemp(prefix=f"{args.project_prefix}-bundle-", dir=bundle_tmp))
+    os.chmod(extracted, 0o700)
     cookie = private / "cookie"
     setup = None
     cleanup_result = 0
@@ -276,6 +280,7 @@ def main() -> int:
             except Exception:
                 cleanup_result=1
         shutil.rmtree(private,ignore_errors=True)
+        shutil.rmtree(extracted,ignore_errors=True)
         if cleanup_result:
             print("owned Compose cleanup failed; inspect the exact project resources before retry",file=sys.stderr)
     return 1 if cleanup_result else outcome

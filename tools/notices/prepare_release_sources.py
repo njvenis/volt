@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import re
 import shutil
+import socket
 import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -20,16 +23,68 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 CATALOG = Path(__file__).with_name("debian-source-catalog.json")
 DEBIAN_SNAPSHOT = "https://snapshot.debian.org"
 DEBIAN_KEYRING_SHA256 = "81e08f47b0dd8a563a2742ad90878ccefe53aa0728b095acbea3efda84381ea9"
+FETCH_ATTEMPTS = 4
+FETCH_BACKOFF_SECONDS = (1, 2, 4)
+RETRYABLE_HTTP_STATUS = {429, 503, 504}
 
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _safe_public_url(url: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    return urllib.parse.urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
+def _transient_transport_error(exc: BaseException) -> bool:
+    cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(cause, socket.gaierror):
+        return cause.errno == socket.EAI_AGAIN
+    return isinstance(cause, (TimeoutError, ConnectionError,
+                              http.client.RemoteDisconnected, http.client.IncompleteRead))
+
+
+def _transport_error_label(exc: BaseException) -> str:
+    cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(cause, socket.gaierror) and cause.errno == socket.EAI_AGAIN:
+        return "dns-temporary"
+    return type(cause).__name__
+
+
 def fetch(url: str) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": "VOLT-notice-source-preparer/1.0"})
-    with urllib.request.urlopen(request, timeout=90) as response:
-        return response.read()
+    safe_url = _safe_public_url(url)
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=90) as response:
+                data = response.read()
+                if attempt > 1:
+                    status = getattr(response, "status", None) or getattr(response, "code", 200)
+                    print(f"NOTICE_SOURCE_FETCH attempt={attempt}/{FETCH_ATTEMPTS} outcome=success "
+                          f"status={status} bytes={len(data)} url={safe_url}", file=sys.stderr)
+                return data
+        except urllib.error.HTTPError as exc:
+            if exc.code not in RETRYABLE_HTTP_STATUS:
+                raise
+            reason = f"http-{exc.code}"
+            exc.close()
+        except (urllib.error.URLError, TimeoutError, ConnectionError,
+                http.client.HTTPException) as exc:
+            if not _transient_transport_error(exc):
+                raise
+            reason = _transport_error_label(exc)
+
+        outcome = "exhausted" if attempt == FETCH_ATTEMPTS else "retry"
+        print(f"NOTICE_SOURCE_FETCH attempt={attempt}/{FETCH_ATTEMPTS} outcome={outcome} "
+              f"reason={reason} url={safe_url}", file=sys.stderr)
+        if attempt == FETCH_ATTEMPTS:
+            raise ValueError(f"public source fetch exhausted transient retries: {reason} {safe_url}")
+        time.sleep(FETCH_BACKOFF_SECONDS[attempt - 1])
+    raise AssertionError("unreachable fetch retry state")
 
 
 def release_sha256_row(cleartext: str, relative_path: str) -> tuple[str, int]:

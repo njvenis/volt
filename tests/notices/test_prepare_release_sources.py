@@ -1,12 +1,16 @@
+import io
 import json
 import os
 from pathlib import Path
+import socket
+import ssl
 import subprocess
 import sys
+import urllib.error
 
 import pytest
 
-from tools.notices.prepare_release_sources import CATALOG, catalog_matches, digest, release_sha256_row
+from tools.notices.prepare_release_sources import CATALOG, catalog_matches, digest, fetch, release_sha256_row
 
 
 def test_developer_keyring_lock_matches_acquisition_catalog():
@@ -59,6 +63,112 @@ def test_signed_inrelease_uses_unique_sha256_section_row():
     duplicate = clear.replace("SHA512:", " " + "b" * 64 + " 12 main/source/Sources.xz\nSHA512:")
     with pytest.raises(ValueError, match="one complete SHA-256/size row"):
         release_sha256_row(duplicate, "main/source/Sources.xz")
+
+
+def test_fetch_retries_transient_http_statuses_with_bounded_backoff(monkeypatch, capsys):
+    url = "https://snapshot.debian.org/file/public-hash?signature=must-not-be-logged"
+    responses = [
+        urllib.error.HTTPError(url, 429, "rate limited", {}, io.BytesIO()),
+        urllib.error.HTTPError(url, 503, "unavailable", {}, io.BytesIO()),
+        urllib.error.HTTPError(url, 504, "gateway timeout", {}, io.BytesIO()),
+        io.BytesIO(b"verified source bytes"),
+    ]
+    sleeps = []
+    calls = []
+
+    def fake_open(request, timeout):
+        calls.append((request.full_url, timeout))
+        response = responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+    monkeypatch.setattr("tools.notices.prepare_release_sources.urllib.request.urlopen", fake_open)
+    monkeypatch.setattr("tools.notices.prepare_release_sources.time.sleep", sleeps.append)
+    assert fetch(url) == b"verified source bytes"
+    assert len(calls) == 4 and all(timeout == 90 for _url, timeout in calls)
+    assert sleeps == [1, 2, 4]
+    diagnostic = capsys.readouterr().err
+    assert "attempt=1/4 outcome=retry reason=http-429" in diagnostic
+    assert "attempt=2/4 outcome=retry reason=http-503" in diagnostic
+    assert "attempt=3/4 outcome=retry reason=http-504" in diagnostic
+    assert "attempt=4/4 outcome=success status=200 bytes=21" in diagnostic
+    assert "snapshot.debian.org/file/public-hash" in diagnostic
+    assert "must-not-be-logged" not in diagnostic
+
+
+def test_fetch_does_not_retry_permanent_http_or_tls_failures(monkeypatch, capsys):
+    calls = []
+
+    def missing(request, timeout):
+        calls.append(request.full_url)
+        raise urllib.error.HTTPError(request.full_url, 404, "not found", {}, io.BytesIO())
+
+    monkeypatch.setattr("tools.notices.prepare_release_sources.urllib.request.urlopen", missing)
+    with pytest.raises(urllib.error.HTTPError):
+        fetch("https://snapshot.debian.org/missing")
+    assert len(calls) == 1
+    assert capsys.readouterr().err == ""
+
+    server_error_calls = []
+
+    def server_error(request, timeout):
+        server_error_calls.append(request.full_url)
+        raise urllib.error.HTTPError(request.full_url, 500, "internal server error", {}, io.BytesIO())
+
+    monkeypatch.setattr("tools.notices.prepare_release_sources.urllib.request.urlopen", server_error)
+    with pytest.raises(urllib.error.HTTPError):
+        fetch("https://snapshot.debian.org/server-error")
+    assert len(server_error_calls) == 1
+
+    tls_calls = []
+
+    def bad_certificate(request, timeout):
+        tls_calls.append(request.full_url)
+        raise urllib.error.URLError(ssl.SSLCertVerificationError("certificate verification failed"))
+
+    monkeypatch.setattr("tools.notices.prepare_release_sources.urllib.request.urlopen", bad_certificate)
+    with pytest.raises(urllib.error.URLError):
+        fetch("https://snapshot.debian.org/tls-error")
+    assert len(tls_calls) == 1
+
+
+def test_fetch_retries_transient_network_errors_then_fails_closed(monkeypatch, capsys):
+    calls = []
+    sleeps = []
+
+    def timeout(request, timeout):
+        calls.append(request.full_url)
+        raise urllib.error.URLError(socket.timeout("first byte timeout"))
+
+    monkeypatch.setattr("tools.notices.prepare_release_sources.urllib.request.urlopen", timeout)
+    monkeypatch.setattr("tools.notices.prepare_release_sources.time.sleep", sleeps.append)
+    with pytest.raises(ValueError, match="exhausted transient retries: TimeoutError"):
+        fetch("https://snapshot.debian.org/slow?token=must-not-be-logged")
+    assert len(calls) == 4
+    assert sleeps == [1, 2, 4]
+    diagnostic = capsys.readouterr().err
+    assert "attempt=4/4 outcome=exhausted reason=TimeoutError" in diagnostic
+    assert "snapshot.debian.org/slow" in diagnostic
+    assert "must-not-be-logged" not in diagnostic
+
+
+def test_fetch_retries_temporary_dns_failure(monkeypatch, capsys):
+    calls = []
+    sleeps = []
+
+    def temporary_dns(request, timeout):
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            raise urllib.error.URLError(socket.gaierror(socket.EAI_AGAIN, "temporary name resolution failure"))
+        return io.BytesIO(b"public input")
+
+    monkeypatch.setattr("tools.notices.prepare_release_sources.urllib.request.urlopen", temporary_dns)
+    monkeypatch.setattr("tools.notices.prepare_release_sources.time.sleep", sleeps.append)
+    assert fetch("https://snapshot.debian.org/retry") == b"public input"
+    assert len(calls) == 2
+    assert sleeps == [1]
+    assert "reason=dns-temporary" in capsys.readouterr().err
 
 
 def test_catalog_rejects_source_version_or_stanza_drift():

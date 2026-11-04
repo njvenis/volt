@@ -8,42 +8,50 @@ VOLT `0.1.0-rc.2` is the current Linux/amd64 Compose-compatible evaluation image
 VOLT_RELEASE_IMAGE='ghcr.io/njvenis/volt@sha256:a7130e38b88b781d93d84c4ddd022ba45716a06b89949a2923e1dd531db2eac1'
 ```
 
-The image has been published and passed the hosted synthetic Compose demo, cold backup/restore, and offline-preview qualification. The signed outer archive and standalone source-free Compose bundle are expected at the [RC2 prerelease page](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.2). The version tag/release handoff is a separate owner action; until that page and assets exist, the download steps below are pending.
+The RC2 prerelease is published. Its assets include the standalone source-free Compose bundle, checksum, signed Linux/amd64 offline archive, and external release-verification instructions. The image passed the hosted synthetic Compose demo, cold backup/restore, and offline-preview qualification.
 
 ### Download and verify the source-free bundle
 
-Download the standalone Compose bundle, its checksum, the signed offline archive, and the external release-verification instructions after the prerelease appears:
+Download the standalone Compose bundle, its checksum, the signed offline archive, and the external release-verification instructions:
 
 ```sh
-mkdir -p volt-rc2-release
-cd volt-rc2-release
-gh release download v0.1.0-rc.2 --repo njvenis/volt \
-  --pattern volt-compose.tar.gz \
-  --pattern volt-compose.tar.gz.sha256 \
-  --pattern volt-0.1.0-rc.2-linux-amd64.tar.gz \
-  --pattern VERIFY-RELEASE.md
+if ! mkdir -p volt-rc2-release; then echo 'Cannot create download directory' >&2; exit 1; fi
+if ! cd volt-rc2-release; then echo 'Cannot enter download directory' >&2; exit 1; fi
+if ! gh release download v0.1.0-rc.2 --repo njvenis/volt \
+    --pattern volt-compose.tar.gz \
+    --pattern volt-compose.tar.gz.sha256 \
+    --pattern volt-0.1.0-rc.2-linux-amd64.tar.gz \
+    --pattern VERIFY-RELEASE.md; then
+  echo 'Release asset download failed; stop without using any local files' >&2
+  exit 1
+fi
 ```
+
+Assets are also available directly: [Compose bundle](https://github.com/njvenis/volt/releases/download/v0.1.0-rc.2/volt-compose.tar.gz), [bundle checksum](https://github.com/njvenis/volt/releases/download/v0.1.0-rc.2/volt-compose.tar.gz.sha256), [signed offline archive](https://github.com/njvenis/volt/releases/download/v0.1.0-rc.2/volt-0.1.0-rc.2-linux-amd64.tar.gz), and [VERIFY-RELEASE.md](https://github.com/njvenis/volt/releases/download/v0.1.0-rc.2/VERIFY-RELEASE.md). The checksum confirms transfer integrity; use the authenticated outer archive to verify the standalone bundle's identity.
 
 Before extracting either the Compose bundle or image, follow the external `VERIFY-RELEASE.md` instructions after authenticating them through the release owner or another trusted channel. Those instructions use an independently authenticated verifier checkout at controller commit `90f48211e65c9ae0556419dc7f8329170386287c` to verify the archive's image-source commit `0af679d77754060f2f89368830a92ddb6e3f2122` and image ID `sha256:09412fdcda1a77a6182829061e202f83e767f8cfaecce2cc5b3e9443c3c35461`. Keep those identities distinct: the controller supplies the verifier; it is not the source revision built into the image. Provision Cosign's official Sigstore trust through its official procedure or use an already provisioned trusted store. Never take a trust root or its only checksum from the archive. This trust bootstrap can use Git, but Git is not an installation or runtime prerequisite for the extracted source-free bundle.
 
 ```sh
-git clone https://github.com/njvenis/volt.git volt-rc2-verifier
-git -C volt-rc2-verifier checkout --detach 90f48211e65c9ae0556419dc7f8329170386287c
-test "$(git -C volt-rc2-verifier rev-parse HEAD)" = 90f48211e65c9ae0556419dc7f8329170386287c
-python3 volt-rc2-verifier/tools/release/archive.py verify \
-  --archive volt-0.1.0-rc.2-linux-amd64.tar.gz --cosign cosign \
-  --source-sha 0af679d77754060f2f89368830a92ddb6e3f2122 \
-  --image-id sha256:09412fdcda1a77a6182829061e202f83e767f8cfaecce2cc5b3e9443c3c35461
+if ! git clone https://github.com/njvenis/volt.git volt-rc2-verifier; then echo 'Verifier checkout failed' >&2; exit 1; fi
+if ! git -C volt-rc2-verifier checkout --detach 90f48211e65c9ae0556419dc7f8329170386287c; then echo 'Verifier checkout identity failed' >&2; exit 1; fi
+if ! test "$(git -C volt-rc2-verifier rev-parse HEAD)" = 90f48211e65c9ae0556419dc7f8329170386287c; then echo 'Unexpected verifier checkout identity' >&2; exit 1; fi
+if ! python3 volt-rc2-verifier/tools/release/archive.py verify \
+    --archive volt-0.1.0-rc.2-linux-amd64.tar.gz --cosign cosign \
+    --source-sha 0af679d77754060f2f89368830a92ddb6e3f2122 \
+    --image-id sha256:09412fdcda1a77a6182829061e202f83e767f8cfaecce2cc5b3e9443c3c35461; then
+  echo 'Signed archive verification failed; do not extract the bundle or load the image' >&2
+  exit 1
+fi
 ```
 
 The outer archive signature and signed manifest authenticate the included Compose bundle. Confirm the separately downloaded bundle is byte-for-byte identical to that authenticated member; the sidecar checksum alone is not a trust anchor:
 
 ```sh
-tar -xOf volt-0.1.0-rc.2-linux-amd64.tar.gz volt-compose.tar.gz > volt-compose-embedded.tar.gz
-cmp volt-compose.tar.gz volt-compose-embedded.tar.gz
-sha256sum -c volt-compose.tar.gz.sha256
-tar -xzf volt-compose.tar.gz
-cd volt-compose-0.1.0-rc.2
+if ! tar -xOf volt-0.1.0-rc.2-linux-amd64.tar.gz volt-compose.tar.gz > volt-compose-embedded.tar.gz; then echo 'Cannot read authenticated bundle member' >&2; exit 1; fi
+if ! cmp volt-compose.tar.gz volt-compose-embedded.tar.gz; then echo 'Standalone bundle differs from the authenticated archive; stop' >&2; exit 1; fi
+if ! sha256sum -c volt-compose.tar.gz.sha256; then echo 'Bundle checksum failed; stop' >&2; exit 1; fi
+if ! tar -xzf volt-compose.tar.gz; then echo 'Bundle extraction failed; stop' >&2; exit 1; fi
+if ! cd volt-compose-0.1.0-rc.2; then echo 'Expected versioned bundle directory is missing' >&2; exit 1; fi
 ```
 
 The bundle's README contains the demo and external OIDC setup, identity-linking, authority initialization, lifecycle, and backup instructions. The installer is source-free: installation does not clone VOLT, install Node.js/npm, install a browser, or build the application. Runtime prerequisites are Docker Engine with Compose v2, Python 3.11+, and OpenSSL. External mode also requires a separately operated provider-specific identity-sync publisher; OIDC login alone does not establish current source membership or permissions.
@@ -53,13 +61,17 @@ The bundle's README contains the demo and external OIDC setup, identity-linking,
 Verify the registry signature and pull by immutable digest, not a mutable tag:
 
 ```sh
-cosign verify \
-  --certificate-identity https://github.com/njvenis/volt/.github/workflows/release.yml@refs/heads/main \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  "$VOLT_RELEASE_IMAGE"
-docker pull --platform linux/amd64 "$VOLT_RELEASE_IMAGE"
-python3 setup.py init /var/lib/volt/demo --mode demo --project volt-demo --image "$VOLT_RELEASE_IMAGE"
-python3 setup.py start /var/lib/volt/demo
+VOLT_RELEASE_IMAGE='ghcr.io/njvenis/volt@sha256:a7130e38b88b781d93d84c4ddd022ba45716a06b89949a2923e1dd531db2eac1'
+if ! cosign verify \
+    --certificate-identity https://github.com/njvenis/volt/.github/workflows/release.yml@refs/heads/main \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    "$VOLT_RELEASE_IMAGE"; then
+  echo 'Image signature verification failed; do not pull or initialize' >&2
+  exit 1
+fi
+if ! docker pull --platform linux/amd64 "$VOLT_RELEASE_IMAGE"; then echo 'Image pull failed; do not initialize' >&2; exit 1; fi
+if ! python3 setup.py init /var/lib/volt/demo --mode demo --project volt-demo --image "$VOLT_RELEASE_IMAGE"; then echo 'Initialization failed; stop' >&2; exit 1; fi
+if ! python3 setup.py start /var/lib/volt/demo; then echo 'Startup failed; stop' >&2; exit 1; fi
 ```
 
 Continue with the extracted bundle README to link the synthetic administrator and explicitly initialize authority. The demo uses synthetic identity and loopback ingress. For external OIDC, follow the separate external-mode instructions and operate the required identity-sync publisher. Do not expose the upstream or recovery port publicly. Configure host TLS at the reverse proxy and use the exact HTTPS callback and trusted origins.
@@ -70,14 +82,28 @@ The signed archive's verification procedure can load its image without a registr
 
 ```sh
 # Return from volt-compose-0.1.0-rc.2 to volt-rc2-release.
-cd ..
-python3 volt-rc2-verifier/tools/release/archive.py load \
-  --archive volt-0.1.0-rc.2-linux-amd64.tar.gz --cosign cosign
-tar -xOf volt-0.1.0-rc.2-linux-amd64.tar.gz manifest.json > manifest.json
-image_id="$(python3 -c 'import json; print(json.load(open("manifest.json"))["image_id"])')"
-cd volt-compose-0.1.0-rc.2
-python3 setup.py init /var/lib/volt/demo --mode demo --project volt-demo --image "$image_id"
-python3 setup.py start /var/lib/volt/demo
+if ! cd ..; then echo 'Cannot return to release directory' >&2; exit 1; fi
+if ! python3 volt-rc2-verifier/tools/release/archive.py verify \
+    --archive volt-0.1.0-rc.2-linux-amd64.tar.gz --cosign cosign \
+    --source-sha 0af679d77754060f2f89368830a92ddb6e3f2122 \
+    --image-id sha256:09412fdcda1a77a6182829061e202f83e767f8cfaecce2cc5b3e9443c3c35461; then
+  echo 'Signed archive verification failed; do not load or extract' >&2
+  exit 1
+fi
+if ! python3 volt-rc2-verifier/tools/release/archive.py load \
+    --archive volt-0.1.0-rc.2-linux-amd64.tar.gz --cosign cosign; then
+  echo 'Image archive verification or load failed; do not initialize' >&2
+  exit 1
+fi
+if ! tar -xOf volt-0.1.0-rc.2-linux-amd64.tar.gz volt-compose.tar.gz > volt-compose-embedded.tar.gz; then echo 'Cannot read authenticated bundle member' >&2; exit 1; fi
+if ! cmp volt-compose.tar.gz volt-compose-embedded.tar.gz; then echo 'Standalone bundle differs from the authenticated archive; stop' >&2; exit 1; fi
+if ! sha256sum -c volt-compose.tar.gz.sha256; then echo 'Bundle checksum failed; stop' >&2; exit 1; fi
+if ! tar -xzf volt-compose.tar.gz; then echo 'Bundle extraction failed; stop' >&2; exit 1; fi
+if ! tar -xOf volt-0.1.0-rc.2-linux-amd64.tar.gz manifest.json > manifest.json; then echo 'Cannot read verified manifest' >&2; exit 1; fi
+if ! image_id="$(python3 -c 'import json; print(json.load(open("manifest.json"))["image_id"])')" || [ -z "$image_id" ]; then echo 'Cannot obtain signed local image ID' >&2; exit 1; fi
+if ! cd volt-compose-0.1.0-rc.2; then echo 'Expected versioned bundle directory is missing' >&2; exit 1; fi
+if ! python3 setup.py init /var/lib/volt/demo --mode demo --project volt-demo --image "$image_id"; then echo 'Initialization failed; stop' >&2; exit 1; fi
+if ! python3 setup.py start /var/lib/volt/demo; then echo 'Startup failed; stop' >&2; exit 1; fi
 ```
 
 `image_id` is a local image identity, distinct from the registry digest in `VOLT_RELEASE_IMAGE`. For a complete offline flow, extract the signed `manifest.json` and Compose bundle as described in the archive's `VERIFY.txt`; verify the bundle checksum after the outer archive has authenticated it. Do not substitute the registry digest for `--image` after `docker load`.

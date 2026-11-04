@@ -42,7 +42,7 @@ Requirements, gates, ADRs and G7 contracts retain their stated verification boun
 | UI and accessibility | [UI requirements](ui-requirements.md), [`design/tokens.json`](../design/tokens.json) |
 | Development and checks | [Runbook](../RUNBOOK.md), [contributing](../CONTRIBUTING.md), [OpenSpec changes](../openspec/changes/) |
 
-A public RC1 image and signed offline bundle are available, and the RC2 Compose-compatible image has been published. The RC2 source-free bundle will be published as a standalone asset and included in its signed offline release archive; use the release page linked from the installation guide when the owner completes the tag/release handoff. Helm deployment and a general production backup/upgrade runbook are not provided.
+A public RC1 image and signed offline bundle are available. The RC2 Compose-compatible image and signed release assets are published; the source-free bundle is available separately and inside the signed offline archive. Helm deployment and a general production backup/upgrade runbook are not provided.
 # Installation and operations
 
 - [Source-free Compose bundle](../deploy/compose/README.md)

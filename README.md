@@ -15,7 +15,7 @@ Its focus is continuity and accountability: understanding which workloads are af
 [RC2 Compose image](docs/installation.md#rc2-compose-installation) · [Historical RC1 release](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.1) · [Getting started](#getting-started) · [Architecture](#architecture) · [Documentation](#documentation) · [Contributing](CONTRIBUTING.md) · [Apache-2.0 licence](LICENSE)
 
 > [!IMPORTANT]
-> **Primary installation: VOLT 0.1.0-rc.2 with Docker Compose.** The compatible Linux/amd64 image is published at `ghcr.io/njvenis/volt@sha256:a7130e38b88b781d93d84c4ddd022ba45716a06b89949a2923e1dd531db2eac1`. The source-free Compose bundle and signed offline archive will be linked from the [RC2 prerelease page](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.2) after the release owner completes the separate tag/release handoff; until then, treat that asset handoff as pending. The signed archive also contains the bundle. RC1 remains an immutable historical launcher release and does not satisfy the Compose contract. Neither release is production-ready. See [RC2 installation](docs/installation.md#rc2-compose-installation), [historical RC1 installation](docs/installation.md#historical-rc1-launcher), and [verification boundaries](GATES.md).
+> **Primary installation: VOLT 0.1.0-rc.2 with Docker Compose.** The compatible Linux/amd64 image is published at `ghcr.io/njvenis/volt@sha256:a7130e38b88b781d93d84c4ddd022ba45716a06b89949a2923e1dd531db2eac1`. The [RC2 prerelease](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.2) includes the source-free Compose bundle and signed offline archive; the signed archive also contains the bundle. RC1 remains an immutable historical launcher release and does not satisfy the Compose contract. Neither release is production-ready. See [RC2 installation](docs/installation.md#rc2-compose-installation), [historical RC1 installation](docs/installation.md#historical-rc1-launcher), and [verification boundaries](GATES.md).
 
 ## Why VOLT?
 
@@ -90,7 +90,7 @@ flowchart TD
 | --- | --- |
 | Identity and ingestion | Synthetic local suites exercise source-native grouping, rebuild history, completeness, freshness, replay and conflict handling. |
 | RC1 evaluation | Published image and offline bundle; the [release workflow](https://github.com/njvenis/volt/actions/runs/41804175229) passed synthetic sign-in, audited-operation, ingress-denial and restart-persistence checks. |
-| RC2 Compose evaluation | Published digest-pinned image; hosted Compose, cold-restore and offline-preview qualification passed. The scan gate reported 888 findings and zero fixable High/Critical findings; this is not a claim of zero vulnerabilities. Signed offline assets are linked from the prerelease page after the separate release handoff. |
+| RC2 Compose evaluation | Published digest-pinned image and signed offline assets; hosted Compose, cold-restore and offline-preview qualification passed. The scan gate reported 888 findings and zero fixable High/Critical findings; this is not a claim of zero vulnerabilities. |
 | External integrations | Local tests do not establish compatibility with live scanners, enterprise identity providers, GitHub or other external services. |
 | Enterprise deployment | No supported production deployment or end-user installer. Security, recovery, operational and integration qualification remain separate requirements. |
 | G7 operational scenarios | Acceptance goals in OpenSpec; their presence does not establish implementation or successful execution. |

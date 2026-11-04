@@ -51,7 +51,7 @@ def test_catalog_is_portable_and_keeps_six_distinct_index_routes():
     apt = next(x for x in catalog["groups"] if x["source_package"] == "apt" and x["source_version"] == "3.0.3")
     assert apt["immutable_dsc_sha1"] == "75cc2d8a7adec664f1b1058dcab263372da25df5"
     immutable = [x for x in catalog["groups"] if "immutable_dsc_sha1" in x]
-    assert len(immutable) == 63
+    assert len(immutable) == 76
     assert all(len(x["immutable_dsc_sha1"]) == 40
                and all(c in "0123456789abcdef" for c in x["immutable_dsc_sha1"])
                and not x.get("index_authentication") for x in immutable)

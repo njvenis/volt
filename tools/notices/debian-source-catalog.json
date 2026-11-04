@@ -35788,7 +35788,8 @@
         }
       ],
       "source_package": "audit",
-      "source_version": "1:4.0.2-2+deb13u1"
+      "source_version": "1:4.0.2-2+deb13u1",
+      "immutable_dsc_sha1": "f318926afbbfa4cc8f96188d7907199116567d72"
     },
     {
       "copyright_files": [
@@ -35866,7 +35867,8 @@
         }
       ],
       "source_package": "base-files",
-      "source_version": "13.8+deb13u7"
+      "source_version": "13.8+deb13u7",
+      "immutable_dsc_sha1": "09c6e9bef6e1c0234e4cd91d2a7ac5d52f6dc8b3"
     },
     {
       "copyright_files": [
@@ -36048,7 +36050,8 @@
         }
       ],
       "source_package": "bind9",
-      "source_version": "1:9.20.30-1~deb13u1"
+      "source_version": "1:9.20.30-1~deb13u1",
+      "immutable_dsc_sha1": "5df77dc26b12e7a638e236ee39eaa60bf63cc577"
     },
     {
       "copyright_files": [
@@ -36132,7 +36135,8 @@
         }
       ],
       "source_package": "ca-certificates",
-      "source_version": "20250419+deb13u1"
+      "source_version": "20250419+deb13u1",
+      "immutable_dsc_sha1": "44effdeab045b9b4749c3e21df2308a2ef7587ee"
     },
     {
       "copyright_files": [
@@ -37769,7 +37773,8 @@
         }
       ],
       "source_package": "curl",
-      "source_version": "8.14.1-2+deb13u7"
+      "source_version": "8.14.1-2+deb13u7",
+      "immutable_dsc_sha1": "a52b26b71ab211b478dbcd7c1399578b52d912d4"
     },
     {
       "copyright_files": [
@@ -37860,7 +37865,8 @@
         }
       ],
       "source_package": "gzip",
-      "source_version": "1.13-1+deb13u1"
+      "source_version": "1.13-1+deb13u1",
+      "immutable_dsc_sha1": "da29a1d6cbffd22cf19ba0acb51355aedae2c985"
     },
     {
       "copyright_files": [
@@ -38174,7 +38180,8 @@
         }
       ],
       "source_package": "libevent",
-      "source_version": "2.1.13-stable-1~deb13u1"
+      "source_version": "2.1.13-stable-1~deb13u1",
+      "immutable_dsc_sha1": "98ef582410ee3735fb8da955770bc1a9dc8ee903"
     },
     {
       "copyright_files": [
@@ -38361,7 +38368,8 @@
         }
       ],
       "source_package": "linux",
-      "source_version": "6.12.115-2"
+      "source_version": "6.12.115-2",
+      "immutable_dsc_sha1": "392fc47bff05a3eaf352d9782c83392d29f2706c"
     },
     {
       "copyright_files": [
@@ -38537,7 +38545,8 @@
         }
       ],
       "source_package": "openssl",
-      "source_version": "3.5.7-1~deb13u3"
+      "source_version": "3.5.7-1~deb13u3",
+      "immutable_dsc_sha1": "db56cd5070f847d98b8fec3dde05ce8ee276ba64"
     },
     {
       "copyright_files": [
@@ -46458,7 +46467,8 @@
         }
       ],
       "source_package": "perl",
-      "source_version": "5.40.1-6+deb13u1"
+      "source_version": "5.40.1-6+deb13u1",
+      "immutable_dsc_sha1": "735f1a33e381a4037b22f895726d2ffce281b39a"
     },
     {
       "copyright_files": [
@@ -46569,7 +46579,8 @@
         }
       ],
       "source_package": "sqlite3",
-      "source_version": "3.46.1-7+deb13u2"
+      "source_version": "3.46.1-7+deb13u2",
+      "immutable_dsc_sha1": "e9d9d4e7b5c82a96d3f233e46eb23a35376700eb"
     },
     {
       "copyright_files": [
@@ -46824,7 +46835,8 @@
         }
       ],
       "source_package": "unbound",
-      "source_version": "1.26.2-0+deb13u1"
+      "source_version": "1.26.2-0+deb13u1",
+      "immutable_dsc_sha1": "aae78304b0da9904f4315a7971b8be477632d3be"
     },
     {
       "copyright_files": [
@@ -47066,7 +47078,8 @@
         }
       ],
       "source_package": "xz-utils",
-      "source_version": "5.8.1-1+deb13u2"
+      "source_version": "5.8.1-1+deb13u2",
+      "immutable_dsc_sha1": "183b0cf1dce421176532909902d728165be3748b"
     }
   ],
   "schema": "volt-debian-source-catalog/v1",

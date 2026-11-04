@@ -76,12 +76,23 @@ def validate_canonical_fallback_url(url: str, filename: str) -> str:
         raise ValueError("invalid canonical Debian fallback URL port") from exc
     path = urllib.parse.unquote(parts.path)
     segments = PurePosixPath(path).parts
+    package = filename.split("_", 1)[0]
+    canonical_names = {filename}
+    if "_" in filename and ":" in filename.split("_", 1)[1]:
+        stem, remainder = filename.split("_", 1)
+        canonical_names.add(f"{stem}_{remainder.split(':', 1)[1]}")
+    pool_prefix = f"lib{package[3]}" if package.startswith("lib") and len(package) > 3 else package[:1]
+    allowed_paths = {
+        ("debian", "pool", "main", pool_prefix, package),
+        ("debian-security", "pool", "updates", "main", pool_prefix, package),
+    }
+    path_parts = tuple(segments[1:-1])
     if (parts.scheme != "https" or parts.hostname != "deb.debian.org"
             or parts.username is not None or parts.password is not None or port not in (None, 443)
             or parts.query or parts.fragment or "%" in parts.path
-            or not path.startswith("/debian/pool/") or ".." in segments
-            or PurePosixPath(path).name != filename):
-        raise ValueError("canonical source fallback must be an exact HTTPS deb.debian.org pool URL for the catalogued filename")
+            or path_parts not in allowed_paths or ".." in segments
+            or PurePosixPath(path).name not in canonical_names):
+        raise ValueError("canonical source fallback must be an exact HTTPS deb.debian.org pool URL for the catalogued source filename")
     return url
 
 
@@ -91,6 +102,10 @@ def fetch(url: str) -> bytes:
     for attempt in range(1, FETCH_ATTEMPTS + 1):
         try:
             with urllib.request.urlopen(request, timeout=90) as response:
+                if _fetch_route(url) == "debian-canonical":
+                    final = urllib.parse.urlsplit(response.geturl() if hasattr(response, "geturl") else url)
+                    if final.scheme != "https" or final.hostname != "deb.debian.org":
+                        raise ValueError("canonical Debian source redirected outside the approved HTTPS host")
                 data = response.read()
                 if attempt > 1:
                     status = getattr(response, "status", None) or getattr(response, "code", 200)
@@ -377,7 +392,19 @@ def acquire_group(entry: dict, root: Path, keyring_path: Path, repository_keyrin
     if is_repository_signed:
         dsc_matches = [(repository_source["dsc_name"], repository_source["dsc_path"].read_bytes())]
     elif immutable_dsc_sha1:
-        immutable_dsc = fetch(f"{DEBIAN_SNAPSHOT}/file/{immutable_dsc_sha1}")
+        descriptor_fallback_url = entry.get("immutable_dsc_fallback_url")
+        if descriptor_fallback_url is not None:
+            descriptor_fallback_url = validate_canonical_fallback_url(
+                descriptor_fallback_url, f"{package}_{version}.dsc")
+        try:
+            immutable_dsc = fetch(f"{DEBIAN_SNAPSHOT}/file/{immutable_dsc_sha1}")
+        except TransientFetchError:
+            if descriptor_fallback_url is None:
+                raise
+            print(f"NOTICE_SOURCE_FALLBACK package={package} version={version} filename={package}_{version}.dsc "
+                  "from=debian-snapshot to=debian-canonical reason=transient-exhaustion",
+                  file=sys.stderr)
+            immutable_dsc = fetch(descriptor_fallback_url)
         if hashlib.sha1(immutable_dsc).hexdigest() != immutable_dsc_sha1:
             raise ValueError(f"{package}@{version}: immutable .dsc locator SHA-1 mismatch")
         dsc_matches = [(dsc_names[0], immutable_dsc)]

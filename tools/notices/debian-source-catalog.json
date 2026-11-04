@@ -584,7 +584,8 @@
       "source_files": [
         {
           "filename": "adduser_3.152.tar.xz",
-          "sha256": "484cdde2d48053be40657b564375469fc577e89f3b984b01aed247b6081355b8"
+          "sha256": "484cdde2d48053be40657b564375469fc577e89f3b984b01aed247b6081355b8",
+          "fallback_url": "https://deb.debian.org/debian/pool/main/a/adduser/adduser_3.152.tar.xz"
         }
       ],
       "source_package": "adduser",

@@ -14,7 +14,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # Direct ``python3 tools/notices/prepare_release_sources.py`` is the documented
 # CI entrypoint. Python otherwise puts only tools/notices on sys.path.
@@ -26,6 +26,10 @@ DEBIAN_KEYRING_SHA256 = "81e08f47b0dd8a563a2742ad90878ccefe53aa0728b095acbea3efd
 FETCH_ATTEMPTS = 4
 FETCH_BACKOFF_SECONDS = (1, 2, 4)
 RETRYABLE_HTTP_STATUS = {429, 503, 504}
+
+
+class TransientFetchError(ValueError):
+    """A public source transport failed after its bounded transient retries."""
 
 
 def digest(data: bytes) -> str:
@@ -55,16 +59,57 @@ def _transport_error_label(exc: BaseException) -> str:
     return type(cause).__name__
 
 
+def _fetch_route(url: str) -> str:
+    host = urllib.parse.urlsplit(url).hostname
+    if host == "snapshot.debian.org":
+        return "debian-snapshot"
+    if host == "deb.debian.org":
+        return "debian-canonical"
+    return "public-source"
+
+
+def validate_canonical_fallback_url(url: str, filename: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError("invalid canonical Debian fallback URL port") from exc
+    path = urllib.parse.unquote(parts.path)
+    segments = PurePosixPath(path).parts
+    package = filename.split("_", 1)[0]
+    canonical_names = {filename}
+    if "_" in filename and ":" in filename.split("_", 1)[1]:
+        stem, remainder = filename.split("_", 1)
+        canonical_names.add(f"{stem}_{remainder.split(':', 1)[1]}")
+    pool_prefix = f"lib{package[3]}" if package.startswith("lib") and len(package) > 3 else package[:1]
+    allowed_paths = {
+        ("debian", "pool", "main", pool_prefix, package),
+        ("debian-security", "pool", "updates", "main", pool_prefix, package),
+    }
+    path_parts = tuple(segments[1:-1])
+    if (parts.scheme != "https" or parts.hostname != "deb.debian.org"
+            or parts.username is not None or parts.password is not None or port not in (None, 443)
+            or parts.query or parts.fragment or "%" in parts.path
+            or path_parts not in allowed_paths or ".." in segments
+            or PurePosixPath(path).name not in canonical_names):
+        raise ValueError("canonical source fallback must be an exact HTTPS deb.debian.org pool URL for the catalogued source filename")
+    return url
+
+
 def fetch(url: str) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": "VOLT-notice-source-preparer/1.0"})
     safe_url = _safe_public_url(url)
     for attempt in range(1, FETCH_ATTEMPTS + 1):
         try:
             with urllib.request.urlopen(request, timeout=90) as response:
+                if _fetch_route(url) == "debian-canonical":
+                    final = urllib.parse.urlsplit(response.geturl() if hasattr(response, "geturl") else url)
+                    if final.scheme != "https" or final.hostname != "deb.debian.org":
+                        raise ValueError("canonical Debian source redirected outside the approved HTTPS host")
                 data = response.read()
                 if attempt > 1:
                     status = getattr(response, "status", None) or getattr(response, "code", 200)
-                    print(f"NOTICE_SOURCE_FETCH attempt={attempt}/{FETCH_ATTEMPTS} outcome=success "
+                    print(f"NOTICE_SOURCE_FETCH route={_fetch_route(url)} attempt={attempt}/{FETCH_ATTEMPTS} outcome=success "
                           f"status={status} bytes={len(data)} url={safe_url}", file=sys.stderr)
                 return data
         except urllib.error.HTTPError as exc:
@@ -79,10 +124,10 @@ def fetch(url: str) -> bytes:
             reason = _transport_error_label(exc)
 
         outcome = "exhausted" if attempt == FETCH_ATTEMPTS else "retry"
-        print(f"NOTICE_SOURCE_FETCH attempt={attempt}/{FETCH_ATTEMPTS} outcome={outcome} "
+        print(f"NOTICE_SOURCE_FETCH route={_fetch_route(url)} attempt={attempt}/{FETCH_ATTEMPTS} outcome={outcome} "
               f"reason={reason} url={safe_url}", file=sys.stderr)
         if attempt == FETCH_ATTEMPTS:
-            raise ValueError(f"public source fetch exhausted transient retries: {reason} {safe_url}")
+            raise TransientFetchError(f"public source fetch exhausted transient retries: {reason} {safe_url}")
         time.sleep(FETCH_BACKOFF_SECONDS[attempt - 1])
     raise AssertionError("unreachable fetch retry state")
 
@@ -315,7 +360,19 @@ def acquire_group(entry: dict, root: Path, keyring_path: Path, repository_keyrin
             if immutable_members is None or name not in immutable_members:
                 raise ValueError(f"{package}@{version}: signed immutable .dsc omits {name}")
             blob, size = immutable_members[name]
-            data = fetch(f"{DEBIAN_SNAPSHOT}/file/{blob}")
+            source_row = next(row for row in entry["source_files"] if row["filename"] == name)
+            fallback_url = source_row.get("fallback_url")
+            if fallback_url is not None:
+                fallback_url = validate_canonical_fallback_url(fallback_url, name)
+            try:
+                data = fetch(f"{DEBIAN_SNAPSHOT}/file/{blob}")
+            except TransientFetchError:
+                if fallback_url is None:
+                    raise
+                print(f"NOTICE_SOURCE_FALLBACK package={package} version={version} filename={name} "
+                      "from=debian-snapshot to=debian-canonical reason=transient-exhaustion",
+                      file=sys.stderr)
+                data = fetch(fallback_url)
             if len(data) != size or hashlib.sha1(data).hexdigest() != blob:
                 raise ValueError(f"{package}@{version} {name}: immutable locator SHA-1/size mismatch")
             return data
@@ -335,7 +392,19 @@ def acquire_group(entry: dict, root: Path, keyring_path: Path, repository_keyrin
     if is_repository_signed:
         dsc_matches = [(repository_source["dsc_name"], repository_source["dsc_path"].read_bytes())]
     elif immutable_dsc_sha1:
-        immutable_dsc = fetch(f"{DEBIAN_SNAPSHOT}/file/{immutable_dsc_sha1}")
+        descriptor_fallback_url = entry.get("immutable_dsc_fallback_url")
+        if descriptor_fallback_url is not None:
+            descriptor_fallback_url = validate_canonical_fallback_url(
+                descriptor_fallback_url, f"{package}_{version}.dsc")
+        try:
+            immutable_dsc = fetch(f"{DEBIAN_SNAPSHOT}/file/{immutable_dsc_sha1}")
+        except TransientFetchError:
+            if descriptor_fallback_url is None:
+                raise
+            print(f"NOTICE_SOURCE_FALLBACK package={package} version={version} filename={package}_{version}.dsc "
+                  "from=debian-snapshot to=debian-canonical reason=transient-exhaustion",
+                  file=sys.stderr)
+            immutable_dsc = fetch(descriptor_fallback_url)
         if hashlib.sha1(immutable_dsc).hexdigest() != immutable_dsc_sha1:
             raise ValueError(f"{package}@{version}: immutable .dsc locator SHA-1 mismatch")
         dsc_matches = [(dsc_names[0], immutable_dsc)]

@@ -15,21 +15,40 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class FreshInstallWorkflowTests(unittest.TestCase):
-    def test_rc1_release_gates_the_saved_image_through_fresh_no_build_preview(self):
+    def test_candidate_and_publish_are_separate_and_publish_reuses_named_run(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertIn("candidate_run_id == ''", workflow)
+        self.assertIn("inputs.candidate_run_id != '' && inputs.publish_approved == true", workflow)
+        self.assertIn("verify_candidate_run.py", workflow)
+        self.assertIn("verify_candidate_artifact.py", workflow)
+        self.assertIn("run-id: ${{ inputs.candidate_run_id }}", workflow)
+        self.assertIn('--run-id "$CANDIDATE_RUN_ID"', workflow)
+        self.assertIn('printf \'%s\\n\' "$GITHUB_RUN_ID" > "$out/prepare-run-id.txt"', workflow)
+        self.assertIn('"voltCandidatePreparationRun": os.environ["VOLT_PREPARE_RUN_ID"]', workflow)
+        self.assertIn('"voltPublicationRun": os.environ["GITHUB_RUN_ID"]', workflow)
+        publish = workflow.split("  publish:",1)[1]
+        self.assertIn("environment: volt-rc1-publication", publish)
+        self.assertIn("packages: write", publish)
+        self.assertIn("id-token: write", publish)
+        self.assertNotIn("docker build", publish)
+        self.assertIn("volt-rc2-compose-qualification", workflow)
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn("uv run python -m unittest discover -s tests/release -v", ci)
+    def test_rc2_release_gates_the_saved_image_through_fresh_no_build_preview(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertEqual(workflow.count("docker build --platform linux/amd64"), 1)
-        self.assertIn('docker save --output "$out/image.tar" volt-rc1:candidate', workflow)
+        self.assertIn('docker save --output "$out/image.tar" volt-rc2:candidate', workflow)
         self.assertIn('org.opencontainers.image.source="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"', workflow)
         self.assertIn('docker load --input "$out/image.tar"', workflow)
         self.assertIn("tools/notices/prepare_release_sources.py --output", workflow)
         self.assertIn("--debian-dispositions", workflow)
         self.assertIn("debian-source-dispositions.json", workflow)
         self.assertIn("--debian-developer-keyring", workflow)
-        self.assertIn("start rc1 --no-build", workflow)
+        self.assertIn("start rc2 --no-build", workflow)
         self.assertIn("--expected-image-id \"$image_id\"", workflow)
         self.assertIn("--expected-image-source-revision \"$GITHUB_SHA\"", workflow)
-        self.assertIn("smoke rc1 --readback", workflow)
-        self.assertIn("destroy rc1", workflow)
+        self.assertIn("smoke rc2 --readback", workflow)
+        self.assertIn("destroy rc2", workflow)
 
     def test_installed_scanner_is_visible_in_the_same_workflow_step(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
@@ -71,8 +90,8 @@ class FreshInstallWorkflowTests(unittest.TestCase):
             return "\n".join(line[10:] for line in step.split("run: |\n", 1)[1].splitlines())
 
         upload = workflow.split("- name: Upload exact candidate inputs; no publication credentials", 1)[1].split("\n  publish:", 1)[0]
-        self.assertIn("path: ${{ runner.temp }}/volt-rc1-candidate.tar", upload)
-        self.assertIn("path: ${{ runner.temp }}/volt-rc1-transfer", workflow)
+        self.assertIn("path: ${{ runner.temp }}/volt-rc2-candidate.tar", upload)
+        self.assertIn("path: ${{ runner.temp }}/volt-rc2-transfer", workflow)
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             source = directory / "candidate"
@@ -92,15 +111,15 @@ class FreshInstallWorkflowTests(unittest.TestCase):
             environment = dict(os.environ, RELEASE_OUT=str(source), RUNNER_TEMP=str(directory))
             packed = subprocess.run(["/bin/bash", "-e", "-c", script("Pack exact candidate inputs for portable artifact transfer")], cwd=ROOT, env=environment, text=True, capture_output=True)
             self.assertEqual(packed.returncode, 0, packed.stdout + packed.stderr)
-            with tarfile.open(directory / "volt-rc1-candidate.tar") as archive:
+            with tarfile.open(directory / "volt-rc2-candidate.tar") as archive:
                 self.assertTrue(all(member.isfile() or member.isdir() for member in archive))
             shutil.rmtree(source)
-            transfer = directory / "volt-rc1-transfer"
+            transfer = directory / "volt-rc2-transfer"
             transfer.mkdir()
-            (directory / "volt-rc1-candidate.tar").rename(transfer / "volt-rc1-candidate.tar")
+            (directory / "volt-rc2-candidate.tar").rename(transfer / "volt-rc2-candidate.tar")
             restored = subprocess.run(["/bin/bash", "-e", "-c", script("Restore exact candidate inputs")], cwd=ROOT, env=environment, text=True, capture_output=True)
             self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
-            output = directory / "volt-rc1"
+            output = directory / "volt-rc2"
             observed = {path.relative_to(output).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in output.rglob("*") if path.is_file()}
             self.assertEqual(observed, {name: hashlib.sha256(data).hexdigest() for name, data in files.items()})
 

@@ -8,6 +8,7 @@ import io
 import json
 from pathlib import Path, PurePosixPath
 import tarfile
+import re
 
 FILES = ("VERSION", "README.md", "backup-restore.md", "compose.yaml", "demo.yaml",
          "compose.env.example", "oidc.example.json", "setup.py")
@@ -17,11 +18,17 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def build(output: Path) -> None:
+def build(output: Path, image_reference: str | None = None) -> None:
     source = Path(__file__).resolve().parents[1] / "deploy" / "compose"
     payload = {name: (source / name).read_bytes() for name in FILES}
     version = payload["VERSION"].decode().strip()
+    if image_reference is not None and not re.fullmatch(r"ghcr\.io/njvenis/volt@sha256:[0-9a-f]{64}", image_reference):
+        raise SystemExit("release image reference must be the exact VOLT GHCR sha256 digest")
+    if image_reference:
+        payload = {name: content.replace(b"VOLT_RELEASE_IMAGE_REFERENCE", image_reference.encode())
+                   for name, content in payload.items()}
     manifest = {"format_version": 1, "bundle_version": version,
+                "release_image": image_reference,
                 "files": {name: digest(payload[name]) for name in FILES}}
     entries = {**payload, "manifest.json": (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode()}
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -62,6 +69,11 @@ def verify(archive_path: Path) -> None:
     manifest = json.loads(files["manifest.json"])
     if manifest.get("format_version") != 1 or manifest.get("bundle_version") != files["VERSION"].decode().strip():
         raise SystemExit("bundle version metadata is invalid")
+    image_reference = manifest.get("release_image")
+    if image_reference is not None and not re.fullmatch(r"ghcr\.io/njvenis/volt@sha256:[0-9a-f]{64}", image_reference):
+        raise SystemExit("bundle release image reference is malformed")
+    if image_reference and image_reference.encode() not in files["README.md"]:
+        raise SystemExit("bundle instructions do not bind the declared release image")
     expected = {name: digest(files[name]) for name in FILES}
     if manifest.get("files") != expected:
         raise SystemExit("bundle file digest mismatch")
@@ -74,7 +86,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(required=True)
     build_cmd = sub.add_parser("build"); build_cmd.add_argument("--output", type=Path, required=True)
-    build_cmd.set_defaults(func=lambda args: build(args.output))
+    build_cmd.add_argument("--image-reference")
+    build_cmd.set_defaults(func=lambda args: build(args.output, args.image_reference))
     verify_cmd = sub.add_parser("verify"); verify_cmd.add_argument("--archive", type=Path, required=True)
     verify_cmd.set_defaults(func=lambda args: verify(args.archive))
     args = parser.parse_args(); args.func(args)

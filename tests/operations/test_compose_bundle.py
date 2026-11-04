@@ -20,8 +20,31 @@ class ComposeBundleTests(unittest.TestCase):
                             "--output", str(archive)), check=True, capture_output=True, text=True)
             result = subprocess.run(("python3", str(ROOT / "tools/build_compose_bundle.py"), "verify",
                                      "--archive", str(archive)), check=True, capture_output=True, text=True)
-            self.assertIn("verified_version=0.1.0-dev1 files=8", result.stdout)
+            self.assertIn("verified_version=0.1.0-rc.2 files=8", result.stdout)
             self.assertTrue(Path(str(archive) + ".sha256").is_file())
+
+    def test_release_bundle_binds_digest_pinned_image_into_manifest_and_instructions(self):
+        image = "ghcr.io/njvenis/volt@sha256:" + "a" * 64
+        with tempfile.TemporaryDirectory(prefix="volt-compose-release-bundle-") as directory:
+            archive = Path(directory) / "release.tar.gz"
+            subprocess.run(("python3", str(ROOT / "tools/build_compose_bundle.py"), "build",
+                            "--output", str(archive), "--image-reference", image), check=True,
+                           capture_output=True, text=True)
+            subprocess.run(("python3", str(ROOT / "tools/build_compose_bundle.py"), "verify",
+                            "--archive", str(archive)), check=True, capture_output=True, text=True)
+            with tarfile.open(archive, "r:gz") as bundle:
+                files = {Path(member.name).name: bundle.extractfile(member).read()
+                         for member in bundle.getmembers() if member.isfile()}
+            manifest = __import__("json").loads(files["manifest.json"])
+            self.assertEqual(manifest["bundle_version"], "0.1.0-rc.2")
+            self.assertEqual(manifest["release_image"], image)
+            self.assertIn(image.encode(), files["README.md"])
+
+    def test_release_bundle_rejects_tag_reference_instead_of_immutable_digest(self):
+        with tempfile.TemporaryDirectory(prefix="volt-compose-release-bundle-") as directory:
+            with self.assertRaisesRegex(SystemExit, "exact VOLT GHCR sha256 digest"):
+                from tools.build_compose_bundle import build
+                build(Path(directory) / "invalid.tar.gz", "ghcr.io/njvenis/volt:0.1.0-rc.2")
 
     def test_bundle_verifier_rejects_duplicate_and_traversal_members(self):
         for entries, message in (([("root/a", b"a"), ("root/a", b"b")], "duplicate"),

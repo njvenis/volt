@@ -19,7 +19,8 @@ import zlib
 
 import provenance as provenance_validator
 
-EXPECTED_VERSION = "0.1.0-rc.1"
+EXPECTED_VERSION = "0.1.0-rc.2"
+SUPPORTED_ARCHIVE_VERSIONS = {"0.1.0-rc.1", EXPECTED_VERSION}
 EXPECTED_PLATFORM = "linux/amd64"
 EXPECTED_IDENTITY = "https://github.com/njvenis/volt/.github/workflows/release.yml@refs/heads/main"
 EXPECTED_ISSUER = "https://token.actions.githubusercontent.com"
@@ -40,8 +41,8 @@ def run(command: list[str]) -> None:
 
 def build_manifest(directory: Path, version: str, source_sha: str, image_id: str,
                    platform: str, signer_identity: str, issuer: str, registry_digest: str) -> dict:
-    if version != EXPECTED_VERSION:
-        raise ValueError("only v0.1.0-rc.1 is approved")
+    if version not in SUPPORTED_ARCHIVE_VERSIONS:
+        raise ValueError("unsupported VOLT release archive version")
     if platform != EXPECTED_PLATFORM:
         raise ValueError("only linux/amd64 is approved")
     if len(source_sha) != 40 or any(c not in "0123456789abcdef" for c in source_sha):
@@ -50,9 +51,14 @@ def build_manifest(directory: Path, version: str, source_sha: str, image_id: str
         raise ValueError("image identity must be an immutable sha256 ID")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", registry_digest):
         raise ValueError("published OCI registry digest must be immutable")
+    source_snapshot = "sha256:" + sha(directory / "source.tar")
     required = ["image.tar", "source.tar", "sbom.syft.json", "sbom.spdx.json",
                 "release-scan.json", "VERIFY.txt", "provenance.json", "registry-digest.txt", "notice-manifest.json",
-                "source.bundle", "tools-g7-local-preview.py", "launcher-guide.txt"]
+                "source.bundle"]
+    if version == EXPECTED_VERSION:
+        required += ["volt-compose.tar.gz", "volt-compose.tar.gz.sha256"]
+    else:
+        required += ["tools-g7-local-preview.py", "launcher-guide.txt"]
     for name in required:
         if not (directory / name).is_file():
             raise ValueError(f"required offline release file missing: {name}")
@@ -67,9 +73,24 @@ def build_manifest(directory: Path, version: str, source_sha: str, image_id: str
         inventory[rel] = sha(path)
     if signer_identity != EXPECTED_IDENTITY or issuer != EXPECTED_ISSUER:
         raise ValueError("release signer must be the main-branch publication workflow with GitHub OIDC")
+    if version == EXPECTED_VERSION:
+        bundle = directory / "volt-compose.tar.gz"
+        checksum = (directory / "volt-compose.tar.gz.sha256").read_text().split()
+        if len(checksum) != 2 or checksum[0] != sha(bundle) or checksum[1] != bundle.name:
+            raise ValueError("Compose bundle checksum does not match its archive")
+        with tarfile.open(bundle, "r:gz") as compose_archive:
+            compose_files = {PurePosixPath(item.name).name: compose_archive.extractfile(item).read()
+                             for item in compose_archive.getmembers() if item.isfile()}
+        compose_manifest = json.loads(compose_files.get("manifest.json", b"{}"))
+        expected_ref = f"ghcr.io/njvenis/volt@{registry_digest}"
+        if (compose_manifest.get("bundle_version") != version or
+                compose_manifest.get("release_image") != expected_ref or
+                expected_ref.encode() not in compose_files.get("README.md", b"")):
+            raise ValueError("Compose bundle version or image reference differs from the signed release")
     manifest = {
         "schema": "volt-offline-release/v1", "version": version,
         "source_commit": source_sha, "image_id": image_id, "platform": platform,
+        "source_snapshot": source_snapshot,
         "registry_digest": registry_digest,
         "signer_identity": signer_identity, "oidc_issuer": issuer,
         "files": inventory,
@@ -276,6 +297,10 @@ def _check_image_labels(config: dict, manifest: dict) -> None:
     labels = config.get("config", {}).get("Labels") or {}
     if labels.get("org.opencontainers.image.revision") != manifest.get("source_commit") or labels.get("org.opencontainers.image.version") != manifest.get("version"):
         raise ValueError("image labels disagree with signed source/version")
+    if manifest.get("version") == EXPECTED_VERSION and (labels.get("org.volt.oidc-deployment-modes") != "demo,external"
+            or labels.get("org.volt.compose-install.contract") != "1"
+            or labels.get("org.volt.compose.source-snapshot") != manifest.get("source_snapshot")):
+        raise ValueError("image lacks the required Compose capability or source snapshot binding")
 
 
 def _raw_json_object_fields(raw: bytes) -> dict[str, bytes]:
@@ -520,7 +545,7 @@ def verify_directory(directory: Path, cosign: str, *, public_key: Path | None = 
     manifest = json.loads(manifest_path.read_text())
     if not isinstance(manifest, dict):
         raise ValueError("release manifest is not an object")
-    if manifest.get("schema") != "volt-offline-release/v1" or manifest.get("version") != EXPECTED_VERSION:
+    if manifest.get("schema") != "volt-offline-release/v1" or manifest.get("version") not in SUPPORTED_ARCHIVE_VERSIONS:
         raise ValueError("unsupported release manifest or version")
     if manifest.get("platform") != EXPECTED_PLATFORM:
         raise ValueError("release platform metadata mismatch")
@@ -583,6 +608,8 @@ def verify_directory(directory: Path, cosign: str, *, public_key: Path | None = 
             raise ValueError(f"unsafe signed file path: {name}")
         if not path.is_file() or sha(path) != expected:
             raise ValueError(f"payload missing or digest mismatch: {name}")
+    if manifest.get("version") == EXPECTED_VERSION and manifest.get("source_snapshot") != "sha256:" + sha(directory / "source.tar"):
+        raise ValueError("signed source snapshot digest does not match source.tar")
     checksums = directory / "SHA256SUMS"
     if not checksums.is_file():
         raise ValueError("SHA256SUMS missing")

@@ -2,7 +2,7 @@
 
 This bundle installs an existing VOLT supervised image. It does not clone VOLT source, install Node.js, run npm, or build the application. Bundle version is in `VERSION`; the archive manifest covers every installation file. Runtime prerequisites are Docker Engine with Compose v2, Python 3.11+, OpenSSL, and an admitted `linux/amd64` image.
 
-The default Compose profile uses external OIDC. The local synthetic demo requires the explicit `demo` overlay. Demo identity is generated and labelled as synthetic; it does not establish Okta, AWS, or production integration. Both commands require `--image` with an explicitly built Compose-compatible candidate. The published RC1 image is retained as the historical `HISTORICAL_RC1_IMAGE` reference; RC1 supports the launcher contract only and is rejected by this Compose bundle. No later published digest is implied by this development bundle.
+The default Compose profile uses external OIDC. The local synthetic demo requires the explicit `demo` overlay. Demo identity is generated and labelled as synthetic; it does not establish Okta, AWS, or production integration. Supply the digest-pinned release image reference printed in this bundle. RC1 remains a historical launcher-only release and is rejected by this Compose bundle.
 
 ## Verify and initialize
 
@@ -11,7 +11,7 @@ Verify the archive using the published sidecar checksum before extracting it. Ke
 For a disposable demo, use a fresh project and path:
 
 ```sh
-python3 setup.py init /var/lib/volt/demo --mode demo --project volt-demo --image sha256:REPLACE_WITH_LOCAL_CANDIDATE_ID
+python3 setup.py init /var/lib/volt/demo --mode demo --project volt-demo --image VOLT_RELEASE_IMAGE_REFERENCE
 python3 setup.py start /var/lib/volt/demo
 python3 setup.py status /var/lib/volt/demo
 python3 setup.py link-admin /var/lib/volt/demo

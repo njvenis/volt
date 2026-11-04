@@ -37,7 +37,7 @@ class RegistryCollisionTests(unittest.TestCase):
                 return Response()
             self.assertEqual(request.headers["Authorization"], "Bearer fixture")
             return Response(b"", {"Docker-Content-Digest": "sha256:" + "f" * 64})
-        self.assertEqual(registry.tag_digest("0.1.0-rc.1", opener, username="actor", password="secret-token"), "sha256:" + "f" * 64)
+        self.assertEqual(registry.tag_digest("0.1.0-rc.2", opener, username="actor", password="secret-token"), "sha256:" + "f" * 64)
         self.assertEqual(len(calls), 2)
 
     def test_only_authoritative_manifest_404_is_absent(self):
@@ -47,7 +47,7 @@ class RegistryCollisionTests(unittest.TestCase):
             calls += 1
             if calls == 1: return Response()
             raise urllib.error.HTTPError(request.full_url, 404, "absent", {}, None)
-        self.assertTrue(registry.unused_tag("0.1.0-rc.1", opener, username="actor", password="secret"))
+        self.assertTrue(registry.unused_tag("0.1.0-rc.2", opener, username="actor", password="secret"))
         for code in (401, 403, 500):
             calls = 0
             def denied(request, timeout):
@@ -56,13 +56,13 @@ class RegistryCollisionTests(unittest.TestCase):
                 if calls == 1: return Response()
                 raise urllib.error.HTTPError(request.full_url, code, "denied", {}, None)
             with self.assertRaisesRegex(RuntimeError, f"HTTP {code}"):
-                registry.unused_tag("0.1.0-rc.1", denied, username="actor", password="secret")
+                registry.unused_tag("0.1.0-rc.2", denied, username="actor", password="secret")
 
     def test_token_denial_does_not_leak_credential(self):
         def denied(request, timeout):
             raise urllib.error.HTTPError(request.full_url, 403, "denied", {}, None)
         with self.assertRaises(RuntimeError) as caught:
-            registry.unused_tag("0.1.0-rc.1", denied, username="actor", password="secret-token")
+            registry.unused_tag("0.1.0-rc.2", denied, username="actor", password="secret-token")
         self.assertNotIn("secret-token", str(caught.exception))
         self.assertIn("HTTP 403", str(caught.exception))
 
@@ -74,11 +74,11 @@ class RegistryCollisionTests(unittest.TestCase):
             if calls == 1: return Response()
             raise urllib.error.URLError("temporary DNS failure")
         with self.assertRaisesRegex(RuntimeError, "network error"):
-            registry.unused_tag("0.1.0-rc.1", offline, username="actor", password="secret")
+            registry.unused_tag("0.1.0-rc.2", offline, username="actor", password="secret")
         for data in (b"not-json", b"{}"):
             def ambiguous(request, timeout): return Response(data)
             with self.assertRaises(RuntimeError):
-                registry.unused_tag("0.1.0-rc.1", ambiguous, username="actor", password="secret")
+                registry.unused_tag("0.1.0-rc.2", ambiguous, username="actor", password="secret")
 
     def test_redirect_handler_refuses_redirect(self):
         handler = registry.NoRedirect()
@@ -96,14 +96,14 @@ class RegistryCollisionTests(unittest.TestCase):
                 return Response()
             self.assertEqual(request.headers["Authorization"], "Bearer fixture")
             return Response(b"")
-        self.assertFalse(registry.unused_tag("0.1.0-rc.1", opener, anonymous=True))
+        self.assertFalse(registry.unused_tag("0.1.0-rc.2", opener, anonymous=True))
         self.assertEqual(len(calls), 2)
 
     def test_cli_requires_credentials_for_authenticated_preflight(self):
         env = {key: os.environ.get(key) for key in ("GITHUB_ACTOR", "GH_TOKEN")}
         try:
             os.environ.pop("GITHUB_ACTOR", None); os.environ.pop("GH_TOKEN", None)
-            argv = ["registry.py", "--version-tag", "0.1.0-rc.1", "--sha-tag", "sha-" + "a" * 40]
+            argv = ["registry.py", "--version-tag", "0.1.0-rc.2", "--sha-tag", "sha-" + "a" * 40]
             with patch.object(sys, "argv", argv):
                 self.assertEqual(registry.main(), 2)
         finally:
@@ -114,10 +114,10 @@ class RegistryCollisionTests(unittest.TestCase):
     def test_expected_digest_check_reads_both_tags_and_rejects_mismatch(self):
         expected = "sha256:" + "f" * 64; observed = []
         def digest(tag, **kwargs): observed.append(tag); return expected
-        argv = ["registry.py", "--version-tag", "0.1.0-rc.1", "--sha-tag", "sha-" + "a" * 40, "--expected-digest", expected]
+        argv = ["registry.py", "--version-tag", "0.1.0-rc.2", "--sha-tag", "sha-" + "a" * 40, "--expected-digest", expected]
         with patch.dict(os.environ, {"GITHUB_ACTOR": "actor", "GH_TOKEN": "secret"}), patch.object(registry, "tag_digest", side_effect=digest), patch.object(sys, "argv", argv):
             self.assertEqual(registry.main(), 0)
-        self.assertEqual(observed, ["0.1.0-rc.1", "sha-" + "a" * 40])
+        self.assertEqual(observed, ["0.1.0-rc.2", "sha-" + "a" * 40])
         argv[-1] = "sha256:" + "e" * 64
         with patch.dict(os.environ, {"GITHUB_ACTOR": "actor", "GH_TOKEN": "secret"}), patch.object(registry, "tag_digest", return_value=expected), patch.object(sys, "argv", argv):
             self.assertEqual(registry.main(), 2)
@@ -146,7 +146,7 @@ class RegistryCollisionTests(unittest.TestCase):
                 response.msg = "fixture response"
                 return response
 
-        argv = ["registry.py", "--version-tag", "0.1.0-rc.1", "--sha-tag", "sha-" + "a" * 40]
+        argv = ["registry.py", "--version-tag", "0.1.0-rc.2", "--sha-tag", "sha-" + "a" * 40]
         if anonymous:
             argv.append("--anonymous")
         if expected_digest:

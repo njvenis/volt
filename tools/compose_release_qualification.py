@@ -16,6 +16,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -152,7 +153,7 @@ def main() -> int:
         if not binding.stdout.strip().startswith("127.0.0.1:"):
             raise RuntimeError("Compose HTTP listener is not bound to loopback")
         ingress_info = {"container":f"{project}-volt-1","network":f"{project}_network",
-                        "image":args.image_id,"owner_token":"volt-rc2-qualification-probe"}
+                        "image":args.image_id,"owner_token":str(uuid.uuid4())}
         probe = (f"import sys;from pathlib import Path;sys.path.insert(0,{str(ROOT)!r});"
                  f"from tools.g7_local_preview import verify_private_ingress;"
                  f"verify_private_ingress({ingress_info!r},Path({str(evidence)!r}))")

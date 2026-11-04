@@ -287,7 +287,7 @@ class OfflineArchiveTests(unittest.TestCase):
             source = self.source_sha
             raw_layer = b"valid fixture uncompressed layer bytes"
             compressed = gzip.compress(raw_layer, mtime=0)
-            config = {"os":"linux", "architecture":"amd64", "config":{"Labels":{
+            config = {"os":"linux", "architecture":"amd64", "created":"1970-01-01T00:00:00Z", "config":{"Labels":{
                 "org.opencontainers.image.revision":source,"org.opencontainers.image.version":"0.1.0-rc.1"}},
                 "rootfs":{"type":"layers","diff_ids":["sha256:"+hashlib.sha256(raw_layer).hexdigest()]}}
             config_bytes = json.dumps(config,sort_keys=True,separators=(",",":")).encode()
@@ -295,10 +295,12 @@ class OfflineArchiveTests(unittest.TestCase):
             def descriptor(data, media):
                 digest=hashlib.sha256(data).hexdigest(); blobs["blobs/sha256/"+digest]=data
                 return {"mediaType":media,"digest":"sha256:"+digest,"size":len(data)}
-            def write_layout(index_data, compat_data, extra_blobs=None):
+            repository_data = b'{}'
+            def write_layout(index_data, compat_data, extra_blobs=None, repository_override=None):
                 if isinstance(index_data, dict): index_data=json.dumps(index_data).encode()
                 entries={"oci-layout":b'{"imageLayoutVersion":"1.0.0"}',"index.json":index_data,
-                         "manifest.json":json.dumps([compat_data]).encode(),**blobs,**(extra_blobs or {})}
+                         "manifest.json":json.dumps([compat_data]).encode(),"repositories":repository_override or repository_data,
+                         **blobs,**(extra_blobs or {})}
                 with tarfile.open(image,"w") as tf:
                     for name,data in entries.items():
                         info=tarfile.TarInfo(name); info.size=len(data); tf.addfile(info,io.BytesIO(data))
@@ -308,6 +310,20 @@ class OfflineArchiveTests(unittest.TestCase):
             image_manifest=json.dumps({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":cfg,"layers":[layer]},sort_keys=True,separators=(",",":")).encode()
             image_desc=descriptor(image_manifest,"application/vnd.oci.image.manifest.v1+json")
             index=json.dumps({"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{**image_desc,"platform":{"os":"linux","architecture":"amd64"},"annotations":{"io.containerd.image.name":"volt:fixture"}}]},sort_keys=True,separators=(",",":")).encode()
+            legacy_config={**archive._docker_zero_container_config(),**config["config"]}
+            exporter_record={"created":config["created"],"container_config":archive._docker_zero_container_config(),"config":legacy_config,"architecture":"amd64","os":"linux"}
+            def exporter_record_bytes(record):
+                raw=json.dumps(record,separators=(",",":")).encode()
+                fields=archive._raw_json_object_fields(raw)
+                fields.pop("id",None)
+                fields["layer_id"]=json.dumps(config["rootfs"]["diff_ids"][0],separators=(",",":")).encode()
+                material=b"{"+b",".join(json.dumps(key).encode()+b":"+fields[key] for key in sorted(fields))+b"}"
+                result={**record,"id":hashlib.sha256(material).hexdigest()}
+                return result,json.dumps(result,separators=(",",":")).encode()
+            exporter_record,metadata_bytes=exporter_record_bytes(exporter_record)
+            metadata_name="blobs/sha256/"+hashlib.sha256(metadata_bytes).hexdigest()
+            blobs[metadata_name]=metadata_bytes
+            repository_data=json.dumps({"volt":{"fixture":config["rootfs"]["diff_ids"][0].removeprefix("sha256:")}}).encode()
             write_layout(index,compat)
             selected_id=image_desc["digest"]
             identity=archive.validate_docker_archive(image,{"image_id":selected_id,"source_commit":source,"version":"0.1.0-rc.1","platform":"linux/amd64"})
@@ -352,6 +368,7 @@ class OfflineArchiveTests(unittest.TestCase):
                 blobs.clear()
                 cfg=descriptor(config_bytes,"application/vnd.oci.image.config.v1+json")
                 layer=descriptor(compressed_zstd,"application/vnd.oci.image.layer.v1.tar+zstd")
+                repository_data=json.dumps({"volt":{"fixture":config["rootfs"]["diff_ids"][0].removeprefix("sha256:")}}).encode()
                 compat={"Config":"blobs/sha256/"+cfg["digest"].removeprefix("sha256:"),"Layers":["blobs/sha256/"+layer["digest"].removeprefix("sha256:")],"RepoTags":["volt:fixture"]}
                 image_manifest=json.dumps({"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":cfg,"layers":[layer]},sort_keys=True,separators=(",",":")).encode()
                 image_desc=descriptor(image_manifest,"application/vnd.oci.image.manifest.v1+json")
@@ -369,6 +386,57 @@ class OfflineArchiveTests(unittest.TestCase):
             wrong_ref={**compat,"RepoTags":["volt:other"]}; write_layout(index,wrong_ref)
             with self.assertRaisesRegex(ValueError,"image reference disagrees"):
                 archive.validate_docker_archive(image,{"image_id":selected_id,"source_commit":source,"version":"0.1.0-rc.1","platform":"linux/amd64"})
+            wrong_repo=json.loads(index)
+            wrong_repo["manifests"][0]["annotations"]["io.containerd.image.name"]="evil/volt:fixture"
+            write_layout(wrong_repo,compat)
+            with self.assertRaisesRegex(ValueError,"image reference disagrees"):
+                archive.validate_docker_archive(image,{"image_id":selected_id,"source_commit":source,"version":"0.1.0-rc.1","platform":"linux/amd64"})
+            write_layout(index,compat,repository_override=b'{"evil":{"fixture":"'+layer["digest"].removeprefix("sha256:").encode()+b'"}}')
+            with self.assertRaisesRegex(ValueError,"repositories map disagrees"):
+                archive.validate_docker_archive(image,{"image_id":selected_id,"source_commit":source,"version":"0.1.0-rc.1","platform":"linux/amd64"})
+            changed_metadata=dict(exporter_record); changed_metadata["id"]="b"*64
+            changed_bytes=json.dumps(changed_metadata,separators=(",",":")).encode()
+            blobs[metadata_name]=changed_bytes
+            write_layout(index,compat)
+            with self.assertRaisesRegex(ValueError,"content address mismatch"):
+                archive.validate_docker_archive(image,{"image_id":selected_id,"source_commit":source,"version":"0.1.0-rc.1","platform":"linux/amd64"})
+            blobs[metadata_name]=metadata_bytes
+            foreign_record={**exporter_record,"id":hashlib.sha256(b"foreign-0").hexdigest()}
+            foreign_bytes=json.dumps(foreign_record,separators=(",",":")).encode()
+            del blobs[metadata_name]
+            foreign_name="blobs/sha256/"+hashlib.sha256(foreign_bytes).hexdigest()
+            blobs[foreign_name]=foreign_bytes
+            write_layout(index,compat)
+            with self.assertRaisesRegex(ValueError,"legacy layer ID does not derive"):
+                archive.validate_docker_archive(image,{"image_id":selected_id,"source_commit":source,"version":"0.1.0-rc.1","platform":"linux/amd64"})
+            del blobs[foreign_name]
+            changed_config={**exporter_record,"config":{**exporter_record["config"],"Entrypoint":["/unrelated-entrypoint"]}}
+            changed_config,changed_config_bytes=exporter_record_bytes(changed_config)
+            changed_config_name="blobs/sha256/"+hashlib.sha256(changed_config_bytes).hexdigest()
+            blobs[changed_config_name]=changed_config_bytes
+            write_layout(index,compat)
+            with self.assertRaisesRegex(ValueError,"final runtime config disagrees"):
+                archive.validate_docker_archive(image,{"image_id":selected_id,"source_commit":source,"version":"0.1.0-rc.1","platform":"linux/amd64"})
+            del blobs[changed_config_name]
+            changed_container={**exporter_record,"container_config":{**exporter_record["container_config"],"unexpected":"data"}}
+            changed_container,changed_container_bytes=exporter_record_bytes(changed_container)
+            changed_container_name="blobs/sha256/"+hashlib.sha256(changed_container_bytes).hexdigest()
+            blobs[changed_container_name]=changed_container_bytes
+            write_layout(index,compat)
+            with self.assertRaisesRegex(ValueError,"container_config is not the supported zero-value"):
+                archive.validate_docker_archive(image,{"image_id":selected_id,"source_commit":source,"version":"0.1.0-rc.1","platform":"linux/amd64"})
+            del blobs[changed_container_name]
+            blobs[metadata_name]=metadata_bytes
+            broken_record={**exporter_record,"parent":"f"*64}
+            broken_bytes=json.dumps(broken_record,separators=(",",":")).encode()
+            del blobs[metadata_name]
+            broken_name="blobs/sha256/"+hashlib.sha256(broken_bytes).hexdigest()
+            blobs[broken_name]=broken_bytes
+            write_layout(index,compat)
+            with self.assertRaisesRegex(ValueError,"legacy layer chain does not match selected layer order"):
+                archive.validate_docker_archive(image,{"image_id":selected_id,"source_commit":source,"version":"0.1.0-rc.1","platform":"linux/amd64"})
+            del blobs[broken_name]
+            blobs[metadata_name]=metadata_bytes
             write_layout(index,compat,{"blobs/sha256/"+"f"*64:b"extra"})
             with self.assertRaisesRegex(ValueError,"unreferenced image blobs"):
                 archive.validate_docker_archive(image,{"image_id":selected_id,"source_commit":source,"version":"0.1.0-rc.1","platform":"linux/amd64"})

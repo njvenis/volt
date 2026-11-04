@@ -1,8 +1,21 @@
 # Release preparation and publication
 
-VOLT's first candidate is designated `0.1.0-rc.1`. Its intended source release is Apache-2.0 and its intended image is `ghcr.io/njvenis/volt:0.1.0-rc.1` for `linux/amd64`, alongside an offline archive. The project license file is the license authority; this designation does not itself publish or alter it. There is no `latest` tag for a release candidate.
+## Published RC1 evidence
 
-## Required preparation
+[VOLT 0.1.0-rc.1](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.1) was published on 4 November 2026 as an Apache-2.0 source release, a public Linux/amd64 image and a signed offline bundle. There is no `latest` tag.
+
+- Source: `d6e7868091839fcf1374b45397d2aa2c5964f97c`.
+- Image: `ghcr.io/njvenis/volt:0.1.0-rc.1`.
+- Registry digest: `sha256:c0c49bc9c38a0ea946d1868748fcaadbf9e7e79dfd50b24d2b276c83c4d18497`.
+- [Hosted release workflow](https://github.com/njvenis/volt/actions/runs/41804175229): passed, including image-specific notice verification, scan policy, fresh offline-loaded startup, synthetic sign-in, an audited operation, ingress denial, restart persistence and owned cleanup.
+- The release notes record successful independent anonymous pull and exact-workflow signature verification. SPDX and provenance attestations are attached to the digest; the offline bundle includes notices, source evidence and verification material.
+- The retained scan has 885 findings, including unfixed findings. The configured gate found zero fixable High/Critical findings and used no exceptions; this does not establish that the image has no vulnerabilities.
+
+Use [RC1 installation](installation.md) for evaluation. The release page is the canonical artifact/evidence handoff; the sections below document maintainer controls, not installation steps or a request to republish RC1.
+
+## Maintainer preparation and publication controls
+
+The existing workflow is specific to RC1 and must not be rerun to replace it. A future candidate needs a separately reviewed version/workflow change; preserve the published RC1 tag and artifacts. The original RC1 procedure follows for maintenance and recovery reference.
 
 Run the release workflow manually from `main`. It accepts only the clean, exact source revision dispatched from `main`, fails if `v0.1.0-rc.1` already exists, and records the source revision and immutable local Docker image ID. It runs the existing portable checks and must build the image once. All reports, SBOMs, notices, archive content and signatures must identify that same image and source revision. A rebuilt image must never replace the candidate after scanning.
 
@@ -26,4 +39,4 @@ The offline consumer accepts the OCI layout emitted by the hosted image export w
 
 The source repository is public and GitHub private vulnerability reporting is enabled. Public security reports are best effort and have no SLA; see [SECURITY.md](../SECURITY.md).
 
-Hosted publication and production OIDC signing have not been executed. Package creation, package visibility changes, GitHub prerelease/tag creation and archive handoff remain separate owner actions. Do not describe this candidate as published, signed, remotely scanned, production-ready, or approved by hosted CI.
+RC1 publication, hosted signing and the release checks above have completed. Future package visibility changes, release/tag creation and archive handoffs remain separate owner actions. Successful RC1 checks establish the stated synthetic evaluation scope, not production readiness, compliance or compatibility with a customer's live integrations.

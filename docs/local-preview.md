@@ -1,4 +1,6 @@
-# Private G7 local preview
+# Development preview from source
+
+To evaluate the published image without building it, follow [RC1 installation](installation.md). This guide describes source-build development and lower-level launcher behaviour.
 
 This is a local development image preview from the committed source revision and pinned dependencies in `Dockerfile.g7`. It is synthetic local proof, not an Okta, AWS, production, external deployment, or release-gate result. The synthetic provider and bootstrap administrator have no identity outside this disposable preview.
 

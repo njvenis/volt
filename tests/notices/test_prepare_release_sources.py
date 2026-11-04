@@ -48,7 +48,13 @@ def test_catalog_is_portable_and_keeps_six_distinct_index_routes():
     assert not (CATALOG.parent / "keyrings" / "debian-developer-keyring.gpg").exists()
     acl = next(x for x in catalog["groups"] if x["source_package"] == "acl" and x["source_version"] == "2.3.2-2")
     assert acl["immutable_dsc_sha1"] == "a78c0a5e511ee122ba5976bbd7cabeff0fd7cbe6"
-    assert sum("immutable_dsc_sha1" in x for x in catalog["groups"]) == 1
+    apt = next(x for x in catalog["groups"] if x["source_package"] == "apt" and x["source_version"] == "3.0.3")
+    assert apt["immutable_dsc_sha1"] == "75cc2d8a7adec664f1b1058dcab263372da25df5"
+    immutable = [x for x in catalog["groups"] if "immutable_dsc_sha1" in x]
+    assert len(immutable) == 63
+    assert all(len(x["immutable_dsc_sha1"]) == 40
+               and all(c in "0123456789abcdef" for c in x["immutable_dsc_sha1"])
+               and not x.get("index_authentication") for x in immutable)
 
 
 def _immutable_dsc_fixture(source="demo", version="1-1", member_size=None):

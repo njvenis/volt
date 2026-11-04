@@ -4,8 +4,8 @@ Use this index to find the current runnable guidance and the detailed product co
 
 ## First steps
 
-- [Primary installation: source-free Compose bundle](../deploy/compose/README.md): new evaluation installs, explicit compatible candidate image, external OIDC configuration and local demo mode.
-- [Install RC1](installation.md): verify and run the published Linux/amd64 image without rebuilding, or use the signed offline bundle.
+- [RC2 Compose installation](installation.md#rc2-compose-installation): verify the release assets, use the digest-pinned Linux/amd64 image and install from the source-free bundle.
+- [Historical RC1 launcher](installation.md#historical-rc1-launcher): verify and run the older image without rebuilding, or use its signed offline bundle.
 - [Development preview](local-preview.md): build and run the synthetic loopback preview, sign in, exercise its smoke path, and stop or destroy it.
 - [Configuration inputs](configuration.md): generated preview settings, packaging example values, and required secret files.
 - [Packaging and deployment boundary](deployment.md): image contents, verification scope, dependencies, and controls a deployer must supply.
@@ -13,12 +13,12 @@ Use this index to find the current runnable guidance and the detailed product co
 
 ## User and operator guidance
 
-Production operation remains outside the supported scope. Compose is the primary installation path for new work; it is not yet backed by a published compatible image. RC1 documentation is historical and its launcher remains a separate path.
+Production operation remains outside the supported scope. RC2 is the current Compose-compatible evaluation release; RC1 documentation is historical and its launcher remains a separate path.
 
 | Topic | Start here |
 | --- | --- |
-| New installation | [Source-free Compose bundle](../deploy/compose/README.md) — candidate image required; development contract |
-| Historical released-image evaluation | [Install RC1](installation.md) — fresh Linux/amd64 installations with synthetic identity |
+| New Compose evaluation | [RC2 installation](installation.md#rc2-compose-installation) — bundle from the signed archive and digest-pinned image |
+| Historical launcher evaluation | [RC1 installation](installation.md#historical-rc1-launcher) — fresh Linux/amd64 installations with synthetic identity |
 | Configuration and deployment | [Configuration inputs](configuration.md), [deployment boundary](deployment.md) |
 | Local operations and troubleshooting | [Operations guide](operations.md) |
 | Security and responsible reporting | [Security policy](../SECURITY.md) |
@@ -42,7 +42,7 @@ Requirements, gates, ADRs and G7 contracts retain their stated verification boun
 | UI and accessibility | [UI requirements](ui-requirements.md), [`design/tokens.json`](../design/tokens.json) |
 | Development and checks | [Runbook](../RUNBOOK.md), [contributing](../CONTRIBUTING.md), [OpenSpec changes](../openspec/changes/) |
 
-A public RC1 image and signed offline bundle are available. Compose bundle sources are maintained for development, but its required compatible image is not yet published. Helm deployment and a production backup/upgrade runbook are not provided.
+A public RC1 image and signed offline bundle are available, and the RC2 Compose-compatible image has been published. The RC2 source-free bundle will be published as a standalone asset and included in its signed offline release archive; use the release page linked from the installation guide when the owner completes the tag/release handoff. Helm deployment and a general production backup/upgrade runbook are not provided.
 # Installation and operations
 
 - [Source-free Compose bundle](../deploy/compose/README.md)

@@ -1,6 +1,6 @@
 # Operations and troubleshooting
 
-This guide covers disposable local evaluation using either [the released RC1 image](installation.md) or [a development source build](local-preview.md). It is not a production operations runbook. Examples below use the instance name `demo`; substitute `rc1` if you followed the RC1 installation guide.
+This guide covers disposable local evaluation using the [RC2 Compose release](installation.md#rc2-compose-installation), the [historical RC1 launcher](installation.md#historical-rc1-launcher), or [a development source build](local-preview.md). It is not a production operations runbook. Preview examples below use the instance name `demo`; substitute `rc1` if following the historical RC1 launcher guide.
 
 ## Preview status and health
 

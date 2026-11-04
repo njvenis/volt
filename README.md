@@ -12,10 +12,10 @@ VOLT is an open-source vulnerability lifecycle application built around [DefectD
 
 Its focus is continuity and accountability: understanding which workloads are affected, who owns the outstanding work, which decisions apply and what evidence supports a change in status.
 
-[RC1 release](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.1) · [Install RC1](docs/installation.md) · [Getting started](#getting-started) · [Architecture](#architecture) · [Documentation](#documentation) · [Contributing](CONTRIBUTING.md) · [Apache-2.0 licence](LICENSE)
+[RC2 Compose image](docs/installation.md#rc2-compose-installation) · [Historical RC1 release](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.1) · [Getting started](#getting-started) · [Architecture](#architecture) · [Documentation](#documentation) · [Contributing](CONTRIBUTING.md) · [Apache-2.0 licence](LICENSE)
 
 > [!IMPORTANT]
-> **Primary installation: source-free Docker Compose evaluation bundle.** The Compose bundle is under development and currently requires an explicitly built compatible candidate image; it is not backed by a published Compose-compatible release. Published RC1 remains available through the historical launcher instructions and does not satisfy the Compose runtime contract. Neither path is production-ready. See [Compose installation](deploy/compose/README.md), [historical RC1 installation](docs/installation.md), and [verification boundaries](GATES.md).
+> **Primary installation: VOLT 0.1.0-rc.2 with Docker Compose.** The compatible Linux/amd64 image is published at `ghcr.io/njvenis/volt@sha256:a7130e38b88b781d93d84c4ddd022ba45716a06b89949a2923e1dd531db2eac1`. The source-free Compose bundle and signed offline archive will be linked from the [RC2 prerelease page](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.2) after the release owner completes the separate tag/release handoff; until then, treat that asset handoff as pending. The signed archive also contains the bundle. RC1 remains an immutable historical launcher release and does not satisfy the Compose contract. Neither release is production-ready. See [RC2 installation](docs/installation.md#rc2-compose-installation), [historical RC1 installation](docs/installation.md#historical-rc1-launcher), and [verification boundaries](GATES.md).
 
 ## Why VOLT?
 
@@ -47,13 +47,13 @@ The design treats **evidence, decisions and remediation as distinct concepts**. 
 
 ## Getting started
 
-### Install the current Compose candidate
+### Install the RC2 Compose release
 
-Use the [source-free Compose bundle](deploy/compose/README.md) for new installations. It requires Docker Compose, Python and OpenSSL, plus an explicitly built candidate image. External evaluation also requires a provider-specific trusted identity-sync publisher; OIDC login alone does not establish current source permissions.
+Use the [RC2 installation guide](docs/installation.md#rc2-compose-installation) and its signed source-free Compose bundle for new evaluation installations. Online pulls use the immutable registry digest above. The bundle requires Docker Compose v2, Python 3.11+ and OpenSSL; it does not build or clone application source. External evaluation also requires a provider-specific trusted identity-sync publisher; OIDC login alone does not establish current source permissions.
 
 ### Historical RC1 launcher
 
-Follow **[Install RC1](docs/installation.md)** to verify and pull the published image, start it without rebuilding, link the synthetic administrator and check persistence. The [release page](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.1) provides the immutable digest, signed offline bundle, SBOMs and verification evidence.
+Follow the [historical RC1 launcher guide](docs/installation.md#historical-rc1-launcher) to verify and run that published image without rebuilding. The [RC1 release page](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.1) provides its immutable digest, signed offline bundle, SBOMs and verification evidence. RC1 cannot be used with the RC2 Compose installer.
 
 The historical launcher binds the application and synthetic OIDC provider to loopback, generates private local secrets and creates owned persistent volumes. Use synthetic data and disposable resources. RC1 is an evaluation release, not a production installation recipe; installing DefectDojo separately does not install VOLT.
 
@@ -82,7 +82,7 @@ flowchart TD
 
 **Identity and authority.** OIDC establishes identity; VOLT's access model governs application actions and scopes. Ownership-team membership is separate from access-group authority. The [native access contract](docs/g7-native-access-ownership-api-contract.md) details current authority checks, bounded grants and audited administration.
 
-**Packaging.** RC1 is distributed as a signed Linux/amd64 image and an offline bundle. `Dockerfile.g7` remains the build recipe using pinned DefectDojo CE and Valkey images. See [installation](docs/installation.md), [deployment boundaries](docs/deployment.md) and [third-party notices](THIRD-PARTY-NOTICES.md).
+**Packaging.** RC1 remains a signed historical Linux/amd64 image with its own offline bundle. RC2 adds the Compose-compatible image and a source-free Compose bundle published separately and included in the signed offline archive, bound to registry digest `sha256:a7130e38b88b781d93d84c4ddd022ba45716a06b89949a2923e1dd531db2eac1`. `Dockerfile.g7` remains the build recipe using pinned DefectDojo CE and Valkey images. See [installation](docs/installation.md), [deployment boundaries](docs/deployment.md) and [third-party notices](THIRD-PARTY-NOTICES.md).
 
 ## Verification and deployment status
 
@@ -90,6 +90,7 @@ flowchart TD
 | --- | --- |
 | Identity and ingestion | Synthetic local suites exercise source-native grouping, rebuild history, completeness, freshness, replay and conflict handling. |
 | RC1 evaluation | Published image and offline bundle; the [release workflow](https://github.com/njvenis/volt/actions/runs/41804175229) passed synthetic sign-in, audited-operation, ingress-denial and restart-persistence checks. |
+| RC2 Compose evaluation | Published digest-pinned image; hosted Compose, cold-restore and offline-preview qualification passed. The scan gate reported 888 findings and zero fixable High/Critical findings; this is not a claim of zero vulnerabilities. Signed offline assets are linked from the prerelease page after the separate release handoff. |
 | External integrations | Local tests do not establish compatibility with live scanners, enterprise identity providers, GitHub or other external services. |
 | Enterprise deployment | No supported production deployment or end-user installer. Security, recovery, operational and integration qualification remain separate requirements. |
 | G7 operational scenarios | Acceptance goals in OpenSpec; their presence does not establish implementation or successful execution. |
@@ -101,7 +102,8 @@ Evidence should identify the exact revision, commands, environment and result. A
 | I want to… | Start here |
 | --- | --- |
 | Find configuration, deployment boundaries, and operations guidance | [Documentation index](docs/README.md) |
-| Try the released application locally | [Install RC1](docs/installation.md) |
+| Install the current Compose release | [RC2 Compose installation](docs/installation.md#rc2-compose-installation) |
+| Run the historical launcher release | [RC1 launcher installation](docs/installation.md#historical-rc1-launcher) |
 | Build a development preview | [Development preview](docs/local-preview.md) |
 | Understand product scope and invariants | [Requirements](REQUIREMENTS.md) |
 | Assess verification and maturity | [Development and verification](GATES.md) |

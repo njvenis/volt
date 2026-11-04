@@ -1,14 +1,98 @@
-# Primary Compose installation
+# RC2 Compose installation and historical RC1 launcher
 
-The maintained installation path is the versioned, source-free Compose bundle in [`deploy/compose`](../deploy/compose/README.md). It does not clone source or run Node/npm during install. External OIDC is the default profile; the local synthetic demo is an explicit overlay. The published RC1 image remains a historical local-evaluation artifact and does not include the later external-OIDC mode split.
+## RC2 Compose installation
+
+VOLT `0.1.0-rc.2` is the current Linux/amd64 Compose-compatible evaluation image. Its immutable registry reference is:
+
+```sh
+VOLT_RELEASE_IMAGE='ghcr.io/njvenis/volt@sha256:a7130e38b88b781d93d84c4ddd022ba45716a06b89949a2923e1dd531db2eac1'
+```
+
+The image has been published and passed the hosted synthetic Compose demo, cold backup/restore, and offline-preview qualification. The signed outer archive and standalone source-free Compose bundle are expected at the [RC2 prerelease page](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.2). The version tag/release handoff is a separate owner action; until that page and assets exist, the download steps below are pending.
+
+### Download and verify the source-free bundle
+
+Download the standalone Compose bundle, its checksum, the signed offline archive, and the external release-verification instructions after the prerelease appears:
+
+```sh
+mkdir -p volt-rc2-release
+cd volt-rc2-release
+gh release download v0.1.0-rc.2 --repo njvenis/volt \
+  --pattern volt-compose.tar.gz \
+  --pattern volt-compose.tar.gz.sha256 \
+  --pattern volt-0.1.0-rc.2-linux-amd64.tar.gz \
+  --pattern VERIFY-RELEASE.md
+```
+
+Before extracting either the Compose bundle or image, follow the external `VERIFY-RELEASE.md` instructions after authenticating them through the release owner or another trusted channel. Those instructions use an independently authenticated verifier checkout at controller commit `90f48211e65c9ae0556419dc7f8329170386287c` to verify the archive's image-source commit `0af679d77754060f2f89368830a92ddb6e3f2122` and image ID `sha256:09412fdcda1a77a6182829061e202f83e767f8cfaecce2cc5b3e9443c3c35461`. Keep those identities distinct: the controller supplies the verifier; it is not the source revision built into the image. Provision Cosign's official Sigstore trust through its official procedure or use an already provisioned trusted store. Never take a trust root or its only checksum from the archive. This trust bootstrap can use Git, but Git is not an installation or runtime prerequisite for the extracted source-free bundle.
+
+```sh
+git clone https://github.com/njvenis/volt.git volt-rc2-verifier
+git -C volt-rc2-verifier checkout --detach 90f48211e65c9ae0556419dc7f8329170386287c
+test "$(git -C volt-rc2-verifier rev-parse HEAD)" = 90f48211e65c9ae0556419dc7f8329170386287c
+python3 volt-rc2-verifier/tools/release/archive.py verify \
+  --archive volt-0.1.0-rc.2-linux-amd64.tar.gz --cosign cosign \
+  --source-sha 0af679d77754060f2f89368830a92ddb6e3f2122 \
+  --image-id sha256:09412fdcda1a77a6182829061e202f83e767f8cfaecce2cc5b3e9443c3c35461
+```
+
+The outer archive signature and signed manifest authenticate the included Compose bundle. Confirm the separately downloaded bundle is byte-for-byte identical to that authenticated member; the sidecar checksum alone is not a trust anchor:
+
+```sh
+tar -xOf volt-0.1.0-rc.2-linux-amd64.tar.gz volt-compose.tar.gz > volt-compose-embedded.tar.gz
+cmp volt-compose.tar.gz volt-compose-embedded.tar.gz
+sha256sum -c volt-compose.tar.gz.sha256
+tar -xzf volt-compose.tar.gz
+cd volt-compose-0.1.0-rc.2
+```
+
+The bundle's README contains the demo and external OIDC setup, identity-linking, authority initialization, lifecycle, and backup instructions. The installer is source-free: installation does not clone VOLT, install Node.js/npm, install a browser, or build the application. Runtime prerequisites are Docker Engine with Compose v2, Python 3.11+, and OpenSSL. External mode also requires a separately operated provider-specific identity-sync publisher; OIDC login alone does not establish current source membership or permissions.
+
+### Pull and run online
+
+Verify the registry signature and pull by immutable digest, not a mutable tag:
+
+```sh
+cosign verify \
+  --certificate-identity https://github.com/njvenis/volt/.github/workflows/release.yml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "$VOLT_RELEASE_IMAGE"
+docker pull --platform linux/amd64 "$VOLT_RELEASE_IMAGE"
+python3 setup.py init /var/lib/volt/demo --mode demo --project volt-demo --image "$VOLT_RELEASE_IMAGE"
+python3 setup.py start /var/lib/volt/demo
+```
+
+Continue with the extracted bundle README to link the synthetic administrator and explicitly initialize authority. The demo uses synthetic identity and loopback ingress. For external OIDC, follow the separate external-mode instructions and operate the required identity-sync publisher. Do not expose the upstream or recovery port publicly. Configure host TLS at the reverse proxy and use the exact HTTPS callback and trusted origins.
+
+### Install offline
+
+The signed archive's verification procedure can load its image without a registry pull. Use the signed manifest's `image_id` (local Docker image/config ID) as the `--image` value:
+
+```sh
+# Return from volt-compose-0.1.0-rc.2 to volt-rc2-release.
+cd ..
+python3 volt-rc2-verifier/tools/release/archive.py load \
+  --archive volt-0.1.0-rc.2-linux-amd64.tar.gz --cosign cosign
+tar -xOf volt-0.1.0-rc.2-linux-amd64.tar.gz manifest.json > manifest.json
+image_id="$(python3 -c 'import json; print(json.load(open("manifest.json"))["image_id"])')"
+cd volt-compose-0.1.0-rc.2
+python3 setup.py init /var/lib/volt/demo --mode demo --project volt-demo --image "$image_id"
+python3 setup.py start /var/lib/volt/demo
+```
+
+`image_id` is a local image identity, distinct from the registry digest in `VOLT_RELEASE_IMAGE`. For a complete offline flow, extract the signed `manifest.json` and Compose bundle as described in the archive's `VERIFY.txt`; verify the bundle checksum after the outer archive has authenticated it. Do not substitute the registry digest for `--image` after `docker load`.
+
+This is a local evaluation installation path, not production-readiness evidence or a general migration, upgrade, backup-retention, or independent-host recovery procedure. See [backup and restore limits](../deploy/compose/backup-restore.md).
 
 ## Historical RC1 launcher
+
+RC1 remains a separate, immutable launcher-only evaluation release. It does not implement the RC2 Compose contract or external-OIDC mode split. The instructions below reproduce that historical launcher path.
 
 VOLT `0.1.0-rc.1` supports fresh Linux/amd64 installations with synthetic data and a local synthetic OIDC provider. It does not upgrade historical development volumes or establish production readiness. The launcher binds the UI/API and identity provider to loopback; run the browser on the same host. Do not expose this preview publicly or supply production credentials.
 
 The [RC1 release](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.1) is the canonical source for artifacts and verification evidence. This guide runs the published image without rebuilding it. For a source build, use [the development preview guide](local-preview.md).
 
-## Prerequisites
+### Prerequisites
 
 - A Linux/amd64 Docker Engine environment and permission to use its daemon.
 - Git, Python 3.13+, OpenSSL, Node.js and npm. RC1's development tooling pins Node.js 24.21.0.
@@ -17,7 +101,7 @@ The [RC1 release](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.1) is t
 - Free loopback ports 8180 and 8190, and disk space for the image, checkout, browser, persistent volumes and evidence. The compressed offline bundle alone is about 2.06 GB; allow additional space for extraction and Docker storage.
 - Network access to GitHub, GHCR, npm, the Playwright browser distribution and signature verification services for the online path.
 
-## 1. Obtain the exact launcher source
+### 1. Obtain the exact launcher source
 
 Run the commands in order in one shell. Use a new directory and retain this checkout for the instance's lifecycle.
 
@@ -33,7 +117,7 @@ npm --prefix ui ci
 
 Stop if any command fails. If Playwright reports missing system libraries, install the dependencies it identifies for your host before continuing. The npm packages and browser support the evaluation smoke test; these commands do not build the application image. Do not edit the checkout: the launcher requires a committed, clean revision.
 
-## 2. Verify and pull the released image
+### 2. Verify and pull the released image
 
 The expected signing identity is the release workflow on `main`, not the tag ref. A failed verification must stop installation.
 
@@ -57,7 +141,7 @@ test -n "$VOLT_RC1_IMAGE_ID"
 
 **The registry digest and local image ID are different identities.** Supply the local config/image ID returned by `docker image inspect` to `--expected-image-id`; do not substitute the registry digest. The launcher independently checks the local ID, source revision, version label and platform before creating resources.
 
-## 3. Initialize, start and sign in
+### 3. Initialize, start and sign in
 
 Choose a fresh instance name (`rc1` below). Keep the same name for subsequent commands. If the default ports are occupied, choose unused ports with the two `init` options and use the resulting URL.
 
@@ -82,7 +166,7 @@ Open **http://127.0.0.1:8180/** and select **Sign in**. The synthetic provider s
 
 `init` creates private secrets and recovery TLS material under `$XDG_STATE_HOME/volt/g7-preview/rc1`. Keep this directory private. The instance owns one container, a private bridge network and three persistent volumes for PostgreSQL, DefectDojo media and VOLT state. A bare `docker run` does not perform this initialization.
 
-## 4. Stop, resume and verify persistence
+### 4. Stop, resume and verify persistence
 
 From the same source checkout, retain the same evidence directory used for the initial smoke:
 
@@ -97,7 +181,7 @@ Stop/restart retains state. Readback compares the saved synthetic object, revisi
 
 RC1 does not support switching an initialized instance to a different image. An interrupted first initialization must resume with the same image binding; missing established resources require investigation rather than automatic recreation. See [operations and troubleshooting](operations.md).
 
-## 5. Remove the evaluation instance
+### 5. Remove the evaluation instance
 
 Only when its data is no longer needed:
 
@@ -107,7 +191,7 @@ python3 tools/g7_local_preview.py destroy rc1
 
 **This deletes the instance's three volumes and private configuration.** The helper checks resource ownership and does not prune unrelated Docker resources. The image, source checkout and separately stored smoke evidence remain.
 
-## Offline bundle
+### Offline bundle
 
 The release supplies `volt-0.1.0-rc.1-linux-amd64.tar.gz`, `VERIFY-RELEASE.md`, a signed manifest and signature bundle. Follow **[VERIFY-RELEASE.md](https://github.com/njvenis/volt/releases/download/v0.1.0-rc.1/VERIFY-RELEASE.md)** before extraction or image loading. Independently provision the required Sigstore trust; checksums alone do not authenticate the bundle.
 

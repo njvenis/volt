@@ -40,12 +40,22 @@ def main() -> int:
     parser.add_argument("--source", required=True)
     parser.add_argument("--repository", required=True)
     parser.add_argument("--workflow", default=".github/workflows/release.yml")
+    parser.add_argument("--artifact-id")
+    parser.add_argument("--artifact-digest")
+    parser.add_argument("--controller-source")
     args = parser.parse_args()
     token = os.environ.get("GH_TOKEN", "")
     if not token or not re.fullmatch(r"[0-9]+", args.run_id):
         parser.error("a numeric candidate run ID and GitHub token are required")
     if not re.fullmatch(r"[0-9a-f]{40}", args.source):
         parser.error("candidate source must be a full commit SHA")
+    if args.controller_source is not None and not re.fullmatch(r"[0-9a-f]{40}", args.controller_source):
+        parser.error("controller source must be a full commit SHA")
+    if (args.artifact_id is None) != (args.artifact_digest is None):
+        parser.error("expected artifact ID and digest must be supplied together")
+    if args.artifact_id is not None and (not re.fullmatch(r"[0-9]+", args.artifact_id)
+                                         or not re.fullmatch(r"sha256:[0-9a-f]{64}", args.artifact_digest)):
+        parser.error("expected artifact identity is malformed")
     try:
         prefix = f"repos/{args.repository}/actions"
         run = api(f"{prefix}/runs/{args.run_id}", token)
@@ -57,10 +67,16 @@ def main() -> int:
         artifacts = api(f"{prefix}/runs/{args.run_id}/artifacts", token).get("artifacts")
         expected_name = f"volt-rc2-candidate-{args.source}"
         matches = [item for item in artifacts or [] if item.get("name") == expected_name and not item.get("expired")]
-        if len(matches) != 1 or not isinstance(matches[0].get("digest"), str):
+        if (len(matches) != 1 or type(matches[0].get("id")) is not int
+                or not isinstance(matches[0].get("digest"), str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", matches[0]["digest"])):
             raise RuntimeError("candidate run must contain exactly one retained candidate artifact with a digest")
+        if args.artifact_id is not None and (matches[0]["id"] != int(args.artifact_id)
+                                             or matches[0]["digest"] != args.artifact_digest):
+            raise RuntimeError("candidate artifact ID or digest differs from the explicitly approved identity")
         print(json.dumps({"run_id": int(args.run_id), "repository": args.repository,
                           "workflow_path": run["path"], "source_commit": args.source,
+                          "controller_commit": args.controller_source or args.source,
                           "artifact_name": expected_name, "artifact_id": matches[0]["id"],
                           "artifact_digest": matches[0]["digest"]}, sort_keys=True))
         return 0

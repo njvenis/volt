@@ -13,6 +13,31 @@ on:
         type: boolean
         required: true
         default: false
+      recovery_mode:
+        description: Use an explicitly identified earlier approved main candidate with this main-branch controller
+        type: boolean
+        required: true
+        default: false
+      candidate_source_sha:
+        description: Required only for recovery mode; exact source commit embedded in the approved candidate
+        type: string
+        required: false
+        default: ""
+      candidate_artifact_id:
+        description: Required only for recovery mode; exact retained Actions artifact ID
+        type: string
+        required: false
+        default: ""
+      candidate_artifact_digest:
+        description: Required only for recovery mode; exact retained Actions artifact sha256 digest
+        type: string
+        required: false
+        default: ""
+      candidate_archive_sha256:
+        description: Required only for recovery mode; exact SHA-256 of the retained candidate tar
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -239,20 +264,58 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Verify named successful candidate run identity
+        id: candidate_identity
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          RECOVERY_MODE: ${{ inputs.recovery_mode }}
+          REQUESTED_CANDIDATE_SOURCE: ${{ inputs.candidate_source_sha }}
+          EXPECTED_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
+          EXPECTED_ARTIFACT_DIGEST: ${{ inputs.candidate_artifact_digest }}
+          EXPECTED_CANDIDATE_ARCHIVE_SHA256: ${{ inputs.candidate_archive_sha256 }}
         run: |
-          python3 tools/release/verify_candidate_run.py --run-id "$CANDIDATE_RUN_ID" --source "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY" --workflow .github/workflows/release.yml
+          set -euo pipefail
+          source_sha="$GITHUB_SHA"
+          args=()
+          if [[ "$RECOVERY_MODE" == true ]]; then
+            [[ "$REQUESTED_CANDIDATE_SOURCE" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$EXPECTED_ARTIFACT_ID" =~ ^[0-9]+$ ]]
+            [[ "$EXPECTED_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$EXPECTED_CANDIDATE_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            source_sha="$REQUESTED_CANDIDATE_SOURCE"
+            args+=(--artifact-id "$EXPECTED_ARTIFACT_ID" --artifact-digest "$EXPECTED_ARTIFACT_DIGEST")
+            git merge-base --is-ancestor "$source_sha" origin/main
+          else
+            test -z "$REQUESTED_CANDIDATE_SOURCE"
+            test -z "$EXPECTED_ARTIFACT_ID"
+            test -z "$EXPECTED_ARTIFACT_DIGEST"
+            test -z "$EXPECTED_CANDIDATE_ARCHIVE_SHA256"
+          fi
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+          python3 tools/release/verify_candidate_run.py --run-id "$CANDIDATE_RUN_ID" \
+            --source "$source_sha" --controller-source "$GITHUB_SHA" \
+            --repository "$GITHUB_REPOSITORY" --workflow .github/workflows/release.yml \
+            "${args[@]}" > "$RUNNER_TEMP/candidate-identity.json"
+          cat "$RUNNER_TEMP/candidate-identity.json"
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v4.3.0
         with:
-          name: volt-rc2-candidate-${{ github.sha }}
+          name: volt-rc2-candidate-${{ steps.candidate_identity.outputs.source_sha }}
           run-id: ${{ inputs.candidate_run_id }}
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           path: ${{ runner.temp }}/volt-rc2-transfer
       - name: Restore exact candidate inputs
+        env:
+          RECOVERY_MODE: ${{ inputs.recovery_mode }}
+          EXPECTED_CANDIDATE_ARCHIVE_SHA256: ${{ inputs.candidate_archive_sha256 }}
         run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/volt-rc2-transfer/volt-rc2-candidate.tar"
+          if [[ "$RECOVERY_MODE" == true ]]; then
+            actual="$(sha256sum "$archive" | cut -d' ' -f1)"
+            test "$actual" = "$EXPECTED_CANDIDATE_ARCHIVE_SHA256"
+          fi
           python3 - <<'PYTRANSFER'
           import os
           import sys
@@ -265,7 +328,8 @@ jobs:
       - name: Revalidate retained candidate contents before registry writes
         env:
           CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
-        run: python3 tools/release/verify_candidate_artifact.py --directory "$RUNNER_TEMP/volt-rc2" --source "$GITHUB_SHA" --prepare-run-id "$CANDIDATE_RUN_ID"
+          CANDIDATE_SOURCE_SHA: ${{ steps.candidate_identity.outputs.source_sha }}
+        run: python3 tools/release/verify_candidate_artifact.py --directory "$RUNNER_TEMP/volt-rc2" --source "$CANDIDATE_SOURCE_SHA" --prepare-run-id "$CANDIDATE_RUN_ID"
       - name: Verify explicit approval and required environment reviewers
         env:
           GH_TOKEN: ${{ github.token }}
@@ -276,6 +340,7 @@ jobs:
             --approval-reference "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
       - name: Recheck exact source and immutable destination tags
         env:
+          CANDIDATE_SOURCE_SHA: ${{ steps.candidate_identity.outputs.source_sha }}
           GITHUB_ACTOR: ${{ github.actor }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -283,7 +348,9 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
           test -z "$(git tag --list v0.1.0-rc.2)"
-          python3 tools/release/registry.py --version-tag 0.1.0-rc.2 --sha-tag "sha-$GITHUB_SHA"
+          git merge-base --is-ancestor "$CANDIDATE_SOURCE_SHA" origin/main
+          test -z "$(git tag --list v0.1.0-rc.2)"
+          python3 tools/release/registry.py --version-tag 0.1.0-rc.2 --sha-tag "sha-$CANDIDATE_SOURCE_SHA"
       - name: Install pinned Cosign and establish offline verification root
         run: |
           python3 tools/release/install_cosign.py
@@ -292,17 +359,28 @@ jobs:
       - name: Publish the already-gated image without rebuilding
         env:
           GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SOURCE_SHA: ${{ steps.candidate_identity.outputs.source_sha }}
         run: |
+          set -euo pipefail
           VOLT_PREPARE_RUN_ID="$(cat "$RUNNER_TEMP/volt-rc2/prepare-run-id.txt")"
           export VOLT_PREPARE_RUN_ID
+          VOLT_CANDIDATE_SOURCE_SHA="$CANDIDATE_SOURCE_SHA"
+          export VOLT_CANDIDATE_SOURCE_SHA
+          VOLT_CONTROLLER_COMMIT="$GITHUB_SHA"
+          export VOLT_CONTROLLER_COMMIT
+          VOLT_CANDIDATE_ARTIFACT_ID="$(python3 -c 'import json,os; print(json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "candidate-identity.json")))["artifact_id"])')"
+          VOLT_CANDIDATE_ARTIFACT_DIGEST="$(python3 -c 'import json,os; print(json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "candidate-identity.json")))["artifact_digest"])')"
+          VOLT_CANDIDATE_ARCHIVE_SHA256="$(sha256sum "$RUNNER_TEMP/volt-rc2-transfer/volt-rc2-candidate.tar" | cut -d' ' -f1)"
+          VOLT_RECOVERY_MODE='${{ inputs.recovery_mode }}'
+          export VOLT_CANDIDATE_ARTIFACT_ID VOLT_CANDIDATE_ARTIFACT_DIGEST VOLT_CANDIDATE_ARCHIVE_SHA256 VOLT_RECOVERY_MODE
           image_id=$(cat "$RUNNER_TEMP/volt-rc2/image-id.txt")
           docker load --input "$RUNNER_TEMP/volt-rc2/image.tar"
           docker image inspect "$image_id" --format '{{.Id}}' | grep -Fx "$image_id"
           registry=ghcr.io/njvenis/volt
           docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<< "$GH_TOKEN"
           docker tag "$image_id" "$registry:0.1.0-rc.2"
-          docker tag "$image_id" "$registry:sha-$GITHUB_SHA"
-          docker push "$registry:sha-$GITHUB_SHA"
+          docker tag "$image_id" "$registry:sha-$CANDIDATE_SOURCE_SHA"
+          docker push "$registry:sha-$CANDIDATE_SOURCE_SHA"
           docker push "$registry:0.1.0-rc.2"
           repo_digest=$(docker image inspect "$registry:0.1.0-rc.2" --format '{{index .RepoDigests 0}}')
           digest="${repo_digest##*@}"
@@ -317,7 +395,7 @@ jobs:
           repository = os.environ["GITHUB_REPOSITORY"]
           source = f"{server}/{repository}"
           workflow_ref = os.environ["GITHUB_WORKFLOW_REF"]
-          sha = os.environ["GITHUB_SHA"]
+          sha = os.environ["VOLT_CANDIDATE_SOURCE_SHA"]
           predicate = {
               "buildDefinition": {
                   "buildType": "https://github.com/Attestations/GitHubActionsWorkflow@v1",
@@ -328,6 +406,17 @@ jobs:
                   "internalParameters": {
                       "voltCandidatePreparationRun": os.environ["VOLT_PREPARE_RUN_ID"],
                       "voltPublicationRun": os.environ["GITHUB_RUN_ID"],
+                      "voltReleaseController": {
+                          "commit": os.environ["VOLT_CONTROLLER_COMMIT"],
+                          "workflow_ref": workflow_ref,
+                          "candidate_source_commit": sha,
+                          "candidate_run_id": os.environ["VOLT_PREPARE_RUN_ID"],
+                          "publication_run_id": os.environ["GITHUB_RUN_ID"],
+                          "artifact_id": os.environ["VOLT_CANDIDATE_ARTIFACT_ID"],
+                          "artifact_digest": os.environ["VOLT_CANDIDATE_ARTIFACT_DIGEST"],
+                          "candidate_archive_sha256": os.environ["VOLT_CANDIDATE_ARCHIVE_SHA256"],
+                          "recovery_mode": os.environ["VOLT_RECOVERY_MODE"] == "true",
+                      },
                   },
                   "resolvedDependencies": [{"uri": f"git+{source}", "digest": {"gitCommit": sha}}],
               },
@@ -342,19 +431,23 @@ jobs:
           PY
           /tmp/volt-release-tools/cosign attest --yes --type slsaprovenance1 \
             --predicate "$RUNNER_TEMP/volt-rc2/provenance.json" "$registry@$digest"
-          python3 tools/release/registry.py --version-tag 0.1.0-rc.2 --sha-tag "sha-$GITHUB_SHA" --expected-digest "$digest"
-          python3 tools/release/publication_verify.py --cosign /tmp/volt-release-tools/cosign --digest "$digest" --source "$GITHUB_SHA" --image-id "$image_id" --spdx "$RUNNER_TEMP/volt-rc2/notices/sbom.spdx.json" --provenance "$RUNNER_TEMP/volt-rc2/provenance.json" --notice-manifest "$RUNNER_TEMP/volt-rc2/notices/notice-manifest.json"
-          python3 tools/build_compose_bundle.py build --output "$RUNNER_TEMP/volt-rc2/volt-compose.tar.gz" --image-reference "$registry@$digest"
-          python3 tools/build_compose_bundle.py verify --archive "$RUNNER_TEMP/volt-rc2/volt-compose.tar.gz"
+          python3 tools/release/registry.py --version-tag 0.1.0-rc.2 --sha-tag "sha-$CANDIDATE_SOURCE_SHA" --expected-digest "$digest"
+          python3 tools/release/publication_verify.py --cosign /tmp/volt-release-tools/cosign --digest "$digest" --source "$CANDIDATE_SOURCE_SHA" --controller-commit "$GITHUB_SHA" --image-id "$image_id" --spdx "$RUNNER_TEMP/volt-rc2/notices/sbom.spdx.json" --provenance "$RUNNER_TEMP/volt-rc2/provenance.json" --notice-manifest "$RUNNER_TEMP/volt-rc2/notices/notice-manifest.json"
+          mkdir -p "$RUNNER_TEMP/volt-rc2-approved-source"
+          git archive "$CANDIDATE_SOURCE_SHA" deploy/compose | tar -x -C "$RUNNER_TEMP/volt-rc2-approved-source"
+          python3 tools/build_compose_bundle.py build --output "$RUNNER_TEMP/volt-rc2/volt-compose.tar.gz" --image-reference "$registry@$digest" --source-root "$RUNNER_TEMP/volt-rc2-approved-source"
+          python3 tools/build_compose_bundle.py verify --archive "$RUNNER_TEMP/volt-rc2/volt-compose.tar.gz" --source-root "$RUNNER_TEMP/volt-rc2-approved-source"
           (cd "$RUNNER_TEMP/volt-rc2" && sha256sum volt-compose.tar.gz > volt-compose.tar.gz.sha256)
       - name: Sign and assemble the offline image archive
+        env:
+          CANDIDATE_SOURCE_SHA: ${{ steps.candidate_identity.outputs.source_sha }}
         run: |
           out="$RUNNER_TEMP/volt-rc2"
           rm -f "$out/compose-qualification.tar.gz"
           cp -a "$out/notices/." "$out/"
-          cp tools/release/VERIFY.txt "$out/VERIFY.txt"
+          git show "$CANDIDATE_SOURCE_SHA:tools/release/VERIFY.txt" > "$out/VERIFY.txt"
           python3 tools/release/archive.py prepare --directory "$out" \
-            --version 0.1.0-rc.2 --source-sha "$GITHUB_SHA" \
+            --version 0.1.0-rc.2 --source-sha "$CANDIDATE_SOURCE_SHA" \
             --image-id "$(cat "$out/image-id.txt")" --registry-digest "$(cat "$out/registry-digest.txt")" \
             --platform linux/amd64
           python3 tools/release/archive.py sign --directory "$out" --cosign /tmp/volt-release-tools/cosign \
@@ -362,7 +455,7 @@ jobs:
           python3 tools/release/archive.py pack --directory "$out" \
             --archive "$RUNNER_TEMP/volt-0.1.0-rc.2-linux-amd64.tar"
           python3 tools/release/archive.py verify --archive "$RUNNER_TEMP/volt-0.1.0-rc.2-linux-amd64.tar" \
-            --cosign /tmp/volt-release-tools/cosign --source-sha "$GITHUB_SHA" \
+            --cosign /tmp/volt-release-tools/cosign --source-sha "$CANDIDATE_SOURCE_SHA" \
             --image-id "$(cat "$out/image-id.txt")"
       - name: Retain signed offline archive for independent download
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

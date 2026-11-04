@@ -25,6 +25,36 @@ class CandidateIdentityTests(unittest.TestCase):
                                 "--repository", "njvenis/volt"]), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(verify_candidate_run.main(), 0)
 
+        with patch.object(verify_candidate_run, "api", side_effect=[run, artifact]), \
+             patch.dict("os.environ", {"GH_TOKEN": "fixture-token"}), \
+             patch("sys.argv", ["verify_candidate_run.py", "--run-id", "123", "--source", sha,
+                                "--repository", "njvenis/volt", "--controller-source", "c" * 40,
+                                "--artifact-id", "44", "--artifact-digest", "sha256:" + "b" * 64]), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(verify_candidate_run.main(), 0)
+            import json
+            record = json.loads(output.getvalue())
+            self.assertEqual(record["source_commit"], sha)
+            self.assertEqual(record["controller_commit"], "c" * 40)
+            self.assertEqual(record["artifact_id"], 44)
+            self.assertEqual(record["artifact_digest"], "sha256:" + "b" * 64)
+
+        with patch.object(verify_candidate_run, "api", side_effect=[run, artifact]), \
+             patch.dict("os.environ", {"GH_TOKEN": "fixture-token"}), \
+             patch("sys.argv", ["verify_candidate_run.py", "--run-id", "123", "--source", sha,
+                                "--repository", "njvenis/volt", "--artifact-id", "45",
+                                "--artifact-digest", "sha256:" + "b" * 64]), \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(verify_candidate_run.main(), 2)
+
+        with patch.object(verify_candidate_run, "api", side_effect=[run, artifact]), \
+             patch.dict("os.environ", {"GH_TOKEN": "fixture-token"}), \
+             patch("sys.argv", ["verify_candidate_run.py", "--run-id", "123", "--source", sha,
+                                "--repository", "njvenis/volt", "--artifact-id", "44",
+                                "--artifact-digest", "sha256:" + "e" * 64]), \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(verify_candidate_run.main(), 2)
+
         run["head_sha"] = "c" * 40
         with patch.object(verify_candidate_run, "api", return_value=run), \
              patch.dict("os.environ", {"GH_TOKEN": "fixture-token"}), \
@@ -65,6 +95,15 @@ class CandidateIdentityTests(unittest.TestCase):
             with patch("sys.argv", ["verify_candidate_artifact.py", "--directory", directory,
                                     "--source", "d" * 40, "--prepare-run-id", "124"]), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(verify_candidate_artifact.main(), 2)
+
+    def test_candidate_child_failure_surfaces_stdout_and_stderr(self):
+        from unittest.mock import Mock
+        result = Mock(returncode=1, stdout="FAIL: signed .dsc signature verification failed\n",
+                      stderr="gpgv: keybox unavailable\n")
+        with patch.object(verify_candidate_artifact.subprocess, "run", return_value=result):
+            with self.assertRaisesRegex(ValueError, r"signed \.dsc signature verification failed") as raised:
+                verify_candidate_artifact.verify_child(["python3", "verify.py"], label="notice check")
+        self.assertIn("gpgv: keybox unavailable", str(raised.exception))
 
 
 if __name__ == "__main__":

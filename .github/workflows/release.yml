@@ -135,7 +135,7 @@ jobs:
             --evidence "$RELEASE_OUT/compose-evidence"
       - name: Retain Compose qualification evidence on success or failure
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: volt-rc2-compose-qualification-${{ github.sha }}
           path: ${{ runner.temp }}/volt-rc2/compose-evidence/
@@ -199,7 +199,7 @@ jobs:
           test ! -e "$state/volt/g7-preview/rc2"
       - name: Retain fresh offline install evidence on success or failure
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: volt-rc2-fresh-install-evidence-${{ github.sha }}
           path: ${{ runner.temp }}/volt-rc2/local-preview/
@@ -221,7 +221,7 @@ jobs:
           python3 tools/release/scan.py --image "$(cat "$RELEASE_OUT/image-id.txt")" --expected-image-id "$(cat "$RELEASE_OUT/image-id.txt")" --exceptions tools/release/exceptions.example.json --output "$RELEASE_OUT/release-scan.json"
       - name: Retain full scan report on success or failure
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: volt-rc2-scan-evidence-${{ github.sha }}
           path: ${{ runner.temp }}/volt-rc2/release-scan.json*
@@ -241,7 +241,7 @@ jobs:
           PYTRANSFER
       - name: Upload exact candidate inputs; no publication credentials
         if: success()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: volt-rc2-candidate-${{ github.sha }}
           path: ${{ runner.temp }}/volt-rc2-candidate.tar
@@ -458,7 +458,7 @@ jobs:
             --cosign /tmp/volt-release-tools/cosign --source-sha "$CANDIDATE_SOURCE_SHA" \
             --image-id "$(cat "$out/image-id.txt")"
       - name: Retain signed offline archive for independent download
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: volt-0.1.0-rc.2-linux-amd64
           path: ${{ runner.temp }}/volt-0.1.0-rc.2-linux-amd64.tar

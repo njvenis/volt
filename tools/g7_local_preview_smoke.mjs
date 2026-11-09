@@ -6,12 +6,14 @@ import {requireAdminRendered,requireAudit,requirePersistedState,requireReceipt,r
 
 function arg(name){const i=process.argv.indexOf(name);if(i<0||!process.argv[i+1])throw new Error(`missing ${name}`);return process.argv[i+1];}
 const origin=arg('--origin'), issuer=arg('--issuer'), subject=arg('--subject'), principal=arg('--principal'), evidence=arg('--evidence');
+const deploymentLabel=process.argv.includes('--deployment-label')?arg('--deployment-label'):'Synthetic local demo';
 const readbackOnly=process.argv.includes('--readback');
 await mkdir(evidence,{recursive:true,mode:0o700});
 const launchOptions={headless:true};
 if(process.env.CHROMIUM_EXECUTABLE_PATH)launchOptions.executablePath=process.env.CHROMIUM_EXECUTABLE_PATH;
+if(process.env.VOLT_SMOKE_HOST_RESOLVER_RULES)launchOptions.args=[`--host-resolver-rules=${process.env.VOLT_SMOKE_HOST_RESOLVER_RULES}`];
 const browser=await chromium.launch(launchOptions);
-const context=await browser.newContext();
+const context=await browser.newContext({ignoreHTTPSErrors:true});
 const page=await context.newPage();
 const zero='00000000-0000-4000-8000-000000000000';
 function ensure(ok,label){if(!ok)throw new Error(label);}
@@ -39,12 +41,19 @@ async function cardFor(groupId){
 }
 try{
   await page.goto(origin+'/',{waitUntil:'domcontentloaded',timeout:30000});
+  await page.getByText(deploymentLabel,{exact:true}).waitFor({state:'visible',timeout:10000});
+  if(process.env.VOLT_SMOKE_FIXTURE_SUBJECT){
+    await context.route('**/authorize**',async route=>{
+      const url=new URL(route.request().url());
+      url.searchParams.set('fixture_subject',process.env.VOLT_SMOKE_FIXTURE_SUBJECT);
+      await route.continue({url:url.toString()});
+    });
+  }
   await page.getByRole('link',{name:/sign in/i}).click({timeout:10000});
   await page.waitForFunction(async()=>{const r=await fetch('/api/v1/auth/session',{cache:'no-store'});if(!r.ok)return false;return (await r.json()).authenticated===true;},null,{timeout:30000});
   const session=(await api('/api/v1/auth/session')).body;
   requireSession(session,{issuer,subject,principal});
-  let saved,receipt;
-  if(!readbackOnly){
+  if(process.argv.includes('--initialize-development')){
     const bootstrap=await api('/api/v1/assessment/bootstrap-policy',{method:'POST',write:true,body:{policy:{grants:[],denies:[],owner_directory:[{owner_id:principal,owner_type:'person',display_name:'Synthetic Local Preview Administrator',enabled:true}],acceptance_material_changes:{},exception_warning_routes:[]}}});
     ensure([200,409].includes(bootstrap.status),`initial_policy_bootstrap_failed_${bootstrap.status}`);
     let catalogue=(await api('/api/v1/assessment/administration/catalogue')).body;
@@ -53,6 +62,9 @@ try{
       const activation=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:{command_id:crypto.randomUUID(),target_id:zero,membership_ids:[],action:'native.authority.activate',expected_revisions:{target:catalogue.policy_revision,policy:catalogue.policy_revision,authority:catalogue.authority_revision,identity_membership:0,owners:0},payload:{mapping_revision:1,rationale:'Activate native authority for the private synthetic local preview',evidence_ref:'local-preview-bootstrap'}}});
       ensure(activation.status===200,`native_authority_activation_failed_${activation.status}`);
     }
+  }
+  let saved,receipt;
+  if(!readbackOnly){
     await page.goto(origin+'/#administration',{waitUntil:'domcontentloaded'});
     const createButton=await waitAdminReady();
     await page.screenshot({path:`${evidence}/admin-initial.png`,fullPage:true});

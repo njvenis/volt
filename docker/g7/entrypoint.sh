@@ -205,6 +205,19 @@ oidc_config_value() {
   local field=$1
   UVM_OIDC_CONFIG="$UVM_OIDC_CONFIG" python -c 'import json,os,sys; print(json.loads(os.environ["UVM_OIDC_CONFIG"])[sys.argv[1]])' "$field"
 }
+UVM_OIDC_DEPLOYMENT_MODE=${UVM_OIDC_DEPLOYMENT_MODE:-demo}
+case "$UVM_OIDC_DEPLOYMENT_MODE" in
+  demo|external) ;;
+  *) echo 'G7_OIDC_DEPLOYMENT_MODE=invalid' >&2; exit 70 ;;
+esac
+if [[ $UVM_OIDC_DEPLOYMENT_MODE == external && ${UVM_AUTH_MODE:-} != oidc ]]; then
+  echo 'G7_OIDC_EXTERNAL=oidc-auth-mode-required' >&2; exit 70
+fi
+if [[ -n ${UVM_OIDC_CONFIG_FILE:-} ]]; then
+  [[ -s "$UVM_OIDC_CONFIG_FILE" ]] || { echo 'G7_OIDC_CONFIG=file-missing' >&2; exit 70; }
+  UVM_OIDC_CONFIG=$(cat "$UVM_OIDC_CONFIG_FILE")
+  export UVM_OIDC_CONFIG
+fi
 if [[ ${UVM_AUTH_MODE:-bearer} == oidc ]]; then
   [[ -n ${UVM_OIDC_CONFIG:-} ]] || { echo 'G7_OIDC_CONFIG=missing' >&2; exit 70; }
   install -d -o root -g uvm -m 0750 /run/uvm-g7-secrets
@@ -220,13 +233,6 @@ if [[ ${UVM_AUTH_MODE:-bearer} == oidc ]]; then
     install -o uvm -g uvm -m 0600 /run/secrets/github_webhook_secret_v2 /run/uvm-g7-secrets/github_webhook_secret_v2
     install -o root -g uvm -m 0640 /run/secrets/github_webhook_secret_version /run/uvm-g7-secrets/github_webhook_secret_version
   fi
-  install -d -o uvm -g uvm -m 0700 /opt/uvm/state
-  OIDC_PROVIDER_KEY=/opt/uvm/state/oidc-provider-private.pem
-  if [[ ! -s "$OIDC_PROVIDER_KEY" ]]; then
-    openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$OIDC_PROVIDER_KEY" 2>/dev/null
-    chown uvm:uvm "$OIDC_PROVIDER_KEY"
-    chmod 0600 "$OIDC_PROVIDER_KEY"
-  fi
   UVM_OIDC_ISSUER=$(oidc_config_value issuer)
   UVM_OIDC_CLIENT_ID=$(oidc_config_value client_id)
   UVM_OIDC_CALLBACK_URL=$(oidc_config_value callback_url)
@@ -234,8 +240,27 @@ if [[ ${UVM_AUTH_MODE:-bearer} == oidc ]]; then
   UVM_OIDC_CLIENT_SECRET_FILE=$(oidc_config_value client_secret_file)
   UVM_OIDC_SYNC_SECRET_FILE=$(oidc_config_value sync_secret_file)
   UVM_OIDC_OPERATOR_SECRET_FILE=$(oidc_config_value operator_secret_file)
-  UVM_OIDC_FIXTURE_SUBJECT=${UVM_OIDC_FIXTURE_SUBJECT:?synthetic subject fixture is required}
-  UVM_OIDC_FIXTURE_IDENTITIES=${UVM_OIDC_FIXTURE_IDENTITIES:?synthetic identity fixture is required}
+  if [[ $UVM_OIDC_DEPLOYMENT_MODE == demo ]]; then
+    install -d -o uvm -g uvm -m 0700 /opt/uvm/state
+    OIDC_PROVIDER_KEY=/opt/uvm/state/oidc-provider-private.pem
+    if [[ ! -s "$OIDC_PROVIDER_KEY" ]]; then
+      openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$OIDC_PROVIDER_KEY" 2>/dev/null
+      chown uvm:uvm "$OIDC_PROVIDER_KEY"
+      chmod 0600 "$OIDC_PROVIDER_KEY"
+    fi
+    UVM_OIDC_FIXTURE_SUBJECT=${UVM_OIDC_FIXTURE_SUBJECT:?synthetic subject fixture is required in demo mode}
+    UVM_OIDC_FIXTURE_IDENTITIES=${UVM_OIDC_FIXTURE_IDENTITIES:?synthetic identity fixture is required in demo mode}
+  else
+    if [[ -n ${UVM_OIDC_FIXTURE_SUBJECT:-}${UVM_OIDC_FIXTURE_IDENTITIES:-} ]]; then
+      echo 'G7_OIDC_EXTERNAL=synthetic-fixture-settings-forbidden' >&2
+      exit 70
+    fi
+    UVM_AUTH_MODE=oidc UVM_OIDC_CONFIG="$UVM_OIDC_CONFIG" \
+      UVM_OIDC_DEPLOYMENT_MODE=external /opt/uvm/venv/bin/python -c \
+      'from uvm.auth.service import load_oidc_config; load_oidc_config()' || {
+        echo 'G7_OIDC_EXTERNAL=config-validation-failed' >&2; exit 70;
+      }
+  fi
 fi
 UVM_PASSWORD_URL=$(printf %s "$UVM_PASSWORD" | urlpart)
 CE_PASSWORD_URL=$(printf %s "$CE_PASSWORD" | urlpart)
@@ -533,7 +558,7 @@ start_child ce-beat 1001 1337 env -i PATH="$PATH" HOME=/nonexistent \
   DD_DEDUPLICATION_ALGORITHM_PER_PARSER='{"Generic Findings Import":"unique_id_from_tool"}' \
   /entrypoint-celery-beat.sh
 fi
-if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_AUTH_MODE:-bearer} == oidc ]]; then
+if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_AUTH_MODE:-bearer} == oidc && $UVM_OIDC_DEPLOYMENT_MODE == demo ]]; then
   start_child oidc-provider 1800 1800 env -i PATH="$PATH" HOME=/opt/uvm \
     PYTHONPATH=/opt/uvm/app UVM_OIDC_ISSUER="$UVM_OIDC_ISSUER" \
     UVM_OIDC_CLIENT_ID="$UVM_OIDC_CLIENT_ID" UVM_OIDC_CALLBACK_URL="$UVM_OIDC_CALLBACK_URL" \
@@ -614,6 +639,8 @@ start_child api 1800 1800 env -i PATH="$PATH" HOME=/opt/uvm \
   UVM_G7_PRESERVATION_ENVIRONMENT="${UVM_G7_PRESERVATION_ENVIRONMENT-}" \
   UVM_G7_PRESERVATION_MAX_FUTURE_SKEW_SECONDS="${UVM_G7_PRESERVATION_MAX_FUTURE_SKEW_SECONDS-}" \
   UVM_AUTH_MODE="${UVM_AUTH_MODE-bearer}" UVM_OIDC_CONFIG="${UVM_OIDC_CONFIG-}" \
+  UVM_OIDC_DEPLOYMENT_MODE="$UVM_OIDC_DEPLOYMENT_MODE" \
+  SSL_CERT_FILE="${SSL_CERT_FILE-}" \
   UVM_GITHUB_API_BASE_URL="${UVM_GITHUB_API_BASE_URL-}" \
   UVM_GITHUB_APP_BASE_URL="${UVM_GITHUB_APP_BASE_URL-}" \
   UVM_CONNECTOR_PUBLIC_BASE_URL="${UVM_CONNECTOR_PUBLIC_BASE_URL-}" \
@@ -700,7 +727,9 @@ fi
 wait_for 'CE web' curl --silent --output /dev/null http://127.0.0.1:8081/api/v2/
 wait_for 'uWSGI master FIFO' test -p /run/uwsgi/uvm-g7.fifo
 if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_AUTH_MODE:-bearer} == oidc ]]; then
-  wait_for 'local OIDC provider' curl --fail --silent "http://127.0.0.1:${UVM_OIDC_PROVIDER_PORT:-9000}/healthz"
+  if [[ $UVM_OIDC_DEPLOYMENT_MODE == demo ]]; then
+    wait_for 'local OIDC provider' curl --fail --silent "http://127.0.0.1:${UVM_OIDC_PROVIDER_PORT:-9000}/healthz"
+  fi
   wait_for 'loopback OIDC sync adapter' curl --fail --silent http://127.0.0.1:8001/healthz
 fi
 wait_for 'UVM API' curl --fail --silent http://127.0.0.1:8000/openapi.json

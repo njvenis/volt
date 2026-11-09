@@ -1,10 +1,16 @@
 # Third-party notices
 
+## Published RC1 inventory
+
+The [RC1 release](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.1) includes image-specific notices and retained source evidence in its signed offline bundle. Its [notice manifest](https://github.com/njvenis/volt/releases/download/v0.1.0-rc.1/notice-manifest.json) binds the inventory to the released image; the [release workflow](https://github.com/njvenis/volt/actions/runs/41804175229) passed collection and verification. Use the release verification instructions before relying on downloaded evidence.
+
+The notices below describe source dependencies. Every new or modified image needs a fresh image-specific inventory and verification under [the notice collection procedure](docs/third-party-notices.md); RC1 evidence does not cover arbitrary rebuilds.
+
 ## Valkey
 
 The optional single-container packaging build uses Valkey 9.1.2 from the pinned `valkey/valkey:9.1.2-alpine` container image. The upstream release is identified by [Valkey's release page](https://valkey.io/download/). The build copies the Valkey server, command-line client and required musl/OpenSSL runtime libraries into the final image. Valkey's upstream license is BSD 3-Clause; its source tree identifies copyright as 2024-present Valkey contributors and 2006-2020 Redis Ltd ([Valkey 9.1.2 COPYING](https://github.com/valkey-io/valkey/blob/9.1.2/COPYING)).
 
-The repository contains only small launcher scripts for these binaries; the binaries themselves are obtained from the pinned image at build time. This source tree does not redistribute the CE or Valkey binaries. A built image does redistribute DefectDojo CE 3.3.100, Valkey, musl/OpenSSL and other base-image content. The exact package-level notices and copyright metadata for that combined image have not been audited; do not redistribute a built image until those notices are collected and included. DefectDojo CE is licensed under BSD 3-Clause ([DefectDojo license](https://github.com/DefectDojo/django-DefectDojo/blob/3.3.100/LICENSE.md); [upstream dependency notices](https://github.com/DefectDojo/django-DefectDojo/blob/3.3.100/NOTICE)).
+The repository contains only small launcher scripts for these binaries; the binaries themselves are obtained from the pinned image at build time. This source tree does not redistribute the CE or Valkey binaries. A built image does redistribute DefectDojo CE 3.3.100, Valkey, musl/OpenSSL and other base-image content. RC1's package-level inventory is supplied with that release as described above. For another build, collect and include the exact package-level notices and copyright metadata before redistribution. DefectDojo CE is licensed under BSD 3-Clause ([DefectDojo license](https://github.com/DefectDojo/django-DefectDojo/blob/3.3.100/LICENSE.md); [upstream dependency notices](https://github.com/DefectDojo/django-DefectDojo/blob/3.3.100/NOTICE)).
 
 ### Valkey 9.1.2 COPYING
 
@@ -48,7 +54,7 @@ Other runtime and UI dependencies are declared in `uv.lock` and `ui/package-lock
 
 ## DefectDojo CE 3.3.100
 
-DefectDojo CE is an external runtime base, not source code included in this repository. Its upstream license is BSD 3-Clause. The pinned build recipe copies the resulting CE layer into the optional built image, so this notice alone does not satisfy image redistribution obligations; see the image limitation above.
+DefectDojo CE is an external runtime base, not source code included in this repository. Its upstream license is BSD 3-Clause. The pinned build recipe copies the resulting CE layer into the optional built image, so this notice alone does not satisfy image redistribution obligations; see the image-specific inventory requirements above.
 
 Copyright (c) 2015-2023 DefectDojo, Inc.
 

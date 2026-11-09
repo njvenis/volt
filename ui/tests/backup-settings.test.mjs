@@ -58,6 +58,7 @@ async function fixture(t,state=settings(),retained=null,options={}) {
   const url=new URL(route.request().url());requests.push(url.pathname+url.search);let body,status=200;
   const error=(code,outcome='not_committed')=>({schema_version:1,error:{code,message:code,details:{outcome}}});
   if(url.pathname==='/api/v1/auth/session')body={schema_version:1,authenticated:true,credential_mode:'oidc_session',principal_id:'fixture-actor',csrf_token:'synthetic-csrf'};
+  else if(url.pathname==='/api/v1/deployment/mode')body={schema_version:1,mode:'demo',label:'Synthetic local demo'};
   else if(url.pathname==='/api/v1/operations/observer-settings')body={schema_version:1,deployments:[],next_cursor:null};
   else if(url.pathname===root){
    const cursor=url.searchParams.get('cursor');

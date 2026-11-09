@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a reproducible problem using synthetic data.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, production vulnerability records, private identifiers or unredacted logs.
+        Report security vulnerabilities privately: https://github.com/njvenis/volt/security/advisories/new
+  - type: input
+    id: version
+    attributes:
+      label: Release and source revision or image digest
+      description: Include the exact artifact used, or the commit for a source build.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Evaluation environment
+      description: Host OS, architecture, Docker version and installation method. Omit private hostnames.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Provide minimal steps with synthetic inputs.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted evidence and checks
+      description: Relevant errors, health/smoke results and workarounds. Review all attachments before submitting.

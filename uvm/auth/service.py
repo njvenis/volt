@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import secrets
@@ -109,6 +110,18 @@ def load_oidc_config() -> dict[str, Any]:
     if (issuer_origin not in origins or _url_origin(config["discovery_url"]) not in origins
             or _url_origin(config["callback_url"]) not in origins):
         raise RuntimeError("OIDC issuer, discovery and callback origins must be trusted")
+    if os.environ.get("UVM_OIDC_DEPLOYMENT_MODE") == "external":
+        urls = (config["issuer"], config["discovery_url"], config["callback_url"],
+                *config["allowed_endpoint_origins"])
+        for value in urls:
+            parsed = urlsplit(value)
+            hostname = (parsed.hostname or "").lower().rstrip(".")
+            try:
+                loopback = ipaddress.ip_address(hostname).is_loopback
+            except ValueError:
+                loopback = hostname == "localhost" or hostname.endswith(".localhost")
+            if parsed.scheme != "https" or loopback or hostname.endswith(".invalid"):
+                raise RuntimeError("external OIDC deployment requires public HTTPS provider and callback origins")
     ceilings = {_scope(item) for item in config["source_scope_ceilings"]}
     for mapping in config["group_mappings"].values():
         if any(_scope(item) not in ceilings for item in mapping["source_scopes"]):

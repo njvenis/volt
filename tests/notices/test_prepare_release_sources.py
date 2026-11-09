@@ -1,12 +1,19 @@
+import io
 import json
 import os
 from pathlib import Path
+import socket
+import ssl
 import subprocess
 import sys
+import urllib.error
 
 import pytest
 
-from tools.notices.prepare_release_sources import CATALOG, catalog_matches, digest, release_sha256_row
+from tools.notices.prepare_release_sources import (
+    CATALOG, TransientFetchError, acquire_group, catalog_matches, digest, fetch,
+    release_sha256_row, validate_canonical_fallback_url,
+)
 
 
 def test_developer_keyring_lock_matches_acquisition_catalog():
@@ -36,12 +43,262 @@ def test_catalog_is_portable_and_keeps_six_distinct_index_routes():
     }
     assert all(set(x["index_authentication"]) == {"trust_root", "trust_route"} for x in indexed)
     assert all(x["index_authentication"]["trust_route"] == "signed-repository-index" for x in indexed)
+    fallback_rows = [(group, row) for group in catalog["groups"]
+                     for row in group["source_files"] if "fallback_url" in row]
+    descriptor_rows = [group for group in catalog["groups"] if "immutable_dsc_fallback_url" in group]
+    assert len(descriptor_rows) == 76
+    assert len(fallback_rows) == 171
+    assert all("immutable_dsc_sha1" in group for group in descriptor_rows)
+    assert all("immutable_dsc_sha1" in group for group, _row in fallback_rows)
+    for group in descriptor_rows:
+        validate_canonical_fallback_url(
+            group["immutable_dsc_fallback_url"], f"{group['source_package']}_{group['source_version']}.dsc")
+    for _group, row in fallback_rows:
+        validate_canonical_fallback_url(row["fallback_url"], row["filename"])
+    adduser_group = next(group for group in catalog["groups"] if group["source_package"] == "adduser")
+    assert adduser_group["immutable_dsc_fallback_url"] == (
+        "https://deb.debian.org/debian/pool/main/a/adduser/adduser_3.152.dsc"
+    )
+    adduser_member = next(row for row in adduser_group["source_files"]
+                          if row["filename"] == "adduser_3.152.tar.xz")
+    assert adduser_member["fallback_url"] == (
+        "https://deb.debian.org/debian/pool/main/a/adduser/adduser_3.152.tar.xz"
+    )
     keyring = catalog["debian_developer_keyring"]
     assert keyring["package_version"] == "2026.03.25"
     assert keyring["package_size"] == 33697852
     assert keyring["package_sha256"] == "7f48a8f7cd846f8b01d7a0fc65b1dc93c1a6d06981683b9db97e407c7908f0ae"
     assert keyring["sha256"] == "81e08f47b0dd8a563a2742ad90878ccefe53aa0728b095acbea3efda84381ea9"
     assert not (CATALOG.parent / "keyrings" / "debian-developer-keyring.gpg").exists()
+    acl = next(x for x in catalog["groups"] if x["source_package"] == "acl" and x["source_version"] == "2.3.2-2")
+    assert acl["immutable_dsc_sha1"] == "a78c0a5e511ee122ba5976bbd7cabeff0fd7cbe6"
+    apt = next(x for x in catalog["groups"] if x["source_package"] == "apt" and x["source_version"] == "3.0.3")
+    assert apt["immutable_dsc_sha1"] == "75cc2d8a7adec664f1b1058dcab263372da25df5"
+    immutable = [x for x in catalog["groups"] if "immutable_dsc_sha1" in x]
+    assert len(immutable) == 76
+    assert all(len(x["immutable_dsc_sha1"]) == 40
+               and all(c in "0123456789abcdef" for c in x["immutable_dsc_sha1"])
+               and not x.get("index_authentication") for x in immutable)
+
+
+def _immutable_dsc_fixture(source="demo", version="1-1", member_size=None):
+    from tools.notices.prepare_release_sources import digest
+    member_name = "demo_1.orig.tar.xz"
+    member_data = b"exact source archive"
+    size = len(member_data) if member_size is None else member_size
+    member_sha1 = __import__("hashlib").sha1(member_data).hexdigest()
+    member_sha256 = digest(member_data)
+    dsc = ("-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\n"
+           f"Source: {source}\nVersion: {version}\n"
+           f"Checksums-Sha1:\n {member_sha1} {size} {member_name}\n"
+           f"Checksums-Sha256:\n {member_sha256} {len(member_data)} {member_name}\n"
+           "-----BEGIN PGP SIGNATURE-----\nfake signature fixture\n-----END PGP SIGNATURE-----\n").encode()
+    return dsc, member_name, member_data, member_sha1
+
+
+def _acquire_immutable_fixture(monkeypatch, tmp_path, *, source="demo", version="1-1", member_size=None,
+                               descriptor_signature_ok=True, catalog_dsc_sha256=None, descriptor_sha1=None,
+                               snapshot_error=None, fallback_url=None, fallback_data=None,
+                               catalog_member_sha256=None, descriptor_snapshot_error=None,
+                               descriptor_fallback_url=None, url_log=None):
+    import hashlib
+    from types import SimpleNamespace
+    from tools.notices import prepare_release_sources as preparer
+
+    dsc, member_name, member_data, member_sha1 = _immutable_dsc_fixture(source, version, member_size)
+    actual_descriptor_sha1 = hashlib.sha1(dsc).hexdigest()
+    locator = descriptor_sha1 or actual_descriptor_sha1
+    entry = {
+        "source_package": "demo", "source_version": "1-1",
+        "immutable_dsc_sha1": locator,
+        "dsc_sha256": catalog_dsc_sha256 or digest(dsc),
+        **({"immutable_dsc_fallback_url": descriptor_fallback_url} if descriptor_fallback_url else {}),
+        "source_files": [{"filename": member_name,
+                          "sha256": catalog_member_sha256 or digest(member_data),
+                          **({"fallback_url": fallback_url} if fallback_url else {})}],
+    }
+    urls = url_log if url_log is not None else []
+
+    def fake_fetch(url):
+        urls.append(url)
+        if url.endswith("/" + locator):
+            if descriptor_snapshot_error is not None:
+                raise descriptor_snapshot_error
+            return dsc
+        if url.endswith("/" + member_sha1):
+            if snapshot_error is not None:
+                raise snapshot_error
+            return member_data
+        if fallback_url and url == fallback_url:
+            return member_data if fallback_data is None else fallback_data
+        if descriptor_fallback_url and url == descriptor_fallback_url:
+            return dsc
+        raise AssertionError(f"unexpected immutable source URL: {url}")
+
+    def fake_run(args, **kwargs):
+        assert args[0] == "gpgv"
+        return SimpleNamespace(returncode=0 if descriptor_signature_ok else 1, stderr="", stdout="")
+
+    monkeypatch.setattr(preparer, "fetch", fake_fetch)
+    monkeypatch.setattr(preparer.subprocess, "run", fake_run)
+    result = acquire_group(entry, tmp_path, tmp_path / "keyring.gpg", {}, {})
+    return result, urls
+
+
+def test_immutable_member_uses_canonical_fallback_after_transient_snapshot_exhaustion(monkeypatch, tmp_path, capsys):
+    fallback_url = "https://deb.debian.org/debian/pool/main/d/demo/demo_1.orig.tar.xz"
+    result, urls = _acquire_immutable_fixture(
+        monkeypatch, tmp_path, fallback_url=fallback_url,
+        snapshot_error=TransientFetchError("synthetic first-byte timeout"),
+    )
+    assert len(result["files"]) == 1
+    assert urls[-2:] == [
+        "https://snapshot.debian.org/file/" + __import__("hashlib").sha1(b"exact source archive").hexdigest(),
+        fallback_url,
+    ]
+    assert "reason=transient-exhaustion" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("url", [
+    "http://deb.debian.org/debian/pool/main/d/demo/demo_1.orig.tar.xz",
+    "https://evil.example/debian/pool/main/d/demo/demo_1.orig.tar.xz",
+    "https://deb.debian.org/debian/pool/main/d/other.tar.xz",
+    "https://user" + "@deb.debian.org/debian/pool/main/d/demo/demo_1.orig.tar.xz",
+    "https://deb.debian.org/debian/pool/main/d/demo/demo_1.orig.tar.xz?x=1",
+])
+def test_canonical_fallback_url_is_limited_to_exact_debian_pool_member(url):
+    with pytest.raises(ValueError, match="exact HTTPS deb.debian.org pool URL"):
+        validate_canonical_fallback_url(url, "demo_1.orig.tar.xz")
+
+
+def test_canonical_fallback_accepts_epochless_official_filename_and_security_pool():
+    assert validate_canonical_fallback_url(
+        "https://deb.debian.org/debian/pool/main/a/attr/attr_2.5.2-3.dsc",
+        "attr_1:2.5.2-3.dsc",
+    )
+    assert validate_canonical_fallback_url(
+        "https://deb.debian.org/debian-security/pool/updates/main/l/linux/linux_6.12.115.orig.tar.xz",
+        "linux_6.12.115.orig.tar.xz",
+    )
+
+
+@pytest.mark.parametrize("failure", ["permanent-http", "certificate", "missing-fallback"])
+def test_immutable_member_does_not_fallback_for_permanent_or_unconfigured_failures(
+        monkeypatch, tmp_path, failure):
+    if failure == "permanent-http":
+        error = urllib.error.HTTPError("https://snapshot.debian.org/file/x", 404, "not found", {}, io.BytesIO())
+    elif failure == "certificate":
+        error = urllib.error.URLError(ssl.SSLCertVerificationError("bad certificate"))
+    else:
+        error = TransientFetchError("bounded retries exhausted")
+    fallback_url = "https://deb.debian.org/debian/pool/main/d/demo/demo_1.orig.tar.xz"
+    with pytest.raises((ValueError, urllib.error.URLError)):
+        _acquire_immutable_fixture(
+            monkeypatch, tmp_path, snapshot_error=error,
+            fallback_url=None if failure == "missing-fallback" else fallback_url,
+        )
+
+
+@pytest.mark.parametrize("bad_payload", [b"wrong payload length", b"other source archive"])
+def test_immutable_fallback_rejects_bytes_that_fail_signed_sha1_or_size(monkeypatch, tmp_path, bad_payload):
+    fallback_url = "https://deb.debian.org/debian/pool/main/d/demo/demo_1.orig.tar.xz"
+    with pytest.raises(ValueError, match="immutable locator SHA-1/size mismatch"):
+        _acquire_immutable_fixture(
+            monkeypatch, tmp_path, fallback_url=fallback_url,
+            snapshot_error=TransientFetchError("synthetic transient exhaustion"), fallback_data=bad_payload,
+        )
+
+
+def test_immutable_fallback_still_requires_original_catalog_sha256(monkeypatch, tmp_path):
+    fallback_url = "https://deb.debian.org/debian/pool/main/d/demo/demo_1.orig.tar.xz"
+    with pytest.raises(ValueError, match="catalog source-member set differs from signed .dsc"):
+        _acquire_immutable_fixture(
+            monkeypatch, tmp_path, fallback_url=fallback_url,
+            snapshot_error=TransientFetchError("synthetic transient exhaustion"),
+            catalog_member_sha256="0" * 64,
+        )
+
+
+def test_immutable_dsc_route_uses_only_file_urls_and_checks_members(monkeypatch, tmp_path):
+    result, urls = _acquire_immutable_fixture(monkeypatch, tmp_path)
+    assert len(result["files"]) == 1
+    assert all("snapshot.debian.org/file/" in url for url in urls)
+    assert not any("/mr/" in url for url in urls)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"source": "other"}, "identity differs"),
+        ({"descriptor_signature_ok": False}, "maintainer signature check failed"),
+        ({"member_size": 999}, "immutable locator SHA-1/size mismatch"),
+        ({"catalog_dsc_sha256": "0" * 64}, "exact .dsc differs from catalog"),
+        ({"descriptor_sha1": "0" * 40}, "immutable .dsc locator SHA-1 mismatch"),
+    ],
+)
+def test_immutable_dsc_route_rejects_unbound_inputs(monkeypatch, tmp_path, kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        _acquire_immutable_fixture(monkeypatch, tmp_path, **kwargs)
+
+
+def test_immutable_descriptor_uses_canonical_fallback_after_transient_exhaustion(monkeypatch, tmp_path, capsys):
+    descriptor_url = "https://deb.debian.org/debian/pool/main/d/demo/demo_1-1.dsc"
+    result, urls = _acquire_immutable_fixture(
+        monkeypatch, tmp_path, descriptor_fallback_url=descriptor_url,
+        descriptor_snapshot_error=TransientFetchError("synthetic exhausted transient Snapshot transport"),
+    )
+    assert len(result["files"]) == 1
+    assert urls[0].startswith("https://snapshot.debian.org/file/")
+    assert urls[1] == descriptor_url
+    assert "filename=demo_1-1.dsc from=debian-snapshot to=debian-canonical reason=transient-exhaustion" in capsys.readouterr().err
+
+
+def test_immutable_descriptor_transient_exhaustion_without_fallback_fails_closed(monkeypatch, tmp_path):
+    with pytest.raises(TransientFetchError, match="exhausted transient Snapshot transport"):
+        _acquire_immutable_fixture(
+            monkeypatch, tmp_path,
+            descriptor_snapshot_error=TransientFetchError("exhausted transient Snapshot transport"),
+        )
+
+
+@pytest.mark.parametrize("failure", ["permanent-http", "certificate"])
+def test_immutable_descriptor_does_not_fallback_for_permanent_or_certificate_failures(
+        monkeypatch, tmp_path, failure):
+    if failure == "permanent-http":
+        error = urllib.error.HTTPError("https://snapshot.debian.org/file/x", 404, "not found", {}, io.BytesIO())
+    else:
+        error = urllib.error.URLError(ssl.SSLCertVerificationError("bad certificate"))
+    fallback_url = "https://deb.debian.org/debian/pool/main/d/demo/demo_1-1.dsc"
+    calls = []
+    with pytest.raises((urllib.error.HTTPError, urllib.error.URLError)):
+        _acquire_immutable_fixture(
+            monkeypatch, tmp_path, descriptor_fallback_url=fallback_url,
+            descriptor_snapshot_error=error, url_log=calls,
+        )
+    assert len(calls) == 1
+    assert fallback_url not in calls
+
+
+@pytest.mark.parametrize(("kwargs", "message"), [
+    ({"descriptor_sha1": "0" * 40}, "immutable .dsc locator SHA-1 mismatch"),
+    ({"descriptor_signature_ok": False}, "maintainer signature check failed"),
+    ({"source": "other"}, "identity differs from catalog"),
+    ({"catalog_dsc_sha256": "0" * 64}, "exact .dsc differs from catalog"),
+])
+def test_immutable_descriptor_fallback_still_requires_original_authentication(
+        monkeypatch, tmp_path, kwargs, message):
+    fallback_url = "https://deb.debian.org/debian/pool/main/d/demo/demo_1-1.dsc"
+    calls = []
+    with pytest.raises(ValueError, match=message):
+        _acquire_immutable_fixture(
+            monkeypatch, tmp_path, descriptor_fallback_url=fallback_url,
+            descriptor_snapshot_error=TransientFetchError("synthetic exhausted transient Snapshot transport"),
+            url_log=calls,
+            **kwargs,
+        )
+    assert len(calls) == 2
+    assert calls[0].startswith("https://snapshot.debian.org/file/")
+    assert calls[1] == fallback_url
 
 
 def test_documented_direct_cli_starts_without_repository_pythonpath():
@@ -59,6 +316,136 @@ def test_signed_inrelease_uses_unique_sha256_section_row():
     duplicate = clear.replace("SHA512:", " " + "b" * 64 + " 12 main/source/Sources.xz\nSHA512:")
     with pytest.raises(ValueError, match="one complete SHA-256/size row"):
         release_sha256_row(duplicate, "main/source/Sources.xz")
+
+
+def test_fetch_retries_transient_http_statuses_with_bounded_backoff(monkeypatch, capsys):
+    url = "https://snapshot.debian.org/file/public-hash?signature=must-not-be-logged"
+    responses = [
+        urllib.error.HTTPError(url, 429, "rate limited", {}, io.BytesIO()),
+        urllib.error.HTTPError(url, 503, "unavailable", {}, io.BytesIO()),
+        urllib.error.HTTPError(url, 504, "gateway timeout", {}, io.BytesIO()),
+        io.BytesIO(b"verified source bytes"),
+    ]
+    sleeps = []
+    calls = []
+
+    def fake_open(request, timeout):
+        calls.append((request.full_url, timeout))
+        response = responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+    monkeypatch.setattr("tools.notices.prepare_release_sources.urllib.request.urlopen", fake_open)
+    monkeypatch.setattr("tools.notices.prepare_release_sources.time.sleep", sleeps.append)
+    assert fetch(url) == b"verified source bytes"
+    assert len(calls) == 4 and all(timeout == 90 for _url, timeout in calls)
+    assert sleeps == [1, 2, 4]
+    diagnostic = capsys.readouterr().err
+    assert "attempt=1/4 outcome=retry reason=http-429" in diagnostic
+    assert "attempt=2/4 outcome=retry reason=http-503" in diagnostic
+    assert "attempt=3/4 outcome=retry reason=http-504" in diagnostic
+    assert "attempt=4/4 outcome=success status=200 bytes=21" in diagnostic
+    assert "snapshot.debian.org/file/public-hash" in diagnostic
+    assert "must-not-be-logged" not in diagnostic
+
+
+def test_fetch_does_not_retry_permanent_http_or_tls_failures(monkeypatch, capsys):
+    calls = []
+
+    def missing(request, timeout):
+        calls.append(request.full_url)
+        raise urllib.error.HTTPError(request.full_url, 404, "not found", {}, io.BytesIO())
+
+    monkeypatch.setattr("tools.notices.prepare_release_sources.urllib.request.urlopen", missing)
+    with pytest.raises(urllib.error.HTTPError):
+        fetch("https://snapshot.debian.org/missing")
+    assert len(calls) == 1
+    assert capsys.readouterr().err == ""
+
+    server_error_calls = []
+
+    def server_error(request, timeout):
+        server_error_calls.append(request.full_url)
+        raise urllib.error.HTTPError(request.full_url, 500, "internal server error", {}, io.BytesIO())
+
+    monkeypatch.setattr("tools.notices.prepare_release_sources.urllib.request.urlopen", server_error)
+    with pytest.raises(urllib.error.HTTPError):
+        fetch("https://snapshot.debian.org/server-error")
+    assert len(server_error_calls) == 1
+
+    tls_calls = []
+
+    def bad_certificate(request, timeout):
+        tls_calls.append(request.full_url)
+        raise urllib.error.URLError(ssl.SSLCertVerificationError("certificate verification failed"))
+
+    monkeypatch.setattr("tools.notices.prepare_release_sources.urllib.request.urlopen", bad_certificate)
+    with pytest.raises(urllib.error.URLError):
+        fetch("https://snapshot.debian.org/tls-error")
+    assert len(tls_calls) == 1
+
+
+def test_canonical_fetch_rejects_redirects_outside_debian_host(monkeypatch):
+    class Redirected:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def geturl(self):
+            return "https://mirror.example/source.tar.xz"
+
+        def read(self):
+            return b"untrusted redirected bytes"
+
+    monkeypatch.setattr(
+        "tools.notices.prepare_release_sources.urllib.request.urlopen",
+        lambda _request, timeout: Redirected(),
+    )
+    with pytest.raises(ValueError, match="redirected outside the approved HTTPS host"):
+        fetch("https://deb.debian.org/debian/pool/main/d/demo/demo_1-1.dsc")
+
+
+def test_fetch_retries_transient_network_errors_then_fails_closed(monkeypatch, capsys):
+    calls = []
+    sleeps = []
+
+    def timeout(request, timeout):
+        calls.append(request.full_url)
+        raise urllib.error.URLError(socket.timeout("first byte timeout"))
+
+    monkeypatch.setattr("tools.notices.prepare_release_sources.urllib.request.urlopen", timeout)
+    monkeypatch.setattr("tools.notices.prepare_release_sources.time.sleep", sleeps.append)
+    with pytest.raises(ValueError, match="exhausted transient retries: TimeoutError"):
+        fetch("https://snapshot.debian.org/slow?token=must-not-be-logged")
+    assert len(calls) == 4
+    assert sleeps == [1, 2, 4]
+    diagnostic = capsys.readouterr().err
+    assert "attempt=4/4 outcome=exhausted reason=TimeoutError" in diagnostic
+    assert "snapshot.debian.org/slow" in diagnostic
+    assert "must-not-be-logged" not in diagnostic
+
+
+def test_fetch_retries_temporary_dns_failure(monkeypatch, capsys):
+    calls = []
+    sleeps = []
+
+    def temporary_dns(request, timeout):
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            raise urllib.error.URLError(socket.gaierror(socket.EAI_AGAIN, "temporary name resolution failure"))
+        return io.BytesIO(b"public input")
+
+    monkeypatch.setattr("tools.notices.prepare_release_sources.urllib.request.urlopen", temporary_dns)
+    monkeypatch.setattr("tools.notices.prepare_release_sources.time.sleep", sleeps.append)
+    assert fetch("https://snapshot.debian.org/retry") == b"public input"
+    assert len(calls) == 2
+    assert sleeps == [1]
+    assert "reason=dns-temporary" in capsys.readouterr().err
 
 
 def test_catalog_rejects_source_version_or_stanza_drift():

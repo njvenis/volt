@@ -30,3 +30,18 @@ class GitleaksPolicyTests(unittest.TestCase):
         self.assertTrue(any(re.search(pattern, line) for pattern in exception["regexes"]))
         changed = ("9" if checksum[0] != "9" else "0") + checksum[1:]
         self.assertFalse(any(re.search(pattern, line.replace(checksum, changed)) for pattern in exception["regexes"]))
+
+    def test_retired_ingress_probe_marker_exception_is_exact_and_rule_scoped(self):
+        root = Path(__file__).resolve().parents[2]
+        policy = tomllib.loads((root / "tools/release/gitleaks.toml").read_text())
+        marker = "volt-rc2-qualification-probe"
+        exception = next(row for row in policy["allowlists"] if "ingress-probe marker" in row["description"])
+        self.assertEqual(exception["condition"], "AND")
+        self.assertEqual(exception["targetRules"], ["generic-api-key"])
+        self.assertEqual(exception["paths"], [r"^tools/compose_release_qualification\.py$"])
+        self.assertEqual(exception["regexes"], [f"^{marker}$"])
+        self.assertTrue(re.search(exception["paths"][0], "tools/compose_release_qualification.py"))
+        self.assertFalse(re.search(exception["paths"][0], "tools/other.py"))
+        self.assertTrue(re.search(exception["regexes"][0], marker))
+        self.assertFalse(re.search(exception["regexes"][0], marker + "-changed"))
+        self.assertNotIn(marker, (root / "tools/compose_release_qualification.py").read_text())

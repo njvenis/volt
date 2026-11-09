@@ -1,6 +1,6 @@
 # Operations and troubleshooting
 
-This guide covers the disposable local preview. It is not a production operations runbook.
+This guide covers disposable local evaluation using the [RC2 Compose release](installation.md#rc2-compose-installation), the [historical RC1 launcher](installation.md#historical-rc1-launcher), or [a development source build](local-preview.md). It is not a production operations runbook. Preview examples below use the instance name `demo`; substitute `rc1` if following the historical RC1 launcher guide.
 
 ## Preview status and health
 
@@ -28,3 +28,6 @@ See the exact lifecycle and command sequence in [the local preview guide](local-
 The repository does not provide a general production backup/restore or upgrade procedure. The [backup/recovery contract](g7-backup-settings-contract.md), [preservation contract](g7-data-preservation-contract.md), and [upgrade/rollback delta](g7-upgrade-rollback-development-delta.md) are scoped development contracts and evidence references; use their stated status before treating them as operational instructions. Host observation and alerting guidance is likewise in development contracts: [observer settings](g7-observer-settings-contract.md), [host runtime](g7-observer-host-runtime.md), and [operational alerts](g7-operational-alert-contract.md). They do not establish production monitoring or recovery readiness.
 
 For development verification, use [RUNBOOK.md](../RUNBOOK.md). For vulnerability reporting status, see [SECURITY.md](../SECURITY.md).
+# Compose operations
+
+The source-free operator commands, owner-checked lifecycle and bounded cold backup/restore procedure are in [`deploy/compose/README.md`](../deploy/compose/README.md) and [`deploy/compose/backup-restore.md`](../deploy/compose/backup-restore.md). They are local evaluation guidance, not production backup or recovery evidence. The independently controlled G7 recovery contract remains authoritative.

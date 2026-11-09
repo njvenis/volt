@@ -171,7 +171,8 @@ def test_signed_index_bundle_binds_release_index_dsc_and_all_members(tmp_path, m
     class Result:
         returncode = 0
         stdout = ""
-        stderr = "gpgv: using RSA key " + "A" * 40 + "\ngpgv: Good signature"
+        stdout = "[GNUPG:] VALIDSIG " + "A" * 40 + " 2026-01-01"
+        stderr = "gpgv: Good signature"
     monkeypatch.setattr(MODULE.subprocess, "run", lambda *args, **kwargs: Result())
     keyring_hash = hashlib.sha256(keyring.read_bytes()).hexdigest()
     monkeypatch.setattr(MODULE, "INDEX_TRUST_ROOTS", {"fixture": (keyring_hash, ("A" * 40,))})
@@ -185,6 +186,48 @@ def test_signed_index_bundle_binds_release_index_dsc_and_all_members(tmp_path, m
     bundle["index_authentication"]["index_sha256"] = "0" * 64
     errors = MODULE.verify_signed_index_bundle(bundle, tmp_path, "sample", "1")
     assert errors == ["sample@1 signed-index index evidence is missing or corrupt"]
+
+
+def test_debian_archive_signer_allowlist_keeps_keyring_pin_and_rejects_unknown_key():
+    keyring_sha, _ = MODULE.INDEX_TRUST_ROOTS["debian-trixie-archive"]
+    signer = "[GNUPG:] VALIDSIG 89C87ACEA5DD6B8E6A7068808E9F831205B4BA95 2026-11-09"
+    assert MODULE.pinned_index_signer_matches("debian-trixie-archive", keyring_sha, signer)
+    assert not MODULE.pinned_index_signer_matches("debian-trixie-archive", keyring_sha, "[GNUPG:] VALIDSIG " + "A" * 40 + " 2026-11-09")
+    assert not MODULE.pinned_index_signer_matches("debian-trixie-archive", keyring_sha, "Good signature from 89C87ACEA5DD6B8E6A7068808E9F831205B4BA95")
+    assert not MODULE.pinned_index_signer_matches("debian-trixie-archive", "0" * 64, signer)
+    assert not MODULE.pinned_index_signer_matches("unknown-root", keyring_sha, signer)
+
+
+def test_signed_index_bundle_rejects_invalid_signature_from_allowlisted_signer(tmp_path, monkeypatch):
+    import gzip
+    source = tmp_path / "source.tar.xz"
+    source.write_bytes(b"source")
+    source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+    dsc = tmp_path / "sample_1.dsc"
+    dsc.write_text(f"Source: sample\nVersion: 1\nChecksums-Sha256:\n {source_sha} {source.stat().st_size} source.tar.xz\n")
+    dsc_sha = hashlib.sha256(dsc.read_bytes()).hexdigest()
+    index = tmp_path / "Sources.gz"
+    index.write_bytes(gzip.compress(f"Package: sample\nVersion: 1\nChecksums-Sha256:\n {dsc_sha} {dsc.stat().st_size} sample_1.dsc\n {source_sha} {source.stat().st_size} source.tar.xz\n".encode()))
+    index_sha = hashlib.sha256(index.read_bytes()).hexdigest()
+    inrelease = tmp_path / "InRelease"
+    inrelease.write_text(f"-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\nSHA256:\n {index_sha} {index.stat().st_size} main/source/Sources.gz\n-----BEGIN PGP SIGNATURE-----\nfake\n-----END PGP SIGNATURE-----\n")
+    keyring = tmp_path / "archive-keyring.gpg"
+    keyring.write_bytes(b"fixture keyring")
+    class InvalidSignature:
+        returncode = 1
+        stdout = ""
+        stderr = "gpgv: BAD signature from 89C87ACEA5DD6B8E6A7068808E9F831205B4BA95"
+    monkeypatch.setattr(MODULE.subprocess, "run", lambda *args, **kwargs: InvalidSignature())
+    trust_sha = hashlib.sha256(keyring.read_bytes()).hexdigest()
+    monkeypatch.setattr(MODULE, "INDEX_TRUST_ROOTS", {"debian-trixie-archive": (trust_sha, ("89C87ACEA5DD6B8E6A7068808E9F831205B4BA95",))})
+    bundle = {"signed_dsc_path": dsc.name, "signed_dsc_sha256": dsc_sha,
+              "files": [{"path": source.name, "filename": source.name, "sha256": source_sha}],
+              "index_authentication": {"trust_root": "debian-trixie-archive", "inrelease_path": inrelease.name,
+                  "inrelease_sha256": hashlib.sha256(inrelease.read_bytes()).hexdigest(), "index_path": index.name,
+                  "index_sha256": index_sha, "index_size": index.stat().st_size, "index_release_path": "main/source/Sources.gz",
+                  "keyring_path": keyring.name, "keyring_sha256": trust_sha}}
+    assert MODULE.verify_signed_index_bundle(bundle, tmp_path, "sample", "1") == [
+        "sample@1 signed-index InRelease signature verification failed"]
 
 
 def test_disposition_evidence_relative_paths_resolve_from_json_directory(tmp_path):

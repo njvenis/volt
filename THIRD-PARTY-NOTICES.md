@@ -6,6 +6,10 @@ The [RC1 release](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.1) incl
 
 The notices below describe source dependencies. Every new or modified image needs a fresh image-specific inventory and verification under [the notice collection procedure](docs/third-party-notices.md); RC1 evidence does not cover arbitrary rebuilds.
 
+## DefectDojo CE global OAuthlib 4.0.1
+
+The pinned DefectDojo CE runtime image provides OAuthlib globally for CE's `requests-oauthlib` dependency. The G7 runtime pins this CE-global distribution to OAuthlib 4.0.1, separately from the UVM virtual environment, using the exact PyPI wheel digest recorded in [`docker/g7/versions.lock`](docker/g7/versions.lock). The wheel's PyPI publish provenance is recorded at the corresponding PyPI Integrity API URL in that lock. The release's exact BSD 3-Clause license text is included in [`third-party/notices/OAUTHLIB-4.0.1-BSD-3-Clause.txt`](third-party/notices/OAUTHLIB-4.0.1-BSD-3-Clause.txt); the text is byte-identical in the hash-verified 4.0.1 wheel and source archive.
+
 ## Valkey
 
 The optional single-container packaging build uses Valkey 9.1.2 from the pinned `valkey/valkey:9.1.2-alpine` container image. The upstream release is identified by [Valkey's release page](https://valkey.io/download/). The build copies the Valkey server, command-line client and required musl/OpenSSL runtime libraries into the final image. Valkey's upstream license is BSD 3-Clause; its source tree identifies copyright as 2024-present Valkey contributors and 2006-2020 Redis Ltd ([Valkey 9.1.2 COPYING](https://github.com/valkey-io/valkey/blob/9.1.2/COPYING)).

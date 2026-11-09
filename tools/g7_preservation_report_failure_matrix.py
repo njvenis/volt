@@ -216,8 +216,6 @@ def main() -> int:
             swap.write_bytes(negative_bytes); swap.chmod(0o644); os.replace(swap, report_path)
             try:
                 env = dict(os.environ)
-                env["PLAYWRIGHT_BROWSERS_PATH"] = "/home/nicho/.cache/ms-playwright"
-                env["CHROMIUM_EXECUTABLE_PATH"] = "/home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome"
                 command = ["node", str(Path(__file__).with_suffix(".mjs")),
                     "--origin", args.origin, "--storage-state", args.storage_state,
                     "--expect", str(expected_path), "--output", str(output_path)]

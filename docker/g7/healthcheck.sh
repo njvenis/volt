@@ -27,7 +27,10 @@ pg_isready -q -h 127.0.0.1 -p 5432 -U postgres
 valkey-cli -h 127.0.0.1 -p 6379 ping | grep -qx PONG
 curl --fail --silent --show-error http://127.0.0.1:8000/openapi.json >/dev/null
 if [ "$mode" = runtime ] && [ "${UVM_AUTH_MODE:-bearer}" = oidc ]; then
-  curl --fail --silent --show-error "http://127.0.0.1:${UVM_OIDC_PROVIDER_PORT:-9000}/healthz" >/dev/null
+  if [ "${UVM_OIDC_DEPLOYMENT_MODE:-demo}" = demo ]; then
+    curl --fail --silent --show-error "http://127.0.0.1:${UVM_OIDC_PROVIDER_PORT:-9000}/healthz" >/dev/null
+  fi
+  curl --fail --silent --show-error http://127.0.0.1:8001/healthz >/dev/null
 fi
 if [ "$mode" = verification ]; then
   status=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8081/api/v2/findings/)

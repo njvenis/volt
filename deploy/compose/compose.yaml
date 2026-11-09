@@ -1,0 +1,109 @@
+name: ${VOLT_PROJECT:-volt-compose}
+services:
+  volt:
+    image: ${VOLT_IMAGE:?initialize with an explicitly built compatible image}
+    platform: linux/amd64
+    restart: unless-stopped
+    stop_grace_period: 10m
+    init: true
+    security_opt: [no-new-privileges:true]
+    ports:
+      - "127.0.0.1:${VOLT_HTTP_PORT:-8180}:8000"
+      - "127.0.0.1:${VOLT_RECOVERY_PORT:-8181}:8002"
+    environment:
+      DD_ADMIN_USER: admin
+      DD_ADMIN_MAIL: admin@localhost.invalid
+      DD_ALLOWED_HOSTS: ${VOLT_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      DD_INITIALIZE: "true"
+      UVM_AUTH_MODE: oidc
+      UVM_OIDC_DEPLOYMENT_MODE: external
+      UVM_OIDC_CONFIG_FILE: /etc/volt/oidc.json
+      UVM_G3_BOOTSTRAP_PRINCIPAL: ${VOLT_BOOTSTRAP_PRINCIPAL:-}
+      UVM_NATIVE_BOOTSTRAP_PRINCIPALS: ${VOLT_BOOTSTRAP_PRINCIPAL:-}
+      UVM_NATIVE_GRANTABLE_ENVELOPE: ${VOLT_NATIVE_GRANTABLE_ENVELOPE:?run setup first}
+      UVM_G7_RECOVERY_TLS_CERT_FILE: /run/secrets/recovery-server.crt
+      UVM_G7_RECOVERY_TLS_KEY_FILE: /run/secrets/recovery-server.key
+      UVM_G7_RECOVERY_TLS_CA_FILE: /run/secrets/recovery-ca.crt
+      UVM_INGRESS_ALLOWED_PEER_CIDRS: 127.0.0.1/32,${VOLT_GATEWAY:?run setup first}/32
+      UVM_INGRESS_ALLOWED_HOSTS: ${VOLT_ALLOWED_HOSTS:-localhost,127.0.0.1}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+      - media:/app/media
+      - state:/opt/uvm/state
+      - ${VOLT_INSTANCE_DIR:?run setup first}/oidc.json:/etc/volt/oidc.json:ro
+    secrets:
+      - uvm_db_password
+      - ce_db_password
+      - ce_admin_password
+      - ce_secret_key
+      - ce_credential_key
+      - uvm_cursor_secret
+      - oidc_client_secret
+      - oidc_sync_secret
+      - oidc_operator_secret
+      - recovery-server.crt
+      - recovery-server.key
+      - recovery-ca.crt
+    networks: [application]
+    healthcheck:
+      test: [CMD, /usr/local/bin/uvm-g7-healthcheck]
+      interval: 10s
+      timeout: 4s
+      start_period: 180s
+      retries: 3
+    labels:
+      org.opencontainers.image.title: VOLT
+      volt.installation.mode: external-oidc
+      volt.compose.image-id: ${VOLT_IMAGE_ID:?run setup first}
+      volt.compose.owner-token: ${VOLT_OWNER_TOKEN:?run setup first}
+
+volumes:
+  postgres:
+    name: ${VOLT_PROJECT:-volt-compose}_postgres
+    labels:
+      volt.compose.owner-token: ${VOLT_OWNER_TOKEN:?run setup first}
+  media:
+    name: ${VOLT_PROJECT:-volt-compose}_media
+    labels:
+      volt.compose.owner-token: ${VOLT_OWNER_TOKEN:?run setup first}
+  state:
+    name: ${VOLT_PROJECT:-volt-compose}_state
+    labels:
+      volt.compose.owner-token: ${VOLT_OWNER_TOKEN:?run setup first}
+
+networks:
+  application:
+    name: ${VOLT_PROJECT:-volt-compose}_network
+    driver: bridge
+    labels:
+      volt.compose.owner-token: ${VOLT_OWNER_TOKEN:?run setup first}
+    ipam:
+      config:
+        - subnet: ${VOLT_SUBNET:?run setup first}
+          gateway: ${VOLT_GATEWAY:?run setup first}
+
+secrets:
+  uvm_db_password:
+    file: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/uvm_db_password
+  ce_db_password:
+    file: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/ce_db_password
+  ce_admin_password:
+    file: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/ce_admin_password
+  ce_secret_key:
+    file: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/ce_secret_key
+  ce_credential_key:
+    file: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/ce_credential_key
+  uvm_cursor_secret:
+    file: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/uvm_cursor_secret
+  oidc_client_secret:
+    file: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/oidc_client_secret
+  oidc_sync_secret:
+    file: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/oidc_sync_secret
+  oidc_operator_secret:
+    file: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/oidc_operator_secret
+  recovery-server.crt:
+    file: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/recovery-server.crt
+  recovery-server.key:
+    file: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/recovery-server.key
+  recovery-ca.crt:
+    file: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/recovery-ca.crt

@@ -20,7 +20,8 @@ def statement_rows(raw: str) -> list[dict]:
         rows.append(statement)
     return rows
 
-def verify(cosign: str, digest: str, source: str, image_id: str, spdx: Path, provenance: Path, notice_manifest: Path) -> None:
+def verify(cosign: str, digest: str, source: str, image_id: str, spdx: Path, provenance: Path,
+           notice_manifest: Path, controller_commit: str | None = None) -> None:
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or not re.fullmatch(r"[0-9a-f]{40}", source): raise ValueError("immutable registry digest or source commit is malformed")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id): raise ValueError("image config ID is malformed")
     notice = json.loads(notice_manifest.read_text())
@@ -43,12 +44,12 @@ def verify(cosign: str, digest: str, source: str, image_id: str, spdx: Path, pro
     if not any(subject_matches(row) and row.get("predicateType") == "https://spdx.dev/Document" and row.get("predicate") == expected_spdx for row in spdx_rows):
         raise ValueError("verified SPDX attestation does not match the release SBOM and registry digest")
     expected_prov = json.loads(provenance.read_text())
-    provenance_validator.validate(expected_prov, source)
+    provenance_validator.validate(expected_prov, source, expected_controller_commit=controller_commit)
     def provenance_matches(row: dict) -> bool:
         predicate = row.get("predicate")
         if not isinstance(predicate, dict): return False
         try:
-            provenance_validator.validate(predicate, source)
+            provenance_validator.validate(predicate, source, expected_controller_commit=controller_commit)
         except ValueError:
             return False
         return subject_matches(row) and row.get("predicateType") == "https://slsa.dev/provenance/v1" and predicate == expected_prov
@@ -56,7 +57,7 @@ def verify(cosign: str, digest: str, source: str, image_id: str, spdx: Path, pro
         raise ValueError("verified provenance attestation does not match the exact source commit and registry digest")
 
 def main() -> int:
-    p=argparse.ArgumentParser(); p.add_argument("--cosign",required=True); p.add_argument("--digest",required=True); p.add_argument("--source",required=True); p.add_argument("--image-id",required=True); p.add_argument("--spdx",type=Path,required=True); p.add_argument("--provenance",type=Path,required=True); p.add_argument("--notice-manifest",type=Path,required=True); a=p.parse_args()
-    try: verify(a.cosign,a.digest,a.source,a.image_id,a.spdx,a.provenance,a.notice_manifest); print(f"verified registry signature, SPDX and provenance for {REPO}@{a.digest}"); return 0
+    p=argparse.ArgumentParser(); p.add_argument("--cosign",required=True); p.add_argument("--digest",required=True); p.add_argument("--source",required=True); p.add_argument("--image-id",required=True); p.add_argument("--spdx",type=Path,required=True); p.add_argument("--provenance",type=Path,required=True); p.add_argument("--notice-manifest",type=Path,required=True); p.add_argument("--controller-commit"); a=p.parse_args()
+    try: verify(a.cosign,a.digest,a.source,a.image_id,a.spdx,a.provenance,a.notice_manifest,a.controller_commit); print(f"verified registry signature, SPDX and provenance for {REPO}@{a.digest}"); return 0
     except (OSError,ValueError,subprocess.CalledProcessError,json.JSONDecodeError) as exc: print(f"publication verification failed: {exc}",file=sys.stderr); return 2
 if __name__ == "__main__": raise SystemExit(main())

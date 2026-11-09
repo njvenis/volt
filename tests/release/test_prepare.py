@@ -1,4 +1,5 @@
 import json
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -26,7 +27,7 @@ class PreparationPolicyTests(unittest.TestCase):
             notices.mkdir()
             wrong = self.run_prepare("--version", "0.1.0", "--source", source, "--notices", notices, "--image-id", "sha256:" + "a" * 64)
             self.assertNotEqual(wrong.returncode, 0)
-            missing = self.run_prepare("--version", "0.1.0-rc.1", "--source", source, "--notices", notices, "--image-id", "sha256:" + "a" * 64)
+            missing = self.run_prepare("--version", "0.1.0-rc.2", "--source", source, "--notices", notices, "--image-id", "sha256:" + "a" * 64)
             self.assertNotEqual(missing.returncode, 0)
             self.assertIn("SBOMs", missing.stderr)
 
@@ -41,7 +42,7 @@ class PreparationPolicyTests(unittest.TestCase):
                 "advisory": "CVE-2099-0001", "package": "sample", "version": "1.0",
                 "rationale": "fixture", "owner": "maintainer", "approval": "review-1", "expires": "2099-02-01"
             }]}))
-            result = self.run_prepare("--version", "0.1.0-rc.1", "--source", source, "--notices", notices,
+            result = self.run_prepare("--version", "0.1.0-rc.2", "--source", source, "--notices", notices,
                                       "--exception", exception, "--at", "2099-01-01", "--image-id", "sha256:" + "a" * 64)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("within 30 days", result.stderr)
@@ -57,7 +58,7 @@ class PreparationPolicyTests(unittest.TestCase):
                 "advisory": "CVE-2099-0001", "package": "sample", "version": "1.0",
                 "rationale": "fixture", "owner": "maintainer", "approval": "review-1", "expires": "2098-12-31"
             }]}))
-            result = self.run_prepare("--version", "0.1.0-rc.1", "--source", source, "--notices", notices,
+            result = self.run_prepare("--version", "0.1.0-rc.2", "--source", source, "--notices", notices,
                                       "--exception", exception, "--at", "2099-01-01", "--image-id", "sha256:" + "a" * 64)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("within 30 days", result.stderr)
@@ -75,14 +76,18 @@ class PreparationPolicyTests(unittest.TestCase):
     def run_with_dependencies(self, source, notices, image_id, commit):
         real_run = subprocess.run
         calls = []
-        image = [{"Id": image_id, "Config": {"Labels": {"org.opencontainers.image.revision": commit, "org.opencontainers.image.version": "0.1.0-rc.1"}}}]
+        source_archive = subprocess.check_output(["git", "-C", str(source), "archive", "--format=tar", "HEAD"])
+        snapshot = "sha256:" + hashlib.sha256(source_archive).hexdigest()
+        image = [{"Id": image_id, "Config": {"Labels": {"org.opencontainers.image.revision": commit,
+            "org.opencontainers.image.version": "0.1.0-rc.2", "org.volt.oidc-deployment-modes": "demo,external",
+            "org.volt.compose-install.contract": "1", "org.volt.compose.source-snapshot": snapshot}}}]
         def run(command, *args, **kwargs):
             calls.append((command, kwargs))
             if "verify.py" in str(command): return SimpleNamespace(returncode=0, stdout="", stderr="")
             if command[:3] == ["docker", "image", "inspect"]: return SimpleNamespace(returncode=0, stdout=json.dumps(image), stderr="")
             return real_run(command, *args, **kwargs)
         with patch.object(prepare.subprocess, "run", side_effect=run):
-            with patch.object(sys, "argv", [str(SCRIPT), "--version", "0.1.0-rc.1", "--source", str(source), "--notices", str(notices), "--image-id", image_id, "--docker", "docker"]):
+            with patch.object(sys, "argv", [str(SCRIPT), "--version", "0.1.0-rc.2", "--source", str(source), "--notices", str(notices), "--image-id", image_id, "--docker", "docker"]):
                 result = prepare.main()
         return result, calls
 
@@ -109,13 +114,13 @@ class PreparationPolicyTests(unittest.TestCase):
             real_run=subprocess.run
             def run(command,*args,**kwargs):
                 if "verify.py" in str(command): return SimpleNamespace(returncode=0,stdout="",stderr="")
-                if command[:3]==["docker","image","inspect"]: return SimpleNamespace(returncode=0,stdout=json.dumps([{"Id":image_id,"Config":{"Labels":{"org.opencontainers.image.revision":commit,"org.opencontainers.image.version":"0.1.0-rc.1"}}}]),stderr="")
+                if command[:3]==["docker","image","inspect"]: return SimpleNamespace(returncode=0,stdout=json.dumps([{"Id":image_id,"Config":{"Labels":{"org.opencontainers.image.revision":commit,"org.opencontainers.image.version":"0.1.0-rc.2"}}}]),stderr="")
                 return real_run(command,*args,**kwargs)
-            argv=[str(SCRIPT),"--version","0.1.0-rc.1","--source",str(source),"--notices",str(notices),"--image-id",image_id]
+            argv=[str(SCRIPT),"--version","0.1.0-rc.2","--source",str(source),"--notices",str(notices),"--image-id",image_id]
             with patch.object(prepare.subprocess,"run",side_effect=run),patch.object(sys,"argv",argv):
                 with self.assertRaises(SystemExit): prepare.main()
             subprocess.run(["git","-C",str(source),"checkout","main"],check=True,capture_output=True)
-            subprocess.run(["git","-C",str(source),"tag","v0.1.0-rc.1"],check=True)
+            subprocess.run(["git","-C",str(source),"tag","v0.1.0-rc.2"],check=True)
             with patch.object(prepare.subprocess,"run",side_effect=run),patch.object(sys,"argv",argv):
                 with self.assertRaises(SystemExit): prepare.main()
 
@@ -126,9 +131,9 @@ class PreparationPolicyTests(unittest.TestCase):
             image_id="sha256:"+"a"*64; real_run=subprocess.run
             def run(command,*args,**kwargs):
                 if "verify.py" in str(command): return SimpleNamespace(returncode=0,stdout="",stderr="")
-                if command[:3]==["docker","image","inspect"]: return SimpleNamespace(returncode=0,stdout=json.dumps([{"Id":image_id,"Config":{"Labels":{"org.opencontainers.image.revision":"b"*40,"org.opencontainers.image.version":"0.1.0-rc.1"}}}]),stderr="")
+                if command[:3]==["docker","image","inspect"]: return SimpleNamespace(returncode=0,stdout=json.dumps([{"Id":image_id,"Config":{"Labels":{"org.opencontainers.image.revision":"b"*40,"org.opencontainers.image.version":"0.1.0-rc.2"}}}]),stderr="")
                 return real_run(command,*args,**kwargs)
-            argv=[str(SCRIPT),"--version","0.1.0-rc.1","--source",str(source),"--notices",str(notices),"--image-id",image_id]
+            argv=[str(SCRIPT),"--version","0.1.0-rc.2","--source",str(source),"--notices",str(notices),"--image-id",image_id]
             with patch.object(prepare.subprocess,"run",side_effect=run),patch.object(sys,"argv",argv):
                 with self.assertRaises(SystemExit): prepare.main()
 
@@ -144,7 +149,7 @@ class PreparationPolicyTests(unittest.TestCase):
                 if "verify.py" in str(command): return SimpleNamespace(returncode=0,stdout="",stderr="")
                 if command[:3] == ["docker", "image", "inspect"]: return SimpleNamespace(returncode=0,stdout="[]",stderr="")
                 return real_run(command,*args,**kwargs)
-            with patch.object(prepare.subprocess,"run",side_effect=run), patch.object(sys,"argv",[str(SCRIPT),"--version","0.1.0-rc.1","--source",str(unrelated),"--notices",str(notices),"--image-id",image_id]):
+            with patch.object(prepare.subprocess,"run",side_effect=run), patch.object(sys,"argv",[str(SCRIPT),"--version","0.1.0-rc.2","--source",str(unrelated),"--notices",str(notices),"--image-id",image_id]):
                 with self.assertRaises(subprocess.CalledProcessError): prepare.main()
             self.assertTrue(any(command[:3] == ["git", "-C", str(unrelated.resolve())] for command in calls))
 

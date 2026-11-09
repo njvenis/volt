@@ -19,7 +19,10 @@ import zlib
 
 import provenance as provenance_validator
 
-EXPECTED_VERSION = "0.1.0-rc.1"
+EXPECTED_VERSION = "0.1.0-rc.2"
+SUPPORTED_ARCHIVE_VERSIONS = {"0.1.0-rc.1", EXPECTED_VERSION}
+COMPOSE_BUNDLE_FILES = ("VERSION", "README.md", "backup-restore.md", "compose.yaml", "demo.yaml",
+                        "compose.env.example", "oidc.example.json", "setup.py")
 EXPECTED_PLATFORM = "linux/amd64"
 EXPECTED_IDENTITY = "https://github.com/njvenis/volt/.github/workflows/release.yml@refs/heads/main"
 EXPECTED_ISSUER = "https://token.actions.githubusercontent.com"
@@ -34,14 +37,58 @@ def sha(path: Path) -> str:
     return h.hexdigest()
 
 
+def verify_compose_bundle(bundle: Path, version: str, registry_digest: str,
+                          source_root: Path | None = None) -> None:
+    expected_ref = f"ghcr.io/njvenis/volt@{registry_digest}"
+    if not re.fullmatch(r"ghcr\.io/njvenis/volt@sha256:[0-9a-f]{64}", expected_ref):
+        raise ValueError("Compose bundle requires the exact published VOLT image digest")
+    checksum_path = bundle.with_suffix(bundle.suffix + ".sha256")
+    if not checksum_path.is_file() or checksum_path.read_text() != f"{sha(bundle)}  {bundle.name}\n":
+        raise ValueError("Compose bundle checksum does not match its archive")
+    try:
+        with tarfile.open(bundle, "r:gz") as tf:
+            members = tf.getmembers()
+            names = [member.name for member in members]
+            root = f"volt-compose-{version}"
+            expected_names = {f"{root}/{name}" for name in (*COMPOSE_BUNDLE_FILES, "manifest.json")}
+            if (len(names) != len(set(names)) or set(names) != expected_names
+                    or any(not member.isfile() for member in members)):
+                raise ValueError("Compose bundle closed inventory or archive member types are invalid")
+            contents = {}
+            for member in members:
+                stream = tf.extractfile(member)
+                if stream is None:
+                    raise ValueError("Compose bundle member cannot be read")
+                contents[PurePosixPath(member.name).name] = stream.read()
+    except (OSError, tarfile.TarError) as exc:
+        raise ValueError("Compose bundle is not a readable gzip tar archive") from exc
+    try:
+        metadata = json.loads(contents["manifest.json"])
+    except (KeyError, json.JSONDecodeError) as exc:
+        raise ValueError("Compose bundle manifest is missing or malformed") from exc
+    actual_hashes = {name: hashlib.sha256(contents[name]).hexdigest() for name in COMPOSE_BUNDLE_FILES}
+    if (not isinstance(metadata, dict) or metadata.get("format_version") != 1
+            or metadata.get("bundle_version") != version or metadata.get("release_image") != expected_ref
+            or metadata.get("files") != actual_hashes or contents["VERSION"].decode().strip() != version
+            or expected_ref.encode() not in contents["README.md"]):
+        raise ValueError("Compose bundle version, image reference or signed file hashes are inconsistent")
+    if source_root is not None:
+        compose_source = source_root / "deploy" / "compose"
+        for name in COMPOSE_BUNDLE_FILES:
+            original = (compose_source / name).read_bytes()
+            expected = original.replace(b"VOLT_RELEASE_IMAGE_REFERENCE", expected_ref.encode())
+            if contents[name] != expected:
+                raise ValueError(f"Compose bundle source file differs from signed source, including digest substitution: {name}")
+
+
 def run(command: list[str]) -> None:
     subprocess.run(command, check=True)
 
 
 def build_manifest(directory: Path, version: str, source_sha: str, image_id: str,
                    platform: str, signer_identity: str, issuer: str, registry_digest: str) -> dict:
-    if version != EXPECTED_VERSION:
-        raise ValueError("only v0.1.0-rc.1 is approved")
+    if version not in SUPPORTED_ARCHIVE_VERSIONS:
+        raise ValueError("unsupported VOLT release archive version")
     if platform != EXPECTED_PLATFORM:
         raise ValueError("only linux/amd64 is approved")
     if len(source_sha) != 40 or any(c not in "0123456789abcdef" for c in source_sha):
@@ -50,9 +97,14 @@ def build_manifest(directory: Path, version: str, source_sha: str, image_id: str
         raise ValueError("image identity must be an immutable sha256 ID")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", registry_digest):
         raise ValueError("published OCI registry digest must be immutable")
+    source_snapshot = "sha256:" + sha(directory / "source.tar")
     required = ["image.tar", "source.tar", "sbom.syft.json", "sbom.spdx.json",
                 "release-scan.json", "VERIFY.txt", "provenance.json", "registry-digest.txt", "notice-manifest.json",
-                "source.bundle", "tools-g7-local-preview.py", "launcher-guide.txt"]
+                "source.bundle"]
+    if version == EXPECTED_VERSION:
+        required += ["volt-compose.tar.gz", "volt-compose.tar.gz.sha256"]
+    else:
+        required += ["tools-g7-local-preview.py", "launcher-guide.txt"]
     for name in required:
         if not (directory / name).is_file():
             raise ValueError(f"required offline release file missing: {name}")
@@ -67,9 +119,12 @@ def build_manifest(directory: Path, version: str, source_sha: str, image_id: str
         inventory[rel] = sha(path)
     if signer_identity != EXPECTED_IDENTITY or issuer != EXPECTED_ISSUER:
         raise ValueError("release signer must be the main-branch publication workflow with GitHub OIDC")
+    if version == EXPECTED_VERSION:
+        verify_compose_bundle(directory / "volt-compose.tar.gz", version, registry_digest)
     manifest = {
         "schema": "volt-offline-release/v1", "version": version,
         "source_commit": source_sha, "image_id": image_id, "platform": platform,
+        "source_snapshot": source_snapshot,
         "registry_digest": registry_digest,
         "signer_identity": signer_identity, "oidc_issuer": issuer,
         "files": inventory,
@@ -130,6 +185,27 @@ def _uncompressed_layer_digest(data: bytes, media: str | None) -> str:
     except (OSError, EOFError, zlib.error) as exc:
         raise ValueError(f"image layer decompression failed: {exc}") from exc
     return "sha256:" + digest.hexdigest()
+
+
+def _reject_rc2_snakeoil_key(data: bytes, media: str | None = None) -> None:
+    """Reject Debian's generated TLS private key in an RC2 image layer."""
+    if media and ("+zstd" in media or media.endswith(".zstd")):
+        stream_context = tempfile.TemporaryFile()
+        subprocess.run(["zstd", "-q", "-d", "-c"], input=data, stdout=stream_context,
+                       stderr=subprocess.PIPE, check=True)
+        stream_context.seek(0)
+    elif media and ("+gzip" in media or media.endswith(".gzip")) or data.startswith(b"\x1f\x8b"):
+        stream_context = gzip.GzipFile(fileobj=io.BytesIO(data))
+    else:
+        stream_context = io.BytesIO(data)
+    try:
+        with stream_context, tarfile.open(fileobj=stream_context, mode="r:") as layer:
+            for member in layer:
+                parts = tuple(part for part in PurePosixPath(member.name).parts if part not in {"", "."})
+                if parts == ("etc", "ssl", "private", "ssl-cert-snakeoil.key"):
+                    raise ValueError("RC2 image layer contains a generated TLS private key")
+    except tarfile.TarError as exc:
+        raise ValueError("RC2 image layer is not a readable tar archive") from exc
 
 
 def _validate_oci(tf: tarfile.TarFile, members: dict, manifest: dict) -> dict:
@@ -232,6 +308,8 @@ def _validate_oci(tf: tarfile.TarFile, members: dict, manifest: dict) -> dict:
         used.add(layer_path)
         if not isinstance(diff_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", diff_id) or _uncompressed_layer_digest(compressed, media) != diff_id:
             raise ValueError("OCI uncompressed layer diff ID disagrees with config")
+        if manifest.get("version") == EXPECTED_VERSION:
+            _reject_rc2_snakeoil_key(compressed, media)
     compat_rows = json.loads(_member_bytes(tf, members, "manifest.json"))
     if not isinstance(compat_rows, list) or len(compat_rows) != 1 or not isinstance(compat_rows[0], dict):
         raise ValueError("OCI Docker-compatibility manifest must select exactly one image")
@@ -242,12 +320,27 @@ def _validate_oci(tf: tarfile.TarFile, members: dict, manifest: dict) -> dict:
     if not isinstance(compat_ref, list) or len(compat_ref) != 1 or not isinstance(compat_ref[0], str):
         raise ValueError("OCI Docker-compatibility manifest must contain exactly one import tag")
     image_ref = next(iter(image_refs))
-    if image_ref != compat_ref[0] and not image_ref.endswith("/" + compat_ref[0]):
+    if image_ref not in {compat_ref[0], "docker.io/library/" + compat_ref[0]}:
         raise ValueError("OCI image reference disagrees with Docker-compatibility import tag")
     used.add("manifest.json")
     unexpected = set(members) - used
-    if unexpected:
+    if "repositories" in unexpected:
+        try:
+            repositories = json.loads(_member_bytes(tf, members, "repositories"))
+        except json.JSONDecodeError as exc:
+            raise ValueError("OCI Docker-compatibility repositories map is malformed") from exc
+        image_name, _, image_tag = compat_ref[0].rpartition(":")
+        image_name = image_name.rsplit("/", 1)[-1]
+        if (not image_name or not image_tag or not diff_ids
+                or repositories != {image_name: {image_tag: diff_ids[-1].removeprefix("sha256:")}}):
+            raise ValueError("OCI Docker-compatibility repositories map disagrees with selected image")
+        used.add("repositories")
+        unexpected.remove("repositories")
+    non_blob_extras = {name for name in unexpected if not name.startswith("blobs/sha256/")}
+    if non_blob_extras:
         raise ValueError("OCI archive contains unreferenced image blobs")
+    if unexpected:
+        _validate_exporter_layer_metadata(tf, members, unexpected, diff_ids, config)
     if manifest.get("image_id") not in {image_id, config_digest}:
         raise ValueError(f"OCI image/index ID disagrees with signed identity: {manifest.get('image_id')} != {image_id} or {config_digest}")
     if manifest.get("image_config_id") not in {None, config_digest}:
@@ -261,6 +354,160 @@ def _check_image_labels(config: dict, manifest: dict) -> None:
     labels = config.get("config", {}).get("Labels") or {}
     if labels.get("org.opencontainers.image.revision") != manifest.get("source_commit") or labels.get("org.opencontainers.image.version") != manifest.get("version"):
         raise ValueError("image labels disagree with signed source/version")
+    if manifest.get("version") == EXPECTED_VERSION and (labels.get("org.volt.oidc-deployment-modes") != "demo,external"
+            or labels.get("org.volt.compose-install.contract") != "1"
+            or labels.get("org.volt.compose.source-snapshot") != manifest.get("source_snapshot")):
+        raise ValueError("image lacks the required Compose capability or source snapshot binding")
+
+
+def _raw_json_object_fields(raw: bytes) -> dict[str, bytes]:
+    """Return exact encoded values from one JSON object without reserializing children."""
+    try:
+        text = raw.decode("utf-8")
+        decoder = json.JSONDecoder()
+        offset = 1
+        fields = {}
+        while True:
+            while text[offset].isspace() or text[offset] == ",":
+                offset += 1
+            if text[offset] == "}":
+                return fields
+            key, offset = decoder.raw_decode(text, offset)
+            if not isinstance(key, str):
+                raise ValueError("legacy exporter metadata key is malformed")
+            while text[offset].isspace():
+                offset += 1
+            if text[offset] != ":":
+                raise ValueError("legacy exporter metadata object is malformed")
+            offset += 1
+            while text[offset].isspace():
+                offset += 1
+            start = offset
+            _value, offset = decoder.raw_decode(text, offset)
+            fields[key] = text[start:offset].encode("utf-8")
+    except (UnicodeDecodeError, json.JSONDecodeError, IndexError) as exc:
+        raise ValueError("legacy exporter metadata object is malformed") from exc
+
+
+def _docker_config_equivalent(legacy: object, selected: object) -> bool:
+    if not isinstance(legacy, dict) or not isinstance(selected, dict):
+        return False
+    zero_values = {
+        "Hostname": "", "Domainname": "", "User": "", "AttachStdin": False,
+        "AttachStdout": False, "AttachStderr": False, "Tty": False,
+        "OpenStdin": False, "StdinOnce": False, "Env": None, "Cmd": None,
+        "Image": "", "Volumes": None, "WorkingDir": "", "Entrypoint": None,
+        "OnBuild": None, "Labels": None,
+    }
+    keys = set(legacy) | set(selected)
+    for key in keys:
+        if key in legacy and key in selected:
+            if legacy[key] != selected[key]:
+                return False
+        elif key not in zero_values or legacy.get(key, selected.get(key)) != zero_values[key]:
+            return False
+    return True
+
+
+def _validate_exporter_layer_metadata(tf: tarfile.TarFile, members: dict, extras: set[str],
+                                     diff_ids: list, config: dict) -> None:
+    """Validate Moby docker-save v1 IDs against the selected ordered layer chain."""
+    if len(extras) != len(diff_ids) or not diff_ids:
+        raise ValueError("OCI archive contains unreferenced image blobs")
+    records: dict[str, tuple[dict, bytes]] = {}
+    for name in extras:
+        digest = name.removeprefix("blobs/sha256/")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("OCI archive contains unsupported unreferenced image blobs")
+        raw = _member_bytes(tf, members, name)
+        if hashlib.sha256(raw).hexdigest() != digest:
+            raise ValueError("OCI exporter metadata content address mismatch")
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("OCI exporter layer metadata is malformed") from exc
+        layer_id = record.get("id") if isinstance(record, dict) else None
+        if not isinstance(layer_id, str) or not re.fullmatch(r"[0-9a-f]{64}", layer_id):
+            raise ValueError("OCI exporter layer metadata identity is malformed")
+        if layer_id in records:
+            raise ValueError("OCI exporter layer metadata contains duplicate identities")
+        parent = record.get("parent")
+        if parent is not None and (not isinstance(parent, str) or not re.fullmatch(r"[0-9a-f]{64}", parent)):
+            raise ValueError("OCI exporter layer metadata parent is malformed")
+        if (not isinstance(record.get("created"), str) or record.get("os") != "linux"
+                or not isinstance(record.get("container_config"), dict)):
+            raise ValueError("OCI exporter layer metadata has unsupported fields")
+        allowed = {"id", "created", "container_config", "os"}
+        if "parent" in record:
+            allowed.add("parent")
+        if "config" in record:
+            allowed |= {"config", "architecture"}
+            legacy_config = record.get("config")
+            if (not isinstance(legacy_config, dict) or record.get("architecture") != config.get("architecture")
+                    or record.get("os") != config.get("os")
+                    or (legacy_config.get("Labels") or {}) != (config.get("config", {}).get("Labels") or {})):
+                raise ValueError("OCI exporter final layer metadata disagrees with image config")
+        if set(record) != allowed:
+            raise ValueError("OCI exporter layer metadata has unsupported fields")
+        if record["container_config"] != _docker_zero_container_config():
+            raise ValueError("OCI exporter container_config is not the supported zero-value form")
+        records[layer_id] = (record, raw)
+
+    ordered = []
+    previous_id = None
+    for index, diff_id in enumerate(diff_ids):
+        if not isinstance(diff_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", diff_id):
+            raise ValueError("OCI layer diff ID is malformed")
+        chain_id = diff_id if not ordered else "sha256:" + hashlib.sha256((ordered[-1][1] + " " + diff_id).encode()).hexdigest()
+        matches = [(layer_id, record_raw) for layer_id, (record, record_raw) in records.items()
+                   if record.get("parent") == previous_id]
+        # The root record omits parent; non-root records store the previous bare v1 ID.
+        if index == 0:
+            matches = [(layer_id, record_raw) for layer_id, (record, record_raw) in records.items()
+                       if "parent" not in record]
+        if len(matches) != 1:
+            raise ValueError("OCI exporter legacy layer chain does not match selected layer order")
+        _stored_id, raw = matches[0]
+        record = json.loads(raw)
+        is_final = index == len(diff_ids) - 1
+        expected_parent = None if index == 0 else ordered[-1][0]
+        if record.get("parent") != expected_parent:
+            raise ValueError("OCI exporter legacy parent chain disagrees with selected layer order")
+        if record.get("created") != (config.get("created") if is_final else "1970-01-01T00:00:00Z"):
+            raise ValueError("OCI exporter legacy created metadata disagrees with selected image")
+        if record.get("os") != config.get("os"):
+            raise ValueError("OCI exporter legacy OS metadata disagrees with selected image")
+        if is_final:
+            if (record.get("architecture") != config.get("architecture")
+                    or not _docker_config_equivalent(record.get("config"), config.get("config"))):
+                raise ValueError("OCI exporter final runtime config disagrees with selected image config")
+        elif "config" in record or "architecture" in record:
+            raise ValueError("OCI exporter intermediate layer contains final image config fields")
+
+        fields = _raw_json_object_fields(raw)
+        fields.pop("id", None)
+        if not is_final:
+            # Moby sets V1Image.OS after computing every intermediate v1.CreateID.
+            fields.pop("os", None)
+        fields["layer_id"] = json.dumps(chain_id, separators=(",", ":")).encode()
+        if index:
+            # Moby's v1.CreateID hashes the full digest parent; the saved record stores its bare encoding.
+            fields["parent"] = json.dumps("sha256:" + expected_parent, separators=(",", ":")).encode()
+        material = b"{" + b",".join(json.dumps(key).encode() + b":" + fields[key] for key in sorted(fields)) + b"}"
+        expected_id = hashlib.sha256(material).hexdigest()
+        if expected_id not in records or expected_id != record["id"]:
+            raise ValueError("OCI exporter legacy layer ID does not derive from selected layer/config")
+        ordered.append((record["id"], chain_id))
+        previous_id = record["id"]
+    if len(ordered) != len(records):
+        raise ValueError("OCI archive contains unrelated exporter layer metadata")
+
+
+def _docker_zero_container_config() -> dict:
+    return {"Hostname": "", "Domainname": "", "User": "", "AttachStdin": False,
+            "AttachStdout": False, "AttachStderr": False, "Tty": False, "OpenStdin": False,
+            "StdinOnce": False, "Env": None, "Cmd": None, "Image": "", "Volumes": None,
+            "WorkingDir": "", "Entrypoint": None, "OnBuild": None, "Labels": None}
 
 
 def validate_docker_archive(image_tar: Path, manifest: dict) -> dict:
@@ -317,6 +564,8 @@ def validate_docker_archive(image_tar: Path, manifest: dict) -> dict:
                 digest = _uncompressed_layer_digest(compressed, None)
                 if digest != diff_id:
                     raise ValueError("Docker archive layer digest differs from config diff ID")
+                if manifest.get("version") == EXPECTED_VERSION:
+                    _reject_rc2_snakeoil_key(compressed)
             allowed = {"manifest.json", config_name, *layer_names}
             if "repositories" in members:
                 allowed.add("repositories")
@@ -355,7 +604,7 @@ def verify_directory(directory: Path, cosign: str, *, public_key: Path | None = 
     manifest = json.loads(manifest_path.read_text())
     if not isinstance(manifest, dict):
         raise ValueError("release manifest is not an object")
-    if manifest.get("schema") != "volt-offline-release/v1" or manifest.get("version") != EXPECTED_VERSION:
+    if manifest.get("schema") != "volt-offline-release/v1" or manifest.get("version") not in SUPPORTED_ARCHIVE_VERSIONS:
         raise ValueError("unsupported release manifest or version")
     if manifest.get("platform") != EXPECTED_PLATFORM:
         raise ValueError("release platform metadata mismatch")
@@ -373,9 +622,12 @@ def verify_directory(directory: Path, cosign: str, *, public_key: Path | None = 
         raise ValueError("signed file inventory missing")
     if (directory / "trusted_root.json").exists():
         raise ValueError("archive-supplied Sigstore trusted roots are forbidden")
-    required = {"image.tar", "source.tar", "source.bundle", "tools-g7-local-preview.py", "launcher-guide.txt",
-                "sbom.syft.json", "sbom.spdx.json", "release-scan.json", "provenance.json",
-                "registry-digest.txt", "notice-manifest.json", "VERIFY.txt"}
+    required = {"image.tar", "source.tar", "source.bundle", "sbom.syft.json", "sbom.spdx.json",
+                "release-scan.json", "provenance.json", "registry-digest.txt", "notice-manifest.json", "VERIFY.txt"}
+    if manifest["version"] == EXPECTED_VERSION:
+        required.update({"volt-compose.tar.gz", "volt-compose.tar.gz.sha256"})
+    else:
+        required.update({"tools-g7-local-preview.py", "launcher-guide.txt"})
     if not required <= set(files):
         raise ValueError(f"required signed payload members missing: {sorted(required - set(files))}")
     actual_payload = {p.relative_to(directory).as_posix() for p in directory.rglob("*") if p.is_file()
@@ -418,6 +670,8 @@ def verify_directory(directory: Path, cosign: str, *, public_key: Path | None = 
             raise ValueError(f"unsafe signed file path: {name}")
         if not path.is_file() or sha(path) != expected:
             raise ValueError(f"payload missing or digest mismatch: {name}")
+    if manifest.get("version") == EXPECTED_VERSION and manifest.get("source_snapshot") != "sha256:" + sha(directory / "source.tar"):
+        raise ValueError("signed source snapshot digest does not match source.tar")
     checksums = directory / "SHA256SUMS"
     if not checksums.is_file():
         raise ValueError("SHA256SUMS missing")
@@ -450,12 +704,15 @@ def verify_directory(directory: Path, cosign: str, *, public_key: Path | None = 
         checkout = Path(temp) / "source"
         subprocess.run(["git", "clone", "--quiet", "--no-checkout", str(directory / "source.bundle"), str(checkout)], check=True, capture_output=True, text=True)
         subprocess.run(["git", "-C", str(checkout), "checkout", "--quiet", "--detach", manifest["source_commit"]], check=True, capture_output=True, text=True)
-        helper = checkout / "tools" / "g7_local_preview.py"
-        if not helper.is_file() or helper.read_bytes() != (directory / "tools-g7-local-preview.py").read_bytes():
-            raise ValueError("packaged host launcher does not match the exact source bundle")
         source_tar = subprocess.check_output(["git", "-C", str(checkout), "archive", "--format=tar", manifest["source_commit"]])
         if source_tar != (directory / "source.tar").read_bytes():
             raise ValueError("source.tar does not match the exact Git bundle commit")
+        if manifest["version"] == EXPECTED_VERSION:
+            verify_compose_bundle(directory / "volt-compose.tar.gz", manifest["version"], registry_digest, checkout)
+        else:
+            helper = checkout / "tools" / "g7_local_preview.py"
+            if not helper.is_file() or helper.read_bytes() != (directory / "tools-g7-local-preview.py").read_bytes():
+                raise ValueError("packaged host launcher does not match the exact source bundle")
     scan_report = json.loads((directory / "release-scan.json").read_text())
     scan_metadata = scan_report.get("Metadata") if isinstance(scan_report, dict) else None
     if not isinstance(scan_report, dict) or scan_report.get("SchemaVersion") != 2 or scan_report.get("ArtifactType") != "container_image" or not isinstance(scan_metadata, dict) or scan_metadata.get("ImageID") != manifest.get("image_id") or not isinstance(scan_report.get("Results"), list) or not scan_report["Results"]:

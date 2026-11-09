@@ -71,6 +71,7 @@ if source.count(needle) != 1:
 path.write_text(source.replace(needle, replacement))
 PY
 COPY docker/g7/versions.lock /tmp/uvm-g7-versions.lock
+COPY third-party/notices/OAUTHLIB-4.0.1-BSD-3-Clause.txt /tmp/ce-global-oauthlib-license.txt
 RUN set -eu; \
     export DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none; \
     apt-get update -qq; \
@@ -108,6 +109,23 @@ RUN set -eu; \
     && rm -rf /var/lib/postgresql/18/main /etc/postgresql/18/main /var/log/postgresql \
     && install -d -o 1001 -g 1337 /app/media \
     && install -d -o uvm -g uvm /opt/uvm/state
+# Pin the CE-global OAuthlib distribution independently from the UVM venv.
+# The wheel URL and hash are recorded in docker/g7/versions.lock; pip verifies
+# that exact wheel and installs no transitive dependency changes.
+RUN set -eu; \
+    line=$(grep '^ce_global_python_oauthlib=' /tmp/uvm-g7-versions.lock); \
+    IFS='|' read -r version digest wheel_url <<< "${line#*=}"; \
+    test "$version" = 4.0.1; \
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]]; \
+    [[ "$wheel_url" == https://files.pythonhosted.org/*/oauthlib-4.0.1-py3-none-any.whl ]]; \
+    license_line=$(grep '^ce_global_python_oauthlib_license=' /tmp/uvm-g7-versions.lock); \
+    IFS='|' read -r license_digest license_name <<< "${license_line#*=}"; \
+    test "$license_name" = OAUTHLIB-4.0.1-BSD-3-Clause.txt; \
+    printf '%s  %s\n' "$license_digest" /tmp/ce-global-oauthlib-license.txt | sha256sum -c -; \
+    printf 'oauthlib @ %s --hash=sha256:%s\n' "$wheel_url" "$digest" > /tmp/ce-global-python-requirements.txt; \
+    python3 -m pip install --no-cache-dir --no-deps --require-hashes -r /tmp/ce-global-python-requirements.txt; \
+    python3 -c 'import importlib.metadata as m, oauthlib, requests_oauthlib; assert m.version("oauthlib") == oauthlib.__version__ == "4.0.1"; print("CE-global oauthlib", oauthlib.__version__, "requests-oauthlib", m.version("requests-oauthlib"))'; \
+    rm -f /tmp/ce-global-python-requirements.txt /tmp/ce-global-oauthlib-license.txt
 COPY --from=valkey-bin /usr/local/bin/valkey-server /opt/valkey/bin/valkey-server
 COPY --from=valkey-bin /usr/local/bin/valkey-cli /opt/valkey/bin/valkey-cli
 COPY --from=valkey-bin /lib/ld-musl-x86_64.so.1 /opt/valkey/lib/ld-musl-x86_64.so.1

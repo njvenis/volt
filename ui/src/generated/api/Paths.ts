@@ -6,6 +6,7 @@
  */
 
 export type Authorization = string | null;
+export type Input = unknown;
 export type Location = (string | number)[];
 export type Message = string;
 export type ErrorType = string;
@@ -210,7 +211,7 @@ export interface Paths {
     get: {
       request: {
         path?: {};
-        headers: {
+        headers?: {
           authorization?: Authorization;
           [k: string]: unknown;
         };
@@ -246,7 +247,7 @@ export interface Paths {
         path: {
           access_group_id: AccessGroupId;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization1;
           [k: string]: unknown;
         };
@@ -280,7 +281,7 @@ export interface Paths {
     get: {
       request: {
         path?: {};
-        headers: {
+        headers?: {
           authorization?: Authorization2;
           [k: string]: unknown;
         };
@@ -316,7 +317,7 @@ export interface Paths {
         path: {
           intent_id: IntentId;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization3;
           [k: string]: unknown;
         };
@@ -350,7 +351,7 @@ export interface Paths {
     get: {
       request: {
         path?: {};
-        headers: {
+        headers?: {
           authorization?: Authorization4;
           [k: string]: unknown;
         };
@@ -590,14 +591,14 @@ export interface Paths {
     get: {
       request: {
         path?: {};
-        headers: {
+        headers?: {
           authorization?: Authorization10;
           [k: string]: unknown;
         };
         cookies?: {
           [k: string]: unknown;
         };
-        query: {
+        query?: {
           native_id?: NativeId;
           source_family?: SourceFamily;
           cve?: Cve;
@@ -637,7 +638,7 @@ export interface Paths {
         path: {
           group_id: GroupId1;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization11;
           [k: string]: unknown;
         };
@@ -673,7 +674,7 @@ export interface Paths {
         path: {
           group_id: GroupId2;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization12;
           [k: string]: unknown;
         };
@@ -709,7 +710,7 @@ export interface Paths {
         path: {
           group_id: GroupId3;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization13;
           [k: string]: unknown;
         };
@@ -745,7 +746,7 @@ export interface Paths {
         path: {
           group_id: GroupId4;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization14;
           [k: string]: unknown;
         };
@@ -782,7 +783,7 @@ export interface Paths {
           group_id: GroupId5;
           intent_id: IntentId1;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization15;
           [k: string]: unknown;
         };
@@ -816,7 +817,7 @@ export interface Paths {
     get: {
       request: {
         path?: {};
-        headers: {
+        headers?: {
           authorization?: Authorization16;
           [k: string]: unknown;
         };
@@ -852,7 +853,7 @@ export interface Paths {
         path: {
           team_id: TeamId;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization17;
           [k: string]: unknown;
         };
@@ -886,7 +887,7 @@ export interface Paths {
     get: {
       request: {
         path?: {};
-        headers: {
+        headers?: {
           authorization?: Authorization18;
           [k: string]: unknown;
         };
@@ -927,7 +928,7 @@ export interface Paths {
         cookies?: {
           [k: string]: unknown;
         };
-        query: {
+        query?: {
           limit?: Limit1;
           cursor?: Cursor2;
           [k: string]: unknown;
@@ -1111,7 +1112,7 @@ export interface Paths {
         cookies?: {
           [k: string]: unknown;
         };
-        query: {
+        query?: {
           code?: Code;
           error?: Error;
           state?: State;
@@ -1575,7 +1576,7 @@ export interface Paths {
         path: {
           group_id: GroupId8;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization22;
           [k: string]: unknown;
         };
@@ -1792,14 +1793,14 @@ export interface Paths {
     get: {
       request: {
         path?: {};
-        headers: {
+        headers?: {
           authorization?: Authorization27;
           [k: string]: unknown;
         };
         cookies?: {
           [k: string]: unknown;
         };
-        query: {
+        query?: {
           limit?: Limit2;
           cursor?: Cursor3;
           [k: string]: unknown;
@@ -1830,14 +1831,14 @@ export interface Paths {
         path: {
           run_id: RunId;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization28;
           [k: string]: unknown;
         };
         cookies?: {
           [k: string]: unknown;
         };
-        query: {
+        query?: {
           limit?: Limit3;
           cursor?: Cursor4;
           [k: string]: unknown;
@@ -1869,7 +1870,7 @@ export interface Paths {
           run_id: RunId1;
           revision: Revision;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization29;
           [k: string]: unknown;
         };
@@ -1903,14 +1904,14 @@ export interface Paths {
     get: {
       request: {
         path?: {};
-        headers: {
+        headers?: {
           authorization?: Authorization30;
           [k: string]: unknown;
         };
         cookies?: {
           [k: string]: unknown;
         };
-        query: {
+        query?: {
           limit?: Limit4;
           cursor?: Cursor5;
           [k: string]: unknown;
@@ -1939,14 +1940,14 @@ export interface Paths {
     get: {
       request: {
         path?: {};
-        headers: {
+        headers?: {
           authorization?: Authorization31;
           [k: string]: unknown;
         };
         cookies?: {
           [k: string]: unknown;
         };
-        query: {
+        query?: {
           limit?: Limit5;
           offset?: Offset;
           deployment_id?: DeploymentId;
@@ -2049,14 +2050,14 @@ export interface Paths {
     get: {
       request: {
         path?: {};
-        headers: {
+        headers?: {
           authorization?: Authorization34;
           [k: string]: unknown;
         };
         cookies?: {
           [k: string]: unknown;
         };
-        query: {
+        query?: {
           cursor?: Cursor6;
           [k: string]: unknown;
         };
@@ -2086,7 +2087,7 @@ export interface Paths {
         path: {
           deployment_id: DeploymentId1;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization35;
           [k: string]: unknown;
         };
@@ -2161,7 +2162,7 @@ export interface Paths {
           deployment_id: DeploymentId3;
           command_id: CommandId1;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization37;
           [k: string]: unknown;
         };
@@ -2198,7 +2199,7 @@ export interface Paths {
           deployment_id: DeploymentId4;
           revision: Revision1;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization38;
           [k: string]: unknown;
         };
@@ -2232,14 +2233,14 @@ export interface Paths {
     get: {
       request: {
         path?: {};
-        headers: {
+        headers?: {
           authorization?: Authorization39;
           [k: string]: unknown;
         };
         cookies?: {
           [k: string]: unknown;
         };
-        query: {
+        query?: {
           limit?: Limit6;
           cursor?: Cursor7;
           [k: string]: unknown;
@@ -2270,7 +2271,7 @@ export interface Paths {
         path: {
           deployment_id: DeploymentId5;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization40;
           [k: string]: unknown;
         };
@@ -2344,7 +2345,7 @@ export interface Paths {
         path: {
           deployment_id: DeploymentId7;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization42;
           [k: string]: unknown;
         };
@@ -2418,14 +2419,14 @@ export interface Paths {
         path: {
           deployment_id: DeploymentId9;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization44;
           [k: string]: unknown;
         };
         cookies?: {
           [k: string]: unknown;
         };
-        query: {
+        query?: {
           limit?: Limit7;
           sink_id?: SinkId;
           [k: string]: unknown;
@@ -2457,7 +2458,7 @@ export interface Paths {
           deployment_id: DeploymentId10;
           command_id: CommandId2;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization45;
           [k: string]: unknown;
         };
@@ -2494,7 +2495,7 @@ export interface Paths {
           deployment_id: DeploymentId11;
           revision: Revision2;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization46;
           [k: string]: unknown;
         };
@@ -2528,7 +2529,7 @@ export interface Paths {
     get: {
       request: {
         path?: {};
-        headers: {
+        headers?: {
           authorization?: Authorization47;
           [k: string]: unknown;
         };
@@ -2567,7 +2568,7 @@ export interface Paths {
         path: {
           evidence_id: EvidenceId;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization48;
           [k: string]: unknown;
         };
@@ -2601,7 +2602,7 @@ export interface Paths {
     get: {
       request: {
         path?: {};
-        headers: {
+        headers?: {
           authorization?: Authorization49;
           [k: string]: unknown;
         };
@@ -2677,7 +2678,7 @@ export interface Paths {
         path: {
           command_id: CommandId3;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization51;
           [k: string]: unknown;
         };
@@ -2711,7 +2712,7 @@ export interface Paths {
     get: {
       request: {
         path?: {};
-        headers: {
+        headers?: {
           authorization?: Authorization52;
           [k: string]: unknown;
         };
@@ -2780,14 +2781,14 @@ export interface Paths {
     get: {
       request: {
         path?: {};
-        headers: {
+        headers?: {
           authorization?: Authorization54;
           [k: string]: unknown;
         };
         cookies?: {
           [k: string]: unknown;
         };
-        query: {
+        query?: {
           group_id?: GroupId11;
           [k: string]: unknown;
         };
@@ -2817,7 +2818,7 @@ export interface Paths {
         path: {
           report_id: ReportId1;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization55;
           [k: string]: unknown;
         };
@@ -2853,14 +2854,14 @@ export interface Paths {
         path: {
           report_id: ReportId2;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization56;
           [k: string]: unknown;
         };
         cookies?: {
           [k: string]: unknown;
         };
-        query: {
+        query?: {
           limit?: Limit9;
           cursor?: Cursor9;
           metric?: Metric;
@@ -2894,14 +2895,14 @@ export interface Paths {
         path: {
           report_id: ReportId3;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization57;
           [k: string]: unknown;
         };
         cookies?: {
           [k: string]: unknown;
         };
-        query: {
+        query?: {
           format?: Format;
           [k: string]: unknown;
         };
@@ -2929,14 +2930,14 @@ export interface Paths {
     get: {
       request: {
         path?: {};
-        headers: {
+        headers?: {
           authorization?: Authorization58;
           [k: string]: unknown;
         };
         cookies?: {
           [k: string]: unknown;
         };
-        query: {
+        query?: {
           limit?: Limit10;
           cursor?: Cursor10;
           [k: string]: unknown;
@@ -2965,7 +2966,7 @@ export interface Paths {
     post: {
       request: {
         path?: {};
-        headers: {
+        headers?: {
           authorization?: Authorization59;
           [k: string]: unknown;
         };
@@ -3077,7 +3078,7 @@ export interface Paths {
         path: {
           deployment_id: DeploymentId14;
         };
-        headers: {
+        headers?: {
           authorization?: Authorization62;
           [k: string]: unknown;
         };
@@ -3235,9 +3236,6 @@ export interface ValidationError {
   [k: string]: unknown;
 }
 export interface Context {
-  [k: string]: unknown;
-}
-export interface Input {
   [k: string]: unknown;
 }
 export interface Body {

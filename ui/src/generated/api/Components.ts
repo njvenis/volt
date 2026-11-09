@@ -5,6 +5,7 @@
  * and run json-schema-to-typescript to regenerate this file.
  */
 
+export type Input = unknown;
 export type Location = (string | number)[];
 export type Message = string;
 export type ErrorType = string;
@@ -29,8 +30,5 @@ export interface ValidationError {
   [k: string]: unknown;
 }
 export interface Context {
-  [k: string]: unknown;
-}
-export interface Input {
   [k: string]: unknown;
 }

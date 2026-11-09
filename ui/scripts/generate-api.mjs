@@ -19,7 +19,8 @@ const {Resolver}=require('@stoplight/json-ref-resolver');
 const {compile}=require('json-schema-to-typescript');
 // Version-bound internal API: these three parsers are covered by contract tests.
 // The stock CLI concatenates declarations and duplicates shared names. Keep each
-// compiler output in its own module, without rewriting declarations or schemas.
+// compiler output in its own module. Fidelity adapters below affect only the
+// intermediate compiler schema; the exported OpenAPI input stays unchanged.
 const parsers={
  Paths:require('openapi-types-generator/dist/parsers/paths').default,
  Webhooks:require('openapi-types-generator/dist/parsers/webhooks').default,
@@ -36,13 +37,50 @@ function assertLocalReferences(value){
  for(const child of Object.values(value))assertLocalReferences(child);
 }
 
+// json-schema-to-typescript 13.1.2 infers an object for a title-only schema.
+// Annotation-only schemas constrain no values. Express that as unknown using
+// the compiler's tsType extension, only in its private intermediate input.
+function preserveUnconstrained(schema){
+ if(schema===null||typeof schema!=='object'||Array.isArray(schema))return;
+ const annotations=new Set(['title','description','default','examples','deprecated','readOnly','writeOnly','$comment','$id','$schema']);
+ if(Object.keys(schema).every(key=>annotations.has(key)))schema.tsType='unknown';
+ for(const keyword of ['properties','patternProperties','$defs','definitions','dependentSchemas']){
+  for(const child of Object.values(schema[keyword]??{}))preserveUnconstrained(child);
+ }
+ for(const keyword of ['items','additionalItems','additionalProperties','contains','propertyNames','not','if','then','else','unevaluatedItems','unevaluatedProperties']){
+  const child=schema[keyword];
+  if(Array.isArray(child))child.forEach(preserveUnconstrained);else preserveUnconstrained(child);
+ }
+ for(const keyword of ['allOf','anyOf','oneOf','prefixItems']){
+  (schema[keyword]??[]).forEach(preserveUnconstrained);
+ }
+}
+
+// The pinned operation parser marks every populated parameter group required,
+// even when all its members are optional. Its member required lists already
+// include required parameters and required-body Content-Type; retain those.
+function preserveParameterGroups(parsed){
+ for(const path of Object.values(parsed.properties??{})){
+  for(const operation of Object.values(path.properties??{})){
+   for(const request of operation.properties?.request?.oneOf??[]){
+    request.required=request.required.filter(name=>
+     !['path','headers','cookies','query'].includes(name)||
+     (request.properties[name].required??[]).length>0);
+   }
+  }
+ }
+}
+
 export async function generateTypes(schema){
  assertLocalReferences(schema);
  const resolved=await new Resolver().resolve(schema);
  if(resolved.errors.length)throw new Error(`Schema resolution failed: ${JSON.stringify(resolved.errors)}`);
  const files={};
  for(const [name,parse] of Object.entries(parsers)){
-  files[`${name}.ts`]=await compile(parse(resolved.result),name);
+  const parsed=structuredClone(parse(resolved.result));
+  if(name==='Paths'||name==='Webhooks')preserveParameterGroups(parsed);
+  preserveUnconstrained(parsed);
+  files[`${name}.ts`]=await compile(parsed,name);
  }
  files['index.ts']=Object.keys(parsers).map(name=>`export type {${name}} from './${name}';`).join('\n')+'\n';
  return files;

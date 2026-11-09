@@ -26,6 +26,9 @@ test('OpenAPI 3.1 contracts compile strictly under only TypeScript 7, including 
   assert.doesNotMatch(content,/\b(?:fetch|class|function|const|let|var|enum)\s/,'Generated output must contain declarations only');
  }
  await writeArtifacts(directory,Object.fromEntries(Object.entries(types).map(([name,content])=>['generated/'+name,content])));
+ const actual=JSON.parse(await readFile(resolve(import.meta.dirname,'../openapi.json'),'utf8'));
+ const actualTypes=await generateTypes(actual);
+ await writeArtifacts(directory,Object.fromEntries(Object.entries(actualTypes).map(([name,content])=>['actual/'+name,content])));
  await writeFile(join(directory,'contracts.ts'),await readFile(new URL('./fixtures/api-generator-contract.ts',import.meta.url)));
  await writeFile(join(directory,'tsconfig.json'),JSON.stringify({compilerOptions:{strict:true,noEmit:true,target:'ES2022',module:'ESNext',moduleResolution:'bundler',types:[]},files:['contracts.ts']}));
  const compiler=resolve(import.meta.dirname,'../node_modules/typescript/bin/tsc');

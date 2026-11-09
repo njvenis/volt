@@ -195,6 +195,75 @@
           }
         }
       }
+    },
+    "/optional": {
+      "get": {
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "trace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Synthetic"
+          }
+        }
+      }
+    },
+    "/required": {
+      "get": {
+        "parameters": [
+          {
+            "name": "token",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session",
+            "in": "cookie",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Synthetic"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -307,6 +376,25 @@
               }
             }
           }
+        ]
+      },
+      "Unconstrained": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "title": "Input"
+          },
+          "empty": {},
+          "annotated": {
+            "title": "Annotated",
+            "description": "Synthetic unconstrained value",
+            "default": null
+          }
+        },
+        "required": [
+          "input",
+          "empty",
+          "annotated"
         ]
       }
     }

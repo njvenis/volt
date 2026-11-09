@@ -26,7 +26,10 @@ The generator is `openapi-types-generator` 1.0.0 (MIT). The driver imports its
 version-bound internal parsers and directly pins `json-schema-to-typescript`
 13.1.2 and `@stoplight/json-ref-resolver` 3.1.6. Separate modules prevent duplicate
 shared declarations produced by the stock CLI's concatenated output. Version
-checks and synthetic contract tests guard this internal interface. TypeScript
+checks and synthetic contract tests guard this internal interface. Compiler-only
+adapters preserve annotation-only schemas as `unknown` and allow omission of
+parameter groups whose members are all optional. They do not alter the exported
+OpenAPI schema or handwritten runtime code. TypeScript
 7.0.2 is the only compiler; no legacy compiler is installed for generation.
 
 This is type-only output. It does not generate an SDK, transport or validators,

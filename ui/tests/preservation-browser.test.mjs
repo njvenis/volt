@@ -31,7 +31,7 @@ const server=createServer(async(req,res)=>{try{const url=new URL(req.url,'http:/
  }catch{res.writeHead(500).end();}});
 await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
 const origin='http://127.0.0.1:'+server.address().port;
-const browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE_PATH??'/home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome'});
+const browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_EXECUTABLE_PATH?{executablePath:process.env.CHROMIUM_EXECUTABLE_PATH}:{})});
 const expected=(id)=>({schema_version:1,id,synthetic_labels:true,scope,status:200,summary,records:Object.fromEntries(summary.classes.filter(c=>c.expected_records!==null).map(c=>[c.class_id,pages[c.class_id]])),evidence:[{class_id:classIds[0],record_key:'synthetic-record-1',status:200,sha256:raw,size:bytes.length}],timeout_ms:10000});
 async function run(e){const context=await browser.newContext({viewport:{width:1440,height:1000},acceptDownloads:true});try{return await runPreservationBrowserStep({page:await context.newPage(),origin,expectations:e,evidenceDirectory:evidence});}finally{await context.close();}}
 try{

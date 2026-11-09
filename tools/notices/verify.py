@@ -20,7 +20,7 @@ from collections import Counter
 IMAGE_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 DEBIAN_DEVELOPER_KEYRING_SHA256 = "81e08f47b0dd8a563a2742ad90878ccefe53aa0728b095acbea3efda84381ea9"
 INDEX_TRUST_ROOTS = {
-    "debian-trixie-archive": ("506b815cbb32d9b6066b4a2aa524071e071761e7e7f68c3ac74f3061ba852017", ("B8E5F13176D2A7A75220028078DBA3BC47EF2265", "41587F7DB8C774BCCF131416762F67A0B2C39DE4")),
+    "debian-trixie-archive": ("506b815cbb32d9b6066b4a2aa524071e071761e7e7f68c3ac74f3061ba852017", ("B8E5F13176D2A7A75220028078DBA3BC47EF2265", "41587F7DB8C774BCCF131416762F67A0B2C39DE4", "89C87ACEA5DD6B8E6A7068808E9F831205B4BA95")),
     "postgresql-pgdg": ("8ca1b2fb3a2533cc44b87ee146a03858f6e8ea31c1f165dfd38dc270c04ada0f", ("B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8",)),
 }
 
@@ -67,6 +67,15 @@ def parse_sha256_members(value: str) -> dict[str, tuple[str, int]]:
     return members
 
 
+def pinned_index_signer_matches(trust_root: str, keyring_sha256: str, signer_output: str) -> bool:
+    """Require both the pinned archive keyring and an allowlisted signer fingerprint."""
+    trusted = INDEX_TRUST_ROOTS.get(trust_root)
+    if not trusted or keyring_sha256 != trusted[0]:
+        return False
+    valid_signers = re.findall(r"(?m)^\[GNUPG:\] VALIDSIG ([0-9A-F]{40})(?:\s|$)", signer_output.upper())
+    return any(fp in trusted[1] for fp in valid_signers)
+
+
 def verify_signed_index_bundle(bundle: dict, root: Path, package: str, version: str) -> list[str]:
     """Verify archive-index provenance separately from a maintainer-signed .dsc."""
     errors = []
@@ -78,12 +87,11 @@ def verify_signed_index_bundle(bundle: dict, root: Path, package: str, version: 
             errors.append(f"{package}@{version} signed-index {key} evidence is missing or corrupt")
     if errors:
         return errors
-    checked = subprocess.run(["gpgv", "--keyring", str(paths["keyring"]), str(paths["inrelease"])], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    checked = subprocess.run(["gpgv", "--status-fd=1", "--keyring", str(paths["keyring"]), str(paths["inrelease"])], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if checked.returncode:
         return [f"{package}@{version} signed-index InRelease signature verification failed"]
     trust_root = evidence.get("trust_root", "")
-    trusted = INDEX_TRUST_ROOTS.get(trust_root)
-    if not trusted or evidence.get("keyring_sha256") != trusted[0] or not any(fp in checked.stderr.upper() for fp in trusted[1]):
+    if not pinned_index_signer_matches(trust_root, evidence.get("keyring_sha256", ""), checked.stdout + "\n" + checked.stderr):
         return [f"{package}@{version} signed-index trust root or signer fingerprint is not pinned"]
     release = paths["inrelease"].read_text(errors="replace")
     if not release.startswith("-----BEGIN PGP SIGNED MESSAGE-----"):

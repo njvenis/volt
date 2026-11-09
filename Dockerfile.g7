@@ -125,6 +125,7 @@ RUN set -eu; \
     printf 'oauthlib @ %s --hash=sha256:%s\n' "$wheel_url" "$digest" > /tmp/ce-global-python-requirements.txt; \
     python3 -m pip install --no-cache-dir --no-deps --require-hashes -r /tmp/ce-global-python-requirements.txt; \
     python3 -c 'import importlib.metadata as m, oauthlib, requests_oauthlib; assert m.version("oauthlib") == oauthlib.__version__ == "4.0.1"; print("CE-global oauthlib", oauthlib.__version__, "requests-oauthlib", m.version("requests-oauthlib"))'; \
+    python3 -m pip check; \
     rm -f /tmp/ce-global-python-requirements.txt /tmp/ce-global-oauthlib-license.txt
 COPY --from=valkey-bin /usr/local/bin/valkey-server /opt/valkey/bin/valkey-server
 COPY --from=valkey-bin /usr/local/bin/valkey-cli /opt/valkey/bin/valkey-cli

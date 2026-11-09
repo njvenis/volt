@@ -50,3 +50,7 @@ negative strict TypeScript assertions. It also checks deterministic output,
 non-mutating drift detection, synthetic export and external-reference rejection.
 All test schema values are synthetic. The existing Portable and pinned OpenSpec
 checks remain required.
+
+The lockfile omits an upstream deprecation message containing a public contact
+address to meet repository source-hygiene checks. Versions, dependency edges and
+package integrity hashes are unchanged; dependency updates must rerun those checks.

@@ -32,6 +32,11 @@ RUN npm run build
 FROM ${VALKEY_IMAGE} AS valkey-bin
 
 FROM ${CE_IMAGE} AS runtime
+ARG VOLT_OIDC_DEPLOYMENT_MODES=demo,external
+ARG VOLT_SOURCE_SNAPSHOT=unspecified
+LABEL org.volt.oidc-deployment-modes=${VOLT_OIDC_DEPLOYMENT_MODES} \
+      org.volt.compose.source-snapshot=${VOLT_SOURCE_SNAPSHOT} \
+      org.volt.compose-install.contract=1
 USER root
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN python3 - <<'PY'
@@ -93,6 +98,7 @@ RUN set -eu; \
     printf '%s' "$expected_delta" | sort > /tmp/g7-packages-expected; \
     diff -u /tmp/g7-packages-expected /tmp/g7-packages-added-or-upgraded; \
     test ! -s /tmp/g7-packages-removed; \
+    rm -f /etc/ssl/private/ssl-cert-snakeoil.key /etc/ssl/certs/ssl-cert-snakeoil.pem; \
     cd / && rm -rf /tmp/os-packages /var/lib/apt/lists/* \
     && groupadd --system --gid 1800 uvm \
     && useradd --system --uid 1800 --gid uvm --home-dir /opt/uvm --create-home uvm \

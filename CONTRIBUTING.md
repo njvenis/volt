@@ -1,13 +1,13 @@
 # Contributing
 
-Thanks for considering a contribution. VOLT is under active development; please open an issue or discussion before starting a large change so its scope and interface can be reviewed.
+Thanks for considering a contribution. VOLT is under active development; please open an issue before starting a large change so its scope and interface can be reviewed.
 
 ## Local checks
 
 Use the pinned project dependencies and synthetic data only. The core local checks are:
 
 ```sh
-uv sync --locked
+uv sync --locked --python 3.13.15
 uv run python -m unittest discover -s tests/engine -v
 uv run python -m unittest discover -s tests/identity -v
 uv run python -m unittest tests.ingestion.test_run -v
@@ -29,4 +29,4 @@ Keep changes focused, include a concise rationale, update relevant documentation
 
 ## Security
 
-The project is in early development. Do not report sensitive findings in public issues or pull requests. Follow [SECURITY.md](SECURITY.md); private GitHub reporting is inactive until the repository owner makes the repository public and enables it. Reporting is best effort with no response-time SLA.
+RC1 is an evaluation release. Do not report sensitive findings in public issues or pull requests. Use [GitHub private vulnerability reporting](https://github.com/njvenis/volt/security/advisories/new), which is enabled, and follow [SECURITY.md](SECURITY.md). Reporting is best effort with no response-time or remediation SLA.

@@ -1,0 +1,28 @@
+name: Feature request
+description: Describe a use case and the outcome you need.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use synthetic examples; do not include production vulnerability data, private identifiers or credentials.
+        Security reports belong at https://github.com/njvenis/volt/security/advisories/new
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and affected workflow
+      description: Who needs this and what is difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable success and relevant scope or permission boundaries.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and additional context
+      description: Include workarounds and the release or revision you evaluated, where relevant.

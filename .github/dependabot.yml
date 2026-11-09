@@ -8,6 +8,11 @@ updates:
     directory: "/ui"
     schedule:
       interval: weekly
+    groups:
+      react-runtime:
+        patterns:
+          - "react"
+          - "react-dom"
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

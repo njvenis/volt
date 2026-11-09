@@ -53,11 +53,13 @@ jobs:
           uv run python tools/build_compose_bundle.py build --output "$RUNNER_TEMP/volt-compose-bundle/volt-compose.tar.gz"
           uv run python tools/build_compose_bundle.py verify --archive "$RUNNER_TEMP/volt-compose-bundle/volt-compose.tar.gz"
 
-      - name: Install UI dependencies and build
+      - name: Verify generated UI API and build
         run: |
           npm --prefix ui ci
+          npm --prefix ui run check:api
           npm --prefix ui run build
-          node --test ui/tests/public-g4-fixtures.test.mjs
+          (cd ui && npx playwright install --with-deps chromium)
+          node --test ui/tests/*.test.mjs
 
       - name: Install pinned OpenSpec and validate
         run: |

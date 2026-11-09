@@ -52,7 +52,10 @@ def parse_deb822_index(path: Path):
 def parse_sha256_members(value: str) -> dict[str, tuple[str, int]]:
     """Parse a complete, unique Debian Checksums-Sha256 field."""
     members = {}
-    for line in value.splitlines():
+    # Python 3.12.3's email.parser preserves a leading newline for fields whose
+    # first value is a continuation line. Strip field-boundary whitespace, but
+    # leave interior blank lines for the strict row parser to reject.
+    for line in value.strip().splitlines():
         parts = line.split()
         if len(parts) != 3 or not re.fullmatch(r"[0-9a-f]{64}", parts[0]) or not parts[1].isdigit() or not parts[2]:
             raise ValueError("malformed SHA-256 member row")

@@ -578,6 +578,8 @@ def smoke(args) -> None:
         "--evidence", str(evidence)]
     if args.readback:
         command.append("--readback")
+    else:
+        command.append("--initialize-development")
     subprocess.run(command, check=True)
 
 

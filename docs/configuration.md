@@ -2,7 +2,7 @@
 
 ## Local preview
 
-The local preview does not require a hand-written environment file. `tools/g7_local_preview.py init <name>` generates private configuration, local TLS material, and synthetic credentials under `$XDG_STATE_HOME/volt/g7-preview/<name>` (defaulting to `$HOME/.local/state`). Keep that state directory private. The helper mounts its secret directory read-only into the container and owns the preview's ports, network, and volumes. See [the preview guide](local-preview.md) for the exact commands.
+The local preview does not require a hand-written environment file. `tools/g7_local_preview.py init <name>` generates private configuration, local TLS material, and synthetic credentials under `$XDG_STATE_HOME/volt/g7-preview/<name>` (defaulting to `$HOME/.local/state`). Keep that state directory private. The helper mounts its secret directory read-only into the container and owns the preview's ports, network, and volumes. See [historical RC1 launcher instructions](installation.md#historical-rc1-launcher) for that released-image path or [the development preview guide](local-preview.md) for source builds. For current Compose evaluation, use the [RC2 installation guide](installation.md#rc2-compose-installation).
 
 ## Development image packaging
 
@@ -17,3 +17,6 @@ At startup, `docker/g7/entrypoint.sh` requires these files in `/run/secrets`:
 OIDC mode additionally requires `oidc_client_secret`, `oidc_sync_secret`, and `oidc_operator_secret`, with references supplied by the OIDC configuration. Connector tokens, webhook secrets, local signing keys, and notification credentials are optional inputs when the corresponding integration is configured. File contents must be managed by the operator and kept outside source control; no real values belong in the example file.
 
 The recovery TLS files are for the image's recovery-control boundary. They do not configure public ingress TLS. See [packaging/deployment boundaries](deployment.md) before adapting this target to another environment.
+# Compose configuration
+
+For the Compose installation, use the exact-schema `oidc.example.json` and setup flow in [`deploy/compose`](../deploy/compose/README.md). Provider issuer, discovery, callback and trusted origins must use HTTPS in external mode. Set exact hostnames accepted by the UVM ingress guard and use the configured callback through a TLS proxy. Forwarded host/protocol headers do not establish authority. Secret values belong in private files, not OIDC JSON or environment examples.

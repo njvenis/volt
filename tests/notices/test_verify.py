@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 import zipfile
+import pytest
 
 
 VERIFY = Path(__file__).resolve().parents[2] / "tools/notices/verify.py"
@@ -22,6 +23,7 @@ def test_sha256_member_parser_requires_complete_unique_digest_size_rows():
     for malformed in (
         "", "bad 2 file", f"{'a' * 64} -1 file", f"{'a' * 64} 3 file\n{'b' * 64} 4 file",
         f"{'a' * 64} 3 file\n{'b' * 64} 4 file",
+        f"{'a' * 64} 3 file\n\n{'b' * 64} 4 file",
     ):
         try:
             MODULE.parse_sha256_members(malformed)
@@ -29,6 +31,15 @@ def test_sha256_member_parser_requires_complete_unique_digest_size_rows():
             pass
         else:
             raise AssertionError(f"accepted malformed signed member list: {malformed!r}")
+
+
+def test_sha256_member_parser_accepts_python_3123_email_parser_prefix():
+    # Python 3.12.3 Parser().parsestr() returns this leading newline for a
+    # continuation-only Checksums-Sha256 field.
+    value = f"\n {'a' * 64} 12 one.tar.xz\n {'b' * 64} 0 empty.diff\n"
+    assert MODULE.parse_sha256_members(value) == {
+        "one.tar.xz": ("a" * 64, 12), "empty.diff": ("b" * 64, 0)
+    }
 
 
 def test_debian_source_groups_deduplicate_package_license_tokens_and_keep_expression(tmp_path):
@@ -270,22 +281,89 @@ def test_copied_binary_source_hash_follows_symlink_and_records_removal(monkeypat
     assert cleanup[0]["command"] == ["docker", "rm", "--volumes", "source-container"]
 
 
-def test_fresh_daemon_admits_exact_pinned_source_image(monkeypatch):
-    digest = "sha256:" + "e" * 64
-    reference = "valkey/valkey:9.1.2-alpine@" + digest
+def test_cached_classic_store_resolves_registry_digest_to_local_config_id(monkeypatch):
+    registry_digest = "sha256:" + "e" * 64
+    local_id = "sha256:" + "f" * 64
+    reference = "valkey/valkey:9.1.2-alpine@" + registry_digest
     calls = []
     def fake_run(args, **kwargs):
         calls.append(args)
-        if args == ["docker", "image", "inspect", digest] and calls.count(args) == 1:
-            raise COLLECT.subprocess.CalledProcessError(1, args)
-        if args == ["docker", "image", "inspect", digest]:
-            return json.dumps([{"Id": digest, "Os": "linux", "Architecture": "amd64"}])
-        if args == ["docker", "pull", reference]: return "pulled"
+        if args == ["docker", "image", "inspect", reference]:
+            return json.dumps([{"Id": local_id, "Os": "linux", "Architecture": "amd64", "RepoDigests": ["valkey/valkey@" + registry_digest]}])
         raise AssertionError(args)
     monkeypatch.setattr(COLLECT, "run", fake_run)
-    info = COLLECT.admit_pinned_source_image(reference, digest)
-    assert info["Id"] == digest
-    assert calls == [["docker", "image", "inspect", digest], ["docker", "pull", reference], ["docker", "image", "inspect", digest]]
+    info = COLLECT.admit_pinned_source_image(reference, registry_digest)
+    assert info["RegistryDigest"] == registry_digest
+    assert info["LocalImageId"] == local_id
+    assert info["Id"] == local_id
+    assert calls == [["docker", "image", "inspect", reference]]
+
+
+def test_cached_modern_store_admits_index_digest_when_local_id_matches(monkeypatch):
+    registry_digest = "sha256:" + "e" * 64
+    reference = "valkey/valkey:9.1.2-alpine@" + registry_digest
+    monkeypatch.setattr(COLLECT, "run", lambda args, **kwargs: json.dumps([{"Id": registry_digest, "Os": "linux", "Architecture": "amd64", "RepoDigests": ["valkey/valkey@" + registry_digest]}]))
+    info = COLLECT.admit_pinned_source_image(reference, registry_digest)
+    assert info["RegistryDigest"] == registry_digest
+    assert info["LocalImageId"] == registry_digest
+
+
+def test_fresh_daemon_pulls_exact_platform_then_resolves_full_pinned_reference(monkeypatch):
+    registry_digest = "sha256:" + "e" * 64
+    local_id = "sha256:" + "f" * 64
+    reference = "valkey/valkey:9.1.2-alpine@" + registry_digest
+    calls = []
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args == ["docker", "image", "inspect", reference] and calls.count(args) == 1:
+            raise COLLECT.subprocess.CalledProcessError(1, args)
+        if args == ["docker", "pull", "--platform=linux/amd64", reference]: return "pulled"
+        if args == ["docker", "image", "inspect", reference]:
+            return json.dumps([{"Id": local_id, "Os": "linux", "Architecture": "amd64", "RepoDigests": ["valkey/valkey@" + registry_digest]}])
+        raise AssertionError(args)
+    monkeypatch.setattr(COLLECT, "run", fake_run)
+    info = COLLECT.admit_pinned_source_image(reference, registry_digest)
+    assert info["LocalImageId"] == local_id
+    assert calls == [["docker", "image", "inspect", reference], ["docker", "pull", "--platform=linux/amd64", reference], ["docker", "image", "inspect", reference]]
+
+
+@pytest.mark.parametrize("repo_digests,os_name,arch", [
+    (["other/repo@sha256:" + "e" * 64], "linux", "amd64"),
+    (["valkey/valkey@sha256:" + "0" * 64], "linux", "amd64"),
+    (["valkey/valkey@sha256:" + "e" * 64], "linux", "arm64"),
+])
+def test_source_admission_rejects_wrong_repository_digest_or_platform(monkeypatch, repo_digests, os_name, arch):
+    registry_digest = "sha256:" + "e" * 64
+    reference = "valkey/valkey:9.1.2-alpine@" + registry_digest
+    monkeypatch.setattr(COLLECT, "run", lambda args, **kwargs: json.dumps([{"Id": "sha256:" + "f" * 64, "Os": os_name, "Architecture": arch, "RepoDigests": repo_digests}]))
+    with pytest.raises(ValueError):
+        COLLECT.admit_pinned_source_image(reference, registry_digest)
+
+
+def test_source_admission_fails_closed_when_pinned_pull_fails(monkeypatch):
+    registry_digest = "sha256:" + "e" * 64
+    reference = "valkey/valkey:9.1.2-alpine@" + registry_digest
+    def fake_run(args, **kwargs):
+        raise COLLECT.subprocess.CalledProcessError(1, args)
+    monkeypatch.setattr(COLLECT, "run", fake_run)
+    with pytest.raises(COLLECT.subprocess.CalledProcessError):
+        COLLECT.admit_pinned_source_image(reference, registry_digest)
+
+
+def test_source_admission_verifier_binds_registry_digest_to_retained_dockerfile(tmp_path):
+    (tmp_path / "notices/reference-sources").mkdir(parents=True)
+    registry_digest = "sha256:" + "e" * 64
+    local_id = "sha256:" + "f" * 64
+    reference = "valkey/valkey:9.1.2-alpine@" + registry_digest
+    (tmp_path / "notices/reference-sources/Dockerfile.g7").write_text("ARG VALKEY_IMAGE=" + reference + "\n")
+    provenance = {"source_image_id": local_id, "source_distribution_admission": {"reference": reference, "registry_digest": registry_digest, "local_image_id": local_id, "platform": "linux/amd64", "repo_digests": ["valkey/valkey@" + registry_digest]}}
+    errors = []
+    MODULE.validate_source_image_admission(tmp_path, provenance, errors)
+    assert not errors
+    provenance["source_distribution_admission"]["local_image_id"] = registry_digest
+    errors = []
+    MODULE.validate_source_image_admission(tmp_path, provenance, errors)
+    assert "pinned source-image admission identities are invalid" in errors
 
 
 def make_valid_sbom_fixture(root: Path):
@@ -479,6 +557,8 @@ def test_complete_notice_inventory_verifier_fixture_passes(tmp_path, monkeypatch
     import hashlib
     image_id = "sha256:" + "a" * 64
     source_id = "sha256:" + "d" * 64
+    source_registry_digest = "sha256:" + "c" * 64
+    source_reference = "valkey/valkey:9.1.2-alpine@" + source_registry_digest
     manifest_digest = "sha256:" + "b" * 64
     purl = "pkg:deb/debian/sample@1.0?arch=amd64&distro=debian-13"
     location = "/usr/share/doc/sample/copyright"
@@ -512,9 +592,14 @@ def test_complete_notice_inventory_verifier_fixture_passes(tmp_path, monkeypatch
         target = tmp_path / rel; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(data)
         artifact_rows.append({"path": rel, "sha256": hashlib.sha256(data).hexdigest()})
     source_files_json = tmp_path / "notices/copied-source-file-hashes.json"
-    provenance = {"source_image_id": source_id, "source_image_platform": "linux/amd64", "source_image_package_evidence": {}, "copied_assets": copied_rows, "missing_assets": [], "source_files": source_files}
+    (tmp_path / "notices/reference-sources").mkdir(parents=True, exist_ok=True)
+    retained_dockerfile = tmp_path / "notices/reference-sources/Dockerfile.g7"
+    retained_dockerfile.write_text("ARG VALKEY_IMAGE=" + source_reference + "\n")
+    provenance = {"source_image_id": source_id, "source_image_platform": "linux/amd64", "source_image_package_evidence": {}, "copied_assets": copied_rows, "missing_assets": [], "source_files": source_files,
+                  "source_distribution_admission": {"reference": source_reference, "registry_digest": source_registry_digest, "local_image_id": source_id, "platform": "linux/amd64", "repo_digests": ["valkey/valkey@" + source_registry_digest]}}
     (tmp_path / "notices/copied-binary-provenance.json").write_text(json.dumps(provenance))
     artifact_rows.append({"path": "notices/copied-binary-provenance.json", "sha256": hashlib.sha256((tmp_path / "notices/copied-binary-provenance.json").read_bytes()).hexdigest()})
+    artifact_rows.append({"path": "notices/reference-sources/Dockerfile.g7", "sha256": hashlib.sha256(retained_dockerfile.read_bytes()).hexdigest()})
     package_evidence = {"identity": identity, "license_evidence": [{"value": "MIT", "locations": [{"path": location}]}], "metadata_license_texts": []}
     manifest = {"schema": "volt-notice-inventory/v1", "image_id": image_id, "platform": "linux/amd64", "package_count": 1, "packages_with_license_metadata": 1,
                 "runtime_ui_packages": 0, "debian_source_candidate_count": 0, "embedded_notice_asset_count": 0, "package_license_evidence": [package_evidence], "unresolved": [], "files": []}

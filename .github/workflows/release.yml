@@ -96,9 +96,10 @@ jobs:
           uv run python -m unittest discover -s tests/public_check -v
           uv run python tools/public_check.py .
           npm --prefix ui ci
+          npm --prefix ui run check:api
           npm --prefix ui run build
           (cd ui && npx playwright install --with-deps chromium)
-          node --test ui/tests/public-g4-fixtures.test.mjs
+          node --test ui/tests/*.test.mjs
           npm --prefix tools/g0_ci/openspec ci
           test "$(tools/g0_ci/openspec/node_modules/.bin/openspec --version)" = "${OPENSPEC_VERSION}"
           tools/g0_ci/openspec/node_modules/.bin/openspec validate --all --strict

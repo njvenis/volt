@@ -476,21 +476,21 @@ command -v docker >/dev/null || { echo 'Docker CLI unavailable' >&2; exit 69; }
 command -v curl >/dev/null || { echo 'curl unavailable' >&2; exit 69; }
 if (( ! CONTAINER_BOUNDARIES_MODE )); then
   command -v nsenter >/dev/null || { echo 'nsenter is required for the host controller to reach the isolated recovery namespace' >&2; exit 69; }
-  [[ -x /home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome ]] || {
-    echo 'Playwright Chromium 1234 executable unavailable' >&2; exit 69;
-  }
-  PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright node -e \
-    "process.stdout.write(require('./ui/node_modules/playwright/package.json').version+'\\n')" \
-    >"$EVIDENCE/playwright-version.txt"
 fi
-if (( CONTAINER_BOUNDARIES_MODE )); then
-  command -v node >/dev/null || { echo 'Node.js is required for the fake-OIDC protected API acceptance' >&2; exit 69; }
-  [[ -x /home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome ]] || {
-    echo 'Playwright Chromium 1234 executable unavailable for the fake-OIDC journey' >&2; exit 69;
-  }
-  node -e "const p=require('./ui/node_modules/playwright/package.json'); if(p.version!=='1.61.1')process.exit(1); process.stdout.write(p.version+'\\n')" \
-    >"$EVIDENCE/playwright-version.txt"
-fi
+command -v node >/dev/null || { echo 'Node.js is required for browser acceptance' >&2; exit 69; }
+# Use the installed package's browser, or an explicit caller-provided executable.
+# Launching also checks headless-only installations and browser system libraries.
+node <<'PLAYWRIGHTCHECK' >"$EVIDENCE/playwright-version.txt"
+const {chromium}=require('./ui/node_modules/playwright');
+const version=require('./ui/node_modules/playwright/package.json').version;
+const expected=require('./ui/package.json').devDependencies.playwright;
+(async()=>{
+  if(version!==expected)throw new Error(`Playwright ${version} does not match manifest ${expected}`);
+  const browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_EXECUTABLE_PATH?{executablePath:process.env.CHROMIUM_EXECUTABLE_PATH}:{})});
+  await browser.close();
+  process.stdout.write(version+'\n');
+})().catch(error=>{console.error(error.message);process.exit(69);});
+PLAYWRIGHTCHECK
 df -Pk /tmp >"$EVIDENCE/tmp-space-preflight.txt"
 for port in "$API_PORT" "$RECOVERY_PORT" "$OIDC_PROXY_PORT" "$OIDC_PORT" "$ANCHOR_PORT"; do
   if (echo >/dev/tcp/127.0.0.1/$port) >/dev/null 2>&1; then
@@ -951,8 +951,7 @@ CEBOUNDARY
   printf 'network=default-private-bridge\npeer_target_container_id=%s\npeer_target_ip=%s\nprobe_ports=8000,8002,9000,5432,6379,8081\n' \
     "$CONTAINER_ID" "$BOUNDARY_PEER_IP" >"$EVIDENCE/unauthorized-peer-target.txt"
   ingress_boundary_probe before
-  CHROMIUM_EXECUTABLE_PATH=/home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome \
-    node "$ROOT/tools/g7_container_authenticated_probe.mjs" --origin "http://127.0.0.1:$API_PORT" \
+  node "$ROOT/tools/g7_container_authenticated_probe.mjs" --origin "http://127.0.0.1:$API_PORT" \
       --fixture-root "$RUN_ROOT" --evidence "$EVIDENCE" --phase before \
       >"$EVIDENCE/container-auth-before.stdout" 2>"$EVIDENCE/container-auth-before.stderr"
   uv run python "$ROOT/tools/g7_container_webhook_probe.py" --container "$CONTAINER" \
@@ -1006,8 +1005,7 @@ CEASSERT
   chmod 0600 "$EVIDENCE/ce-sentinel-findings-after.json" "$EVIDENCE/ce-media-after.txt"
   BOUNDARY_PEER_IP=$(docker inspect "$CONTAINER" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
   ingress_boundary_probe after
-  CHROMIUM_EXECUTABLE_PATH=/home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome \
-    node "$ROOT/tools/g7_container_authenticated_probe.mjs" --origin "http://127.0.0.1:$API_PORT" \
+  node "$ROOT/tools/g7_container_authenticated_probe.mjs" --origin "http://127.0.0.1:$API_PORT" \
       --fixture-root "$RUN_ROOT" --evidence "$EVIDENCE" --phase after \
       >"$EVIDENCE/container-auth-after.stdout" 2>"$EVIDENCE/container-auth-after.stderr"
   uv run python "$ROOT/tools/g7_container_webhook_probe.py" --container "$CONTAINER" \
@@ -1154,8 +1152,7 @@ if (( DATA_PRESERVATION_MODE )); then
   uv run python "$ROOT/tools/g7_observer_fixture.py" link-actor --root "$RUN_ROOT" \
     --container "$CONTAINER" >"$EVIDENCE/preservation-oidc-link.stdout" \
     2>"$EVIDENCE/preservation-oidc-link.stderr"
-  PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
-    node "$ROOT/tools/g7_preservation_authority_browser.mjs" \
+  node "$ROOT/tools/g7_preservation_authority_browser.mjs" \
       --origin "http://127.0.0.1:$API_PORT" \
       --storage-state "$RUN_ROOT/host/preservation-session.json" \
       >"$EVIDENCE/preservation-authority.stdout" 2>"$EVIDENCE/preservation-authority.stderr"
@@ -1225,7 +1222,6 @@ if (( DATA_PRESERVATION_MODE )); then
     exit 70
   fi
   install -m 0600 "$report_source" "$EVIDENCE/preservation-signed-report.json"
-  PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
   node "$ROOT/tools/g7_preservation_live_readback.mjs" \
       --origin "http://127.0.0.1:$API_PORT" \
       --storage-state "$RUN_ROOT/host/preservation-session.json" \
@@ -1527,8 +1523,7 @@ json.dump({'schema_version':1,'old_snapshot_id':old['snapshot_id'],
  'replacement_storage_generation':new['storage_generation'],'member_identity_digests':b,
  'preserved':True},open(sys.argv[3],'x',encoding='utf-8'),sort_keys=True,separators=(',',':'))
 PRESERVATIONCONTINUITY
-  PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
-    node "$ROOT/tools/g7_preservation_live_readback.mjs" \
+  node "$ROOT/tools/g7_preservation_live_readback.mjs" \
       --origin "http://127.0.0.1:$API_PORT" \
       --storage-state "$RUN_ROOT/host/preservation-session.json" \
       --previous-readback "$EVIDENCE/preservation-public-readback.json" \
@@ -1553,8 +1548,7 @@ json.dump({'schema_version':1,'same_snapshot':False,'same_class_states':True,
  'denied_scope_status':after['denied_scope_status'],'write_methods_observed':False},
  open(sys.argv[3],'w',encoding='utf-8'),sort_keys=True,separators=(',',':'))
 PRESERVATIONREPLACEMENT
-  CHROMIUM_EXECUTABLE_PATH=/home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome \
-    node "$ROOT/tools/g7_preservation_browser_handoff.mjs" \
+  node "$ROOT/tools/g7_preservation_browser_handoff.mjs" \
       --origin "http://127.0.0.1:$API_PORT" \
       --storage-state "$RUN_ROOT/host/preservation-session.json" \
       --signed-report "$EVIDENCE/preservation-replacement-signed-report.json" \
@@ -1665,17 +1659,14 @@ if (( IDENTITY_MODE )); then
     <"$ROOT/tools/g7_recovery_retained_fixture.py" \
     >"$EVIDENCE/identity-owner-finding-fixture.stdout" \
     2>"$EVIDENCE/identity-owner-finding-fixture.stderr"
-  PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
-    node "$ROOT/tools/g7_identity_access_ownership_browser.mjs" \
+  node "$ROOT/tools/g7_identity_access_ownership_browser.mjs" \
       --origin "http://127.0.0.1:$API_PORT" --evidence "$EVIDENCE" \
       --fixture-root "$RUN_ROOT" --oidc-proxy-port "$OIDC_PROXY_PORT" --app-container "$CONTAINER" \
       >"$EVIDENCE/identity-browser.stdout" 2>"$EVIDENCE/identity-browser.stderr"
   echo 'G7 local identity/access/ownership public lifecycle journey completed' | tee "$EVIDENCE/result.txt"
   exit 0
 fi
-PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
-CHROMIUM_EXECUTABLE_PATH=/home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome \
-  node "$ROOT/tools/g7_observer_journey_browser.mjs" \
+node "$ROOT/tools/g7_observer_journey_browser.mjs" \
   --origin "http://127.0.0.1:$API_PORT" --evidence "$EVIDENCE" --fixture-root "$RUN_ROOT" \
   --app-container "$CONTAINER" \
   $([[ $IS_BACKUP_MODE == 1 ]] && printf '%s' '--backup-seed-only') \
@@ -2717,8 +2708,7 @@ PYEXPECT
     --evidence "$EVIDENCE/restore-public-browser-probe" \
     >"$EVIDENCE/restore-public-browser-probe.stdout" \
     2>"$EVIDENCE/restore-public-browser-probe.stderr"
-  PLAYWRIGHT_BROWSERS_PATH=/home/nicho/.cache/ms-playwright \
-    node "$ROOT/ui/tests/backup-recovery-browser.mjs" --origin http://127.0.0.1:8000 \
+  node "$ROOT/ui/tests/backup-recovery-browser.mjs" --origin http://127.0.0.1:8000 \
     --storage-state "$EVIDENCE/recovery-auth-state.json" \
     --expectations "$EVIDENCE/restore-browser-expectations.json" \
     --evidence "$EVIDENCE/restore-public-browser" \

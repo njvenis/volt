@@ -10,7 +10,7 @@ const origin=arg('--origin'), evidence=arg('--evidence'), fixtureRoot=arg('--fix
 const operatorSecret=(await readFile(path.join(fixtureRoot,'secrets','oidc_operator_secret'),'utf8')).trim();
 const ownerFindingFixture=JSON.parse(await readFile(path.join(evidence,'identity-owner-finding-fixture.stdout'),'utf8'));
 await mkdir(evidence,{recursive:true,mode:0o700});
-const browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE_PATH??'/home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome'});
+const browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_EXECUTABLE_PATH?{executablePath:process.env.CHROMIUM_EXECUTABLE_PATH}:{})});
 const admin=await browser.newContext({viewport:{width:1440,height:1000}}), user=await browser.newContext({viewport:{width:1440,height:1000}});
 const zero='00000000-0000-4000-8000-000000000000';
 const scope={source_family:'local',source_account_id:'g7-local',scope_key:'all'};

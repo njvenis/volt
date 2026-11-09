@@ -7,7 +7,7 @@ function arg(name){const i=process.argv.indexOf(name);if(i<0||!process.argv[i+1]
 const origin=arg('--origin'), evidence=arg('--evidence'), fixtureRoot=arg('--fixture-root'), phase=arg('--phase');
 if(!['before','after'].includes(phase))throw new Error('phase must be before or after');
 await mkdir(evidence,{recursive:true,mode:0o700});
-const browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE_PATH??'/home/nicho/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome'});
+const browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_EXECUTABLE_PATH?{executablePath:process.env.CHROMIUM_EXECUTABLE_PATH}:{})});
 const zero='00000000-0000-4000-8000-000000000000';
 function ensure(ok,label){if(!ok)throw new Error(label);}
 function stable(value){if(Array.isArray(value))return value.map(stable);if(value&&typeof value==='object')return Object.fromEntries(Object.keys(value).sort().map(key=>[key,stable(value[key])]));return value;}

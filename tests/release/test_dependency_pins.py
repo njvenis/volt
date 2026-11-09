@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_PINS = {
     "authlib": "1.9.1",
-    "cryptography": "50.0.1",
+    "cryptography": "50.0.2",
 }
 
 

@@ -42,6 +42,19 @@ def write_instance(root: Path, info: dict) -> Path:
 
 
 class LocalPreviewSafetyTests(unittest.TestCase):
+    def test_fresh_smoke_explicitly_initializes_development_and_readback_does_not(self):
+        info = {**metadata(), "api_port": 8180, "oidc_port": 8190}
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(preview, "load", return_value=(Path(directory), info)), \
+             patch.object(preview, "preflight"), patch.object(preview, "verify_private_ingress"), \
+             patch.object(preview.subprocess, "run") as run:
+            for readback in (False, True):
+                args = type("Args", (), {"instance": "demo", "evidence": directory, "readback": readback})()
+                preview.smoke(args)
+                command = run.call_args.args[0]
+                self.assertEqual("--initialize-development" in command, not readback)
+                self.assertEqual("--readback" in command, readback)
+
     def test_instance_name_is_safe_and_state_root_scoped(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"XDG_STATE_HOME": temp}):
             self.assertEqual(preview.state_dir("demo"), Path(temp) / "volt/g7-preview/demo")

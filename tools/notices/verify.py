@@ -52,7 +52,10 @@ def parse_deb822_index(path: Path):
 def parse_sha256_members(value: str) -> dict[str, tuple[str, int]]:
     """Parse a complete, unique Debian Checksums-Sha256 field."""
     members = {}
-    for line in value.splitlines():
+    # Python 3.12.3's email.parser preserves a leading newline for fields whose
+    # first value is a continuation line. Strip field-boundary whitespace, but
+    # leave interior blank lines for the strict row parser to reject.
+    for line in value.strip().splitlines():
         parts = line.split()
         if len(parts) != 3 or not re.fullmatch(r"[0-9a-f]{64}", parts[0]) or not parts[1].isdigit() or not parts[2]:
             raise ValueError("malformed SHA-256 member row")
@@ -482,6 +485,34 @@ def validate_source_sbom_binding(root: Path, source_id: str, errors: list[str]) 
         errors.append("pinned source-image SBOM is invalid")
 
 
+def validate_source_image_admission(root: Path, provenance: dict, errors: list[str]) -> None:
+    """Bind admitted local image identity to the exact Dockerfile-pinned repository digest."""
+    try:
+        admission = provenance.get("source_distribution_admission", {})
+        source_id = provenance.get("source_image_id", "")
+        reference = admission.get("reference", "")
+        registry_digest = admission.get("registry_digest", "")
+        local_id = admission.get("local_image_id", "")
+        if (not isinstance(reference, str) or "@" not in reference
+                or not IMAGE_RE.fullmatch(registry_digest)
+                or reference.rsplit("@", 1)[1] != registry_digest
+                or local_id != source_id
+                or admission.get("platform") != "linux/amd64"
+                or not IMAGE_RE.fullmatch(local_id)):
+            errors.append("pinned source-image admission identities are invalid")
+            return
+        dockerfile = (root / "notices/reference-sources/Dockerfile.g7").read_text()
+        match = re.search(r"^ARG VALKEY_IMAGE=([^\n]+)$", dockerfile, re.MULTILINE)
+        if not match or match.group(1) != reference:
+            errors.append("source-image admission reference does not match retained Dockerfile")
+        repository = reference.rsplit("@", 1)[0].rsplit("/", 1)
+        repository = repository[0] + "/" + repository[1].split(":", 1)[0]
+        if f"{repository}@{registry_digest}" not in admission.get("repo_digests", []):
+            errors.append("source-image admission lacks the exact pinned repository digest")
+    except (OSError, ValueError, TypeError, AttributeError):
+        errors.append("source-image admission evidence is invalid")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--directory", required=True, type=Path, help="collector output directory")
@@ -529,6 +560,7 @@ def main() -> int:
                     errors.append(f"copied-binary digest/size evidence is invalid: {path}")
             source_id = provenance.get("source_image_id", "")
             if not IMAGE_RE.fullmatch(source_id) or provenance.get("source_image_platform") != "linux/amd64": errors.append("copied-binary source image is not bound to a linux/amd64 immutable ID")
+            validate_source_image_admission(root, provenance, errors)
             if not isinstance(provenance.get("source_image_package_evidence"), dict): errors.append("copied-binary source package evidence is missing")
             validate_source_sbom_binding(root, source_id, errors)
             source_files = provenance.get("source_files", {})

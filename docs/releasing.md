@@ -13,9 +13,25 @@
 
 Use [RC1 installation](installation.md) for evaluation. The release page is the canonical artifact/evidence handoff; the sections below document maintainer controls, not installation steps or a request to republish RC1.
 
-## RC2 candidate preparation and publication controls
+## RC2 publication record and controls
 
-RC2 (`0.1.0-rc.2`, prospective tag `v0.1.0-rc.2`) is a separate Compose-compatible candidate. RC1's tag, image, archive and evidence remain historical and unchanged. The candidate has not been published by these instructions.
+RC2 (`0.1.0-rc.2`) is the Compose-compatible evaluation release. RC1's tag, image, archive and evidence remain historical and unchanged. The RC2 Git tag and prerelease are published at [v0.1.0-rc.2](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.2), with the standalone bundle, signed offline archive, and verification instructions attached.
+
+The published image reference is `ghcr.io/njvenis/volt@sha256:a7130e38b88b781d93d84c4ddd022ba45716a06b89949a2923e1dd531db2eac1`. The immutable version and source tags were checked against this digest, direct anonymous pull passed, and Cosign verification passed for the exact release workflow identity on `main`.
+
+| Binding | Published value |
+| --- | --- |
+| Image source commit | `0af679d77754060f2f89368830a92ddb6e3f2122` |
+| Image config ID | `sha256:09412fdcda1a77a6182829061e202f83e767f8cfaecce2cc5b3e9443c3c35461` |
+| Registry digest | `sha256:a7130e38b88b781d93d84c4ddd022ba45716a06b89949a2923e1dd531db2eac1` |
+| Candidate preparation run | `41892440449` |
+| Publication and independent-verifier controller commit | `90f48211e65c9ae0556419dc7f8329170386287c` |
+| Publication run | `41905613454` |
+| Signed offline artifact ID | `13360496761` |
+
+The release scan recorded 888 findings and zero fixable High/Critical findings under the configured gate, with no exceptions. This does not mean the image has zero vulnerabilities. Hosted Compose demo, cold backup/restore, and offline-preview qualification passed for the same image. The signed provenance distinguishes the image source and preparation run from the later publication controller and publication run.
+
+The prerelease assets are the standalone source-free `volt-compose.tar.gz` and `volt-compose.tar.gz.sha256`, the signed `volt-0.1.0-rc.2-linux-amd64.tar.gz` offline archive, and `VERIFY-RELEASE.md`. The standalone bundle is also covered by the outer archive's signed manifest; its checksum sidecar is an integrity aid, not a trust anchor. The external verification instructions use the authenticated controller checkout separately from the image source commit.
 
 Dispatch the RC2 release workflow from `main` with `candidate_run_id` empty and `publish_approved` false. This first phase has read-only repository permissions: it checks exact clean main, unused version tag, and all existing gates; captures `source.tar` before the one image build; labels that image with the source snapshot digest and Compose contract; and runs both the existing launcher regression and the maintained source-free Compose demo/backup/restore qualification against that same image. It retains a versioned candidate artifact for 30 days. Compose qualification runs use only `volt-rc2-*` resources and private state/backups remain in the runner's temporary directory.
 
@@ -23,9 +39,9 @@ Publication is a distinct dispatch from the same exact main commit. Set `candida
 
 An explicitly approved retained candidate may use the workflow's `recovery_mode` only when the publisher controller has advanced on `main` without changing the candidate. Supply the candidate's exact `candidate_source_sha`, `candidate_artifact_id`, `candidate_artifact_digest`, and `candidate_archive_sha256` along with its `candidate_run_id`; the workflow checks the source and controller are canonical-main ancestors, the prepare run is successful and belongs to this workflow, the API reports that exact unique artifact ID/digest, the download action verifies the artifact digest, and the inner tar SHA-256 matches the explicit value before extraction. For the approved RC2 candidate, these values are source `0af679d77754060f2f89368830a92ddb6e3f2122`, run `41892440449`, artifact ID `13353554349`, artifact digest `sha256:c0fa388ee0bd69b243218cf5c5da950c991fd3bd5c554bc7a03eb3f7b4e9b2e6`, and candidate tar SHA-256 `581dd4e916c2874ed3f89221460b07597dcb463263da36a969aa411293c8f072`. This mode keeps image/source/archive and OCI SHA tag bound to the approved candidate source. Compose installer files and `VERIFY.txt` are taken from that source commit; the signed provenance separately records the controller commit/workflow, candidate prepare run, publication run, artifact identity and recovery flag. The publication and required human-environment gates still apply. Do not rebuild, substitute a candidate, or publish if any supplied identity differs.
 
-After pushing the unchanged image, publication records its registry digest, builds the final source-free `0.1.0-rc.2` Compose bundle with `ghcr.io/njvenis/volt@sha256:…`, verifies the bundle and checksum, and includes both in the signed offline archive. The signed manifest binds that bundle, image ID, registry digest, source tar and source-snapshot label. Ordinary bundle consumers need Docker Compose v2, Python 3.11+, OpenSSL and the image pull; Git, Node, npm, browser dependencies and application build tools are not installation prerequisites. The browser is installed only in the hosted verification job.
+Publication recorded registry digest `sha256:a7130e38b88b781d93d84c4ddd022ba45716a06b89949a2923e1dd531db2eac1`, rendered the final source-free `0.1.0-rc.2` Compose bundle with that exact digest-pinned image reference, verified the bundle/checksum, and included it in the signed offline archive. The signed manifest binds the bundle, image ID, registry digest, source tar and source-snapshot label. Once extracted from the authenticated archive, the Compose installer needs Docker Compose v2, Python 3.11+, OpenSSL and the image pull; Git, Node, npm, browser dependencies and application build tools are not runtime/install prerequisites. Independent verification of the outer signed archive uses the documented trust bootstrap and an authenticated source checkout. The browser is installed only in the hosted verification job.
 
-Compose evidence is a local synthetic demo with loopback ingress and exact owned-resource cleanup. It demonstrates the tested same-image cold restore; it does not establish Okta/AWS compatibility, production readiness, identity-sync integration or independent-host recovery. Until the candidate completes the hosted run and publication handoff, Compose release availability remains pending RC2 image and bundle qualification.
+Compose evidence is a hosted synthetic demo with loopback ingress and exact owned-resource cleanup. It demonstrates the tested same-image cold restore; it does not establish Okta/AWS compatibility, production readiness, identity-sync integration or independent-host recovery. The image, hosted qualification, signed offline archive, and prerelease handoff are complete.
 
 ## RC1 historical preparation and publication controls
 

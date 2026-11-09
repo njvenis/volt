@@ -23,6 +23,7 @@ def test_sha256_member_parser_requires_complete_unique_digest_size_rows():
     for malformed in (
         "", "bad 2 file", f"{'a' * 64} -1 file", f"{'a' * 64} 3 file\n{'b' * 64} 4 file",
         f"{'a' * 64} 3 file\n{'b' * 64} 4 file",
+        f"{'a' * 64} 3 file\n\n{'b' * 64} 4 file",
     ):
         try:
             MODULE.parse_sha256_members(malformed)
@@ -30,6 +31,15 @@ def test_sha256_member_parser_requires_complete_unique_digest_size_rows():
             pass
         else:
             raise AssertionError(f"accepted malformed signed member list: {malformed!r}")
+
+
+def test_sha256_member_parser_accepts_python_3123_email_parser_prefix():
+    # Python 3.12.3 Parser().parsestr() returns this leading newline for a
+    # continuation-only Checksums-Sha256 field.
+    value = f"\n {'a' * 64} 12 one.tar.xz\n {'b' * 64} 0 empty.diff\n"
+    assert MODULE.parse_sha256_members(value) == {
+        "one.tar.xz": ("a" * 64, 12), "empty.diff": ("b" * 64, 0)
+    }
 
 
 def test_debian_source_groups_deduplicate_package_license_tokens_and_keep_expression(tmp_path):

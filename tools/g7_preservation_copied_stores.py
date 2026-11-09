@@ -485,7 +485,7 @@ def main():
             if case=='pending_first_receipt':expected['auditCopy']={'pending_receipts':1,'missing_receipts':0,'changed_receipts':0,'unexpected_receipts':0};expected['reasons']={audit_class:'source_checkpoint_missing'}
             if case=='unexpected_sink_only':expected['auditCopy']={'unexpected_events':1,'pending_receipts':0};expected['recordClass']=audit_class;expected['recordState']='unexpected';expected['recordReason']='unexpected_member'
             expected_path=evidence/(case+'-public-expect.json');expected_path.write_text(json.dumps(expected)+'\n')
-            browser_env={**os.environ,'PLAYWRIGHT_BROWSERS_PATH':'/home/nicho/.cache/ms-playwright'}
+            browser_env=dict(os.environ)
             browser=subprocess.run(['node',str(ROOT/'tools/g7_preservation_report_failure_matrix.mjs'),
                 '--origin',origin,'--storage-state',str(root/'host/preservation-session.json'),
                 '--expect',str(expected_path),'--output',str(evidence/(case+'-public.json'))],

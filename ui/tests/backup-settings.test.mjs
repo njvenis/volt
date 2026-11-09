@@ -58,6 +58,7 @@ async function fixture(t,state=settings(),retained=null,options={}) {
   const url=new URL(route.request().url());requests.push(url.pathname+url.search);let body,status=200;
   const error=(code,outcome='not_committed')=>({schema_version:1,error:{code,message:code,details:{outcome}}});
   if(url.pathname==='/api/v1/auth/session')body={schema_version:1,authenticated:true,credential_mode:'oidc_session',principal_id:'fixture-actor',csrf_token:'synthetic-csrf'};
+  else if(url.pathname==='/api/v1/deployment/mode')body={schema_version:1,mode:'demo',label:'Synthetic local demo'};
   else if(url.pathname==='/api/v1/operations/observer-settings')body={schema_version:1,deployments:[],next_cursor:null};
   else if(url.pathname===root){
    const cursor=url.searchParams.get('cursor');
@@ -248,7 +249,7 @@ for(const [name,path,replacement] of [
  // returns a matching receipt and desired revision, so state/count-only checks pass.
  await page.context().addInitScript(({commandPath,path,replacement})=>{const original=window.fetch.bind(window);window.fetch=(input,init)=>{if(new URL(typeof input==='string'?input:input.url,location.origin).pathname===commandPath&&init?.method==='POST'){const command=JSON.parse(init.body);if(path.length===2)command[path[0]][path[1]]=replacement;else command[path[0]]=replacement;init={...init,body:JSON.stringify(command)};}return original(input,init);};},{commandPath:root+'/'+deployment+'/commands',path,replacement});
  await assert.rejects(runBackupBrowserStep({page,origin,expectations,evidenceDirectory}),/Observed backup command payload differs/);
- const report=JSON.parse(await readFile(join(evidenceDirectory,expectations.id+'-browser.json'),'utf8'));assert.equal(report.passed,false);assert.equal(report.commands.length,1);assert.equal(report.commands[0].expected_revisions.configuration,4);assert.match(await page.locator('.observer-summary').innerText(),/Revision 5/);
+ const report=JSON.parse(await readFile(join(evidenceDirectory,expectations.id+'-browser.json'),'utf8'));assert.equal(report.passed,false);assert.equal(report.commands.length,1);assert.equal(report.commands[0].expected_revisions.configuration,4);await page.locator('.observer-summary h3').filter({hasText:/^Revision 5$/}).waitFor();assert.match(await page.locator('.observer-summary').innerText(),/Revision 5/);
 });
 for(const phase of ['navigation','refresh'])test('read handoff rejects backup-command POST during '+phase,async t=>{
  const options={commandError:403,...(phase==='refresh'?{onSettingsRead:(state,count)=>{if(count>=2){state.effective={revision:4,digest,verified_at:new Date().toISOString()};Object.assign(state.status.settings_application,{state:'applied',active_revision:4,active_digest:digest,failure_code:null});}}}:{})};

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import re
 import subprocess
@@ -26,8 +27,8 @@ def main() -> int:
     parser.add_argument("--at", help="UTC date for deterministic policy checks (YYYY-MM-DD)")
     args = parser.parse_args()
 
-    if not re.fullmatch(r"0\.1\.0-rc\.1", args.version):
-        parser.error("only the approved version 0.1.0-rc.1 is configured")
+    if not re.fullmatch(r"0\.1\.0-rc\.2", args.version):
+        parser.error("only the prepared version 0.1.0-rc.2 is configured")
     if args.exception:
         from datetime import date
 
@@ -69,6 +70,8 @@ def main() -> int:
     if git(source, "status", "--porcelain"):
         parser.error("release source worktree must be clean")
     commit = git(source, "rev-parse", "HEAD")
+    source_archive = subprocess.check_output(["git", "-C", str(source), "archive", "--format=tar", "HEAD"])
+    source_snapshot = "sha256:" + hashlib.sha256(source_archive).hexdigest()
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", args.image_id):
         parser.error("candidate image ID must be immutable sha256")
     inspected = subprocess.run([args.docker, "image", "inspect", args.image_id], text=True, capture_output=True)
@@ -81,6 +84,10 @@ def main() -> int:
     labels = image_info.get("Config", {}).get("Labels") or {}
     if image_info.get("Id") != args.image_id or labels.get("org.opencontainers.image.revision") != commit or labels.get("org.opencontainers.image.version") != args.version:
         parser.error("candidate image source/version labels do not match --source")
+    if (labels.get("org.volt.oidc-deployment-modes") != "demo,external"
+            or labels.get("org.volt.compose-install.contract") != "1"
+            or labels.get("org.volt.compose.source-snapshot") != source_snapshot):
+        parser.error("candidate image lacks the required Compose contract or exact source snapshot label")
     if git(source, "tag", "--list", f"v{args.version}"):
         parser.error(f"version tag v{args.version} already exists")
     print(f"release preparation accepted source commit {commit}; publication is a separate approval gate")

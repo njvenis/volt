@@ -431,14 +431,28 @@ def acceptable_image(image: str) -> dict:
 
 
 def admit_pinned_source_image(source_ref: str, source_id: str) -> dict:
-    """Ensure the Docker daemon has the pinned source as an inspectable image record."""
+    """Resolve the pinned registry manifest to an admitted local image record."""
     if not IMAGE_RE.fullmatch(source_id) or "@" not in source_ref or source_ref.rsplit("@", 1)[1] != source_id:
         raise ValueError("source image reference does not bind the supplied immutable digest")
+    repository = source_ref.rsplit("@", 1)[0].rsplit("/", 1)
+    repository = repository[0] + "/" + repository[1].split(":", 1)[0]
+    inspect = ["docker", "image", "inspect", source_ref]
     try:
-        run(["docker", "image", "inspect", source_id])
+        raw = run(inspect)
     except subprocess.CalledProcessError:
-        run(["docker", "pull", source_ref])
-    return acceptable_image(source_id)
+        run(["docker", "pull", "--platform=linux/amd64", source_ref])
+        raw = run(inspect)
+    rows = json.loads(raw)
+    if not isinstance(rows, list) or len(rows) != 1:
+        raise ValueError("Docker did not resolve exactly one pinned source image")
+    info = rows[0]
+    if info.get("Os") != "linux" or info.get("Architecture") != "amd64":
+        raise ValueError(f"expected pinned source linux/amd64, found {info.get('Os')}/{info.get('Architecture')}")
+    if f"{repository}@{source_id}" not in (info.get("RepoDigests") or []):
+        raise ValueError("resolved source image RepoDigests do not contain the pinned repository digest")
+    if not IMAGE_RE.fullmatch(info.get("Id", "")):
+        raise ValueError("Docker returned no immutable local source image ID")
+    return {**info, "RegistryReference": source_ref, "RegistryDigest": source_id, "LocalImageId": info["Id"], "Platform": "linux/amd64"}
 
 
 def remove_owned_export_container(cid: str, mounts: list[str], cleanup_log: list[dict], record_path: Path | None = None) -> None:
@@ -585,11 +599,12 @@ def main() -> int:
     source_match = VALKEY_SOURCE_RE.search(dockerfile_text)
     if not source_match:
         ap.error("Dockerfile.g7 VALKEY_IMAGE must remain pinned by immutable digest")
-    source_image_id = source_match.group(1)
+    source_registry_digest = source_match.group(1)
     source_ref = re.search(r"^ARG VALKEY_IMAGE=([^\n]+)$", dockerfile_text, re.MULTILINE).group(1)
     # Explicitly admit the registry-pinned source into this daemon; BuildKit
     # cache presence is not treated as a Docker image record.
-    source_image = admit_pinned_source_image(source_ref, source_image_id)
+    source_image = admit_pinned_source_image(source_ref, source_registry_digest)
+    source_image_id = source_image["LocalImageId"]
     run([syft, "scan", "--quiet", "--platform", "linux/amd64", f"docker:{source_image_id}", "-o", f"syft-json={out / 'sbom.valkey-source.syft.json'}"])
     source_packages = packages_from_sbom(out / "sbom.valkey-source.syft.json")
     source_package_rows = [p for p in source_packages if p.get("name") in {"valkey", "musl", "libssl3", "libcrypto3", "openssl"}]
@@ -848,7 +863,7 @@ def main() -> int:
     (inv / "debian-source-candidates.json").write_text(json.dumps(source_offer_candidates, indent=2, sort_keys=True) + "\n")
     unresolved = deduplicate_findings(unresolved)
     provenance["source_files"] = source_file_hashes
-    provenance["source_distribution_admission"] = {"reference": source_ref if "source_ref" in locals() else re.search(r"^ARG VALKEY_IMAGE=([^\n]+)$", dockerfile_text, re.MULTILINE).group(1), "explicit_docker_image_inspect_or_pull": True}
+    provenance["source_distribution_admission"] = {"reference": source_ref, "registry_digest": source_registry_digest, "local_image_id": source_image_id, "platform": source_image["Platform"], "repo_digests": source_image.get("RepoDigests", [])}
     (inv / "copied-binary-provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
     report = {"schema": "volt-notice-inventory/v1", "source_revision": run(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).strip(), "image_id": args.image, "platform": f"{image['Os']}/{image['Architecture']}", "syft_version": "1.55.0", "syft_binary_sha256": digest(Path(syft)), "source_files": source_digests, "package_count": len(packages), "packages_with_license_metadata": len(covered), "runtime_ui_packages": len(ui_packages), "bundled_ui_license_package_count": bundled_ui['package_count'], "package_disposition_count": len(pygithub_disposition), "package_license_evidence": sorted(package_findings.values(), key=lambda x:(x['name'],x['version'])), "unresolved": unresolved, "debian_source_package_count": len(source_groups), "debian_source_candidate_count": len(source_offer_candidates), "embedded_notice_asset_count": len(embedded_rows), "launcher_artifact_count": len(launchers), "limitations": ["SBOM license expressions and image copyright files are evidence, not legal determinations.", "Debian source references are grouped by exact source package/version and remain blocking until a matching archive, written offer or exact source-file exclusion is evidenced.", "SPDX OR alternatives are preserved; AND components remain conjunctive. A disposition is bound to exact package/version and inventory evidence.", "Copied Valkey, musl and OpenSSL asset bytes are independently compared with the explicitly admitted pinned source image."], "files": []}
     for path in sorted(x for x in out.rglob("*") if x.is_file()):

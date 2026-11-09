@@ -80,7 +80,7 @@ RUN set -eu; \
     dpkg-query -W -f='${Package}=${Version}\n' | sort > /tmp/g7-packages-before; \
     while IFS='=|' read -r key version digest; do \
       case "$key" in \
-        os_delta_package_*) package=${key#os_delta_package_}; expected_delta+="$package=$version"$'\n' ;; \
+        os_delta_package_*) package=${key#os_delta_package_}; package=${package%%:*}; expected_delta+="$package=$version"$'\n' ;; \
         os_package_*) package=${key#os_package_} ;; \
         *) continue ;; \
       esac; \

@@ -24,7 +24,9 @@ an approved API change.
 
 The generator is `openapi-types-generator` 1.0.0 (MIT). The driver imports its
 version-bound internal parsers and directly pins `json-schema-to-typescript`
-13.1.2 and `@stoplight/json-ref-resolver` 3.1.6. Separate modules prevent duplicate
+16.0.0 and `@stoplight/json-ref-resolver` 3.1.6. The parser package retains its
+own nested compiler 13.1.2; the driver calls the root 16.0.0 compiler with
+`unknownAny: true`. Separate modules prevent duplicate
 shared declarations produced by the stock CLI's concatenated output. Version
 checks and synthetic contract tests guard this internal interface. Compiler-only
 adapters preserve annotation-only schemas as `unknown` and allow omission of

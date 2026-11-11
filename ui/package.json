@@ -22,7 +22,7 @@
     "vite": "8.3.5",
     "esbuild": "0.28.2",
     "openapi-types-generator": "1.0.0",
-    "json-schema-to-typescript": "13.1.2",
+    "json-schema-to-typescript": "16.0.0",
     "@stoplight/json-ref-resolver": "3.1.6"
   }
 }

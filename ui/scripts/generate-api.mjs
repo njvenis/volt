@@ -9,7 +9,7 @@ import {pathToFileURL} from 'node:url';
 const require=createRequire(import.meta.url);
 const pins={
  'openapi-types-generator':'1.0.0',
- 'json-schema-to-typescript':'13.1.2',
+ 'json-schema-to-typescript':'16.0.0',
  '@stoplight/json-ref-resolver':'3.1.6',
 };
 for(const [name,version] of Object.entries(pins)){
@@ -37,7 +37,7 @@ function assertLocalReferences(value){
  for(const child of Object.values(value))assertLocalReferences(child);
 }
 
-// json-schema-to-typescript 13.1.2 infers an object for a title-only schema.
+// json-schema-to-typescript infers an object for a title-only schema.
 // Annotation-only schemas constrain no values. Express that as unknown using
 // the compiler's tsType extension, only in its private intermediate input.
 function preserveUnconstrained(schema){
@@ -80,7 +80,7 @@ export async function generateTypes(schema){
   const parsed=structuredClone(parse(resolved.result));
   if(name==='Paths'||name==='Webhooks')preserveParameterGroups(parsed);
   preserveUnconstrained(parsed);
-  files[`${name}.ts`]=await compile(parsed,name);
+  files[`${name}.ts`]=await compile(parsed,name,{unknownAny:true});
  }
  files['index.ts']=Object.keys(parsers).map(name=>`export type {${name}} from './${name}';`).join('\n')+'\n';
  return files;

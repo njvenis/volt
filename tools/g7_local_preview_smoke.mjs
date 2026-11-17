@@ -4,7 +4,7 @@ import process from 'node:process';
 import crypto from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import path from 'node:path';
-import {requireAdminRendered,requireAudit,requirePersistedState,requireReceipt,requireSession} from './g7_local_preview_smoke_checks.mjs';
+import {policyExpectedRevisions,requireAdminRendered,requireAudit,requirePersistedState,requireReceipt,requireSession} from './g7_local_preview_smoke_checks.mjs';
 
 function arg(name){const i=process.argv.indexOf(name);if(i<0||!process.argv[i+1])throw new Error(`missing ${name}`);return process.argv[i+1];}
 const origin=arg('--origin'), issuer=arg('--issuer'), subject=arg('--subject'), principal=arg('--principal'), evidence=arg('--evidence');
@@ -80,7 +80,7 @@ try{
     requireReceipt(createReceipt,{commandId,targetId:zero,groupId,action:'access_group.create',objectRevision:1});
     const membershipCatalogue=(await api('/api/v1/assessment/administration/catalogue')).body;
     const membershipCommandId=crypto.randomUUID();
-    const membership=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:{command_id:membershipCommandId,target_id:zero,membership_ids:[],action:'access_group.membership.set',expected_revisions:{target:membershipCatalogue.policy_revision,policy:membershipCatalogue.policy_revision,authority:membershipCatalogue.authority_revision,access_group:createReceipt.result.object_revision,identity_membership:0},payload:{access_group_id:groupId,principal_id:principal,effective_from:new Date(Date.now()+1000).toISOString(),effective_until:null,enabled:true,rationale:'Bind the local administrator to the native group for provider-cap qualification',evidence_ref:'local-preview-provider-cap'}}});
+    const membership=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:{command_id:membershipCommandId,target_id:zero,membership_ids:[],action:'access_group.membership.set',expected_revisions:policyExpectedRevisions(membershipCatalogue,createReceipt.result.object_revision),payload:{access_group_id:groupId,principal_id:principal,effective_from:new Date(Date.now()+1000).toISOString(),effective_until:null,enabled:true,rationale:'Bind the local administrator to the native group for provider-cap qualification',evidence_ref:'local-preview-provider-cap'}}});
     ensure(membership.status===200,`native_membership_create_failed_${membership.status}_${JSON.stringify(membership.body)}`);
     membershipReceipt=membership.body;
     requireReceipt(membershipReceipt,{commandId:membershipCommandId,targetId:zero,

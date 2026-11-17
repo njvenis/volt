@@ -14,6 +14,16 @@ export function requireAdminRendered(state) {
   }
 }
 
+export function policyExpectedRevisions(catalogue, objectRevision) {
+  if (![catalogue?.policy_revision, catalogue?.authority_revision,
+        catalogue?.ownership_revision, objectRevision].every(Number.isInteger)) {
+    throw new Error('policy_revision_catalogue_incomplete');
+  }
+  return {target:catalogue.policy_revision,policy:catalogue.policy_revision,
+    authority:catalogue.authority_revision,ownership:catalogue.ownership_revision,
+    access_group:objectRevision,identity_membership:0,owners:0};
+}
+
 export function requireReceipt(receipt, expected) {
   const action=expected.action??'access_group.create';
   if (!receipt || typeof receipt !== 'object' || receipt.schema_version !== 1

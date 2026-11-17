@@ -74,8 +74,20 @@ class FreshInstallWorkflowTests(unittest.TestCase):
         self.assertIn("start rc2 --no-build", workflow)
         self.assertIn("--expected-image-id \"$image_id\"", workflow)
         self.assertIn("--expected-image-source-revision \"$GITHUB_SHA\"", workflow)
-        self.assertIn("smoke rc2 --readback", workflow)
-        self.assertIn("destroy rc2", workflow)
+        preview = workflow.split("- name: Exercise fresh offline image load and no-build release path", 1)[1].split(
+            "- name: Retain fresh offline install evidence on success or failure", 1)[0]
+        self.assertIn('ADMIN_PASSWORD_FILE=$(mktemp "$RUNNER_TEMP/volt-rc2-admin.XXXXXX")', preview)
+        self.assertIn('chmod 600 "$ADMIN_PASSWORD_FILE"', preview)
+        self.assertIn('rm -f -- "$ADMIN_PASSWORD_FILE"', preview)
+        self.assertIn('--admin-username local-preview-admin --admin-password-file "$ADMIN_PASSWORD_FILE"', preview)
+        self.assertIn('start rc2 --no-build', preview)
+        self.assertIn('--expected-platform linux/amd64', preview)
+        self.assertIn('--password-file "$ADMIN_PASSWORD_FILE" --evidence "$evidence"', preview)
+        self.assertIn('stop rc2', preview)
+        self.assertIn('restart rc2', preview)
+        self.assertIn('--password-file "$ADMIN_PASSWORD_FILE" --readback --evidence "$evidence"', preview)
+        self.assertIn('destroy rc2', preview)
+        self.assertIn('test ! -e "$state/volt/g7-preview/rc2"', preview)
 
     def test_installed_scanner_is_visible_in_the_same_workflow_step(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()

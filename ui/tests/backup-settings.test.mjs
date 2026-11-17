@@ -32,10 +32,13 @@ before(async()=>{
  function BackupFixture(){const [deployment,setDeployment]=useState(location.search.includes('discovery')?null:'${deployment}');return <BackupSettings actorId="fixture-actor" refresh={0} deploymentId={deployment} onDeployment={setDeployment}/>;}
  import {useState} from 'react';
  import NativePermissionEditor from './NativePermissionEditor';
+ import NativeAdminEditor from './NativeAdminEditor';
+ import './native-admin.css';
+ function MappedRoleEditor(){const [item,setItem]=useState(window.fixtureItem);const [key,setKey]=useState(0);return <NativeAdminEditor key={key} context={item?{kind:'edit',id:item.access_group_id}:{kind:'create'}} section="access-groups" catalogue={window.fixtureCatalogue} item={item} principals={[]} available={true} onRefresh={()=>{}} onClose={()=>{}} onCommitted={async()=>{const readback=await fetch('/synthetic-group').then(r=>r.json());setItem(readback);setKey(k=>k+1);}}/>;}
  import {permissionWithin} from './native-admin-validation';
  function Permissions(){const [value,setValue]=useState([]);return <><NativePermissionEditor catalogue={window.fixtureCatalogue} value={value} onChange={setValue}/><output id="permissions-state">{JSON.stringify({value,valid:value.every(p=>permissionWithin(p,window.fixtureCatalogue))})}</output></>;}
  import './tokens.css';import './styles.css';import './v2-workspace.css';
- createRoot(document.getElementById('root')).render(location.pathname==='/permissions'?<Permissions/>:(location.pathname==='/application'||window.backupHandoffApp)?<App/>:<BackupFixture/>);`,resolveDir:resolve(import.meta.dirname,'../src'),loader:'tsx'},jsx:'automatic',bundle:true,format:'esm',outfile:join(directory,'app.js'),logLevel:'silent'});
+ createRoot(document.getElementById('root')).render(location.pathname==='/mapped-role'?<MappedRoleEditor/>:location.pathname==='/permissions'?<Permissions/>:(location.pathname==='/application'||window.backupHandoffApp)?<App/>:<BackupFixture/>);`,resolveDir:resolve(import.meta.dirname,'../src'),loader:'tsx'},jsx:'automatic',bundle:true,format:'esm',outfile:join(directory,'app.js'),logLevel:'silent'});
  server=createServer(async(req,res)=>{
   if(httpApi&&req.url.startsWith('/api/')){
    let raw='';for await(const chunk of req)raw+=chunk;
@@ -289,4 +292,60 @@ test('legacy unknown evidence is accessible and reflows at 1440, 390 and 320',as
  const {page}=await fixture(t,legacyAppliedSettings());await page.addScriptTag({path:resolve(import.meta.dirname,'../node_modules/axe-core/axe.min.js')});const results=[];
  for(const width of [1440,390,320]){await page.setViewportSize({width,height:1000});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`legacy reflow ${width}`);const violations=await page.evaluate(async()=>(await axe.run(document.querySelector('main'),{runOnly:{type:'tag',values:['wcag2a','wcag2aa','wcag21aa','wcag22aa']}})).violations);assert.deepEqual(violations,[],`legacy axe ${width}`);results.push({width,overflow:false,violations});if(process.env.BACKUP_UI_EVIDENCE_DIR){await mkdir(process.env.BACKUP_UI_EVIDENCE_DIR,{recursive:true});await page.screenshot({path:join(process.env.BACKUP_UI_EVIDENCE_DIR,`synthetic-legacy-backup-${width}.png`),fullPage:true});}}
  if(process.env.BACKUP_UI_EVIDENCE_DIR)await writeFile(join(process.env.BACKUP_UI_EVIDENCE_DIR,'synthetic-legacy-accessibility.json'),JSON.stringify({environment:'synthetic legacy DTO browser fixture; no database migration execution',results},null,2));
+});
+
+test('native mapped role UUID: exact submission/readback, immutable IDs, validation, errors, keyboard and reflow',async t=>{
+ const context=await browser.newContext({viewport:{width:1440,height:1000}});t.after(()=>context.close());
+ const scope={group_ids:['*'],source_families:['*'],environments:['*'],service_ids:['*'],membership_mode:'explicit'};
+ const limits={maximum_acceptance_days:null,maximum_severity:null,whole_group_confirmation:false,allowed_environments:[],allowed_service_ids:[],allowed_sla_clock_bases:[],allowed_sla_severities:[],allowed_sla_start_sources:[],maximum_sla_duration_seconds:null,maximum_deadline_extension_seconds:null,allow_sla_backfill:false,allowed_identity_scalar_fields:{}};
+ const duties={approval_requires_distinct_actor:false,prohibit_requester_approval:false,required_approver_count:1,prohibited_action_pairs:[]};
+ const sources=[{source_family:'sysdig',source_account_id:randomUUID(),scope_key:'synthetic'}];
+ const catalogue={schema_version:1,authority_mode:'uvm_native_v1',policy_revision:1,authority_revision:2,ownership_revision:1,caller:{principal_id:'actor',can_manage_access_groups:true,can_manage_ownership_teams:false,grantable:{actions:['assessment.read'],target_scope:scope,limits,source_scopes:sources,separation_of_duties:duties}},selectable_actions:[{action:'assessment.read',target_scope:scope,limits}]};
+ await context.addInitScript(c=>window.fixtureCatalogue=c,catalogue);
+ const page=await context.newPage();page.setDefaultTimeout(5000);
+ let reject=true,uncertain=false,group;const commands=[];
+ await page.route('**/api/v1/assessment/commands',async route=>{
+  const command=route.request().postDataJSON();commands.push(command);
+  if(reject){await route.fulfill({status:422,json:{error:{code:'role_id_already_used'}}});return;}
+  if(uncertain){await route.abort('failed');return;}
+  group={...command.payload,enabled:true,revision:1,memberships:[],history:[]};
+  await route.fulfill({json:{schema_version:1,policy_revision:1,command_id:command.command_id,action:command.action,target_id:command.target_id,decision_id:randomUUID(),audit_event_id:randomUUID(),intents:[{intent_id:randomUUID(),kind:'administration.authority.reconcile',target_id:group.access_group_id,authority_revision:2,status:'pending'}]}});
+ });
+ await page.route('**/synthetic-group',route=>route.fulfill({json:group}));
+ await page.goto(origin+'/mapped-role');
+ await page.getByLabel('Display name',{exact:true}).fill('Mapped role fixture');
+ await page.getByRole('group',{name:'Exact source scopes',exact:true}).getByRole('checkbox').check();
+ await page.getByLabel('Reason for change').fill('Synthetic mapped role verification');
+ await page.getByLabel('Evidence reference',{exact:true}).fill('synthetic-role-fixture');
+ await page.getByLabel('I have reviewed', {exact:false}).check();
+ const input=page.getByLabel('Mapped role UUID (optional)'),add=page.getByRole('button',{name:'Add permission',exact:true}),save=page.getByRole('button',{name:'Save change',exact:true});
+ await page.getByLabel('Add action').selectOption('assessment.read');
+ await input.fill('invalid');
+ assert.equal(await input.getAttribute('aria-invalid'),'true');assert.equal(await add.isDisabled(),true);
+ await save.click();assert.equal(commands.length,0);
+ const role='12345678-1234-4234-8234-123456789abc';
+ await input.fill(role);await input.focus();await page.keyboard.press('Tab');assert.equal(await add.evaluate(el=>el===document.activeElement),true);await page.keyboard.press('Enter');
+ await page.getByText(new RegExp('Role ID '+role)).waitFor();
+ assert.equal(await input.inputValue(),'');
+ await page.getByLabel('Add action').selectOption('assessment.read');await input.fill(role.toUpperCase());
+ assert.equal(await add.isDisabled(),true);await page.getByText('This role ID is already used in this draft. Use a new role UUID.',{exact:true}).waitFor();await save.click();assert.equal(commands.length,0);
+ await input.fill('');await add.click();
+ const records=page.locator('details.native-record').filter({has:page.getByRole('button',{name:'Remove assessment.read',exact:true})});
+ assert.equal(await records.count(),2);assert.equal(await records.locator('input').evaluateAll(inputs=>inputs.some(el=>el.value==='12345678-1234-4234-8234-123456789abc')),false);
+ await save.click();await page.getByText('Administration unavailable',{exact:true}).waitFor();
+ assert.equal(commands.length,1);assert.equal(commands[0].payload.permissions[0].role_id,role);
+ assert.match(commands[0].payload.permissions[1].role_id,/^[0-9a-f-]{36}$/);assert.notEqual(commands[0].payload.permissions[1].role_id,role);
+ assert.equal(await page.getByLabel('Reason for change').inputValue(),'Synthetic mapped role verification');
+ reject=false;uncertain=true;await save.click();await page.getByText('Save outcome unknown',{exact:true}).waitFor();
+ assert.equal(await input.isDisabled(),true);assert.equal(commands.length,2);
+ uncertain=false;const retry=page.getByRole('button',{name:'Retry same request',exact:true});await retry.focus();await page.keyboard.press('Enter');await page.getByRole('heading',{name:'Edit access group',exact:true}).waitFor();
+ assert.equal(commands.length,3);assert.deepEqual(commands[2],commands[1]);assert.deepEqual(commands[1].payload.permissions,commands[0].payload.permissions);
+ await page.getByText(new RegExp('Role ID '+role)).waitFor();
+ assert.equal(await input.inputValue(),'');assert.equal(await records.count(),2);
+ await page.addScriptTag({path:resolve(import.meta.dirname,'../node_modules/axe-core/axe.min.js')});
+ for(const width of [1440,390,320]){
+  await page.setViewportSize({width,height:1000});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'mapped role reflow '+width);
+  const violations=await page.evaluate(async()=>(await axe.run(document.querySelector('dialog'),{runOnly:{type:'tag',values:['wcag2a','wcag2aa','wcag21aa','wcag22aa']}})).violations);assert.deepEqual(violations,[],'mapped role axe '+width);
+  if(process.env.BACKUP_UI_EVIDENCE_DIR){await input.scrollIntoViewIfNeeded();await page.screenshot({path:join(process.env.BACKUP_UI_EVIDENCE_DIR,'mapped-role-'+width+'.png'),fullPage:true});}
+ }
 });

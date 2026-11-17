@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from tools import g7_local_preview as preview
+
+ROOT = Path(__file__).resolve().parents[2]
+RC1_SOURCE = "d6e7868091839fcf1374b45397d2aa2c5964f97c"
 
 
 class LocalPreviewPasswordTests(unittest.TestCase):
@@ -28,6 +35,66 @@ class LocalPreviewPasswordTests(unittest.TestCase):
             self.assertNotIn("correct horse battery staple", credential.read_text())
             self.assertEqual(credential.stat().st_mode & 0o777, 0o600)
             self.assertEqual((root.stat().st_mode & 0o777), 0o700)
+
+    def test_init_cli_from_outside_checkout_uses_no_pythonpath_or_docker(self):
+        password_value = "private-cli-test-password"
+        with tempfile.TemporaryDirectory(prefix="volt-preview-cli-outside-") as directory:
+            outer = Path(directory)
+            checkout = outer / "checkout"
+            state = outer / "xdg-state"
+            password_file = outer / "admin-password"
+            password_file.write_text(password_value + "\n", encoding="utf-8")
+            password_file.chmod(0o600)
+            cloned = subprocess.run(["git", "clone", "--quiet", "--local", "--no-hardlinks",
+                str(ROOT), str(checkout)], cwd=outer, text=True, capture_output=True, check=False)
+            self.assertEqual(cloned.returncode, 0, cloned.stderr)
+            env = os.environ.copy()
+            env.pop("PYTHONPATH", None)
+            env["XDG_STATE_HOME"] = str(state)
+            command = [sys.executable, str(checkout / "tools/g7_local_preview.py"),
+                "init", "cli", "--api-port", "18180", "--oidc-port", "18190",
+                "--admin-username", "external-admin", "--admin-password-file", str(password_file)]
+            result = subprocess.run(command, cwd=outer, env=env, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn(password_value, result.stdout + result.stderr)
+            credential = state / "volt/g7-preview/cli/secrets/demo-admin-credentials"
+            record = json.loads(credential.read_text(encoding="utf-8"))
+            self.assertEqual(record["schema"], "uvm.demo-credential.v1")
+            self.assertEqual(record["username"], "external-admin")
+            self.assertEqual(credential.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(hashlib.scrypt(password_value.encode(), salt=bytes.fromhex(record["salt"]),
+                n=2**15, r=8, p=1, dklen=32, maxmem=64 * 1024 * 1024).hex(), record["password_hash"])
+            password_file.unlink()
+            self.assertFalse(password_file.exists())
+
+    def test_rc1_docs_match_the_actual_immutable_rc1_cli(self):
+        old_helper = subprocess.run(["git", "show", f"{RC1_SOURCE}:tools/g7_local_preview.py"],
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True).stdout
+        with tempfile.TemporaryDirectory(prefix="volt-rc1-cli-contract-") as directory:
+            checkout = Path(directory)
+            helper = checkout / "g7_local_preview.py"
+            helper.write_text(old_helper, encoding="utf-8")
+            env = os.environ.copy(); env.pop("PYTHONPATH", None)
+            init_help = subprocess.run([sys.executable, str(helper), "init", "--help"],
+                cwd=checkout, env=env, text=True, capture_output=True, check=False)
+            smoke_help = subprocess.run([sys.executable, str(helper), "smoke", "--help"],
+                cwd=checkout, env=env, text=True, capture_output=True, check=False)
+            self.assertEqual(init_help.returncode, 0, init_help.stderr)
+            self.assertEqual(smoke_help.returncode, 0, smoke_help.stderr)
+            self.assertNotIn("--admin-username", init_help.stdout)
+            self.assertNotIn("--password-file", smoke_help.stdout)
+            accepted = {"init": {"--api-port", "--oidc-port"},
+                        "smoke": {"--evidence", "--readback"}}
+            for document in (ROOT / "docs/installation.md", ROOT / "tools/release/launcher-guide.txt"):
+                lines = document.read_text(encoding="utf-8").splitlines()
+                for action, expected in accepted.items():
+                    matches = [line.strip() for line in lines
+                        if f"tools/g7_local_preview.py {action} rc1 " in line]
+                    self.assertTrue(matches, f"missing RC1 {action} example in {document}")
+                    for line in matches:
+                        options = {token for token in line.split() if token.startswith("--")}
+                        self.assertLessEqual(options, expected, f"unsupported RC1 options in: {line}")
 
     def test_password_file_must_be_private_regular_and_nonempty(self):
         with tempfile.TemporaryDirectory() as directory:

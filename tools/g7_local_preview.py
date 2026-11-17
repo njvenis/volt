@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,14 @@ def run(*args: str, capture: bool = False) -> str:
     if result.returncode:
         raise SystemExit(result.returncode)
     return result.stdout.strip() if capture else ""
+
+
+def source_checkout() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def repository_git(*args: str, capture: bool = False) -> str:
+    return run("git", "-C", str(source_checkout()), *args, capture=capture)
 
 
 def state_dir(instance: str) -> Path:
@@ -50,8 +59,18 @@ def private_password_file(path: Path) -> str:
 
 
 def demo_admin_verifier(username: str, password: str) -> bytes:
-    from deploy.compose.setup import demo_password_verifier
-    return demo_password_verifier(username, password, password)
+    # Keep the preview CLI source-free at runtime; mirror the demo credential
+    # format using only Python's standard library. This must match setup.py.
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,63}", username):
+        raise SystemExit("demo admin username must be 1-64 simple ASCII characters")
+    if len(password) < 16 or len(password.encode("utf-8")) > 1024:
+        raise SystemExit("demo admin password must be 16-1024 UTF-8 bytes")
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**15, r=8,
+                            p=1, dklen=32, maxmem=64 * 1024 * 1024)
+    return json.dumps({"schema": "uvm.demo-credential.v1", "username": username,
+        "salt": salt.hex(), "password_hash": digest.hex()}, sort_keys=True,
+        separators=(",", ":")).encode() + b"\n"
 
 
 def make_tls(directory: Path) -> None:
@@ -122,7 +141,7 @@ def ingress_hostnames() -> str:
 
 
 def initialize(args) -> None:
-    dirty = run("git", "status", "--porcelain", capture=True)
+    dirty = repository_git("status", "--porcelain", capture=True)
     if dirty:
         raise SystemExit("initialize from a committed, clean source revision so the image can be bound to an exact SHA")
     root = state_dir(args.instance)
@@ -163,7 +182,7 @@ def initialize(args) -> None:
     (root / "operator-link.json").chmod(0o600)
     owner_token = secrets.token_hex(32)
     suffix = owner_token[:16]
-    helper_revision = run("git", "rev-parse", "HEAD", capture=True)
+    helper_revision = repository_git("rev-parse", "HEAD", capture=True)
     metadata = {"instance": args.instance, "owner_token": owner_token,
         "container": f"volt-g7-preview-{args.instance}-{suffix}",
         "container_id": None, "container_resource_id": str(uuid.uuid4()),
@@ -403,9 +422,9 @@ def start(args) -> None:
     resources = preflight(info, require_complete=True)
     if resources["container"]:
         raise SystemExit(f"owned container already exists; use restart or stop first: {info['container']}")
-    current = run("git", "rev-parse", "HEAD", capture=True)
+    current = repository_git("rev-parse", "HEAD", capture=True)
     helper_revision = info.get("helper_revision", info.get("source_revision"))
-    if current != helper_revision or run("git", "status", "--porcelain", capture=True):
+    if current != helper_revision or repository_git("status", "--porcelain", capture=True):
         raise SystemExit("source revision changed after init; destroy and reinitialize from a committed clean helper revision")
 
     if no_build:

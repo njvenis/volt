@@ -168,11 +168,12 @@ class OfflineArchiveTests(unittest.TestCase):
             self.assertEqual(archive.main(), 0)
         return package, result
 
-    def build_image_with_layer(self, root: Path, version: str, layer_bytes: bytes) -> tuple[Path, dict]:
+    def build_image_with_layer(self, root: Path, version: str, layer_bytes: bytes,
+                               architecture: str = "amd64") -> tuple[Path, dict]:
         revision = "a" * 40
         source_snapshot = "sha256:" + "b" * 64
         diff = "sha256:" + hashlib.sha256(layer_bytes).hexdigest()
-        config = {"os": "linux", "architecture": "amd64", "config": {"Labels": {
+        config = {"os": "linux", "architecture": architecture, "config": {"Labels": {
             "org.opencontainers.image.revision": revision, "org.opencontainers.image.version": version,
             "org.volt.oidc-deployment-modes": "demo,external", "org.volt.compose-install.contract": "1",
             "org.volt.compose.source-snapshot": source_snapshot}},
@@ -189,8 +190,19 @@ class OfflineArchiveTests(unittest.TestCase):
                 info.size = len(data)
                 image.addfile(info, io.BytesIO(data))
         manifest = {"version": version, "source_commit": revision, "source_snapshot": source_snapshot,
-                    "image_id": image_id, "platform": "linux/amd64"}
+                    "image_id": image_id, "platform": f"linux/{architecture}"}
         return image_tar, manifest
+
+    def test_docker_save_archive_admits_arm64_only_when_manifest_selects_arm64(self):
+        with tempfile.TemporaryDirectory() as temp:
+            layer_io = io.BytesIO()
+            with tarfile.open(fileobj=layer_io, mode="w"):
+                pass
+            image_tar, manifest = self.build_image_with_layer(Path(temp), "0.1.0-demo", layer_io.getvalue(), "arm64")
+            self.assertEqual(archive.validate_docker_archive(image_tar, manifest)["image_id"], manifest["image_id"])
+            wrong_platform = {**manifest, "platform": "linux/amd64"}
+            with self.assertRaisesRegex(ValueError, "platform differs"):
+                archive.validate_docker_archive(image_tar, wrong_platform)
 
     def test_rc2_rejects_generated_private_key_in_saved_layer_but_rc1_history_remains_verifiable(self):
         with tempfile.TemporaryDirectory() as temp:

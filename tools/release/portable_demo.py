@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import uuid
 
 import archive
 
@@ -150,6 +151,12 @@ def source_identity() -> tuple[str, Path]:
     return commit, ROOT
 
 
+def local_image_reference(platform: str) -> str:
+    if platform not in PLATFORM_CE_KEY:
+        raise ValueError("platform must be linux/amd64 or linux/arm64")
+    return f"volt-portable-demo:{platform.split('/', 1)[1]}-{uuid.uuid4().hex}"
+
+
 def _manifest_for_image(image_tar: Path, source_tar: Path, image_id: str, platform: str,
                         source_commit: str, source_snapshot: str, image_ref: str) -> dict:
     identity = archive.validate_docker_archive(image_tar, {"image_id": image_id,
@@ -221,8 +228,10 @@ def build(output: Path, platform: str, docker: str) -> dict:
     ce = lock.get(PLATFORM_CE_KEY[platform], "")
     if not re.fullmatch(r"3\.5\.0@sha256:[0-9a-f]{64}", ce):
         raise ValueError(f"missing immutable DefectDojo CE pin for {platform}")
-    arch = platform.split("/", 1)[1]
-    image_ref = f"volt-portable-demo:{arch}"
+    # Use a fresh tag for every Buildx load. Reusing a tag lets some Docker
+    # containerd stores merge stale subject attestations from a prior local
+    # build into the new OCI index, making archive admission ambiguous.
+    image_ref = local_image_reference(platform)
     with tempfile.TemporaryDirectory(prefix="volt-portable-demo-") as work:
         package = Path(work)
         source_tar = package / "source.tar"

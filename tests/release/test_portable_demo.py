@@ -138,6 +138,12 @@ class PortableDemoArchiveTest(unittest.TestCase):
         self.assertLess(link, browser)
         self.assertLess(browser, authority)
 
+    def test_build_tags_are_unique_across_local_architecture_loads(self) -> None:
+        first = portable_demo.local_image_reference("linux/amd64")
+        second = portable_demo.local_image_reference("linux/amd64")
+        self.assertNotEqual(first, second)
+        self.assertRegex(first, r"^volt-portable-demo:amd64-[0-9a-f]{32}$")
+
     def test_verify_does_not_execute_modified_candidate_helper(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

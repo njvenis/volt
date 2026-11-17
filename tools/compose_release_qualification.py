@@ -23,6 +23,17 @@ ROOT = Path(__file__).resolve().parents[1]
 SUPPORTED_PLATFORMS = ("linux/amd64", "linux/arm64")
 
 
+def qualification_scope(*, development_fixture: bool, environment: dict[str, str] | None = None) -> str:
+    """Classify evidence from how it ran, never from the image's release label."""
+    if development_fixture:
+        return "development_fixture"
+    context = os.environ if environment is None else environment
+    if (context.get("GITHUB_ACTIONS", "").lower() == "true"
+            and context.get("RUNNER_ENVIRONMENT", "").lower() == "github-hosted"):
+        return "hosted_rc2_release"
+    return "local_synthetic_rc2"
+
+
 def platform_from_image_inspect(output: str, declared_platform: str | None = None) -> str:
     """Admit only an image whose Docker config matches the package platform."""
     try:
@@ -287,8 +298,11 @@ def main() -> int:
             "--principal","volt-compose-demo-admin","--evidence",str(evidence),"--readback"], evidence)
         # The exact-owner cleanup below performs the final stop and removes only
         # this private project, avoiding a second graceful stop before cleanup.
+        execution_environment = {key: os.environ[key] for key in ("GITHUB_ACTIONS", "RUNNER_ENVIRONMENT")
+                                if key in os.environ}
         (evidence/"qualification.json").write_text(json.dumps({"result":"passed",
-            "qualification_scope":"development_fixture" if args.development_fixture else "hosted_rc2_release",
+            "qualification_scope":qualification_scope(development_fixture=args.development_fixture),
+            "execution_environment":execution_environment or {"kind": "local"},
             "release_version":bundle_version,"image_id":args.image_id,
             "platform":platform,
             "source_revision":admission["source_revision"],"image_version":admission["version"],

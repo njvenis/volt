@@ -76,6 +76,24 @@ async function api(path,{method='GET',body,write=false}={}){
     let value=null;try{value=await response.json();}catch{}return{status:response.status,body:value};
   },{path,method,body,write});
 }
+// SESSION_POLL_START
+// Await each network result explicitly: an async waitForFunction predicate is
+// itself truthy before it resolves and must not establish a session transition.
+async function waitForSession(page,{status,authenticated,timeoutMs=30000,intervalMs=250}){
+ const deadline=Date.now()+timeoutMs;let last;
+ do{
+  last=await page.evaluate(async()=>{
+   const response=await fetch('/api/v1/auth/session',{credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json'},signal:AbortSignal.timeout(10000)});
+   let body=null;try{body=await response.json();}catch{}
+   return {status:response.status,authenticated:body?.authenticated===true};
+  });
+  if(last.status===status&&(authenticated===undefined||last.authenticated===authenticated))return last;
+  if(Date.now()>=deadline)break;
+  await new Promise(resolve=>setTimeout(resolve,Math.min(intervalMs,Math.max(0,deadline-Date.now()))));
+ }while(Date.now()<deadline);
+ throw new Error('session_transition_not_observed_'+JSON.stringify({expected:{status,authenticated},last}));
+}
+// SESSION_POLL_END
 async function waitAdminReady(){
   const heading=page.getByText('Access groups grant actions',{exact:true});
   const create=page.getByRole('button',{name:'Create access group',exact:true});
@@ -98,7 +116,7 @@ try{
   await page.getByLabel('Username').fill(username);
   await page.getByLabel('Password').fill(password);
   await page.getByRole('button',{name:'Sign in'}).click();
-  await page.waitForFunction(async()=>{const r=await fetch('/api/v1/auth/session',{cache:'no-store'});if(!r.ok)return false;return (await r.json()).authenticated===true;},null,{timeout:30000});
+  await waitForSession(page,{status:200,authenticated:true});
   const session=(await api('/api/v1/auth/session')).body;
   requireSession(session,{issuer,subject,principal});
   if(process.argv.includes('--initialize-development')){
@@ -198,7 +216,8 @@ try{
     const control=execFileSync('docker',['compose','-f',path.join(composeDirectory,'compose.yaml'),'-f',path.join(composeDirectory,'demo.yaml'),'--env-file',envFile,'-p',project,'exec','-T','volt','/opt/uvm/venv/bin/python','-c',controlScript,JSON.stringify({mode:null,identities:[{subject,groups:[]}]})],{encoding:'utf8',stdio:['ignore','pipe','pipe']});
     ensure(control.trim().split(/\r?\n/).at(-1)==='200','synthetic_provider_fixture_update_failed');
     phase='old-session-probe';
-    await page.waitForFunction(async()=>{const r=await fetch('/api/v1/auth/session',{cache:'no-store'});return r.status===401;},null,{timeout:30000});
+    const revoked=await waitForSession(page,{status:401});
+    ensure(revoked.status===401,'old_session_revocation_not_observed');
     // The current URL may only differ by hash from '/', so goto('/') can be
     // same-document navigation and preserve the revoked in-memory session.
     await snapshot('old-session-401');phase='reload';
@@ -225,7 +244,7 @@ try{
     await page.getByLabel('Username').fill(username);
     await page.getByLabel('Password').fill(password);
     await page.getByRole('button',{name:'Sign in'}).click();
-    await page.waitForFunction(async()=>{const r=await fetch('/api/v1/auth/session',{cache:'no-store'});return r.ok&&(await r.json()).authenticated===true;},null,{timeout:30000});
+    await waitForSession(page,{status:200,authenticated:true});
     const after=(await api('/api/v1/auth/session')).body;
     ensure(after.authority?.role_ids?.length===0,'fresh_signin_recovered_native_role_after_provider_group_removal');
     ensure(after.authority?.source_scopes?.length===0,'fresh_signin_recovered_native_scope_after_provider_group_removal');

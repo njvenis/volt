@@ -24,6 +24,7 @@ SUPPORTED_ARCHIVE_VERSIONS = {"0.1.0-rc.1", EXPECTED_VERSION}
 COMPOSE_BUNDLE_FILES = ("VERSION", "README.md", "backup-restore.md", "compose.yaml", "demo.yaml",
                         "compose.env.example", "oidc.example.json", "setup.py")
 EXPECTED_PLATFORM = "linux/amd64"
+SUPPORTED_PLATFORMS = {"linux/amd64", "linux/arm64"}
 EXPECTED_IDENTITY = "https://github.com/njvenis/volt/.github/workflows/release.yml@refs/heads/main"
 EXPECTED_ISSUER = "https://token.actions.githubusercontent.com"
 MAX_UNPACKED = 20 * 1024**3
@@ -89,8 +90,8 @@ def build_manifest(directory: Path, version: str, source_sha: str, image_id: str
                    platform: str, signer_identity: str, issuer: str, registry_digest: str) -> dict:
     if version not in SUPPORTED_ARCHIVE_VERSIONS:
         raise ValueError("unsupported VOLT release archive version")
-    if platform != EXPECTED_PLATFORM:
-        raise ValueError("only linux/amd64 is approved")
+    if platform not in SUPPORTED_PLATFORMS:
+        raise ValueError("unsupported release platform")
     if len(source_sha) != 40 or any(c not in "0123456789abcdef" for c in source_sha):
         raise ValueError("source revision must be a full lowercase Git SHA-1")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
@@ -209,6 +210,10 @@ def _reject_rc2_snakeoil_key(data: bytes, media: str | None = None) -> None:
 
 
 def _validate_oci(tf: tarfile.TarFile, members: dict, manifest: dict) -> dict:
+    platform = manifest.get("platform")
+    if platform not in SUPPORTED_PLATFORMS:
+        raise ValueError("unsupported archive image platform")
+    expected_arch = platform.split("/", 1)[1]
     layout = json.loads(_member_bytes(tf, members, "oci-layout"))
     if not isinstance(layout, dict) or layout.get("imageLayoutVersion") != "1.0.0":
         raise ValueError("unsupported OCI image layout")
@@ -265,18 +270,18 @@ def _validate_oci(tf: tarfile.TarFile, members: dict, manifest: dict) -> dict:
                         attestation_targets.add(annotations["vnd.docker.reference.digest"].removeprefix("sha256:"))
                     used.add("blobs/sha256/" + child["digest"].removeprefix("sha256:"))
                     continue
-                if platform is not None and (not isinstance(platform, dict) or platform.get("os") != "linux" or platform.get("architecture") != "amd64"):
+                if platform is not None and (not isinstance(platform, dict) or platform.get("os") != "linux" or platform.get("architecture") != expected_arch):
                     raise ValueError("OCI image index contains a contradictory platform selection")
                 descend(child, selected_root)
         else:
             platform = descriptor.get("platform")
-            if platform is not None and (not isinstance(platform, dict) or platform.get("os") != "linux" or platform.get("architecture") != "amd64"):
+            if platform is not None and (not isinstance(platform, dict) or platform.get("os") != "linux" or platform.get("architecture") != expected_arch):
                 raise ValueError("OCI image descriptor selects a different platform")
             leaves.append((selected_root, data, obj))
 
     for row in index["manifests"]:
         platform = row.get("platform") if isinstance(row, dict) else None
-        if platform is not None and (not isinstance(platform, dict) or platform.get("os") != "linux" or platform.get("architecture") != "amd64"):
+        if platform is not None and (not isinstance(platform, dict) or platform.get("os") != "linux" or platform.get("architecture") != expected_arch):
             raise ValueError("OCI root index contains a contradictory platform selection")
         descend(row)
     if len(leaves) != 1:
@@ -606,7 +611,7 @@ def verify_directory(directory: Path, cosign: str, *, public_key: Path | None = 
         raise ValueError("release manifest is not an object")
     if manifest.get("schema") != "volt-offline-release/v1" or manifest.get("version") not in SUPPORTED_ARCHIVE_VERSIONS:
         raise ValueError("unsupported release manifest or version")
-    if manifest.get("platform") != EXPECTED_PLATFORM:
+    if manifest.get("platform") not in SUPPORTED_PLATFORMS:
         raise ValueError("release platform metadata mismatch")
     registry_digest = manifest.get("registry_digest", "")
     if not isinstance(registry_digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", registry_digest):

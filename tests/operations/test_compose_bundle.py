@@ -68,7 +68,8 @@ class ComposeRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             info = {"established": True, "project": "volt-compose-test", "owner_token": "test",
-                    "image": "sha256:test", "image_admission": {"id": "sha256:test"}, "mode": "demo",
+                    "image": "sha256:test", "image_admission": {"id": "sha256:test", "platform": "linux/arm64"},
+                    "platform": "linux/arm64", "mode": "demo",
                     "subnet": "10.240.0.0/28", "gateway": "10.240.0.1",
                     "backup_inventory": {"postgres": {"postgres_version": "18"}, "media": {}, "state": {}}}
             with patch.object(setup, "load_instance", return_value=(root, info)), \

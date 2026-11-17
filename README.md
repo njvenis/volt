@@ -49,7 +49,7 @@ The design treats **evidence, decisions and remediation as distinct concepts**. 
 
 ### Install the RC2 Compose release
 
-Use the [RC2 installation guide](docs/installation.md#rc2-compose-installation) and its signed source-free Compose bundle for new evaluation installations. Online pulls use the immutable registry digest above. The bundle requires Docker Compose v2, Python 3.11+ and OpenSSL; it does not build or clone application source. External evaluation also requires a provider-specific trusted identity-sync publisher; OIDC login alone does not establish current source permissions.
+Use the [portable local Compose demo quickstart](deploy/compose/README.md#macoslinux-local-demo) for a source-free install with a named synthetic testing administrator, stop/restart, and cleanup steps. The installer pins the package's declared platform and refuses an image mismatch. The demo identity is synthetic and has no password account. The [RC2 installation guide](docs/installation.md#rc2-compose-installation) documents the previously published Linux/amd64 release and its verification flow. External Okta evaluation additionally requires a provider-specific trusted identity-sync publisher; OIDC login alone does not establish current source permissions.
 
 ### Historical RC1 launcher
 

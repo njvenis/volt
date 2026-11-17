@@ -5,7 +5,8 @@ import unittest
 from unittest.mock import patch
 
 from uvm.auth.service import load_oidc_config
-from deploy.compose.setup import allowed_host_names, compose_environment, validate_external
+from deploy.compose.setup import (allowed_host_names, compose_environment, demo_identity,
+                                  inspect_image, validate_external)
 
 
 def config() -> dict:
@@ -24,6 +25,41 @@ def config() -> dict:
 
 
 class ExternalOIDCModeTests(unittest.TestCase):
+    def test_demo_administrator_uses_named_stable_synthetic_identity(self):
+        self.assertEqual(demo_identity("nicho-testing-admin", "local-subject-7"),
+                         ("nicho-testing-admin", "local-subject-7"))
+        self.assertEqual(demo_identity(None, None),
+                         ("volt-compose-demo-admin", "volt-compose-demo-admin-subject"))
+
+    def test_demo_administrator_rejects_display_text_as_identity(self):
+        for principal, subject in (("testing admin", "subject"), ("principal", ""),
+                                   ("principal", "subject\n")):
+            with self.subTest(principal=principal, subject=subject), self.assertRaisesRegex(
+                    SystemExit, "stable .*(principal ID|provider subject)"):
+                demo_identity(principal, subject)
+
+    def test_image_admission_requires_declared_platform_to_match_docker_inspect(self):
+        from unittest.mock import patch
+        import json
+        image_id = "sha256:" + "a" * 64
+        labels = {"org.volt.oidc-deployment-modes": "demo,external",
+                  "org.volt.compose.source-snapshot": "sha256:" + "b" * 64,
+                  "org.volt.compose-install.contract": "1",
+                  "org.opencontainers.image.revision": "c" * 40,
+                  "org.opencontainers.image.version": "0.2.0-demo"}
+        for architecture, declared in (("arm64", "linux/arm64"), ("amd64", "linux/amd64")):
+            inspected = [{"Id": image_id, "Os": "linux", "Architecture": architecture,
+                          "Config": {"Labels": labels}}]
+            with self.subTest(architecture=architecture), patch(
+                    "deploy.compose.setup.command", return_value=json.dumps(inspected)):
+                self.assertEqual(inspect_image(image_id, "demo", declared)["platform"], declared)
+        with patch("deploy.compose.setup.command", return_value=json.dumps([
+                {"Id": image_id, "Os": "linux", "Architecture": "amd64", "Config": {"Labels": labels}}])):
+            with self.assertRaisesRegex(SystemExit, "does not match declared package platform"):
+                inspect_image(image_id, "demo", "linux/arm64")
+        with self.assertRaisesRegex(SystemExit, "one of the admitted package platforms"):
+            inspect_image(image_id, "demo", "linux/ppc64le")
+
     def load(self, value: dict) -> dict:
         with patch.dict("os.environ", {"UVM_OIDC_DEPLOYMENT_MODE": "external",
                                         "UVM_OIDC_CONFIG": json.dumps(value)}):

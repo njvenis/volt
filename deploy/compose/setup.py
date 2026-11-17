@@ -25,6 +25,7 @@ HISTORICAL_RC1_IMAGE = "ghcr.io/njvenis/volt@sha256:c0c49bc9c38a0ea946d1868748fc
 SECRET_SIZES = {"uvm_db_password": 32, "ce_db_password": 32, "ce_admin_password": 32,
                 "ce_secret_key": 64, "ce_credential_key": 32, "uvm_cursor_secret": 48,
                 "oidc_client_secret": 48, "oidc_sync_secret": 48, "oidc_operator_secret": 48}
+SUPPORTED_PLATFORMS = ("linux/amd64", "linux/arm64")
 
 
 def command(*args: str, capture: bool = False, env: dict | None = None,
@@ -94,9 +95,11 @@ def make_tls(directory: Path) -> None:
     (directory / "recovery-client.key").chmod(0o600)
 
 
-def inspect_image(image: str, mode: str) -> dict:
+def inspect_image(image: str, mode: str, expected_platform: str) -> dict:
     if not ("@sha256:" in image or re.fullmatch(r"sha256:[0-9a-f]{64}", image)):
         raise SystemExit("image must be an immutable registry digest or local sha256 image ID")
+    if expected_platform not in SUPPORTED_PLATFORMS:
+        raise SystemExit("platform must be one of the admitted package platforms: linux/amd64, linux/arm64")
     try:
         item = json.loads(command("docker", "image", "inspect", image, capture=True))[0]
     except (json.JSONDecodeError, IndexError) as exc:
@@ -104,8 +107,9 @@ def inspect_image(image: str, mode: str) -> dict:
     config = item.get("Config") or {}
     labels = config.get("Labels") or {}
     os_name, arch = item.get("Os"), item.get("Architecture")
-    if (os_name, arch) != ("linux", "amd64"):
-        raise SystemExit("selected image must be linux/amd64")
+    actual_platform = f"{os_name}/{arch}"
+    if actual_platform != expected_platform:
+        raise SystemExit(f"selected image platform {actual_platform} does not match declared package platform {expected_platform}")
     if labels.get("org.volt.oidc-deployment-modes") != "demo,external":
         raise SystemExit("this image is not Compose-install compatible; RC1 does not support the OIDC config-file contract; pass an explicitly built candidate image with both deployment modes")
     source_snapshot = labels.get("org.volt.compose.source-snapshot", "")
@@ -118,7 +122,7 @@ def inspect_image(image: str, mode: str) -> dict:
     if not re.fullmatch(r"[0-9a-f]{40}", revision) or not version:
         raise SystemExit("image must declare source revision and version labels")
     return {"id": item["Id"], "source_revision": revision, "version": version,
-            "source_snapshot": source_snapshot, "platform": f"{os_name}/{arch}",
+            "source_snapshot": source_snapshot, "platform": actual_platform,
             "registry_digests": item.get("RepoDigests", [])}
 
 
@@ -152,6 +156,17 @@ def validate_external(path: Path) -> dict:
     return config
 
 
+def demo_identity(principal: str | None, subject: str | None) -> tuple[str, str]:
+    principal = "volt-compose-demo-admin" if principal is None else principal
+    subject = "volt-compose-demo-admin-subject" if subject is None else subject
+    pattern = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
+    if not re.fullmatch(pattern, principal):
+        raise SystemExit("demo bootstrap principal must be a stable principal ID")
+    if not re.fullmatch(pattern, subject):
+        raise SystemExit("demo subject must be a stable provider subject")
+    return principal, subject
+
+
 def choose_network() -> tuple[str, str]:
     used = []
     try:
@@ -183,8 +198,10 @@ def init(args) -> None:
     image = args.image
     if not image:
         raise SystemExit(f"Compose installation requires --image with an explicitly built compatible candidate; historical RC1 {HISTORICAL_RC1_IMAGE} is retained for launcher users and lacks the Compose contract")
-    admitted = inspect_image(image, args.mode)
+    admitted = inspect_image(image, args.mode, args.platform)
     if args.mode == "external":
+        if args.demo_subject is not None:
+            raise SystemExit("--demo-subject is available only in labelled synthetic demo mode")
         oidc = validate_external(Path(args.external_config).expanduser())
         if not args.client_secret_file:
             raise SystemExit("external mode requires --client-secret-file for the configured OIDC client")
@@ -194,7 +211,7 @@ def init(args) -> None:
             raise SystemExit("external OIDC callback hostname must appear exactly in --allowed-hosts")
     else:
         external_client_secret = None
-        args.bootstrap_principal = "volt-compose-demo-admin"
+        args.bootstrap_principal, args.demo_subject = demo_identity(args.bootstrap_principal, args.demo_subject)
         if args.external_config:
             raise SystemExit("demo mode does not accept an external OIDC config")
         api_origin = f"http://127.0.0.1:{args.http_port}"
@@ -247,6 +264,8 @@ def init(args) -> None:
             "prohibited_action_pairs": []}}
     env = "\n".join((f"VOLT_PROJECT={project}", f"VOLT_INSTANCE_DIR={root}", f"VOLT_IMAGE={image}",
                       f"VOLT_IMAGE_ID={admitted['id']}",
+                      f"VOLT_PLATFORM={admitted['platform']}",
+                      f"VOLT_DEMO_ADMIN_SUBJECT={args.demo_subject or ''}",
                       f"VOLT_BOOTSTRAP_PRINCIPAL={args.bootstrap_principal}",
                       "VOLT_NATIVE_GRANTABLE_ENVELOPE=" + json.dumps(envelope, separators=(",", ":")),
                       f"VOLT_OWNER_TOKEN={owner_token}", f"VOLT_SUBNET={subnet}", f"VOLT_GATEWAY={gateway}",
@@ -257,6 +276,8 @@ def init(args) -> None:
                 "image_admission": admitted, "oidc_config_sha256": hashlib.sha256((root / "oidc.json").read_bytes()).hexdigest(),
                 "compose_directory": str(compose_root), "owner_token": owner_token,
                 "bootstrap_principal": args.bootstrap_principal,
+                "platform": admitted["platform"],
+                "demo_admin_subject": args.demo_subject if args.mode == "demo" else None,
                 "ports": [args.http_port, args.recovery_port, args.oidc_port],
                 "subnet": subnet, "gateway": gateway, "established": False, "initialized": True}
     metadata["env_sha256"] = hashlib.sha256((root / ".env").read_bytes()).hexdigest()
@@ -276,6 +297,12 @@ def load_instance(path: str) -> tuple[Path, dict]:
         raise SystemExit("instance metadata is not recognized")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", metadata.get("bootstrap_principal", "")):
         raise SystemExit("instance bootstrap principal metadata is invalid")
+    if (metadata.get("platform") not in SUPPORTED_PLATFORMS
+            or (metadata.get("image_admission") or {}).get("platform") != metadata.get("platform")):
+        raise SystemExit("instance platform metadata does not match its admitted image")
+    if (metadata.get("mode") == "demo" and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", metadata.get("demo_admin_subject", ""))):
+        raise SystemExit("instance demo subject metadata is invalid")
     for name in (*SECRET_SIZES, "recovery-server.crt", "recovery-server.key", "recovery-client.crt",
                  "recovery-client.key", "recovery-ca.crt"):
         secret = root / "secrets" / name
@@ -315,13 +342,14 @@ def resolved_compose(root: Path, info: dict):
                                            if item.get("type") == "volume" else item.get("source"))
                      for item in service.get("volumes", [])}
     labels = service.get("labels", {})
-    if (service.get("image") != info["image"] or actual_mounts != expected_mounts or
+    if (service.get("image") != info["image"] or service.get("platform") != info["platform"]
+            or actual_mounts != expected_mounts or
             resolved.get("networks", {}).get("application", {}).get("name") != f"{info['project']}_network" or
             labels.get("volt.compose.owner-token") != info["owner_token"] or
             resolved.get("volumes", {}).get("postgres", {}).get("name") != f"{info['project']}_postgres" or
             resolved.get("volumes", {}).get("media", {}).get("name") != f"{info['project']}_media" or
             resolved.get("volumes", {}).get("state", {}).get("name") != f"{info['project']}_state"):
-        raise SystemExit("resolved Compose image, mounts, network, volumes or ownership differ from admitted instance metadata")
+        raise SystemExit("resolved Compose image, platform, mounts, network, volumes or ownership differ from admitted instance metadata")
     return files, envfile, clean_env
 
 
@@ -331,7 +359,7 @@ def compose(args, action: str) -> None:
         raise SystemExit("offline restore volumes must be imported and admitted with restore-admit before any runtime starts")
     files, envfile, clean_env = resolved_compose(root, info)
     if action == "up":
-        admitted = inspect_image(info["image"], info["mode"])
+        admitted = inspect_image(info["image"], info["mode"], info["platform"])
         if admitted["id"] != info["image_admission"]["id"]:
             raise SystemExit("selected image identity changed since initialization")
         check_owned_resources(info, allow_missing=not info.get("established"))
@@ -476,7 +504,7 @@ def provision_restore(args) -> None:
     if set(inventory) != {"postgres", "media", "state"} or not inventory["postgres"].get("postgres_version"):
         raise SystemExit("restore provisioning requires the captured cold backup inventory")
     resolved_compose(root, info)
-    if inspect_image(info["image"], info["mode"])["id"] != info["image_admission"]["id"]:
+    if inspect_image(info["image"], info["mode"], info["platform"])["id"] != info["image_admission"]["id"]:
         raise SystemExit("restore image differs from captured identity")
     # Persist the fence before the first resource mutation, including partial failure.
     info["established"] = False
@@ -530,9 +558,10 @@ def link_subject(args) -> None:
     root, info = load_instance(args.directory)
     files, envfile, clean_env = resolved_compose(root, info)
     if info["mode"] == "demo":
-        issuer = json.loads((root / "oidc.json").read_text())["issuer"]
-        subject = "volt-compose-demo-admin-subject"
-        principal = "volt-compose-demo-admin"
+        oidc = json.loads((root / "oidc.json").read_text())
+        issuer = oidc["issuer"]
+        subject = info["demo_admin_subject"]
+        principal = info["bootstrap_principal"]
         rationale = "Explicit labelled local demo bootstrap"
         evidence_ref = "volt-compose-demo-bootstrap"
     else:
@@ -616,9 +645,12 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--mode", choices=("demo", "external"), required=True)
     create.add_argument("--project", default="volt-compose")
     create.add_argument("--image", required=True, help="explicit immutable Compose-compatible candidate image; historical RC1 lacks this contract")
+    create.add_argument("--platform", choices=SUPPORTED_PLATFORMS, required=True,
+                        help="platform declared by the verified package manifest; must match Docker image inspection")
     create.add_argument("--external-config")
     create.add_argument("--client-secret-file")
     create.add_argument("--bootstrap-principal", help="stable principal ID to link and initialize as the first administrator")
+    create.add_argument("--demo-subject", help="stable subject ID for the synthetic local demo administrator")
     create.add_argument("--http-port", type=int, default=8180)
     create.add_argument("--recovery-port", type=int, default=8181)
     create.add_argument("--oidc-port", type=int, default=8190)

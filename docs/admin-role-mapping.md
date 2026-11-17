@@ -2,6 +2,8 @@
 
 Native access requires both a current native grant and a current provider mapping to permit the role and exact source scope. A provider mapping alone creates no permission, membership or principal.
 
+For the RC3 evaluation install and optional Okta setup, see [the installation guide](installation.md#rc3-compose-installation) and [source-free bundle instructions](../deploy/compose/README.md#optional-okta-oidc-evaluation).
+
 The protected bootstrap administrator remains separate from action permissions. Complete the supported bootstrap and explicit native-authority activation first; this form does not activate native authority or grant bootstrap capability.
 
 1. Prepare an unused role UUID in the deployment's identity-provider mapping. For Okta, use that UUID in the configured role IDs for the intended provider group, together with the exact authorised source tuples and source-scope ceilings. Do not reuse a role already owned by a legacy or native permission.

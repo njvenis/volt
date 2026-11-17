@@ -12,10 +12,10 @@ VOLT is an open-source vulnerability lifecycle application built around [DefectD
 
 Its focus is continuity and accountability: understanding which workloads are affected, who owns the outstanding work, which decisions apply and what evidence supports a change in status.
 
-[RC2 Compose image](docs/installation.md#rc2-compose-installation) · [Historical RC1 release](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.1) · [Getting started](#getting-started) · [Architecture](#architecture) · [Documentation](#documentation) · [Contributing](CONTRIBUTING.md) · [Apache-2.0 licence](LICENSE)
+[RC3 Compose evaluation](docs/installation.md#rc3-compose-installation) · [Historical RC2 Compose release](docs/installation.md#rc2-compose-installation) · [Historical RC1 release](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.1) · [Getting started](#getting-started) · [Architecture](#architecture) · [Documentation](#documentation) · [Contributing](CONTRIBUTING.md) · [Apache-2.0 licence](LICENSE)
 
 > [!IMPORTANT]
-> **Primary installation: VOLT 0.1.0-rc.2 with Docker Compose.** The compatible Linux/amd64 image is published at `ghcr.io/njvenis/volt@sha256:a7130e38b88b781d93d84c4ddd022ba45716a06b89949a2923e1dd531db2eac1`. The [RC2 prerelease](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.2) includes the source-free Compose bundle and signed offline archive; the signed archive also contains the bundle. RC1 remains an immutable historical launcher release and does not satisfy the Compose contract. Neither release is production-ready. See [RC2 installation](docs/installation.md#rc2-compose-installation), [historical RC1 installation](docs/installation.md#historical-rc1-launcher), and [verification boundaries](GATES.md).
+> **Primary installation: VOLT 0.1.0-rc.3 Compose evaluation release.** Choose the `linux/arm64` release for Apple Silicon or `linux/amd64` for x86-64. The [RC3 prerelease](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.3) provides architecture-specific signed offline archives and a versioned, source-free Compose bundle. Verify the archive, image identity, platform and bundle using the release's external `VERIFY-RELEASE.md` before extraction or image load; checksums alone do not authenticate the publisher. The local password account is a disposable synthetic OIDC identity, not an Okta or production account. See the [RC3 installation quickstart](docs/installation.md#rc3-compose-installation), [optional Okta evaluation setup](deploy/compose/README.md#optional-okta-oidc-evaluation), [immutable RC2 Compose instructions](docs/installation.md#rc2-compose-installation), [historical RC1 launcher instructions](docs/installation.md#historical-rc1-launcher), and [verification boundaries](GATES.md). RC3 is an evaluation prerelease, not a production deployment.
 
 ## Why VOLT?
 
@@ -47,9 +47,9 @@ The design treats **evidence, decisions and remediation as distinct concepts**. 
 
 ## Getting started
 
-### Install the RC2 Compose release
+### Install the RC3 Compose evaluation release
 
-Use the [portable local Compose demo quickstart](deploy/compose/README.md#macoslinux-local-demo) for a source-free install with a named password-authenticated local testing administrator, stop/restart, and cleanup steps. The installer pins the package's declared platform and refuses an image mismatch. The demo login remains a local OIDC identity and does not create an Okta or production account. The [RC2 installation guide](docs/installation.md#rc2-compose-installation) documents the previously published Linux/amd64 release and its verification flow. External Okta authorization requires the configured Okta membership publisher and current group-to-role/source-scope mappings; OIDC login alone does not establish current source permissions.
+Start with the [RC3 installation guide](docs/installation.md#rc3-compose-installation) and download the signed archive for the Docker platform you will run: `linux/arm64` for Apple Silicon or `linux/amd64` for x86-64. Verify the release through its externally authenticated instructions before extracting the bundle or loading an image. The source-free bundle installs without a VOLT source checkout, Node.js, or npm. Its local demo uses a hidden-prompt password to access a synthetic OIDC account and walks through subject linking, authority initialization and an audited administration action. External Okta setup is optional and requires both its Web OIDC app and the configured read-only membership publisher; group mappings only cap existing native roles and exact scopes.
 
 ### Historical RC1 launcher
 
@@ -57,7 +57,7 @@ Follow the [historical RC1 launcher guide](docs/installation.md#historical-rc1-l
 
 The historical launcher binds the application and synthetic OIDC provider to loopback, generates private local secrets and creates owned persistent volumes. Use synthetic data and disposable resources. RC1 is an evaluation release, not a production installation recipe; installing DefectDojo separately does not install VOLT.
 
-For source builds, use the [development preview guide](docs/local-preview.md).
+For source builds, use the [development preview guide](docs/local-preview.md). The separate [local build package](docs/local-build.md) is checksum-only local demo material and is not a signed release asset.
 
 ## Architecture
 
@@ -82,7 +82,7 @@ flowchart TD
 
 **Identity and authority.** OIDC establishes identity; VOLT's access model governs application actions and scopes. Ownership-team membership is separate from access-group authority. The [native access contract](docs/g7-native-access-ownership-api-contract.md) details current authority checks, bounded grants and audited administration.
 
-**Packaging.** RC1 remains a signed historical Linux/amd64 image with its own offline bundle. RC2 adds the Compose-compatible image and a source-free Compose bundle published separately and included in the signed offline archive, bound to registry digest `sha256:a7130e38b88b781d93d84c4ddd022ba45716a06b89949a2923e1dd531db2eac1`. `Dockerfile.g7` remains the build recipe using pinned DefectDojo CE and Valkey images. See [installation](docs/installation.md), [deployment boundaries](docs/deployment.md) and [third-party notices](THIRD-PARTY-NOTICES.md).
+**Packaging.** RC1 remains a signed historical Linux/amd64 launcher image. RC2 remains an immutable historical Compose release. RC3 is the current Compose evaluation release with native `linux/amd64` and `linux/arm64` images, a versioned source-free bundle and separately verifiable release archives. `Dockerfile.g7` remains the build recipe using pinned DefectDojo CE and Valkey images. See [installation](docs/installation.md), [deployment boundaries](docs/deployment.md) and [third-party notices](THIRD-PARTY-NOTICES.md).
 
 ## Verification and deployment status
 
@@ -90,7 +90,8 @@ flowchart TD
 | --- | --- |
 | Identity and ingestion | Synthetic local suites exercise source-native grouping, rebuild history, completeness, freshness, replay and conflict handling. |
 | RC1 evaluation | Published image and offline bundle; the [release workflow](https://github.com/njvenis/volt/actions/runs/41804175229) passed synthetic sign-in, audited-operation, ingress-denial and restart-persistence checks. |
-| RC2 Compose evaluation | Published digest-pinned image and signed offline assets; hosted Compose, cold-restore and offline-preview qualification passed. The scan gate reported 888 findings and zero fixable High/Critical findings; this is not a claim of zero vulnerabilities. |
+| RC2 Compose evaluation (historical) | Immutable published release; its hosted Compose, cold-restore and offline-preview evidence and scan results apply only to its exact image and source. |
+| RC3 Compose evaluation | Native `linux/amd64` and `linux/arm64` candidate images passed the reviewed synthetic Compose and release checks. The local password/OIDC demo is synthetic; no live Okta tenant, macOS Docker Desktop or production deployment was exercised. Release-specific image identities and scan results are in the RC3 signed archive and verification instructions. |
 | External integrations | Local tests do not establish compatibility with live scanners, enterprise identity providers, GitHub or other external services. |
 | Enterprise deployment | No supported production deployment or end-user installer. Security, recovery, operational and integration qualification remain separate requirements. |
 | G7 operational scenarios | Acceptance goals in OpenSpec; their presence does not establish implementation or successful execution. |
@@ -102,7 +103,9 @@ Evidence should identify the exact revision, commands, environment and result. A
 | I want to… | Start here |
 | --- | --- |
 | Find configuration, deployment boundaries, and operations guidance | [Documentation index](docs/README.md) |
-| Install the current Compose release | [RC2 Compose installation](docs/installation.md#rc2-compose-installation) |
+| Install the current Compose evaluation release | [RC3 Compose installation](docs/installation.md#rc3-compose-installation) |
+| Configure optional Okta evaluation | [Okta OIDC and membership publisher](deploy/compose/README.md#optional-okta-oidc-evaluation) |
+| Install the immutable RC2 release | [Historical RC2 Compose installation](docs/installation.md#rc2-compose-installation) |
 | Run the historical launcher release | [RC1 launcher installation](docs/installation.md#historical-rc1-launcher) |
 | Build a development preview | [Development preview](docs/local-preview.md) |
 | Understand product scope and invariants | [Requirements](REQUIREMENTS.md) |

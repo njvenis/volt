@@ -742,6 +742,7 @@ if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_AUTH_MODE:-bearer} == oidc ]]
   wait_for 'loopback OIDC sync adapter' curl --fail --silent http://127.0.0.1:8001/healthz
 fi
 if [[ -n ${UVM_G7_OKTA_PUBLISHER_CONFIG_FILE:-} ]]; then
+  uvm_g7_invalidate_publisher_readiness /opt/uvm/state/oidc-publisher
   start_child okta-identity-publisher 1800 1800 env -i PATH="$PATH" HOME=/opt/uvm \
     PYTHONPATH=/opt/uvm/app UVM_OIDC_SYNC_SECRET_FILE=/run/uvm-g7-secrets/oidc_sync_secret \
     /opt/uvm/venv/bin/python -m uvm.auth.okta_publisher \

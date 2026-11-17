@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 
 
@@ -158,12 +159,50 @@ else:
                                     self.root / "missing-pid", stale_python)
         self.assertEqual(absent.returncode, 0)
 
+    def test_each_publisher_launch_invalidates_only_transient_readiness(self):
+        publisher_state = self.state / "oidc-publisher"
+        publisher_state.mkdir(parents=True)
+        status_file = publisher_state / "status.json"
+        revision_file = publisher_state / "revision.json"
+        status_file.write_text(json.dumps({"last_success_epoch": time.time(),
+                                           "last_error_class": None}) + "\n")
+        revision_file.write_text('{"revision":41}\n')
+        config = self.root / "publisher.json"
+        config.write_text("{}")
+        pid_file = self.root / "pid"
+        pid_file.write_text(f"{os.getpid()}\n")
+        status_probe = self.bin / "python-held-status"
+        status_probe.write_text(
+            f"#!/usr/bin/env python3\nfrom pathlib import Path\nimport sys\n"
+            f"raise SystemExit(0 if Path({str(status_file)!r}).is_file() else 1)\n")
+        status_probe.chmod(0o755)
+        prior = self.source_script('uvm_g7_okta_publisher_healthy "$@"',
+                                   config, pid_file, status_probe)
+        self.assertEqual(prior.returncode, 0,
+                         msg="retained recent status would admit a restart before invalidation")
+        invalidate = self.source_script('uvm_g7_invalidate_publisher_readiness "$@"', publisher_state)
+        self.assertEqual(invalidate.returncode, 0, invalidate.stderr)
+        self.assertFalse(status_file.exists())
+        self.assertEqual(json.loads(revision_file.read_text()), {"revision": 41})
+
+        held = self.source_script('uvm_g7_okta_publisher_healthy "$@"',
+                                  config, pid_file, status_probe)
+        self.assertNotEqual(held.returncode, 0, "old heartbeat must not admit this launch")
+
+        status_file.write_text('{"last_success_epoch":1000000000,"last_error_class":null}\n')
+        successful = self.source_script('uvm_g7_okta_publisher_healthy "$@"',
+                                        config, pid_file, status_probe)
+        self.assertEqual(successful.returncode, 0, successful.stderr)
+        self.assertEqual(json.loads(revision_file.read_text()), {"revision": 41})
+
     def test_supervisor_orders_publisher_readiness_and_stops_it_as_a_writer(self):
         sync_ready = ENTRYPOINT.index("wait_for 'loopback OIDC sync adapter'")
         publisher_start = ENTRYPOINT.index("start_child okta-identity-publisher")
+        invalidation = ENTRYPOINT.index("uvm_g7_invalidate_publisher_readiness /opt/uvm/state/oidc-publisher")
         first_snapshot = ENTRYPOINT.index("Okta publisher first successful full snapshot")
         readiness = ENTRYPOINT.index("echo 'G7_READINESS=ready'")
         self.assertLess(sync_ready, publisher_start)
+        self.assertLess(invalidation, publisher_start)
         self.assertLess(publisher_start, first_snapshot)
         self.assertLess(first_snapshot, readiness)
         self.assertIn("stop_phase writers okta-identity-publisher", ENTRYPOINT)

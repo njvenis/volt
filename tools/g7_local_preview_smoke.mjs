@@ -38,8 +38,7 @@ async function snapshot(label){
    root:!!document.querySelector('#root'),sessionPanel:document.querySelector('.session-panel')?.textContent??null,
    visibleText:document.body.innerText,scripts:[...document.scripts].map(s=>s.src?new URL(s.src).pathname:'inline')}));
  trace.push({kind:'snapshot',label,phase,at:Date.now(),cookies,dom});
- await writeFile(evidence+'/session-trace.json',JSON.stringify(trace,null,2)+'
-',{mode:0o600});
+ await writeFile(evidence+'/session-trace.json',JSON.stringify(trace,null,2)+'\n',{mode:0o600});
 }
 if(diagnostic){
  page.on('request',request=>{

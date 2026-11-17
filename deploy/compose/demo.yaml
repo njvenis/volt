@@ -14,3 +14,9 @@ services:
       - "127.0.0.1:${VOLT_OIDC_PORT:-8190}:9000"
     labels:
       volt.installation.mode: labelled-synthetic-demo
+    secrets:
+      - demo-admin-credentials
+
+secrets:
+  demo-admin-credentials:
+    file: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/demo_admin_credentials

@@ -1,0 +1,11 @@
+services:
+  volt:
+    secrets:
+      - okta-publisher.json
+      - okta_service_private_key
+
+secrets:
+  okta-publisher.json:
+    file: ${VOLT_INSTANCE_DIR:?run setup first}/okta-publisher.json
+  okta_service_private_key:
+    file: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/okta_service_private_key

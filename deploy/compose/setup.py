@@ -446,10 +446,22 @@ def compose_environment() -> dict[str, str]:
             if not k.startswith(("VOLT_", "COMPOSE_")) and k != "ENV"}
 
 
-def resolved_compose(root: Path, info: dict):
+def compose_files(info: dict) -> list[str]:
     files = ["-f", str(Path(info["compose_directory"]) / "compose.yaml")]
     if info["mode"] == "demo":
         files += ["-f", str(Path(info["compose_directory"]) / "demo.yaml")]
+    elif info.get("okta_publisher_config_sha256") is not None:
+        files += ["-f", str(Path(info["compose_directory"]) / "okta-publisher.yaml")]
+    return files
+
+
+def resolved_compose(root: Path, info: dict):
+    files = compose_files(info)
+    identity_secrets = identity_secret_sources(root, info)
+    for name, source in identity_secrets.items():
+        if (source.is_symlink() or not source.is_file() or not source.read_bytes().strip()
+                or stat.S_IMODE(source.stat().st_mode) != 0o600):
+            raise SystemExit(f"required private identity secret is missing or unsafe: {name}")
     envfile = root / ".env"
     if hashlib.sha256(envfile.read_bytes()).hexdigest() != info.get("env_sha256"):
         raise SystemExit("instance environment file changed after admission; refusing Compose operation")
@@ -464,6 +476,7 @@ def resolved_compose(root: Path, info: dict):
         "/etc/volt/oidc.json": str(root / "oidc.json"),
     }
     volume_names = resolved.get("volumes", {})
+    validate_identity_secret_mounts(resolved, service, identity_secrets, info)
     actual_mounts = {item.get("target"): (volume_names.get(item.get("source"), {}).get("name", item.get("source"))
                                            if item.get("type") == "volume" else item.get("source"))
                      for item in service.get("volumes", [])}
@@ -477,6 +490,37 @@ def resolved_compose(root: Path, info: dict):
             resolved.get("volumes", {}).get("state", {}).get("name") != f"{info['project']}_state"):
         raise SystemExit("resolved Compose image, platform, mounts, network, volumes or ownership differ from admitted instance metadata")
     return files, envfile, clean_env
+
+
+def identity_secret_sources(root: Path, info: dict) -> dict[str, Path]:
+    """Return only mode-authorized identity files that Compose may mount."""
+    if info.get("mode") == "demo":
+        if info.get("okta_publisher_config_sha256") is not None:
+            raise SystemExit("demo mode cannot admit external Okta publisher secrets")
+        return {"demo-admin-credentials": root / "secrets" / "demo_admin_credentials"}
+    if info.get("mode") != "external":
+        raise SystemExit("instance identity mode is unsupported")
+    if info.get("okta_publisher_config_sha256") is None:
+        return {}
+    return {"okta-publisher.json": root / "okta-publisher.json",
+        "okta_service_private_key": root / "secrets" / "okta_service_private_key"}
+
+
+def validate_identity_secret_mounts(resolved: dict, service: dict,
+                                    expected_sources: dict[str, Path], info: dict) -> None:
+    refs = service.get("secrets", [])
+    mounts = {item.get("target", item.get("source")): item.get("source")
+        for item in refs if isinstance(item, dict)}
+    forbidden = ({"okta-publisher.json", "okta_service_private_key"}
+        if info.get("mode") == "demo" else {"demo-admin-credentials"})
+    definitions = resolved.get("secrets", {})
+    if any(name in mounts or name in definitions for name in forbidden):
+        raise SystemExit("resolved Compose mounts identity material from the wrong deployment mode")
+    for name, path in expected_sources.items():
+        definition = definitions.get(name)
+        if (mounts.get(name) != name or not isinstance(definition, dict)
+                or Path(definition.get("file", "")).resolve() != path.resolve()):
+            raise SystemExit(f"resolved Compose identity secret mount is missing or mismatched: {name}")
 
 
 def compose(args, action: str) -> None:

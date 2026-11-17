@@ -10,7 +10,8 @@ from unittest.mock import patch
 from uvm.auth.service import load_oidc_config
 from deploy.compose.setup import (allowed_host_names, compose_environment, demo_identity,
                                   demo_password_verifier, inspect_image, validate_external,
-                                  validate_okta_publisher)
+                                  validate_okta_publisher, compose_files, identity_secret_sources,
+                                  validate_identity_secret_mounts, resolved_compose)
 
 
 def config() -> dict:
@@ -29,6 +30,53 @@ def config() -> dict:
 
 
 class ExternalOIDCModeTests(unittest.TestCase):
+    def test_identity_secret_mounts_are_mode_specific_for_all_install_modes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); secrets = root / "secrets"; secrets.mkdir()
+            demo_credential = secrets / "demo_admin_credentials"
+            demo_credential.write_text('{"schema":"uvm.demo-credential.v1"}\n'); demo_credential.chmod(0o600)
+            publisher_config = root / "okta-publisher.json"; publisher_config.write_text('{"schema_version":1}\n'); publisher_config.chmod(0o600)
+            private_key = secrets / "okta_service_private_key"; private_key.write_text("synthetic-key-bytes\n"); private_key.chmod(0o600)
+            cases = (
+                ({"mode":"demo", "okta_publisher_config_sha256":None},
+                    {"demo-admin-credentials":demo_credential}),
+                ({"mode":"external", "okta_publisher_config_sha256":None}, {}),
+                ({"mode":"external", "okta_publisher_config_sha256":"sha256-test"},
+                    {"okta-publisher.json":publisher_config,"okta_service_private_key":private_key}),
+            )
+            for info, expected in cases:
+                with self.subTest(mode=info["mode"], publisher=bool(expected)):
+                    actual = identity_secret_sources(root, info)
+                    self.assertEqual(actual, expected)
+                    refs = [{"source":name,"target":name} for name in expected]
+                    definitions = {name:{"file":str(path)} for name,path in expected.items()}
+                    resolved = {"secrets":definitions}
+                    validate_identity_secret_mounts(resolved,{"secrets":refs},expected,info)
+
+    def test_identity_compose_overlay_selection_and_missing_secret_fail_before_compose(self):
+        info = {"mode":"demo", "compose_directory":"/package/compose",
+            "okta_publisher_config_sha256":None}
+        self.assertEqual(compose_files(info),["-f","/package/compose/compose.yaml","-f","/package/compose/demo.yaml"])
+        external = {"mode":"external", "compose_directory":"/package/compose",
+            "okta_publisher_config_sha256":"sha256-test"}
+        self.assertIn("/package/compose/okta-publisher.yaml",compose_files(external))
+        external["okta_publisher_config_sha256"] = None
+        self.assertNotIn("/package/compose/okta-publisher.yaml",compose_files(external))
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); (root/".env").write_text("test\n")
+            info={**info,"env_sha256":hashlib.sha256((root/".env").read_bytes()).hexdigest()}
+            with patch("deploy.compose.setup.command") as compose_command:
+                with self.assertRaisesRegex(SystemExit,"demo-admin-credentials"):
+                    resolved_compose(root,info)
+                compose_command.assert_not_called()
+
+    def test_wrong_mode_identity_secret_mounts_are_rejected(self):
+        for mode, forbidden in (("demo","okta_service_private_key"),("external","demo-admin-credentials")):
+            with self.subTest(mode=mode), self.assertRaisesRegex(SystemExit,"wrong deployment mode"):
+                validate_identity_secret_mounts({"secrets":{forbidden:{"file":"/private/source"}}},
+                    {"secrets":[{"source":forbidden,"target":forbidden}]},{},
+                    {"mode":mode})
+
     def test_demo_administrator_uses_named_stable_synthetic_identity(self):
         self.assertEqual(demo_identity("nicho-testing-admin", "local-subject-7"),
                          ("nicho-testing-admin", "local-subject-7"))

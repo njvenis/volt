@@ -20,6 +20,32 @@ import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SUPPORTED_PLATFORMS = ("linux/amd64", "linux/arm64")
+
+
+def platform_from_image_inspect(output: str, declared_platform: str | None = None) -> str:
+    """Admit only an image whose Docker config matches the package platform."""
+    try:
+        rows = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Docker image inspection was not valid JSON") from exc
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        raise RuntimeError("Docker image inspection did not identify exactly one image")
+    platform = f"{rows[0].get('Os')}/{rows[0].get('Architecture')}"
+    if platform not in SUPPORTED_PLATFORMS:
+        raise RuntimeError(f"Docker image platform {platform} is not supported")
+    if declared_platform is not None and declared_platform != platform:
+        raise RuntimeError("verified package platform disagrees with Docker image inspection")
+    return platform
+
+
+def init_command(cli: list[str], state: Path, project: str, ports: list[int],
+                 image_id: str, platform: str) -> list[str]:
+    if platform not in SUPPORTED_PLATFORMS:
+        raise RuntimeError("installer platform is not supported")
+    return [*cli, "init", str(state), "--mode", "demo", "--project", project,
+        "--http-port", str(ports[0]), "--recovery-port", str(ports[0] + 1),
+        "--oidc-port", str(ports[2]), "--image", image_id, "--platform", platform]
 
 
 def run(name: str, argv: list[str], evidence: Path, *, input_text: str | None = None,
@@ -98,6 +124,8 @@ def main() -> int:
     p.add_argument("--image-id", required=True)
     p.add_argument("--source-snapshot", required=True)
     p.add_argument("--source-commit", required=True)
+    p.add_argument("--platform", choices=SUPPORTED_PLATFORMS,
+                   help="optional package-manifest platform; checked against the loaded image config")
     p.add_argument("--version", default="0.1.0-rc.2")
     p.add_argument("--development-fixture", action="store_true",
                    help="label evidence as development-only when testing the runner against a non-RC2 image")
@@ -144,16 +172,21 @@ def main() -> int:
         setup = candidates[0]
         if ROOT in setup.parents:
             raise RuntimeError("source-free bundle extraction unexpectedly overlaps checkout")
+        image_inspect = run("image-platform-inspect", ["docker", "image", "inspect", args.image_id], evidence)
+        platform = platform_from_image_inspect(image_inspect.stdout, args.platform)
+        (evidence / "platform-admission.json").write_text(json.dumps({
+            "image_id": args.image_id, "declared_platform": args.platform,
+            "docker_config_platform": platform, "admitted_platform": platform}, sort_keys=True, indent=2) + "\n")
         ports = [int(18000 + os.getpid() % 1000), int(19000 + os.getpid() % 1000), int(20000 + os.getpid() % 1000)]
         cli = [sys.executable, str(setup)]
-        run("init", [*cli,"init",str(state),"--mode","demo","--project",project,
-             "--http-port",str(ports[0]),"--recovery-port",str(ports[0]+1),"--oidc-port",str(ports[2]),"--image",args.image_id], evidence)
+        run("init", init_command(cli, state, project, ports, args.image_id, platform), evidence)
         info = json.loads((state / "instance.json").read_text())
         admission = info["image_admission"]
         bundle_version = (setup.parent/"VERSION").read_text().strip()
         if bundle_version != "0.1.0-rc.2":
             raise RuntimeError("qualification bundle must be the versioned RC2 Compose bundle")
-        if (admission["id"] != args.image_id or admission["source_snapshot"] != args.source_snapshot
+        if (admission["id"] != args.image_id or admission["platform"] != platform
+                or admission["source_snapshot"] != args.source_snapshot
                 or admission["source_revision"] != args.source_commit):
             raise RuntimeError("installed image admission did not match the candidate image/source snapshot/revision")
         if admission["version"] != args.version and not args.development_fixture:
@@ -257,6 +290,7 @@ def main() -> int:
         (evidence/"qualification.json").write_text(json.dumps({"result":"passed",
             "qualification_scope":"development_fixture" if args.development_fixture else "hosted_rc2_release",
             "release_version":bundle_version,"image_id":args.image_id,
+            "platform":platform,
             "source_revision":admission["source_revision"],"image_version":admission["version"],
             "source_snapshot":args.source_snapshot,"bundle_sha256":sha(args.bundle),"bundle_version":"0.1.0-rc.2",
             "project":project,"synthetic_demo":True,"health":"passed","audited_operation":"passed",

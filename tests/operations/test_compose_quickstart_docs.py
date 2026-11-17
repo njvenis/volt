@@ -35,6 +35,8 @@ class ComposeQuickstartDocumentationTests(unittest.TestCase):
         self.assertIn("subject_by_user_id", readme)
         self.assertIn("Do not map by email or display name", readme)
         self.assertIn("Management API issuer `https://<org>/oauth2/v1`", readme)
+        self.assertIn("unencrypted RSA private PEM key of at least 2048 bits", readme)
+        self.assertIn("RS256 assertions", readme)
         self.assertIn("--okta-publisher-config ./okta-publisher.json", readme)
         self.assertIn("--validate-only", readme)
         self.assertIn("--status", readme)

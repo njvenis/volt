@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {requireAdminRendered,requireAudit,requirePersistedState,requireReceipt,requireSession} from './g7_local_preview_smoke_checks.mjs';
+import {policyExpectedRevisions,requireAdminRendered,requireAudit,requirePersistedState,requireReceipt,requireSession} from './g7_local_preview_smoke_checks.mjs';
 
 const expected={issuer:'http://127.0.0.1:8190',subject:'volt-local-preview-admin-subject',principal:'volt-local-preview-admin'};
 const uuid='28c3f3a6-81da-42cd-90bb-862e2402ff9a';
@@ -31,6 +31,18 @@ test('receipt binds request, action, target, object and audit revision',()=>{
     groupId:receipt.result.object_id,action:'access_group.membership.set',objectRevision:2});
   assert.throws(()=>requireReceipt(membershipReceipt,{commandId:membershipReceipt.command_id,targetId:receipt.target_id,
     groupId:receipt.result.object_id,action:'access_group.membership.set',objectRevision:1}),/public_admin_command_receipt_mismatch/);
+});
+
+test('ordered create then membership uses current public revisions and every policy guard',()=>{
+  const afterCreateCatalogue={policy_revision:3,authority_revision:2,ownership_revision:4};
+  const expected=policyExpectedRevisions(afterCreateCatalogue,receipt.result.object_revision);
+  assert.deepEqual(expected,{target:3,policy:3,authority:2,ownership:4,access_group:1,
+    identity_membership:0,owners:0});
+  // The old request omitted owners:0, which the server's policy-command fence requires.
+  const oldRequest={...expected};delete oldRequest.owners;
+  assert.equal(Object.hasOwn(oldRequest,'owners'),false);
+  assert.throws(()=>policyExpectedRevisions({...afterCreateCatalogue,ownership_revision:undefined},1),
+    /policy_revision_catalogue_incomplete/);
 });
 
 test('history must match the receipt audit ID and committed object revision',()=>{

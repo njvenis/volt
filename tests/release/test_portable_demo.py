@@ -134,9 +134,11 @@ class PortableDemoArchiveTest(unittest.TestCase):
         link = instructions.index("python3 setup.py link-admin")
         browser = instructions.index("sign in with the synthetic local OIDC principal")
         authority = instructions.index("python3 setup.py initialize-authority")
+        action = instructions.index("complete and verify an audited administrative action")
         self.assertLess(start, link)
         self.assertLess(link, browser)
         self.assertLess(browser, authority)
+        self.assertLess(authority, action)
 
     def test_build_tags_are_unique_across_local_architecture_loads(self) -> None:
         first = portable_demo.local_image_reference("linux/amd64")

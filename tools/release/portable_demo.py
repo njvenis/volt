@@ -84,13 +84,16 @@ No VOLT checkout, Git, Node.js, npm, uv, source build, or network access is need
 
    python3 setup.py link-admin "$HOME/.local/share/volt/demo"
 
-6. In a browser, open http://127.0.0.1:8180, sign in with the synthetic local OIDC principal,
-and complete an administrative action. This is synthetic OIDC; no local password is created.
+6. In a browser, open http://127.0.0.1:8180 and sign in with the synthetic local OIDC principal.
+This is synthetic OIDC; no local password is created.
 
 7. Copy the uvm_session cookie from the browser storage inspector. Then initialise authority;
 the command prompts for the cookie without echoing it:
 
    python3 setup.py initialize-authority "$HOME/.local/share/volt/demo"
+
+8. After authority initialisation succeeds, complete and verify an audited administrative action
+in the browser.
 
 Keep demo data disposable. Follow the bundled backup/restore and cleanup instructions for this
 named instance.

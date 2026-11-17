@@ -1,5 +1,6 @@
-#!/bin/sh
+#!/bin/bash
 set -eu
+source /usr/local/bin/uvm-g7-identity-runtime
 test -f /run/uvm-g7/ready
 test ! -e /run/uvm-g7/critical-failed
 mode=$(cat /run/uvm-g7/runtime-mode)
@@ -31,6 +32,11 @@ if [ "$mode" = runtime ] && [ "${UVM_AUTH_MODE:-bearer}" = oidc ]; then
     curl --fail --silent --show-error "http://127.0.0.1:${UVM_OIDC_PROVIDER_PORT:-9000}/healthz" >/dev/null
   fi
   curl --fail --silent --show-error http://127.0.0.1:8001/healthz >/dev/null
+fi
+if [ "$mode" = runtime ] && [ "${UVM_AUTH_MODE:-bearer}" = oidc ] &&
+   [ "${UVM_OIDC_DEPLOYMENT_MODE:-demo}" = external ]; then
+  uvm_g7_okta_publisher_healthy /run/uvm-g7-secrets/okta-publisher.json \
+    /run/uvm-g7/pid-okta-identity-publisher /opt/uvm/venv/bin/python || exit 1
 fi
 if [ "$mode" = verification ]; then
   status=$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8081/api/v2/findings/)

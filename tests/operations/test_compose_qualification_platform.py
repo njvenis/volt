@@ -4,10 +4,23 @@ import json
 import unittest
 from pathlib import Path
 
-from tools.compose_release_qualification import init_command, platform_from_image_inspect
+from tools.compose_release_qualification import init_command, platform_from_image_inspect, qualification_scope
 
 
 class ComposeQualificationPlatformTests(unittest.TestCase):
+    def test_scope_uses_actual_runner_context_not_release_version(self):
+        self.assertEqual(qualification_scope(development_fixture=False, environment={}),
+                         "local_synthetic_rc2")
+        self.assertEqual(qualification_scope(development_fixture=False, environment={
+            "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}),
+            "hosted_rc2_release")
+        self.assertEqual(qualification_scope(development_fixture=False, environment={
+            "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "self-hosted"}),
+            "local_synthetic_rc2")
+        self.assertEqual(qualification_scope(development_fixture=True, environment={
+            "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}),
+            "development_fixture")
+
     def test_platform_from_image_config_admits_both_supported_architectures(self):
         for architecture, platform in (("amd64", "linux/amd64"), ("arm64", "linux/arm64")):
             with self.subTest(platform=platform):

@@ -71,6 +71,10 @@ class ComposeQualificationPlatformTests(unittest.TestCase):
         self.assertIn("getByLabel('Username').fill(username)", source)
         self.assertIn("getByLabel('Password').fill(password)", source)
         self.assertNotIn("VOLT_SMOKE_FIXTURE_SUBJECT", source)
+        revocation = source.split("return r.status===401;", 1)[1].split("const after=", 1)[0]
+        self.assertIn("await page.reload({waitUntil:'domcontentloaded'})", revocation)
+        self.assertLess(revocation.index("await page.reload"),
+            revocation.index("getByRole('link',{name:/sign in/i})"))
         self.assertIn('"--password-file",str(qualification_password)',
             (root / "tools/compose_release_qualification.py").read_text())
 

@@ -148,8 +148,25 @@ try{
     const control=execFileSync('docker',['compose','-f',path.join(composeDirectory,'compose.yaml'),'-f',path.join(composeDirectory,'demo.yaml'),'--env-file',envFile,'-p',project,'exec','-T','volt','/opt/uvm/venv/bin/python','-c',controlScript,JSON.stringify({mode:null,identities:[{subject,groups:[]}]})],{encoding:'utf8',stdio:['ignore','pipe','pipe']});
     ensure(control.trim().split(/\r?\n/).at(-1)==='200','synthetic_provider_fixture_update_failed');
     await page.waitForFunction(async()=>{const r=await fetch('/api/v1/auth/session',{cache:'no-store'});return r.status===401;},null,{timeout:30000});
-    await page.goto(origin+'/',{waitUntil:'domcontentloaded'});
-    await page.getByRole('link',{name:/sign in/i}).click();
+    // The current URL may only differ by hash from '/', so goto('/') can be
+    // same-document navigation and preserve the revoked in-memory session.
+    await page.reload({waitUntil:'domcontentloaded'});
+    try{await page.getByRole('link',{name:/sign in/i}).click({timeout:30000});}
+    catch(error){
+      const observed=await page.evaluate(async()=>{
+        const response=await fetch('/api/v1/auth/session',{credentials:'same-origin',cache:'no-store'});
+        let session=null;try{session=await response.json();}catch{}
+        return {url:location.href,title:document.title,readyState:document.readyState,
+          session_status:response.status,session_authenticated:session?.authenticated??null,
+          session_code:session?.detail?.code??session?.code??null,
+          visible_text:document.body.innerText,
+          links:[...document.querySelectorAll('a')].map(a=>({text:a.innerText,href:a.getAttribute('href'),visible:!!(a.offsetWidth||a.offsetHeight||a.getClientRects().length)})),
+          buttons:[...document.querySelectorAll('button')].map(b=>({text:b.innerText,disabled:b.disabled,visible:!!(b.offsetWidth||b.offsetHeight||b.getClientRects().length)}))};
+      });
+      await page.screenshot({path:`${evidence}/provider-removal-fresh-login-state.png`,fullPage:true});
+      await writeFile(`${evidence}/provider-removal-fresh-login-state.json`,JSON.stringify(observed,null,2)+'\n',{mode:0o600});
+      throw error;
+    }
     await page.getByLabel('Username').fill(username);
     await page.getByLabel('Password').fill(password);
     await page.getByRole('button',{name:'Sign in'}).click();

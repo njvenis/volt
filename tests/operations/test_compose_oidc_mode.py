@@ -48,7 +48,7 @@ class ExternalOIDCModeTests(unittest.TestCase):
                 with self.subTest(mode=info["mode"], publisher=bool(expected)):
                     actual = identity_secret_sources(root, info)
                     self.assertEqual(actual, expected)
-                    refs = [{"source":name,"target":name} for name in expected]
+                    refs = [{"source":name,"target":f"/run/secrets/{name}"} for name in expected]
                     definitions = {name:{"file":str(path)} for name,path in expected.items()}
                     resolved = {"secrets":definitions}
                     validate_identity_secret_mounts(resolved,{"secrets":refs},expected,info)
@@ -74,7 +74,7 @@ class ExternalOIDCModeTests(unittest.TestCase):
         for mode, forbidden in (("demo","okta_service_private_key"),("external","demo-admin-credentials")):
             with self.subTest(mode=mode), self.assertRaisesRegex(SystemExit,"wrong deployment mode"):
                 validate_identity_secret_mounts({"secrets":{forbidden:{"file":"/private/source"}}},
-                    {"secrets":[{"source":forbidden,"target":forbidden}]},{},
+                    {"secrets":[{"source":forbidden,"target":f"/run/secrets/{forbidden}"}]},{},
                     {"mode":mode})
 
     def test_demo_administrator_uses_named_stable_synthetic_identity(self):

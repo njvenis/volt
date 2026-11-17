@@ -509,16 +509,19 @@ def identity_secret_sources(root: Path, info: dict) -> dict[str, Path]:
 def validate_identity_secret_mounts(resolved: dict, service: dict,
                                     expected_sources: dict[str, Path], info: dict) -> None:
     refs = service.get("secrets", [])
-    mounts = {item.get("target", item.get("source")): item.get("source")
+    mounts = {(item.get("source"), item.get("target", item.get("source")))
         for item in refs if isinstance(item, dict)}
     forbidden = ({"okta-publisher.json", "okta_service_private_key"}
         if info.get("mode") == "demo" else {"demo-admin-credentials"})
     definitions = resolved.get("secrets", {})
-    if any(name in mounts or name in definitions for name in forbidden):
+    if (any(name in definitions or any(source == name or target.rsplit("/", 1)[-1] == name
+            for source, target in mounts) for name in forbidden)):
         raise SystemExit("resolved Compose mounts identity material from the wrong deployment mode")
     for name, path in expected_sources.items():
         definition = definitions.get(name)
-        if (mounts.get(name) != name or not isinstance(definition, dict)
+        targets = {name, f"/run/secrets/{name}"}
+        if (not any(source == name and target in targets for source, target in mounts)
+                or not isinstance(definition, dict)
                 or Path(definition.get("file", "")).resolve() != path.resolve()):
             raise SystemExit(f"resolved Compose identity secret mount is missing or mismatched: {name}")
 

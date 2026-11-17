@@ -50,9 +50,12 @@ For external OIDC, prepare a config based on [`oidc.example.json`](oidc.example.
 
 For an Okta evaluation, create an **OIDC Web Application** integration and enable the **Authorization Code** flow. Assign only the evaluation users/group. Set its sign-in redirect URI to the exact HTTPS callback, `https://<your-host>/api/v1/auth/callback`; the callback host must also be included exactly in `--allowed-hosts`. Use your Okta authorization server's exact issuer URI and its discovery URL (commonly `<issuer>/.well-known/openid-configuration`), the generated client ID, and the client secret in a regular private file outside the extracted bundle and source control. Okta must be able to reach the HTTPS callback through a trusted TLS endpoint; the app upstream remains loopback-bound. Configure `oidc.json` from the example with those exact values and trusted HTTPS origins, then pass its path and secret-file path to `init`. See [Okta's OIDC web app setup](https://developer.okta.com/blog/integrator-setup) and [authorization-code flow](https://developer.okta.com/docs/guides/implement-grant-type/-/main/).
 
+For the external command below, set `VOLT_PLATFORM` to the platform in the verified package manifest (for example, `linux/arm64` on Apple Silicon) and pull that platform explicitly. The client-secret file must be mode `0600`; do not paste its value into a command or config file.
+
 This config enables protocol setup only. Real external authorization is not ready from OIDC alone: VOLT requires a separately operated trusted identity-sync publisher with fresh, monotonic membership snapshots and approved group-to-role/source-scope mappings. Missing, stale, or contradictory membership keeps authorization unavailable. This Compose bundle does not implement that publisher or choose organisational roles/scopes. Until that dependency is implemented and exercised, treat Okta config/protocol checks as synthetic validation and do not claim a usable Okta evaluation. After it exists, use the exact callback, link the exact Okta `iss` and stable `sub` (not email/display name), initialise authority, then perform and record a real browser sign-in and permission-scoped audited action.
 
 ```sh
+export VOLT_PLATFORM=linux/arm64 # Replace with the verified package platform.
 docker pull --platform "$VOLT_PLATFORM" VOLT_RELEASE_IMAGE_REFERENCE
 python3 setup.py init /var/lib/volt/evaluation --mode external --image VOLT_RELEASE_IMAGE_REFERENCE --platform "$VOLT_PLATFORM" \
   --project volt-evaluation --external-config ./oidc.json \

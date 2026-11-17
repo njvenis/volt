@@ -11,7 +11,8 @@ import tarfile
 import re
 
 FILES = ("VERSION", "README.md", "backup-restore.md", "compose.yaml", "demo.yaml",
-         "compose.env.example", "oidc.example.json", "setup.py")
+         "okta-publisher.yaml", "compose.env.example", "oidc.example.json",
+         "okta-publisher.example.json", "setup.py")
 
 
 def digest(data: bytes) -> str:

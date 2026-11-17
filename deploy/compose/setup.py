@@ -511,12 +511,15 @@ def validate_identity_secret_mounts(resolved: dict, service: dict,
     refs = service.get("secrets", [])
     mounts = {(item.get("source"), item.get("target", item.get("source")))
         for item in refs if isinstance(item, dict)}
-    forbidden = ({"okta-publisher.json", "okta_service_private_key"}
-        if info.get("mode") == "demo" else {"demo-admin-credentials"})
     definitions = resolved.get("secrets", {})
-    if (any(name in definitions or any(source == name or target.rsplit("/", 1)[-1] == name
-            for source, target in mounts) for name in forbidden)):
-        raise SystemExit("resolved Compose mounts identity material from the wrong deployment mode")
+    identity_names = {"demo-admin-credentials", "okta-publisher.json", "okta_service_private_key"}
+    expected_names = set(expected_sources)
+    defined_identity = set(definitions) & identity_names
+    mounted_identity = {source for source, _target in mounts if source in identity_names}
+    mounted_identity |= {target.rsplit("/", 1)[-1] for _source, target in mounts
+        if target.rsplit("/", 1)[-1] in identity_names}
+    if defined_identity != expected_names or mounted_identity != expected_names:
+        raise SystemExit("resolved Compose identity secrets differ from the exact admitted deployment mode")
     for name, path in expected_sources.items():
         definition = definitions.get(name)
         targets = {name, f"/run/secrets/{name}"}

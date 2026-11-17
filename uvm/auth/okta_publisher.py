@@ -114,6 +114,7 @@ def load_config(path: str | Path) -> dict:
     except (OSError, json.JSONDecodeError):
         raise ValueError("admitted OIDC authority configuration is unavailable or invalid") from None
     if (not isinstance(oidc, dict) or oidc.get("provider_id") != value["provider_id"]
+            or not isinstance(oidc.get("client_id"), str) or not TOKEN_RE.fullmatch(oidc["client_id"])
             or oidc.get("heartbeat_max_age_seconds") != value["heartbeat_max_age_seconds"]
             or not isinstance(oidc.get("group_mappings"), dict)
             or set(oidc["group_mappings"]) != set(groups)
@@ -202,6 +203,13 @@ class OktaPublisher:
                  status_file: Path = Path("/opt/uvm/state/oidc-publisher/status.json"),
                  sync_secret_file: str = "/run/uvm-g7-secrets/oidc_sync_secret"):
         self.config = config
+        try:
+            oidc = json.loads(Path(config["oidc_config_file"]).read_text(encoding="utf-8"))
+            self.login_client_id = oidc["client_id"]
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+            raise ValueError("admitted OIDC login client identity is unavailable") from None
+        if not isinstance(self.login_client_id, str) or not TOKEN_RE.fullmatch(self.login_client_id):
+            raise ValueError("admitted OIDC login client identity is invalid")
         self.revision_dir = revision_dir
         self.status_file = status_file
         self.sync_secret_file = sync_secret_file
@@ -232,9 +240,9 @@ class OktaPublisher:
             raise RuntimeError("Okta app identity did not match configured app")
         if app.get("status") != "ACTIVE":
             raise RuntimeError("configured Okta login application is not active")
-        client_id = ((app.get("settings") or {}).get("oauthClient") or {}).get("client_id")
-        if client_id != config["client_id"]:
-            raise RuntimeError("configured Okta application client ID differs from admitted OIDC client")
+        login_client_id = ((app.get("credentials") or {}).get("oauthClient") or {}).get("client_id")
+        if login_client_id != self.login_client_id:
+            raise RuntimeError("configured Okta application client ID differs from admitted OIDC login client")
         assignments = await _get_all(client, f"{base}/apps/{config['app_id']}/users?limit=200",
                                      base_url=config["api_base_url"], token=token)
         identities = []

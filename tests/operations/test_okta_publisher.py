@@ -47,7 +47,7 @@ class SnapshotClient:
     async def get(self, url, **kwargs):
         if url.endswith("/apps/volt-app-id"):
             return Response({"id": "volt-app-id", "status": "ACTIVE",
-                "settings": {"oauthClient": {"client_id": "service-client-id"}}})
+                "credentials": {"oauthClient": {"client_id": "login-oidc-client-id"}}})
         if "/apps/volt-app-id/users" in url:
             return Response(self.assignments)
         if url.endswith("/users/00u-admin"):
@@ -93,7 +93,7 @@ class OktaPublisherTests(unittest.TestCase):
             "subject_by_user_id": {"00u-admin": "okta_sub-admin+stable"},
             "group_ids": ["00g-admin"],
             "poll_interval_seconds": 30, "heartbeat_max_age_seconds": 120}
-        self.oidc.write_text(json.dumps({"provider_id": "okta-demo", "client_id": "service-client-id",
+        self.oidc.write_text(json.dumps({"provider_id": "okta-demo", "client_id": "login-oidc-client-id",
             "heartbeat_max_age_seconds": 120, "allowed_endpoint_origins": ["https://tenant.example.okta.com"],
             "group_mappings": {"00g-admin": {"role_ids": ["volt-admin"], "source_scopes": []}}}))
 
@@ -207,6 +207,8 @@ class OktaPublisherTests(unittest.TestCase):
 
     def test_complete_snapshot_contains_exact_subject_and_explicit_groups(self):
         publisher = OktaPublisher(self.config)
+        self.assertNotEqual(self.config["client_id"], publisher.login_client_id)
+        self.assertEqual(publisher.login_client_id, "login-oidc-client-id")
         rows = asyncio.run(publisher.snapshot(SnapshotClient(), "synthetic-token"))
         self.assertEqual(rows, [{"subject": "okta_sub-admin+stable", "groups": ["00g-admin"]}])
         removed_group = asyncio.run(publisher.snapshot(SnapshotClient(group_ids=[]), "synthetic-token"))
@@ -217,9 +219,10 @@ class OktaPublisherTests(unittest.TestCase):
             async def get(self, url, **kwargs):
                 if url.endswith("/apps/volt-app-id"):
                     return Response({"id": "volt-app-id", "status": "ACTIVE",
-                        "settings": {"oauthClient": {"client_id": "other-client"}}})
+                        "credentials": {"oauthClient": {"client_id": "other-login-client"}},
+                        "settings": {"oauthClient": {"client_id": "service-client-id"}}})
                 return await super().get(url, **kwargs)
-        with self.assertRaisesRegex(RuntimeError, "client ID differs"):
+        with self.assertRaisesRegex(RuntimeError, "differs from admitted OIDC login client"):
             asyncio.run(OktaPublisher(self.config).snapshot(MismatchedApp(), "synthetic-token"))
 
     def test_validate_key_rejects_malformed_encrypted_and_undersized_private_keys(self):

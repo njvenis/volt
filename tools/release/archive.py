@@ -22,7 +22,8 @@ import provenance as provenance_validator
 EXPECTED_VERSION = "0.1.0-rc.2"
 SUPPORTED_ARCHIVE_VERSIONS = {"0.1.0-rc.1", EXPECTED_VERSION}
 COMPOSE_BUNDLE_FILES = ("VERSION", "README.md", "backup-restore.md", "compose.yaml", "demo.yaml",
-                        "compose.env.example", "oidc.example.json", "setup.py")
+                        "okta-publisher.yaml", "compose.env.example", "oidc.example.json",
+                        "okta-publisher.example.json", "setup.py")
 EXPECTED_PLATFORM = "linux/amd64"
 SUPPORTED_PLATFORMS = {"linux/amd64", "linux/arm64"}
 EXPECTED_IDENTITY = "https://github.com/njvenis/volt/.github/workflows/release.yml@refs/heads/main"

@@ -11,7 +11,7 @@ from uvm.auth.service import load_oidc_config
 from deploy.compose.setup import (allowed_host_names, compose_environment, demo_identity,
                                   demo_password_verifier, inspect_image, validate_external,
                                   validate_okta_publisher, compose_files, identity_secret_sources,
-                                  validate_identity_secret_mounts, resolved_compose)
+                                  validate_identity_secret_mounts, resolved_compose, compose)
 
 
 def config() -> dict:
@@ -72,10 +72,40 @@ class ExternalOIDCModeTests(unittest.TestCase):
 
     def test_wrong_mode_identity_secret_mounts_are_rejected(self):
         for mode, forbidden in (("demo","okta_service_private_key"),("external","demo-admin-credentials")):
-            with self.subTest(mode=mode), self.assertRaisesRegex(SystemExit,"wrong deployment mode"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(SystemExit,"exact admitted deployment mode"):
                 validate_identity_secret_mounts({"secrets":{forbidden:{"file":"/private/source"}}},
                     {"secrets":[{"source":forbidden,"target":f"/run/secrets/{forbidden}"}]},{},
                     {"mode":mode})
+
+    def test_external_without_publisher_rejects_both_unadmitted_okta_secrets_before_start(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);env_file=root/".env";env_file.write_text("isolated\n")
+            (root/"oidc.json").write_text("{}\n")
+            project="volt-external-no-publisher"
+            info={"mode":"external","project":project,"compose_directory":"/synthetic/compose",
+                "image":"ghcr.io/example/volt:test","platform":"linux/amd64","owner_token":"synthetic-owner",
+                "env_sha256":hashlib.sha256(env_file.read_bytes()).hexdigest(),
+                "okta_publisher_config_sha256":None}
+            secrets={name:{"file":str(root/name)} for name in ("okta-publisher.json","okta_service_private_key")}
+            service={"image":info["image"],"platform":info["platform"],
+                "labels":{"volt.compose.owner-token":info["owner_token"]},
+                "volumes":[{"type":"volume","source":"postgres","target":"/var/lib/postgresql/data"},
+                    {"type":"volume","source":"media","target":"/app/media"},
+                    {"type":"volume","source":"state","target":"/opt/uvm/state"},
+                    {"type":"bind","source":str(root/"oidc.json"),"target":"/etc/volt/oidc.json"}],
+                "secrets":[{"source":name,"target":f"/run/secrets/{name}"} for name in secrets]}
+            resolved={"services":{"volt":service},"secrets":secrets,
+                "volumes":{part:{"name":f"{project}_{part}"} for part in ("postgres","media","state")},
+                "networks":{"application":{"name":f"{project}_network"}}}
+            with patch("deploy.compose.setup.load_instance",return_value=(root,info)), \
+                 patch("deploy.compose.setup.command",return_value=json.dumps(resolved)) as docker:
+                with self.assertRaisesRegex(SystemExit,"exact admitted deployment mode"):
+                    compose(SimpleNamespace(directory=str(root)),"up")
+            docker.assert_called_once()
+            argv=docker.call_args.args
+            self.assertIn("config",argv)
+            self.assertNotIn("up",argv)
 
     def test_demo_administrator_uses_named_stable_synthetic_identity(self):
         self.assertEqual(demo_identity("nicho-testing-admin", "local-subject-7"),

@@ -30,7 +30,8 @@ INTEGRITY = "checksum-only-local-demo"
 PACKAGE_SCHEMA = "volt-portable-demo/v1"
 COMPOSE_BUNDLE_FILES = {
     "VERSION", "README.md", "backup-restore.md", "compose.yaml", "demo.yaml",
-    "compose.env.example", "oidc.example.json", "setup.py", "manifest.json",
+    "okta-publisher.yaml", "compose.env.example", "oidc.example.json",
+    "okta-publisher.example.json", "setup.py", "manifest.json",
 }
 
 
@@ -52,8 +53,9 @@ def command(argv: list[str], *, capture: bool = False) -> str:
 def _install_instructions() -> str:
     return """# Install the portable VOLT local demo
 
-This artifact is checksum-only local demo material, not a signed release. It supports a
-synthetic local OIDC principal; it does not provide password login or verified Okta integration.
+This artifact is checksum-only local demo material, not a signed release. The demo uses a
+named local username/password account and a synthetic local OIDC issuer; it is not a verified
+Okta integration.
 
 Requirements on the destination: Python 3.11+, Docker Engine/Desktop with Compose v2,
 OpenSSL, and tar.
@@ -76,7 +78,7 @@ No VOLT checkout, Git, Node.js, npm, uv, source build, or network access is need
 
 4. Initialise and start a private local demo (replace IMAGE_ID and PLATFORM with verified values):
 
-   python3 setup.py init "$HOME/.local/share/volt/demo" --mode demo --project volt-demo --image IMAGE_ID --platform PLATFORM --bootstrap-principal local-testing-admin --demo-subject local-testing-admin-subject
+   python3 setup.py init "$HOME/.local/share/volt/demo" --mode demo --project volt-demo --image IMAGE_ID --platform PLATFORM --bootstrap-principal local-testing-admin --demo-subject local-testing-admin-subject --demo-admin-username local-testing-admin
    python3 setup.py start "$HOME/.local/share/volt/demo"
    python3 setup.py status "$HOME/.local/share/volt/demo"
 
@@ -84,8 +86,9 @@ No VOLT checkout, Git, Node.js, npm, uv, source build, or network access is need
 
    python3 setup.py link-admin "$HOME/.local/share/volt/demo"
 
-6. In a browser, open http://127.0.0.1:8180 and sign in with the synthetic local OIDC principal.
-This is synthetic OIDC; no local password is created.
+6. In a browser, open http://127.0.0.1:8180 and sign in with the local username/password
+created during init. The local provider issues the configured OIDC subject after password
+verification. Passwords are never stored; init stores only a salted scrypt verifier.
 
 7. Copy the uvm_session cookie from the browser storage inspector. Then initialise authority;
 the command prompts for the cookie without echoing it:

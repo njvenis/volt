@@ -174,7 +174,7 @@ Choose a fresh instance name (`rc1` below). Keep the same name for subsequent co
 ```sh
 export XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
 export PREVIEW_EVIDENCE="$PWD/evidence/g7-local-preview/rc1"
-python3 tools/g7_local_preview.py init rc1 --api-port 8180 --oidc-port 8190
+python3 tools/g7_local_preview.py init rc1 --api-port 8180 --oidc-port 8190 --admin-username local-preview-admin
 python3 tools/g7_local_preview.py start rc1 --no-build \
   --expected-image-id "$VOLT_RC1_IMAGE_ID" \
   --expected-image-source-revision d6e7868091839fcf1374b45397d2aa2c5964f97c \
@@ -183,12 +183,12 @@ python3 tools/g7_local_preview.py start rc1 --no-build \
 python3 tools/g7_local_preview.py wait rc1
 python3 tools/g7_local_preview.py status rc1
 python3 tools/g7_local_preview.py link-admin rc1
-python3 tools/g7_local_preview.py smoke rc1 --evidence "$PREVIEW_EVIDENCE"
+python3 tools/g7_local_preview.py smoke rc1 --admin-username local-preview-admin --evidence "$PREVIEW_EVIDENCE"
 ```
 
 Stop and inspect errors before continuing to the next command. `wait` reports `health=healthy` on success. Run `link-admin` only once: it explicitly links the synthetic subject to `volt-local-preview-admin`; repeating it returns a conflict. The initial smoke signs in, establishes the preview policy/authority and creates an audited synthetic access group through the public UI/API.
 
-Open **http://127.0.0.1:8180/** and select **Sign in**. The synthetic provider supplies the local preview identity; no enterprise account or production password is needed. The automated smoke verifies the expected issuer, subject and principal. This provider is only for disposable local evaluation.
+`init` prompts twice without echo for the named local account password (at least 16 characters) and stores only a salted scrypt verifier. Open **http://127.0.0.1:8180/** and select **Sign in**. Enter that local preview username and password; the provider issues the configured OIDC subject after verifying the password. The automated smoke verifies the expected issuer, subject and principal. This account is only for disposable local evaluation and is not an enterprise or production credential.
 
 `init` creates private secrets and recovery TLS material under `$XDG_STATE_HOME/volt/g7-preview/rc1`. Keep this directory private. The instance owns one container, a private bridge network and three persistent volumes for PostgreSQL, DefectDojo media and VOLT state. A bare `docker run` does not perform this initialization.
 
@@ -200,7 +200,7 @@ From the same source checkout, retain the same evidence directory used for the i
 python3 tools/g7_local_preview.py stop rc1
 python3 tools/g7_local_preview.py restart rc1
 python3 tools/g7_local_preview.py wait rc1
-python3 tools/g7_local_preview.py smoke rc1 --readback --evidence "$PREVIEW_EVIDENCE"
+python3 tools/g7_local_preview.py smoke rc1 --admin-username local-preview-admin --readback --evidence "$PREVIEW_EVIDENCE"
 ```
 
 Stop/restart retains state. Readback compares the saved synthetic object, revision and audit evidence. Use `restart` for an existing container, not another `start` or `init`.

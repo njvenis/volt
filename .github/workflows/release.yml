@@ -172,9 +172,15 @@ jobs:
           cleanup() {
             if test -f "$state/volt/g7-preview/rc2/instance.json"; then
               python3 tools/g7_local_preview.py destroy rc2 || true
+            else
+              rm -rf -- "$state/volt/g7-preview/rc2"
             fi
+            if test -n "${ADMIN_PASSWORD_FILE:-}"; then rm -f -- "$ADMIN_PASSWORD_FILE"; fi
           }
           trap cleanup EXIT
+          ADMIN_PASSWORD_FILE=$(mktemp "$RUNNER_TEMP/volt-rc2-admin.XXXXXX")
+          chmod 600 "$ADMIN_PASSWORD_FILE"
+          python3 -c 'import secrets,sys; open(sys.argv[1],"w").write(secrets.token_urlsafe(24)+"\n")' "$ADMIN_PASSWORD_FILE"
           image_id=$(cat "$out/image-id.txt")
           docker image rm volt-rc2:candidate
           if docker image inspect "$image_id" >/dev/null 2>&1; then
@@ -183,7 +189,8 @@ jobs:
           fi
           docker load --input "$out/image.tar"
           docker image inspect "$image_id" --format '{{.Id}}' | grep -Fx "$image_id"
-          python3 tools/g7_local_preview.py init rc2 --api-port 8180 --oidc-port 8190
+          python3 tools/g7_local_preview.py init rc2 --api-port 8180 --oidc-port 8190 \
+            --admin-username local-preview-admin --admin-password-file "$ADMIN_PASSWORD_FILE"
           python3 tools/g7_local_preview.py start rc2 --no-build \
             --expected-image-id "$image_id" \
             --expected-image-source-revision "$GITHUB_SHA" \
@@ -191,11 +198,13 @@ jobs:
             --expected-platform linux/amd64
           python3 tools/g7_local_preview.py wait rc2
           python3 tools/g7_local_preview.py link-admin rc2
-          python3 tools/g7_local_preview.py smoke rc2 --evidence "$evidence"
+          python3 tools/g7_local_preview.py smoke rc2 --admin-username local-preview-admin \
+            --password-file "$ADMIN_PASSWORD_FILE" --evidence "$evidence"
           python3 tools/g7_local_preview.py stop rc2
           python3 tools/g7_local_preview.py restart rc2
           python3 tools/g7_local_preview.py wait rc2
-          python3 tools/g7_local_preview.py smoke rc2 --readback --evidence "$evidence"
+          python3 tools/g7_local_preview.py smoke rc2 --admin-username local-preview-admin \
+            --password-file "$ADMIN_PASSWORD_FILE" --readback --evidence "$evidence"
           python3 tools/g7_local_preview.py destroy rc2
           test ! -e "$state/volt/g7-preview/rc2"
       - name: Retain fresh offline install evidence on success or failure

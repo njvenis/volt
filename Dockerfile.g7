@@ -32,6 +32,9 @@ RUN npm run build
 
 FROM ${VALKEY_IMAGE} AS valkey-bin
 ARG TARGETARCH
+RUN set -eu; case "$TARGETARCH" in amd64) musl_arch=x86_64;; arm64) musl_arch=aarch64;; *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1;; esac; \
+    cp "/lib/ld-musl-${musl_arch}.so.1" /tmp/volt-valkey-ld-musl.so.1; \
+    cp "/lib/libc.musl-${musl_arch}.so.1" /tmp/volt-valkey-libc.musl.so.1
 
 FROM ${CE_IMAGE} AS runtime
 ARG TARGETARCH
@@ -136,9 +139,6 @@ RUN set -eu; \
     python3 -c 'import importlib.metadata as m, oauthlib, requests_oauthlib; assert m.version("oauthlib") == oauthlib.__version__ == "4.0.1"; print("CE-global oauthlib", oauthlib.__version__, "requests-oauthlib", m.version("requests-oauthlib"))'; \
     python3 -m pip check; \
     rm -f /tmp/ce-global-python-requirements.txt /tmp/ce-global-oauthlib-license.txt
-RUN set -eu; case "$TARGETARCH" in amd64) musl_arch=x86_64;; arm64) musl_arch=aarch64;; *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1;; esac; \
-    cp "/lib/ld-musl-${musl_arch}.so.1" /tmp/volt-valkey-ld-musl.so.1; \
-    cp "/lib/libc.musl-${musl_arch}.so.1" /tmp/volt-valkey-libc.musl.so.1
 COPY --from=valkey-bin /usr/local/bin/valkey-server /opt/valkey/bin/valkey-server
 COPY --from=valkey-bin /usr/local/bin/valkey-cli /opt/valkey/bin/valkey-cli
 COPY --from=valkey-bin /tmp/volt-valkey-ld-musl.so.1 /opt/valkey/lib/ld-musl.so.1

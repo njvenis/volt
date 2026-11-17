@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
+import ast
 
 from tools.compose_release_qualification import init_command, platform_from_image_inspect, qualification_scope
 
@@ -51,6 +52,27 @@ class ComposeQualificationPlatformTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "not supported"):
             init_command(["python", "setup.py"], Path("/tmp/volt-demo"), "volt-demo",
                          [18080, 18081, 18090], "sha256:" + "a" * 64, "linux/ppc64le")
+
+    def test_maintained_qualification_imports_password_generator_and_retains_secret_until_cleanup(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "tools/compose_release_qualification.py").read_text()
+        tree = ast.parse(source)
+        imports = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import)
+            for alias in node.names}
+        self.assertIn("secrets", imports)
+        self.assertIn('qualification_password.unlink(missing_ok=True)', source)
+        self.assertIn('"--password-file",str(qualification_password)', source)
+        self.assertIn('del password_value', source)
+
+    def test_browser_smoke_uses_password_login_for_fresh_sessions_without_fixture_bypass(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "tools/g7_local_preview_smoke.mjs").read_text()
+        self.assertIn("readFile(arg('--password-file')", source)
+        self.assertIn("getByLabel('Username').fill(username)", source)
+        self.assertIn("getByLabel('Password').fill(password)", source)
+        self.assertNotIn("VOLT_SMOKE_FIXTURE_SUBJECT", source)
+        self.assertIn('"--password-file",str(qualification_password)',
+            (root / "tools/compose_release_qualification.py").read_text())
 
 
 if __name__ == "__main__":

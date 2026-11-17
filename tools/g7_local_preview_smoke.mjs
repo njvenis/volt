@@ -8,6 +8,7 @@ function arg(name){const i=process.argv.indexOf(name);if(i<0||!process.argv[i+1]
 const origin=arg('--origin'), issuer=arg('--issuer'), subject=arg('--subject'), principal=arg('--principal'), evidence=arg('--evidence');
 const deploymentLabel=process.argv.includes('--deployment-label')?arg('--deployment-label'):'Synthetic local demo';
 const readbackOnly=process.argv.includes('--readback');
+const username=arg('--username'), password=await readFile(arg('--password-file'),'utf8');
 await mkdir(evidence,{recursive:true,mode:0o700});
 const launchOptions={headless:true};
 if(process.env.CHROMIUM_EXECUTABLE_PATH)launchOptions.executablePath=process.env.CHROMIUM_EXECUTABLE_PATH;
@@ -42,14 +43,10 @@ async function cardFor(groupId){
 try{
   await page.goto(origin+'/',{waitUntil:'domcontentloaded',timeout:30000});
   await page.getByText(deploymentLabel,{exact:true}).waitFor({state:'visible',timeout:10000});
-  if(process.env.VOLT_SMOKE_FIXTURE_SUBJECT){
-    await context.route('**/authorize**',async route=>{
-      const url=new URL(route.request().url());
-      url.searchParams.set('fixture_subject',process.env.VOLT_SMOKE_FIXTURE_SUBJECT);
-      await route.continue({url:url.toString()});
-    });
-  }
   await page.getByRole('link',{name:/sign in/i}).click({timeout:10000});
+  await page.getByLabel('Username').fill(username);
+  await page.getByLabel('Password').fill(password);
+  await page.getByRole('button',{name:'Sign in'}).click();
   await page.waitForFunction(async()=>{const r=await fetch('/api/v1/auth/session',{cache:'no-store'});if(!r.ok)return false;return (await r.json()).authenticated===true;},null,{timeout:30000});
   const session=(await api('/api/v1/auth/session')).body;
   requireSession(session,{issuer,subject,principal});

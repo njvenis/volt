@@ -3,14 +3,19 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives import serialization
 
-from uvm.auth.okta_publisher import (OktaPublisher, _client_assertion, _get_all, load_config)
+from uvm.auth.okta_publisher import (OktaPublisher, _client_assertion, _get_all, load_config,
+    publisher_state_lock)
 
 
 class Response:
@@ -41,7 +46,8 @@ class SnapshotClient:
 
     async def get(self, url, **kwargs):
         if url.endswith("/apps/volt-app-id"):
-            return Response({"id": "volt-app-id", "status": "ACTIVE"})
+            return Response({"id": "volt-app-id", "status": "ACTIVE",
+                "settings": {"oauthClient": {"client_id": "service-client-id"}}})
         if "/apps/volt-app-id/users" in url:
             return Response(self.assignments)
         if url.endswith("/users/00u-admin"):
@@ -59,10 +65,10 @@ class TokenClient:
 
 
 class SyncClient:
-    def __init__(self): self.request = None
+    def __init__(self, response=None): self.request = None; self.response = response or Response({"committed": True, "provider_id": "okta-demo", "revision": 1})
     async def post(self, url, **kwargs):
         self.request = (url, kwargs)
-        return Response({"committed": True, "provider_id": "okta-demo", "revision": 1})
+        return self.response
 
 
 class OktaPublisherTests(unittest.TestCase):
@@ -87,6 +93,9 @@ class OktaPublisherTests(unittest.TestCase):
             "subject_by_user_id": {"00u-admin": "okta_sub-admin+stable"},
             "group_ids": ["00g-admin"],
             "poll_interval_seconds": 30, "heartbeat_max_age_seconds": 120}
+        self.oidc.write_text(json.dumps({"provider_id": "okta-demo", "client_id": "service-client-id",
+            "heartbeat_max_age_seconds": 120, "allowed_endpoint_origins": ["https://tenant.example.okta.com"],
+            "group_mappings": {"00g-admin": {"role_ids": ["volt-admin"], "source_scopes": []}}}))
 
     def tearDown(self):
         self.temp.cleanup()
@@ -123,6 +132,47 @@ class OktaPublisherTests(unittest.TestCase):
         self.assertEqual(publisher._next_revision(), 1)
         self.assertEqual(OktaPublisher(self.config, revision_dir=state)._next_revision(), 2)
         self.assertEqual((state / "revision.json").stat().st_mode & 0o777, 0o600)
+
+    def test_only_one_real_process_owns_collection_and_publish_state(self):
+        state = self.root / "state"
+        code = ("import sys,time; from pathlib import Path; from uvm.auth.okta_publisher import publisher_state_lock; "
+                "exec('with publisher_state_lock(Path(sys.argv[1])):\\n print(\"held\",flush=True)\\n time.sleep(3)')")
+        first = subprocess.Popen([sys.executable, "-c", code, str(state)], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env={**os.environ, "PYTHONPATH": str(Path.cwd())})
+        try:
+            self.assertEqual(first.stdout.readline().strip(), "held")
+            second_code = ("import sys; from pathlib import Path; from uvm.auth.okta_publisher import publisher_state_lock; "
+                           "publisher_state_lock(Path(sys.argv[1])).__enter__()")
+            second = subprocess.run([sys.executable, "-c", second_code, str(state)], capture_output=True,
+                text=True, env={**os.environ, "PYTHONPATH": str(Path.cwd())})
+            self.assertNotEqual(second.returncode, 0)
+            self.assertIn("another Okta publisher", second.stderr)
+        finally:
+            first.terminate(); first.wait(timeout=5)
+            first.stdout.close(); first.stderr.close()
+
+    def test_failed_sync_post_consumes_revision_without_duplicate_on_retry(self):
+        state = self.root / "state"
+        secret = self.root / "sync-secret"; secret.write_text("local-test-secret"); secret.chmod(0o600)
+        publisher = OktaPublisher(self.config, revision_dir=state, sync_secret_file=str(secret))
+        failed = SyncClient(Response({"error": "unavailable"}, status=503))
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            asyncio.run(publisher.publish(failed, "token", []))
+        successful = SyncClient(Response({"committed": True, "provider_id": "okta-demo", "revision": 2}))
+        self.assertEqual(asyncio.run(publisher.publish(successful, "token", [])), 2)
+
+    def test_stale_collection_watermark_is_rejected_without_publication(self):
+        state = self.root / "state"
+        secret = self.root / "sync-secret"; secret.write_text("local-test-secret"); secret.chmod(0o600)
+        client = SyncClient()
+        publisher = OktaPublisher(self.config, revision_dir=state, sync_secret_file=str(secret))
+        # A traversal that began before an intervening Okta group revocation is
+        # already older than the conservative budget; it cannot refresh heartbeat.
+        with self.assertRaisesRegex(RuntimeError, "freshness budget"):
+            asyncio.run(publisher.publish(client, "token", [{"subject": "old", "groups": ["00g-admin"]}],
+                collection_started_at=time.time() - 61))
+        self.assertIsNone(client.request)
+        self.assertFalse((state / "revision.json").exists())
 
     def test_service_app_uses_private_key_jwt_and_org_token_issuer(self):
         assertion = _client_assertion(self.config, now=1_000)
@@ -161,6 +211,38 @@ class OktaPublisherTests(unittest.TestCase):
         self.assertEqual(rows, [{"subject": "okta_sub-admin+stable", "groups": ["00g-admin"]}])
         removed_group = asyncio.run(publisher.snapshot(SnapshotClient(group_ids=[]), "synthetic-token"))
         self.assertEqual(removed_group, [{"subject": "okta_sub-admin+stable", "groups": []}])
+
+    def test_app_client_identity_must_match_admitted_oidc_client(self):
+        class MismatchedApp(SnapshotClient):
+            async def get(self, url, **kwargs):
+                if url.endswith("/apps/volt-app-id"):
+                    return Response({"id": "volt-app-id", "status": "ACTIVE",
+                        "settings": {"oauthClient": {"client_id": "other-client"}}})
+                return await super().get(url, **kwargs)
+        with self.assertRaisesRegex(RuntimeError, "client ID differs"):
+            asyncio.run(OktaPublisher(self.config).snapshot(MismatchedApp(), "synthetic-token"))
+
+    def test_validate_key_rejects_malformed_encrypted_and_undersized_private_keys(self):
+        path = self.root / "publisher.json"; path.write_text(json.dumps(self.config))
+        original = self.key.read_bytes()
+        encrypted = rsa.generate_private_key(public_exponent=65537, key_size=2048).private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.BestAvailableEncryption(b"local-test-passphrase"))
+        for invalid in (b"not a pem key", encrypted):
+            self.key.write_bytes(invalid); self.key.chmod(0o600)
+            with self.assertRaisesRegex(ValueError, "unencrypted RSA"):
+                load_config(path)
+        ec_key = ec.generate_private_key(ec.SECP256R1())
+        self.key.write_bytes(ec_key.private_bytes(serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8, serialization.NoEncryption())); self.key.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, "unencrypted RSA"):
+            load_config(path)
+        small = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+        self.key.write_bytes(small.private_bytes(serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8, serialization.NoEncryption())); self.key.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, "unencrypted RSA private PEM"):
+            load_config(path)
+        self.key.write_bytes(original); self.key.chmod(0o600)
 
     def test_disabled_account_and_removed_app_assignment_are_absent_from_snapshot(self):
         publisher = OktaPublisher(self.config)

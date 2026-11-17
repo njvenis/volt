@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import contextmanager
 import datetime as dt
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -16,6 +18,8 @@ from urllib.parse import urlsplit
 from httpx2 import AsyncClient
 from joserfc import jwt
 from joserfc.jwk import RSAKey
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 
 SCOPES = ("okta.apps.read", "okta.groups.read", "okta.users.read")
@@ -28,6 +32,38 @@ CONFIG_KEYS = {"schema_version", "provider_id", "org_url", "api_issuer", "api_ba
 TOKEN_RE = re.compile(r"[A-Za-z0-9._:-]{1,256}\Z")
 MAX_API_RECORDS = 100_000
 MAX_API_PAGES = 1_000
+
+
+def _validated_private_key(path: Path):
+    try:
+        raw = path.read_bytes()
+        key = serialization.load_pem_private_key(raw, password=None)
+        if not isinstance(key, rsa.RSAPrivateKey) or key.key_size < 2048:
+            raise ValueError
+        return key
+    except (OSError, ValueError, TypeError):
+        raise ValueError("Okta signing key must be an unencrypted RSA private PEM key of at least 2048 bits") from None
+
+
+@contextmanager
+def publisher_state_lock(state_dir: Path):
+    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if state_dir.is_symlink() or not state_dir.is_dir():
+        raise RuntimeError("durable publisher state directory is not a regular directory")
+    lock_path = state_dir / ".publisher.lock"
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        lock_stat = os.fstat(lock_fd)
+        if (lock_stat.st_uid != os.geteuid() or stat.S_IMODE(lock_stat.st_mode) != 0o600
+                or not stat.S_ISREG(lock_stat.st_mode)):
+            raise RuntimeError("publisher lock file is not private and owned")
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("another Okta publisher already owns this durable state directory") from None
+        yield
+    finally:
+        os.close(lock_fd)
 
 
 def _origin(value: str) -> tuple[str, str, int]:
@@ -87,8 +123,7 @@ def load_config(path: str | Path) -> dict:
     try:
         if private_key.is_symlink() or not private_key.is_file() or stat.S_IMODE(private_key.stat().st_mode) & 0o077:
             raise OSError
-        if not private_key.read_bytes():
-            raise OSError
+        _validated_private_key(private_key)
     except OSError:
         raise ValueError("Okta private key must be a readable regular file with private permissions") from None
     return value
@@ -106,6 +141,7 @@ def _read_secret(path: str = "/run/uvm-g7-secrets/oidc_sync_secret") -> str:
 
 def _client_assertion(config: dict, now: int | None = None) -> str:
     now = int(time.time()) if now is None else now
+    _validated_private_key(Path(config["private_key_file"]))
     key = RSAKey.import_key(Path(config["private_key_file"]).read_bytes())
     token_url = config["api_issuer"].rstrip("/") + "/token"
     assertion = jwt.encode({"alg": "RS256", "kid": config["key_id"], "typ": "JWT"}, {
@@ -196,6 +232,9 @@ class OktaPublisher:
             raise RuntimeError("Okta app identity did not match configured app")
         if app.get("status") != "ACTIVE":
             raise RuntimeError("configured Okta login application is not active")
+        client_id = ((app.get("settings") or {}).get("oauthClient") or {}).get("client_id")
+        if client_id != config["client_id"]:
+            raise RuntimeError("configured Okta application client ID differs from admitted OIDC client")
         assignments = await _get_all(client, f"{base}/apps/{config['app_id']}/users?limit=200",
                                      base_url=config["api_base_url"], token=token)
         identities = []
@@ -271,10 +310,18 @@ class OktaPublisher:
             temporary.unlink(missing_ok=True)
         return revision
 
-    async def publish(self, client: AsyncClient, token: str, identities: list[dict]) -> int:
+    async def publish(self, client: AsyncClient, token: str, identities: list[dict], *,
+                      collection_started_at: float | None = None) -> int:
+        collection_started_at = time.time() if collection_started_at is None else collection_started_at
+        age = time.time() - collection_started_at
+        freshness_budget = (self.config["heartbeat_max_age_seconds"]
+            - 2 * self.config["poll_interval_seconds"])
+        if age < 0 or age > freshness_budget:
+            raise RuntimeError("Okta identity traversal exceeded its conservative freshness budget")
         revision = self._next_revision()
         payload = {"schema_version": 1, "provider_id": self.config["provider_id"],
-            "revision": revision, "heartbeat_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "revision": revision, "heartbeat_at": dt.datetime.fromtimestamp(
+                collection_started_at, dt.timezone.utc).isoformat(),
             "kind": "full_snapshot", "identities": identities}
         secret = _read_secret(self.sync_secret_file)
         response = await client.post(SYNC_URL, json=payload,
@@ -299,23 +346,26 @@ class OktaPublisher:
     async def run(self) -> None:
         last_success = None
         delay = 1
-        async with AsyncClient(timeout=15, follow_redirects=False) as client:
-            while True:
-                try:
-                    access_token = await self.token(client)
-                    identities = await self.snapshot(client, access_token)
-                    await self.publish(client, access_token, identities)
-                    last_success, delay = time.time(), 1
-                    self._status(last_success=last_success, error=None)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    self._status(last_success=last_success, error=type(exc).__name__)
-                    print(f"OKTA_IDENTITY_SYNC retry error_class={type(exc).__name__}", flush=True)
-                    await asyncio.sleep(delay)
-                    delay = min(delay * 2, 10)
-                    continue
-                await asyncio.sleep(self.config["poll_interval_seconds"])
+        with publisher_state_lock(self.revision_dir):
+            async with AsyncClient(timeout=15, follow_redirects=False) as client:
+                while True:
+                    try:
+                        access_token = await self.token(client)
+                        collection_started_at = time.time()
+                        identities = await self.snapshot(client, access_token)
+                        await self.publish(client, access_token, identities,
+                            collection_started_at=collection_started_at)
+                        last_success, delay = time.time(), 1
+                        self._status(last_success=last_success, error=None)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        self._status(last_success=last_success, error=type(exc).__name__)
+                        print(f"OKTA_IDENTITY_SYNC retry error_class={type(exc).__name__}", flush=True)
+                        await asyncio.sleep(delay)
+                        delay = min(delay * 2, 10)
+                        continue
+                    await asyncio.sleep(self.config["poll_interval_seconds"])
 
 
 def main() -> int:

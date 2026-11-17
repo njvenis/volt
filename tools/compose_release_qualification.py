@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import pty
 import re
+import secrets
 import select
 import shutil
 import subprocess
@@ -236,14 +237,16 @@ def main() -> int:
         cookie.unlink(missing_ok=True)
         smoke = ["node",str(ROOT/"tools/g7_local_preview_smoke.mjs"),"--origin",origin,
                  "--issuer",f"http://127.0.0.1:{ports[2]}","--subject","volt-compose-demo-admin-subject",
-                 "--principal","volt-compose-demo-admin","--evidence",str(evidence)]
+                 "--principal","volt-compose-demo-admin","--evidence",str(evidence),
+                 "--username","qualification-admin","--password-file",str(qualification_password)]
         run("audited-operation", smoke, evidence)
         run("stop", [*cli,"stop",str(state)], evidence); started = False
         run("restart", [*cli,"start",str(state)], evidence); started = True
         run("restart-health", [sys.executable,"-c",f"import sys;sys.path.insert(0,{str(ROOT)!r});from deploy.compose.setup import load_instance,wait_until_ready;wait_until_ready(load_instance({str(state)!r})[1]);print('healthy')"],evidence)
         run("restart-readback", ["node",str(ROOT/"tools/g7_local_preview_smoke.mjs"),"--origin",origin,
             "--issuer",f"http://127.0.0.1:{ports[2]}","--subject","volt-compose-demo-admin-subject",
-            "--principal","volt-compose-demo-admin","--evidence",str(evidence),"--readback"], evidence)
+            "--principal","volt-compose-demo-admin","--evidence",str(evidence),"--readback",
+            "--username","qualification-admin","--password-file",str(qualification_password)], evidence)
         run("cold-stop", [*cli,"stop",str(state)], evidence); started = False
         run("backup-record", [*cli,"backup-record",str(state)], evidence)
         inventories = json.loads((state/"instance.json").read_text())["backup_inventory"]
@@ -308,7 +311,8 @@ def main() -> int:
         run("restore-health", [sys.executable,"-c",f"import sys;sys.path.insert(0,{str(ROOT)!r});from deploy.compose.setup import load_instance,wait_until_ready;wait_until_ready(load_instance({str(state)!r})[1]);print('healthy')"],evidence)
         run("restore-readback", ["node",str(ROOT/"tools/g7_local_preview_smoke.mjs"),"--origin",origin,
             "--issuer",f"http://127.0.0.1:{ports[2]}","--subject","volt-compose-demo-admin-subject",
-            "--principal","volt-compose-demo-admin","--evidence",str(evidence),"--readback"], evidence)
+            "--principal","volt-compose-demo-admin","--evidence",str(evidence),"--readback",
+            "--username","qualification-admin","--password-file",str(qualification_password)], evidence)
         # The exact-owner cleanup below performs the final stop and removes only
         # this private project, avoiding a second graceful stop before cleanup.
         execution_environment = {key: os.environ[key] for key in ("GITHUB_ACTIONS", "RUNNER_ENVIRONMENT")
@@ -329,6 +333,7 @@ def main() -> int:
         outcome = 1
     finally:
         cookie.unlink(missing_ok=True)
+        qualification_password.unlink(missing_ok=True)
         if state.exists() and setup:
             try:
                 # cleanup verifies per-resource owner labels and removes only this unique project.

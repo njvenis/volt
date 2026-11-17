@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import html
 import ipaddress
 import json
 import os
@@ -12,7 +13,7 @@ import time
 from urllib.parse import parse_qs, urlencode
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from httpx2 import AsyncClient
 from joserfc import jwt
 from joserfc.jwk import RSAKey
@@ -21,6 +22,8 @@ app = FastAPI(title="UVM labelled synthetic OIDC provider", docs_url=None, redoc
 _codes: dict[str, dict] = {}
 _failure_mode: str | None = None
 _sync_paused = os.environ.get("UVM_OIDC_FIXTURE_HOLD_SYNC") == "1"
+_login_states: dict[str, dict] = {}
+_login_attempts: dict[str, list[float]] = {}
 
 
 def _required(name: str) -> str:
@@ -45,6 +48,59 @@ def _key() -> RSAKey:
 def _config() -> tuple[str, str, str, str]:
     return (_required("UVM_OIDC_ISSUER"), _required("UVM_OIDC_CLIENT_ID"),
         _required("UVM_OIDC_CALLBACK_URL"), _required("UVM_OIDC_FIXTURE_SUBJECT"))
+
+
+def _credential() -> dict:
+    if not os.environ.get("UVM_OIDC_DEMO_CREDENTIALS_FILE"):
+        raise RuntimeError("password login is disabled for this provider")
+    try:
+        with open(_required("UVM_OIDC_DEMO_CREDENTIALS_FILE"), encoding="utf-8") as stream:
+            value = json.load(stream)
+    except (OSError, json.JSONDecodeError):
+        raise RuntimeError("demo credential file is unavailable or invalid") from None
+    if (not isinstance(value, dict) or set(value) != {"schema", "username", "salt", "password_hash"}
+            or value["schema"] != "uvm.demo-credential.v1"
+            or not isinstance(value["username"], str) or not isinstance(value["salt"], str)
+            or not isinstance(value["password_hash"], str)):
+        raise RuntimeError("demo credential file schema is invalid")
+    return value
+
+
+def _password_matches(username: str, password: str) -> bool:
+    credential = _credential()
+    encoded_password = password.encode("utf-8")
+    if len(encoded_password) > 1024:
+        return False
+    try:
+        salt = bytes.fromhex(credential["salt"])
+        expected = bytes.fromhex(credential["password_hash"])
+        actual = hashlib.scrypt(encoded_password, salt=salt, n=2**15, r=8, p=1,
+                                dklen=32, maxmem=64 * 1024 * 1024)
+    except (ValueError, TypeError):
+        return False
+    return (secrets.compare_digest(username.encode(), credential["username"].encode())
+            and secrets.compare_digest(actual, expected))
+
+
+def _limited(peer: str) -> bool:
+    now = time.monotonic()
+    attempts = [stamp for stamp in _login_attempts.get(peer, []) if now - stamp < 300]
+    _login_attempts[peer] = attempts
+    return len(attempts) >= 10
+
+
+def _failed(peer: str) -> None:
+    _login_attempts.setdefault(peer, []).append(time.monotonic())
+
+
+def _issue_code(query: dict, subject: str, *, name: str = "Local Demo Administrator",
+                email: str = "demo-admin@localhost.invalid", fault: str = "") -> RedirectResponse:
+    _issuer, client_id, callback, _default_subject = _config()
+    code = secrets.token_urlsafe(32)
+    _codes[code] = {"client_id": client_id, "callback": callback,
+        "challenge": query["code_challenge"], "nonce": query["nonce"], "subject": subject,
+        "name": name, "email": email, "fault": fault, "expires": time.time() + 120}
+    return RedirectResponse(callback + "?" + urlencode({"code": code, "state": query["state"]}), status_code=302)
 
 
 @app.get("/healthz")
@@ -90,16 +146,66 @@ def authorize(request: Request):
         return JSONResponse({"error": "invalid_request"}, status_code=400)
     if (_failure_mode or os.environ.get("UVM_G7_PROVIDER_FAILURE")) == "authorize":
         return JSONResponse({"error": "synthetic provider unavailable"}, status_code=503)
-    # fixture_subject is an explicit test input; no email or display label is
-    # used as an identity key.
-    subject = query.get("fixture_subject", default_subject)
-    code = secrets.token_urlsafe(32)
-    _codes[code] = {"client_id": client_id, "callback": callback,
-        "challenge": query["code_challenge"], "nonce": query["nonce"],
-        "subject": subject, "name": query.get("fixture_name", "Synthetic Fixture User"),
-        "email": query.get("fixture_email", "synthetic@example.invalid"),
-        "fault": query.get("fixture_fault", ""), "expires": time.time() + 120}
-    return RedirectResponse(callback + "?" + urlencode({"code": code, "state": query["state"]}), status_code=302)
+    if os.environ.get("UVM_OIDC_FIXTURE_MODE") == "1":
+        # Explicit test-only fixture mode; never enabled by the portable demo.
+        return _issue_code(dict(query), query.get("fixture_subject", default_subject),
+            name=query.get("fixture_name", "Synthetic Fixture User"),
+            email=query.get("fixture_email", "synthetic@example.invalid"),
+            fault=query.get("fixture_fault", ""))
+    if not os.environ.get("UVM_OIDC_DEMO_CREDENTIALS_FILE"):
+        return JSONResponse({"error": "login_unavailable"}, status_code=503)
+    csrf = secrets.token_urlsafe(32)
+    now = time.time()
+    for key in [key for key, item in _login_states.items() if item["expires"] <= now]:
+        _login_states.pop(key, None)
+    if len(_login_states) >= 1000:
+        return JSONResponse({"error": "login_temporarily_unavailable"}, status_code=503)
+    _login_states[csrf] = {"query": dict(query), "expires": time.time() + 300}
+    response = HTMLResponse("""<!doctype html><html><head><meta charset=utf-8><title>VOLT local demo sign in</title></head>
+<body><main><h1>Local demo sign in</h1><form method=post action=/login>
+<input type=hidden name=csrf value=""" + html.escape(csrf, quote=True) + """>
+<label>Username <input name=username autocomplete=username required></label>
+<label>Password <input name=password type=password autocomplete=current-password required></label>
+<button type=submit>Sign in</button></form></main></body></html>""")
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.set_cookie("uvm_demo_login_csrf", csrf, httponly=True, secure=False,
+        samesite="strict", path="/login", max_age=300)
+    return response
+
+
+@app.post("/login")
+async def demo_login(request: Request):
+    peer = request.client.host if request.client else "unknown"
+    try:
+        fields = parse_qs((await request.body()).decode("utf-8"), strict_parsing=True)
+    except Exception:
+        fields = {}
+    csrf = fields.get("csrf", [""])[0]
+    state = _login_states.get(csrf)
+    cookie = request.cookies.get("uvm_demo_login_csrf", "")
+    if (not csrf or not secrets.compare_digest(csrf, cookie) or not state
+            or state["expires"] <= time.time()):
+        return HTMLResponse("Sign-in failed. Check your credentials and try again.", status_code=400,
+            headers={"Cache-Control": "no-store"})
+    if _limited(peer):
+        return HTMLResponse("Sign-in failed. Check your credentials and try again.", status_code=429,
+            headers={"Cache-Control": "no-store"})
+    username = fields.get("username", [""])[0]
+    password = fields.get("password", [""])[0]
+    try:
+        valid = _password_matches(username, password)
+    except RuntimeError:
+        valid = False
+    if not valid:
+        _failed(peer)
+        return HTMLResponse("Sign-in failed. Check your credentials and try again.", status_code=401,
+            headers={"Cache-Control": "no-store"})
+    _login_attempts.pop(peer, None)
+    _login_states.pop(csrf, None)
+    response = _issue_code(state["query"], _config()[3])
+    response.delete_cookie("uvm_demo_login_csrf", path="/login", samesite="strict")
+    return response
 
 
 @app.post("/token")

@@ -44,7 +44,8 @@ class ComposeQualificationPlatformTests(unittest.TestCase):
     def test_installer_command_receives_the_admitted_platform(self):
         command = init_command(["python", "setup.py"], Path("/tmp/volt-demo"), "volt-demo",
                               [18080, 18081, 18090], "sha256:" + "a" * 64, "linux/arm64")
-        self.assertEqual(command[-2:], ["--platform", "linux/arm64"])
+        self.assertEqual(command[command.index("--platform") + 1], "linux/arm64")
+        self.assertEqual(command[command.index("--demo-admin-username") + 1], "qualification-admin")
 
     def test_installer_command_rejects_platform_outside_package_contract(self):
         with self.assertRaisesRegex(RuntimeError, "not supported"):

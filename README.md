@@ -49,7 +49,7 @@ The design treats **evidence, decisions and remediation as distinct concepts**. 
 
 ### Install the RC2 Compose release
 
-Use the [portable local Compose demo quickstart](deploy/compose/README.md#macoslinux-local-demo) for a source-free install with a named synthetic testing administrator, stop/restart, and cleanup steps. The installer pins the package's declared platform and refuses an image mismatch. The demo identity is synthetic and has no password account. The [RC2 installation guide](docs/installation.md#rc2-compose-installation) documents the previously published Linux/amd64 release and its verification flow. External Okta evaluation additionally requires a provider-specific trusted identity-sync publisher; OIDC login alone does not establish current source permissions.
+Use the [portable local Compose demo quickstart](deploy/compose/README.md#macoslinux-local-demo) for a source-free install with a named password-authenticated local testing administrator, stop/restart, and cleanup steps. The installer pins the package's declared platform and refuses an image mismatch. The demo login remains a local OIDC identity and does not create an Okta or production account. The [RC2 installation guide](docs/installation.md#rc2-compose-installation) documents the previously published Linux/amd64 release and its verification flow. External Okta authorization requires the configured Okta membership publisher and current group-to-role/source-scope mappings; OIDC login alone does not establish current source permissions.
 
 ### Historical RC1 launcher
 

@@ -56,7 +56,9 @@ def init_command(cli: list[str], state: Path, project: str, ports: list[int],
         raise RuntimeError("installer platform is not supported")
     return [*cli, "init", str(state), "--mode", "demo", "--project", project,
         "--http-port", str(ports[0]), "--recovery-port", str(ports[0] + 1),
-        "--oidc-port", str(ports[2]), "--image", image_id, "--platform", platform]
+        "--oidc-port", str(ports[2]), "--image", image_id, "--platform", platform,
+        "--bootstrap-principal", "volt-compose-demo-admin", "--demo-subject",
+        "volt-compose-demo-admin-subject", "--demo-admin-username", "qualification-admin"]
 
 
 def run(name: str, argv: list[str], evidence: Path, *, input_text: str | None = None,
@@ -79,13 +81,16 @@ def sha(path: Path) -> str:
     return h.hexdigest()
 
 
-def run_getpass(name: str, argv: list[str], evidence: Path, secret: str) -> subprocess.CompletedProcess:
-    """Feed the protected prompt through a PTY without retaining the secret."""
+def run_getpass(name: str, argv: list[str], evidence: Path,
+                secret: str | list[tuple[bytes, str]]) -> subprocess.CompletedProcess:
+    """Feed protected prompts through a PTY without retaining their values."""
+    prompts = ([(b"Authenticated uvm_session cookie value:", secret)]
+               if isinstance(secret, str) else secret)
     pid, fd = pty.fork()
     if pid == 0:
         os.execvp(argv[0], argv)
     output = bytearray()
-    sent = False
+    sent = 0
     deadline = time.monotonic() + 180
     while time.monotonic() < deadline:
         ready, _, _ = select.select([fd], [], [], 1)
@@ -101,13 +106,13 @@ def run_getpass(name: str, argv: list[str], evidence: Path, secret: str) -> subp
                 (evidence/f"{name}.stdout").write_text(text)
                 (evidence/f"{name}.stderr").write_text("")
                 (evidence/f"{name}.exit").write_text(f"{code}\n")
-                if not sent or code:
+                if sent != len(prompts) or code:
                     raise RuntimeError(f"{name} failed ({code}); see retained evidence")
                 return subprocess.CompletedProcess(argv, code, text, "")
             output.extend(chunk)
-            if not sent and b"Authenticated uvm_session cookie value:" in output:
-                os.write(fd, secret.encode() + b"\n")
-                sent = True
+            while sent < len(prompts) and prompts[sent][0] in output:
+                os.write(fd, prompts[sent][1].encode() + b"\n")
+                sent += 1
         waited, status = os.waitpid(pid, os.WNOHANG)
         if waited:
             code = os.waitstatus_to_exitcode(status)
@@ -115,7 +120,7 @@ def run_getpass(name: str, argv: list[str], evidence: Path, secret: str) -> subp
             (evidence/f"{name}.stdout").write_text(text)
             (evidence/f"{name}.stderr").write_text("")
             (evidence/f"{name}.exit").write_text(f"{code}\n")
-            if not sent or code:
+            if sent != len(prompts) or code:
                 raise RuntimeError(f"{name} failed ({code}); see retained evidence")
             return subprocess.CompletedProcess(argv, code, text, "")
     try:
@@ -169,6 +174,10 @@ def main() -> int:
     extracted = Path(tempfile.mkdtemp(prefix=f"{args.project_prefix}-bundle-", dir=bundle_tmp))
     os.chmod(extracted, 0o700)
     cookie = private / "cookie"
+    qualification_password = private / "qualification-password"
+    password_value = secrets.token_urlsafe(32) + "A7!"
+    qualification_password.write_text(password_value)
+    os.chmod(qualification_password, 0o600)
     setup = None
     cleanup_result = 0
     started = False
@@ -190,7 +199,10 @@ def main() -> int:
             "docker_config_platform": platform, "admitted_platform": platform}, sort_keys=True, indent=2) + "\n")
         ports = [int(18000 + os.getpid() % 1000), int(19000 + os.getpid() % 1000), int(20000 + os.getpid() % 1000)]
         cli = [sys.executable, str(setup)]
-        run("init", init_command(cli, state, project, ports, args.image_id, platform), evidence)
+        run_getpass("init", init_command(cli, state, project, ports, args.image_id, platform), evidence,
+            [(b"New local demo admin password", password_value),
+             (b"Confirm local demo admin password", password_value)])
+        del password_value
         info = json.loads((state / "instance.json").read_text())
         admission = info["image_admission"]
         bundle_version = (setup.parent/"VERSION").read_text().strip()
@@ -217,7 +229,8 @@ def main() -> int:
         run("private-peer-ingress-denial",[sys.executable,"-c",probe],evidence)
         run("link-admin", [*cli,"link-admin",str(state)], evidence)
         origin = f"http://127.0.0.1:{ports[0]}"
-        run("browser-login", ["node",str(ROOT/"tools/compose_release_login.mjs"),origin,str(cookie)], evidence)
+        run("browser-login", ["node",str(ROOT/"tools/compose_release_login.mjs"),origin,str(cookie),
+            "qualification-admin",str(qualification_password)], evidence)
         run_getpass("initialize-authority", [*cli,"initialize-authority",str(state)], evidence,
                     cookie.read_text())
         cookie.unlink(missing_ok=True)

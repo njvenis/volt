@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import tempfile
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
 from uvm.auth.service import load_oidc_config
 from deploy.compose.setup import (allowed_host_names, compose_environment, demo_identity,
-                                  inspect_image, validate_external)
+                                  demo_password_verifier, inspect_image, validate_external,
+                                  validate_okta_publisher)
 
 
 def config() -> dict:
@@ -37,6 +41,38 @@ class ExternalOIDCModeTests(unittest.TestCase):
             with self.subTest(principal=principal, subject=subject), self.assertRaisesRegex(
                     SystemExit, "stable .*(principal ID|provider subject)"):
                 demo_identity(principal, subject)
+
+    def test_demo_password_setup_stores_only_salted_scrypt_verifier(self):
+        password = "long-demo-admin-password"
+        value = json.loads(demo_password_verifier("local-admin", password, password))
+        self.assertEqual(value["schema"], "uvm.demo-credential.v1")
+        self.assertEqual(set(value), {"schema", "username", "salt", "password_hash"})
+        self.assertNotIn(password, json.dumps(value))
+        self.assertEqual(hashlib.scrypt(password.encode(), salt=bytes.fromhex(value["salt"]),
+            n=2**15, r=8, p=1, dklen=32, maxmem=64 * 1024 * 1024).hex(), value["password_hash"])
+
+    def test_okta_publisher_installer_binds_group_and_provider_mapping_without_credentials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            key = Path(directory) / "private.pem"
+            key.write_bytes(b"synthetic-private-key")
+            key.chmod(0o600)
+            publisher_config = {"schema_version": 1, "provider_id": "test-provider",
+                "org_url": "https://id.example.org", "api_issuer": "https://id.example.org/oauth2/v1",
+                "api_base_url": "https://id.example.org/api/v1", "client_id": "client-id",
+                "app_id": "app-id", "key_id": "kid-1", "private_key_file": str(key),
+                "oidc_config_file": "/ignored/host/path", "subject_by_user_id": {"00u1": "sub-1"},
+                "group_ids": ["00g1"], "poll_interval_seconds": 30, "heartbeat_max_age_seconds": 120}
+            path = Path(directory) / "publisher.json"
+            path.write_text(json.dumps(publisher_config))
+            oidc = {**config(), "group_mappings": {"00g1": {"role_ids": ["role-admin"],
+                "source_scopes": []}}}
+            admitted, private_key = validate_okta_publisher(path, oidc)
+            self.assertEqual(private_key, b"synthetic-private-key")
+            self.assertEqual(admitted["private_key_file"], "/run/uvm-g7-secrets/okta_service_private_key")
+            self.assertEqual(admitted["oidc_config_file"], "/etc/volt/oidc.json")
+            self.assertNotIn("password", admitted)
+            with self.assertRaisesRegex(SystemExit, "group IDs"):
+                validate_okta_publisher(path, {**oidc, "group_mappings": {}})
 
     def test_image_admission_requires_declared_platform_to_match_docker_inspect(self):
         from unittest.mock import patch

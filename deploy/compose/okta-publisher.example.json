@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "provider_id": "<same-provider-id-as-oidc-json>",
+  "org_url": "https://<your-okta-org-domain>",
+  "api_issuer": "https://<your-okta-org-domain>/oauth2/v1",
+  "api_base_url": "https://<your-okta-org-domain>/api/v1",
+  "client_id": "<okta-api-service-app-client-id>",
+  "app_id": "<okta-oidc-web-app-id>",
+  "key_id": "<registered-service-app-key-id>",
+  "private_key_file": "<absolute-path-to-local-private-key-file-mode-0600>",
+  "oidc_config_file": "/etc/volt/oidc.json",
+  "subject_by_user_id": {
+    "<okta-user-id>": "<exact-stable-sub-claim-from-login-issuer>"
+  },
+  "group_ids": [
+    "<okta-group-id-mapped-in-oidc-json>"
+  ],
+  "poll_interval_seconds": 30,
+  "heartbeat_max_age_seconds": 120
+}

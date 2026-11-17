@@ -1,6 +1,6 @@
 # VOLT Compose installation bundle
 
-This bundle installs an existing VOLT supervised image. It does not clone VOLT source, install Node.js, run npm, or build the application. Bundle version is in `VERSION`; the archive manifest covers every installation file. Runtime prerequisites are Docker Engine with Compose v2, Python 3.11+, OpenSSL, and an admitted platform image. Use the platform-specific image/archive supplied for your machine; do not rely on emulation as proof of native support.
+This bundle installs an existing VOLT supervised image. It does not clone VOLT source, install Node.js, run npm, or build the application. Bundle version is in `VERSION`; the archive manifest covers every installation file. Host prerequisites are Docker Engine with Compose v2, Python 3.11 or newer, OpenSSL CLI (used by the installer to generate local TLS keys and certificates), and an admitted platform image. Use the platform-specific image/archive supplied for your machine; do not rely on emulation as proof of native support.
 
 The default Compose profile uses external OIDC. The local synthetic demo requires the explicit `demo` overlay. Demo identity is generated and labelled as synthetic; it does not establish Okta, AWS, or production integration. For online installs, supply the digest-pinned release image reference printed in this bundle; for offline installs, use the verified local image ID described below. RC1 remains a historical launcher-only release and is rejected by this Compose bundle.
 
@@ -10,7 +10,7 @@ Verify the release/archive signature and its bundle identity using the release's
 
 ### macOS/Linux local demo
 
-The demo is intended for disposable local evaluation with synthetic identity and data. On macOS, install Docker Desktop and wait for its engine to become ready. On Linux, use Docker Engine with the Compose v2 plugin. Both platforms need Python 3.11+ and OpenSSL. Use a fresh directory under your home folder; no shell needs root privileges:
+The demo is intended for disposable local evaluation with synthetic identity and data. On macOS, install Docker Desktop and wait for its engine to become ready. On Linux, use Docker Engine with the Compose v2 plugin. On either platform, install Python 3.11 or newer and the OpenSSL command-line tools. Use a fresh directory under your home folder; no shell needs root privileges:
 
 ```sh
 mkdir -p "$HOME/volt-evaluation"
@@ -26,13 +26,13 @@ python3 setup.py start "$HOME/.local/share/volt/demo"
 python3 setup.py status "$HOME/.local/share/volt/demo"
 ```
 
-Use the platform declared by the verified package manifest and pull/load that same platform. The installer compares it with Docker's inspected image OS/architecture, records it in the instance, and pins Compose to it. For example, `docker pull --platform "$VOLT_PLATFORM" VOLT_RELEASE_IMAGE_REFERENCE`; on Apple Silicon use the native `linux/arm64` artifact. For a verified offline archive, use its local image ID plus the `platform` value from its signed manifest. The installer binds the app and demo identity provider to loopback. Open `http://127.0.0.1:8180/`, choose **Sign in**, and use the synthetic sign-in offered by the local provider. This is a named synthetic OIDC identity, not a password account, Okta login, or production identity. No password is created or stored. `--bootstrap-principal` and `--demo-subject` are stable local test IDs; omit both to use the documented defaults. The exact configured subject is linked once by the next command.
+Use the platform declared by the verified package manifest and pull/load that same platform. The installer compares it with Docker's inspected image OS/architecture, records it in the instance, and pins Compose to it. For example, `docker pull --platform "$VOLT_PLATFORM" VOLT_RELEASE_IMAGE_REFERENCE`; on Apple Silicon use the native `linux/arm64` artifact. For a verified offline archive, use its local image ID plus the `platform` value from its signed manifest. The installer binds the app and demo identity provider to loopback. `--bootstrap-principal` and `--demo-subject` are stable local test IDs; omit both to use the documented defaults. This is a named synthetic OIDC identity, not a password account, Okta login, or production identity. No password is created or stored. The browser login is available only after the exact configured subject has been linked to the bootstrap principal. Complete the steps in this order: start the instance, link the named synthetic subject, sign in in the browser, then initialise authority.
 
 ```sh
 python3 setup.py link-admin "$HOME/.local/share/volt/demo"
 ```
 
-After sign-in, copy the `uvm_session` cookie value from the browser's storage inspector. Then initialise the demo's initial policy and native authority using the hidden prompt (the value is not echoed or passed in shell arguments):
+Now open `http://127.0.0.1:8180/`, choose **Sign in**, and use the synthetic sign-in offered by the local provider. After sign-in, copy the `uvm_session` cookie value from the browser's storage inspector. Then initialise the demo's initial policy and native authority using the hidden prompt (the value is not echoed or passed in shell arguments):
 
 ```sh
 python3 setup.py initialize-authority "$HOME/.local/share/volt/demo"

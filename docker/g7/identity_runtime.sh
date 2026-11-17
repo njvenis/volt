@@ -62,3 +62,19 @@ uvm_g7_okta_publisher_healthy() {
   "$python_bin" -m uvm.auth.okta_publisher --config "$config_file" --status \
     >/dev/null 2>&1
 }
+
+uvm_g7_invalidate_publisher_readiness() {
+  local publisher_state=$1 status_file="$1/status.json"
+  [[ -e $publisher_state || -L $publisher_state ]] || return 0
+  [[ -d $publisher_state && ! -L $publisher_state ]] || {
+    echo 'G7_IDENTITY_OKTA_STATE=invalid-directory' >&2
+    return 70
+  }
+  if [[ -e $status_file || -L $status_file ]]; then
+    [[ -f $status_file && ! -L $status_file ]] || {
+      echo 'G7_IDENTITY_OKTA_STATUS=invalid-file' >&2
+      return 70
+    }
+    rm -- "$status_file"
+  fi
+}

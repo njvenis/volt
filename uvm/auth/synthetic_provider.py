@@ -289,6 +289,7 @@ async def fixture_failure(request: Request):
             {"mode", "identities"}, {"mode", "revision", "identities"})
             or body["mode"] not in {None, "discovery", "jwks", "authorize", "token", "sync", "readiness"}):
         raise HTTPException(422, "fixture control request is invalid")
+    identities_override = None
     if "identities" in body:
         identities = body["identities"]
         if (body["mode"] not in (None, "sync") or not isinstance(identities, list)
@@ -299,15 +300,26 @@ async def fixture_failure(request: Request):
                     for item in identities)
                 or len({item["subject"] for item in identities}) != len(identities)):
             raise HTTPException(422, "fixture control request is invalid")
-        _fixture_identities_override = identities
+        identities_override = identities
+    revision_path = None
     if "revision" in body:
         if body["mode"] != "sync" or type(body["revision"]) is not int or body["revision"] < 1:
             raise HTTPException(422, "fixture control request is invalid")
         revision_path = _required("UVM_OIDC_PROVIDER_REVISION_FILE")
-        temporary_path = revision_path + ".tmp"
-        with open(temporary_path, "w", encoding="ascii") as stream:
-            stream.write(str(body["revision"]))
-        os.replace(temporary_path, revision_path)
+    if revision_path is not None:
+        temporary_path = revision_path + f".{os.getpid()}.{secrets.token_hex(8)}.tmp"
+        try:
+            with open(temporary_path, "x", encoding="ascii") as stream:
+                stream.write(str(body["revision"]))
+            os.replace(temporary_path, revision_path)
+        except OSError:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+            raise
+    if "identities" in body:
+        _fixture_identities_override = identities_override
     _failure_mode = body["mode"]
     _sync_paused = body["mode"] == "sync"
     print(f"G7_OIDC_FIXTURE_CONTROL mode={body['mode'] or 'none'} sync_paused={_sync_paused}"

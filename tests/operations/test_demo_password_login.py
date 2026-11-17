@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import tempfile
@@ -32,6 +33,8 @@ class DemoPasswordLoginTests(unittest.TestCase):
         provider._login_states.clear()
         provider._login_attempts.clear()
         provider._fixture_identities_override = None
+        provider._failure_mode = None
+        provider._sync_paused = False
         self.env = patch.dict("os.environ", {
             "UVM_OIDC_ISSUER": "http://127.0.0.1:8190",
             "UVM_OIDC_CLIENT_ID": "volt-compose-demo",
@@ -48,6 +51,8 @@ class DemoPasswordLoginTests(unittest.TestCase):
         provider._login_states.clear()
         provider._login_attempts.clear()
         provider._fixture_identities_override = None
+        provider._failure_mode = None
+        provider._sync_paused = False
         self.temp.cleanup()
 
     def authorize(self):
@@ -133,6 +138,7 @@ class DemoPasswordLoginTests(unittest.TestCase):
             self.assertFalse(provider._sync_paused)
             self.assertEqual(provider._fixture_identities_override,
                 [{"subject": "local-testing-admin-subject", "groups": []}])
+            self.assertIsNone(provider._failure_mode)
             invalid = client.post("/__fixture/failure", headers={
                 "Authorization": "Bearer fixture-control-secret"}, json={
                     "mode": None, "identities": [{"subject": "subject", "groups": ["group"], "email": "ignored"}]})
@@ -140,6 +146,40 @@ class DemoPasswordLoginTests(unittest.TestCase):
             denied = client.post("/__fixture/failure", headers={"Authorization": "Bearer wrong"}, json={
                 "mode": None, "identities": []})
             self.assertEqual(denied.status_code, 401)
+
+    def test_rejected_fixture_control_is_observationally_unchanged(self):
+        operator_secret = Path(self.temp.name) / "operator-secret"
+        operator_secret.write_text("fixture-control-secret")
+        revision_file = Path(self.temp.name) / "provider-revision"
+        revision_file.write_text("41")
+        identity_state = [{"subject": "existing-subject", "groups": ["existing-group"]}]
+        provider._fixture_identities_override = identity_state
+        provider._failure_mode = "jwks"
+        provider._sync_paused = True
+        before = (copy.deepcopy(provider._fixture_identities_override), provider._failure_mode,
+            provider._sync_paused, revision_file.read_text())
+        with patch.dict("os.environ", {"UVM_OIDC_OPERATOR_SECRET_FILE": str(operator_secret),
+                                        "UVM_OIDC_PROVIDER_REVISION_FILE": str(revision_file)}):
+            client = TestClient(provider.app, client=("127.0.0.1", 8765))
+            cases = (
+                {"mode": None, "revision": 42, "identities": [
+                    {"subject": "replacement-subject", "groups": ["replacement-group"]}]},
+                {"mode": "not-allowed", "revision": 42, "identities": [
+                    {"subject": "replacement-subject", "groups": ["replacement-group"]}]},
+                {"mode": "discovery", "revision": 42, "identities": [
+                    {"subject": "replacement-subject", "groups": ["replacement-group"]}]},
+                {"mode": "sync", "revision": 0, "identities": [
+                    {"subject": "replacement-subject", "groups": ["replacement-group"]}]},
+            )
+            for body in cases:
+                with self.subTest(body=body):
+                    rejected = client.post("/__fixture/failure", headers={
+                        "Authorization": "Bearer fixture-control-secret"}, json=body)
+                    self.assertEqual(rejected.status_code, 422)
+                    after = (copy.deepcopy(provider._fixture_identities_override), provider._failure_mode,
+                        provider._sync_paused, revision_file.read_text())
+                    self.assertEqual(after, before)
+            self.assertEqual(list(Path(self.temp.name).glob("provider-revision.*.tmp")), [])
 
     def test_verifier_requires_confirmation_and_minimum_length(self):
         for password, confirm in (("short", "short"), ("long-password-value", "other-password-value"),

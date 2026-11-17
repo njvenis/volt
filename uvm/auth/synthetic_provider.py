@@ -35,14 +35,16 @@ def _required(name: str) -> str:
 
 def _file_secret(name: str) -> str:
     path = _required(name)
-    value = open(path, encoding="utf-8").read().strip()
+    with open(path, encoding="utf-8") as stream:
+        value = stream.read().strip()
     if not value:
         raise RuntimeError("synthetic provider secret file is empty")
     return value
 
 
 def _key() -> RSAKey:
-    return RSAKey.import_key(open(_required("UVM_OIDC_PROVIDER_KEY_FILE"), "rb").read())
+    with open(_required("UVM_OIDC_PROVIDER_KEY_FILE"), "rb") as stream:
+        return RSAKey.import_key(stream.read())
 
 
 def _config() -> tuple[str, str, str, str]:

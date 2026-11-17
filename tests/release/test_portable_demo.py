@@ -115,7 +115,8 @@ class PortableDemoArchiveTest(unittest.TestCase):
 
     def test_valkey_runtime_loader_is_target_neutral_and_both_commands_are_executed(self) -> None:
         dockerfile = (ROOT / "Dockerfile.g7").read_text()
-        self.assertIn('case "$TARGETARCH" in amd64) musl_arch=x86_64;; arm64) musl_arch=aarch64;;', dockerfile)
+        valkey_stage = dockerfile.split("FROM ${VALKEY_IMAGE} AS valkey-bin", 1)[1].split("FROM ${CE_IMAGE} AS runtime", 1)[0]
+        self.assertIn('case "$TARGETARCH" in amd64) musl_arch=x86_64;; arm64) musl_arch=aarch64;;', valkey_stage)
         self.assertIn("/tmp/volt-valkey-ld-musl.so.1", dockerfile)
         self.assertIn("/opt/valkey/lib/ld-musl.so.1", dockerfile)
         self.assertNotIn("/opt/valkey/lib/ld-musl-x86_64.so.1", dockerfile)
@@ -124,6 +125,41 @@ class PortableDemoArchiveTest(unittest.TestCase):
             contents = (ROOT / "docker/g7" / wrapper).read_text()
             self.assertIn("/opt/valkey/lib/ld-musl.so.1", contents)
             self.assertNotIn("x86_64", contents)
+
+    def test_portable_instructions_requirements_and_lifecycle_order(self) -> None:
+        instructions = portable_demo._install_instructions()
+        self.assertIn("Python 3.11+", instructions)
+        self.assertIn("OpenSSL", instructions)
+        start = instructions.index("python3 setup.py start")
+        link = instructions.index("python3 setup.py link-admin")
+        browser = instructions.index("sign in with the synthetic local OIDC principal")
+        authority = instructions.index("python3 setup.py initialize-authority")
+        self.assertLess(start, link)
+        self.assertLess(link, browser)
+        self.assertLess(browser, authority)
+
+    def test_verify_does_not_execute_modified_candidate_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            package = self.package(root)
+            unpacked = root / "unpacked"
+            unpacked.mkdir()
+            import archive
+            archive.safe_extract(package, unpacked)
+            package_dir = unpacked / f"volt-portable-demo-{portable_demo.VERSION}"
+            marker = root / "candidate-helper-ran"
+            malicious = package_dir / "offline-tools/build_compose_bundle.py"
+            malicious.write_text(f"from pathlib import Path\nPath({str(marker)!r}).write_text('executed')\n")
+            manifest_path = package_dir / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["files"]["offline-tools/build_compose_bundle.py"] = portable_demo.sha(malicious)
+            manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
+            portable_demo._write_sums(package_dir)
+            changed = root / "malicious-candidate.tar.gz"
+            portable_demo._pack_directory(package_dir, changed)
+            result = portable_demo.verify(changed)
+            self.assertEqual(result["integrity"], "checksum-only-local-demo")
+            self.assertFalse(marker.exists())
 
     def test_source_free_artifact_verifies_outside_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

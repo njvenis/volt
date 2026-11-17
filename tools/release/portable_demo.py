@@ -27,6 +27,10 @@ PLATFORM_CE_KEY = {
 }
 INTEGRITY = "checksum-only-local-demo"
 PACKAGE_SCHEMA = "volt-portable-demo/v1"
+COMPOSE_BUNDLE_FILES = {
+    "VERSION", "README.md", "backup-restore.md", "compose.yaml", "demo.yaml",
+    "compose.env.example", "oidc.example.json", "setup.py", "manifest.json",
+}
 
 
 def sha(path: Path) -> str:
@@ -50,7 +54,8 @@ def _install_instructions() -> str:
 This artifact is checksum-only local demo material, not a signed release. It supports a
 synthetic local OIDC principal; it does not provide password login or verified Okta integration.
 
-Requirements on the destination: Python 3, Docker Engine/Desktop with Compose v2, and tar.
+Requirements on the destination: Python 3.11+, Docker Engine/Desktop with Compose v2,
+OpenSSL, and tar.
 No VOLT checkout, Git, Node.js, npm, uv, source build, or network access is needed after transfer.
 
 1. Extract the downloaded artifact, then verify its package:
@@ -74,10 +79,56 @@ No VOLT checkout, Git, Node.js, npm, uv, source build, or network access is need
    python3 setup.py start "$HOME/.local/share/volt/demo"
    python3 setup.py status "$HOME/.local/share/volt/demo"
 
-Open http://127.0.0.1:8180 and use the synthetic local sign-in. Follow the bundled README for
-linking the admin and initializing authority. Keep demo data disposable and follow bundled
-backup/restore and cleanup instructions for the named instance.
+5. Link the configured synthetic subject to the local testing administrator:
+
+   python3 setup.py link-admin "$HOME/.local/share/volt/demo"
+
+6. In a browser, open http://127.0.0.1:8180, sign in with the synthetic local OIDC principal,
+and complete an administrative action. This is synthetic OIDC; no local password is created.
+
+7. Copy the uvm_session cookie from the browser storage inspector. Then initialise authority;
+the command prompts for the cookie without echoing it:
+
+   python3 setup.py initialize-authority "$HOME/.local/share/volt/demo"
+
+Keep demo data disposable. Follow the bundled backup/restore and cleanup instructions for this
+named instance.
 """
+
+
+def _verify_compose_bundle(path: Path) -> None:
+    """Validate the generated source-free installer without executing its contents."""
+    expected_payload = COMPOSE_BUNDLE_FILES - {"manifest.json"}
+    with tarfile.open(path, "r:gz") as tf:
+        members = tf.getmembers()
+        names = [member.name for member in members]
+        if len(names) != len(set(names)) or any(not member.isfile() for member in members):
+            raise ValueError("Compose installer contains duplicate or non-file entries")
+        roots = set()
+        payload: dict[str, bytes] = {}
+        version = None
+        for member in members:
+            parts = PurePosixPath(member.name).parts
+            if len(parts) != 2 or any(part in {"", ".", ".."} for part in parts):
+                raise ValueError("Compose installer contains an unsafe member path")
+            roots.add(parts[0])
+            payload[parts[1]] = tf.extractfile(member).read()
+        if len(roots) != 1 or set(payload) != COMPOSE_BUNDLE_FILES:
+            raise ValueError("Compose installer file inventory is invalid")
+        version = payload["VERSION"].decode().strip()
+        if next(iter(roots)) != f"volt-compose-{version}":
+            raise ValueError("Compose installer root and version disagree")
+        metadata = json.loads(payload["manifest.json"])
+        if metadata.get("format_version") != 1 or metadata.get("bundle_version") != version or metadata.get("release_image") is not None:
+            raise ValueError("Compose installer manifest metadata is invalid")
+        wanted = {name: hashlib.sha256(payload[name]).hexdigest() for name in expected_payload}
+        if metadata.get("files") != wanted:
+            raise ValueError("Compose installer manifest file digests disagree")
+        if b"git clone" in payload["README.md"] or b"npm " in payload["README.md"]:
+            raise ValueError("Compose installer instructions require source or npm")
+    sidecar = path.with_suffix(path.suffix + ".sha256")
+    if sidecar.read_text() != f"{sha(path)}  {path.name}\n":
+        raise ValueError("Compose installer checksum sidecar is invalid")
 
 
 def pins() -> dict[str, str]:
@@ -266,8 +317,7 @@ def verify(path: Path) -> dict:
         identity = _image_admission(package / "image.tar", manifest)
         if identity.get("image_id") != manifest.get("image_id"):
             raise ValueError("saved image identity differs from package manifest")
-        command([sys.executable, str(package / "offline-tools/build_compose_bundle.py"),
-                 "verify", "--archive", str(package / "installer.tar.gz")])
+        _verify_compose_bundle(package / "installer.tar.gz")
         return manifest
 
 

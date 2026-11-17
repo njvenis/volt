@@ -20,6 +20,55 @@ const browser=await chromium.launch(launchOptions);
 const context=await browser.newContext({ignoreHTTPSErrors:true});
 const page=await context.newPage();
 const zero='00000000-0000-4000-8000-000000000000';
+// Temporary, opt-in diagnosis. Never retain cookies, CSRF tokens or credential headers.
+const diagnostic=verifyProviderRevocation;
+let phase='initial', requestSequence=0;
+const trace=[], pendingCaptures=new Set(), requestIds=new WeakMap();
+const digest=value=>crypto.createHash('sha256').update(value).digest('hex');
+const safeUrl=value=>{try{const u=new URL(value);return u.origin+u.pathname+(u.hash||'');}catch{return '[non-url]';}};
+const safeSession=body=>({schema_version:body?.schema_version,authenticated:body?.authenticated,
+  credential_mode:body?.credential_mode,principal_id:body?.principal_id,authority:body?.authority,
+  code:body?.detail?.code??body?.error?.code??body?.code??null});
+function track(work){pendingCaptures.add(work);work.catch(error=>trace.push({kind:'capture-error',name:error.name})).finally(()=>pendingCaptures.delete(work));}
+async function snapshot(label){
+ if(!diagnostic)return;
+ const cookies=(await context.cookies()).map(({value,...metadata})=>({...metadata,value_sha256:digest(value)}));
+ const dom=await page.evaluate(()=>({url:location.origin+location.pathname+location.hash,title:document.title,readyState:document.readyState,
+   timeOrigin:performance.timeOrigin,navigation:performance.getEntriesByType('navigation').map(n=>({type:n.type,startTime:n.startTime,domContentLoadedEventEnd:n.domContentLoadedEventEnd,transferSize:n.transferSize})),
+   root:!!document.querySelector('#root'),sessionPanel:document.querySelector('.session-panel')?.textContent??null,
+   visibleText:document.body.innerText,scripts:[...document.scripts].map(s=>s.src?new URL(s.src).pathname:'inline')}));
+ trace.push({kind:'snapshot',label,phase,at:Date.now(),cookies,dom});
+ await writeFile(evidence+'/session-trace.json',JSON.stringify(trace,null,2)+'
+',{mode:0o600});
+}
+if(diagnostic){
+ page.on('request',request=>{
+  const id=++requestSequence;requestIds.set(request,id);const at=Date.now(),requestPhase=phase;
+  track((async()=>{
+   const headers=await request.allHeaders();const cookieFingerprints=(headers.cookie??'').split(';').filter(Boolean).map(pair=>{const i=pair.indexOf('=');return {name:pair.slice(0,i).trim(),value_sha256:digest(pair.slice(i+1))};});
+   trace.push({kind:'request',id,at,phase:requestPhase,url:safeUrl(request.url()),resource:request.resourceType(),method:request.method(),cookieFingerprints,
+    accept:headers.accept,cacheControl:headers['cache-control']});
+  })());
+ });
+ page.on('response',response=>{
+  const request=response.request(),id=requestIds.get(request),at=Date.now(),responsePhase=phase;
+  track((async()=>{
+   const url=new URL(response.url()),headers=await response.allHeaders();
+   const row={kind:'response',id,at,phase:responsePhase,url:safeUrl(response.url()),status:response.status(),
+    contentType:headers['content-type'],cacheControl:headers['cache-control'],age:headers.age,etag:headers.etag,fromServiceWorker:response.fromServiceWorker()};
+   if(url.pathname==='/api/v1/auth/session'){try{row.session=safeSession(await response.json());}catch{row.sessionParseFailed=true;}}
+   if(request.resourceType()==='script'||request.resourceType()==='stylesheet'||request.resourceType()==='document'&&url.origin===origin&&url.pathname==='/'){
+    const body=await response.body();row.body_sha256=digest(body);row.bytes=body.length;
+    if(request.resourceType()==='document')row.body=body.toString().replace(/value="[^"]*"/g,'value="[redacted]"');
+   }
+   trace.push(row);
+  })());
+ });
+ page.on('requestfailed',request=>trace.push({kind:'requestfailed',id:requestIds.get(request),at:Date.now(),phase,url:safeUrl(request.url()),failure:request.failure()?.errorText}));
+ page.on('pageerror',error=>trace.push({kind:'pageerror',at:Date.now(),phase,name:error.name,message:error.message.replace(/https?:\/\/[^\s]+/g,'[url]')}));
+ page.on('console',message=>trace.push({kind:'console',at:Date.now(),phase,type:message.type(),text_sha256:digest(message.text()),location:{...message.location(),url:safeUrl(message.location().url)}}));
+}
+
 function ensure(ok,label){if(!ok)throw new Error(label);}
 async function api(path,{method='GET',body,write=false}={}){
   return page.evaluate(async({path,method,body,write})=>{
@@ -140,19 +189,26 @@ try{
   }
   if(verifyProviderRevocation){
     ensure(readbackOnly,'provider revocation proof must follow the persisted readback phase');
+    phase='before-removal';await snapshot('before-provider-removal');
     const before=(await api('/api/v1/auth/session')).body;
     ensure(before.authority?.role_ids?.includes('00000000-0000-4000-8000-000000000002'),'native_role_not_present_before_provider_removal');
     ensure(before.authority?.source_scopes?.some(s=>s[0]==='local'&&s[1]==='volt-local-preview'&&s[2]==='all'),'native_scope_not_present_before_provider_removal');
     const composeDirectory=arg('--compose-directory'), envFile=arg('--env-file'), project=arg('--project');
     const controlScript="import json,pathlib,sys,urllib.request; token=pathlib.Path('/run/uvm-g7-secrets/oidc_operator_secret').read_text().strip(); body=json.loads(sys.argv[1]); req=urllib.request.Request('http://127.0.0.1:9000/__fixture/failure',data=json.dumps(body).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'}); response=urllib.request.urlopen(req,timeout=10); print(response.status)";
+    phase='provider-removal';
     const control=execFileSync('docker',['compose','-f',path.join(composeDirectory,'compose.yaml'),'-f',path.join(composeDirectory,'demo.yaml'),'--env-file',envFile,'-p',project,'exec','-T','volt','/opt/uvm/venv/bin/python','-c',controlScript,JSON.stringify({mode:null,identities:[{subject,groups:[]}]})],{encoding:'utf8',stdio:['ignore','pipe','pipe']});
     ensure(control.trim().split(/\r?\n/).at(-1)==='200','synthetic_provider_fixture_update_failed');
+    phase='old-session-probe';
     await page.waitForFunction(async()=>{const r=await fetch('/api/v1/auth/session',{cache:'no-store'});return r.status===401;},null,{timeout:30000});
     // The current URL may only differ by hash from '/', so goto('/') can be
     // same-document navigation and preserve the revoked in-memory session.
-    await page.reload({waitUntil:'domcontentloaded'});
+    await snapshot('old-session-401');phase='reload';
+    const reloadResponse=await page.reload({waitUntil:'domcontentloaded'});
+    trace.push({kind:'reload-result',at:Date.now(),status:reloadResponse?.status(),url:reloadResponse?safeUrl(reloadResponse.url()):null});
+    await snapshot('after-reload');
     try{await page.getByRole('link',{name:/sign in/i}).click({timeout:30000});}
     catch(error){
+      await snapshot('sign-in-link-missing');
       const observed=await page.evaluate(async()=>{
         const response=await fetch('/api/v1/auth/session',{credentials:'same-origin',cache:'no-store'});
         let session=null;try{session=await response.json();}catch{}
@@ -178,4 +234,4 @@ try{
     await writeFile(`${evidence}/provider-group-removal.json`,JSON.stringify({environment:'local synthetic OIDC Compose process',old_cookie_revoked:true,fresh_code_flow_authenticated:true,retained_native_access_group:true,effective_role_ids:after.authority.role_ids,effective_source_scopes:after.authority.source_scopes},null,2)+'\n',{mode:0o600});
   }
   console.log(JSON.stringify({browser_login:'passed',issuer,subject,principal_id:principal,admin_view:'loaded',admin_control:'enabled',...(readbackOnly?{restart_readback:readback.status}:{public_admin_readback:readback.status}),audited:true,create_audit_event_id:createReceipt.audit_event_id,membership_audit_event_id:membershipReceipt.audit_event_id,object_revision:item.revision,group_id:item.access_group_id,create_command_id:createReceipt.command_id,membership_command_id:membershipReceipt.command_id}));
-}finally{await context.close();await browser.close();}
+}finally{if(diagnostic){await Promise.allSettled([...pendingCaptures]);await snapshot('final');}await context.close();await browser.close();}

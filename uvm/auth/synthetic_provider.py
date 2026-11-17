@@ -22,6 +22,7 @@ app = FastAPI(title="UVM labelled synthetic OIDC provider", docs_url=None, redoc
 _codes: dict[str, dict] = {}
 _failure_mode: str | None = None
 _sync_paused = os.environ.get("UVM_OIDC_FIXTURE_HOLD_SYNC") == "1"
+_fixture_identities_override: list[dict] | None = None
 _login_states: dict[str, dict] = {}
 _login_attempts: dict[str, list[float]] = {}
 
@@ -268,7 +269,7 @@ async def token(request: Request):
 
 @app.post("/__fixture/failure")
 async def fixture_failure(request: Request):
-    global _failure_mode, _sync_paused
+    global _failure_mode, _sync_paused, _fixture_identities_override
     from fastapi import HTTPException
     try:
         peer = ipaddress.ip_address((request.client.host if request.client else "").split("%", 1)[0])
@@ -284,9 +285,21 @@ async def fixture_failure(request: Request):
         body = await request.json()
     except Exception:
         raise HTTPException(422, "fixture control request is invalid") from None
-    if (not isinstance(body, dict) or set(body) not in ({"mode"}, {"mode", "revision"})
+    if (not isinstance(body, dict) or set(body) not in ({"mode"}, {"mode", "revision"},
+            {"mode", "identities"}, {"mode", "revision", "identities"})
             or body["mode"] not in {None, "discovery", "jwks", "authorize", "token", "sync", "readiness"}):
         raise HTTPException(422, "fixture control request is invalid")
+    if "identities" in body:
+        identities = body["identities"]
+        if (body["mode"] not in (None, "sync") or not isinstance(identities, list)
+                or any(not isinstance(item, dict) or set(item) != {"subject", "groups"}
+                    or not isinstance(item["subject"], str) or not item["subject"]
+                    or not isinstance(item["groups"], list)
+                    or any(not isinstance(group, str) or not group for group in item["groups"])
+                    for item in identities)
+                or len({item["subject"] for item in identities}) != len(identities)):
+            raise HTTPException(422, "fixture control request is invalid")
+        _fixture_identities_override = identities
     if "revision" in body:
         if body["mode"] != "sync" or type(body["revision"]) is not int or body["revision"] < 1:
             raise HTTPException(422, "fixture control request is invalid")
@@ -300,7 +313,9 @@ async def fixture_failure(request: Request):
     print(f"G7_OIDC_FIXTURE_CONTROL mode={body['mode'] or 'none'} sync_paused={_sync_paused}"
         + (f" revision={body['revision']}" if "revision" in body else ""), flush=True)
     return {"provider": "labelled-synthetic-local", "failure_mode": _failure_mode,
-        **({"revision": body["revision"]} if "revision" in body else {})}
+        **({"revision": body["revision"]} if "revision" in body else {}),
+        **({"identity_count": len(_fixture_identities_override)}
+            if "identities" in body else {})}
 
 
 @app.on_event("startup")
@@ -313,7 +328,7 @@ async def _sync_loop():
     provider_id = _required("UVM_OIDC_PROVIDER_ID")
     secret = _file_secret("UVM_OIDC_SYNC_SECRET_FILE")
     try:
-        identities = json.loads(_required("UVM_OIDC_FIXTURE_IDENTITIES"))
+        configured_identities = json.loads(_required("UVM_OIDC_FIXTURE_IDENTITIES"))
     except json.JSONDecodeError as exc:
         raise RuntimeError("synthetic identity fixture is invalid") from exc
     revision_path = _required("UVM_OIDC_PROVIDER_REVISION_FILE")
@@ -332,7 +347,9 @@ async def _sync_loop():
             os.replace(tmp, revision_path)
             payload = {"schema_version": 1, "provider_id": provider_id,
                 "revision": revision, "heartbeat_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "kind": "full_snapshot", "identities": identities}
+                "kind": "full_snapshot",
+                "identities": (_fixture_identities_override
+                    if _fixture_identities_override is not None else configured_identities)}
             async with AsyncClient(timeout=3) as client:
                 response = await client.post("http://127.0.0.1:8001/api/v1/auth/provider/sync",
                     json=payload, headers={"Authorization": "Bearer " + secret})

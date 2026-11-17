@@ -313,6 +313,13 @@ def main() -> int:
             "--issuer",f"http://127.0.0.1:{ports[2]}","--subject","volt-compose-demo-admin-subject",
             "--principal","volt-compose-demo-admin","--evidence",str(evidence),"--readback",
             "--username","qualification-admin","--password-file",str(qualification_password)], evidence)
+        run("provider-group-removal-fresh-login", ["node",str(ROOT/"tools/g7_local_preview_smoke.mjs"),
+            "--origin",origin,"--issuer",f"http://127.0.0.1:{ports[2]}",
+            "--subject","volt-compose-demo-admin-subject","--principal","volt-compose-demo-admin",
+            "--evidence",str(evidence),"--readback","--verify-provider-revocation",
+            "--username","qualification-admin","--password-file",str(qualification_password),
+            "--compose-directory",str(info["compose_directory"]),"--env-file",str(state/".env"),
+            "--project",project], evidence)
         # The exact-owner cleanup below performs the final stop and removes only
         # this private project, avoiding a second graceful stop before cleanup.
         execution_environment = {key: os.environ[key] for key in ("GITHUB_ACTIONS", "RUNNER_ENVIRONMENT")
@@ -327,7 +334,9 @@ def main() -> int:
             "project":project,"synthetic_demo":True,"health":"passed","audited_operation":"passed",
             "demo_mode":"passed","loopback_binding":"passed","private_peer_ingress_denial":"passed",
             "restart_readback":"passed","cold_backup_inventories":3,"image_binding_rejection":"passed",
-            "corrupt_inventory_rejection":"passed","restore_readback":"passed"},indent=2)+"\n")
+            "corrupt_inventory_rejection":"passed","restore_readback":"passed",
+            "provider_group_removal_old_cookie_revocation":"passed",
+            "provider_group_removal_fresh_login_no_role_or_scope_recovery":"passed"},indent=2)+"\n")
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         outcome = 1

@@ -2,12 +2,15 @@ import {chromium} from '../ui/node_modules/playwright/index.mjs';
 import {mkdir,readFile,writeFile} from 'node:fs/promises';
 import process from 'node:process';
 import crypto from 'node:crypto';
+import {execFileSync} from 'node:child_process';
+import path from 'node:path';
 import {requireAdminRendered,requireAudit,requirePersistedState,requireReceipt,requireSession} from './g7_local_preview_smoke_checks.mjs';
 
 function arg(name){const i=process.argv.indexOf(name);if(i<0||!process.argv[i+1])throw new Error(`missing ${name}`);return process.argv[i+1];}
 const origin=arg('--origin'), issuer=arg('--issuer'), subject=arg('--subject'), principal=arg('--principal'), evidence=arg('--evidence');
 const deploymentLabel=process.argv.includes('--deployment-label')?arg('--deployment-label'):'Synthetic local demo';
 const readbackOnly=process.argv.includes('--readback');
+const verifyProviderRevocation=process.argv.includes('--verify-provider-revocation');
 const username=arg('--username'), password=await readFile(arg('--password-file'),'utf8');
 await mkdir(evidence,{recursive:true,mode:0o700});
 const launchOptions={headless:true};
@@ -69,11 +72,16 @@ try{
     const envelope=latestCatalogue.caller?.grantable;
     ensure(latestCatalogue.authority_mode==='uvm_native_v1'&&latestCatalogue.caller?.principal_id===principal,'native_admin_catalogue_identity_or_mode_mismatch');
     ensure(envelope?.actions?.includes('access_group.read'),'local_bootstrap_action_envelope_missing');
-    const groupId=crypto.randomUUID(), commandId=crypto.randomUUID(), permissionId=crypto.randomUUID(), roleId=crypto.randomUUID();
+    const groupId=crypto.randomUUID(), commandId=crypto.randomUUID(), permissionId=crypto.randomUUID();
+    const roleId='00000000-0000-4000-8000-000000000002';
     const created=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:{command_id:commandId,target_id:zero,membership_ids:[],action:'access_group.create',expected_revisions:{target:latestCatalogue.policy_revision,policy:latestCatalogue.policy_revision,authority:latestCatalogue.authority_revision,ownership:latestCatalogue.ownership_revision,identity_membership:0,owners:0},payload:{access_group_id:groupId,display_name:'Local preview audit smoke',description:'Synthetic local administrator smoke operation',enabled:true,source_scopes:[{source_family:'local',source_account_id:'volt-local-preview',scope_key:'all'}],permissions:[{permission_id:permissionId,role_id:roleId,action:'access_group.read',target_scope:{group_ids:[groupId],source_families:['local'],environments:[],service_ids:[],membership_mode:'explicit'},limits:envelope.limits,separation_of_duties:envelope.separation_of_duties??{approval_requires_distinct_actor:true,prohibit_requester_approval:true,required_approver_count:1,prohibited_action_pairs:[]}}],rationale:'Verify a public audited administrator operation in the synthetic local preview',evidence_ref:'local-preview-smoke'}}});
     ensure(created.status===200,`public_admin_create_failed_${created.status}_${JSON.stringify(created.body)}`);
     receipt=created.body;
     requireReceipt(receipt,{commandId,targetId:zero,groupId});
+    const membershipCatalogue=(await api('/api/v1/assessment/administration/catalogue')).body;
+    const membershipCommandId=crypto.randomUUID();
+    const membership=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:{command_id:membershipCommandId,target_id:zero,membership_ids:[],action:'access_group.membership.set',expected_revisions:{target:membershipCatalogue.policy_revision,policy:membershipCatalogue.policy_revision,authority:membershipCatalogue.authority_revision,access_group:receipt.result.object_revision,identity_membership:0},payload:{access_group_id:groupId,principal_id:principal,effective_from:new Date(Date.now()+1000).toISOString(),effective_until:null,enabled:true,rationale:'Bind the local administrator to the native group for provider-cap qualification',evidence_ref:'local-preview-provider-cap'}}});
+    ensure(membership.status===200,`native_membership_create_failed_${membership.status}_${JSON.stringify(membership.body)}`);
     const refresh=page.getByRole('button',{name:'Refresh administration',exact:true});
     await refresh.click();
     await cardFor(groupId);
@@ -109,6 +117,28 @@ try{
   }else{
     requireAudit(item,auditEvent,{groupId:saved.object.access_group_id,displayName:saved.object.display_name,objectRevision:receipt.result.object_revision,auditEventId:receipt.audit_event_id,actorId:principal});
     await writeFile(`${evidence}/public-admin-smoke.json`,JSON.stringify({environment:'local synthetic OIDC container',principal_id:principal,issuer,subject,credential_mode:'oidc_session',group_id:item.access_group_id,command_id:receipt.command_id,receipt_audit_event_id:receipt.audit_event_id,public_readback_status:readback.status,object_revision:item.revision,audit_event_id:auditEvent.event_id,audit_event:{event_id:auditEvent.event_id,action:auditEvent.action,actor_id:auditEvent.actor_id,after_value:auditEvent.after_value},restart_readback:false},null,2)+'\n',{mode:0o600});
+  }
+  if(verifyProviderRevocation){
+    ensure(readbackOnly,'provider revocation proof must follow the persisted readback phase');
+    const before=(await api('/api/v1/auth/session')).body;
+    ensure(before.authority?.role_ids?.includes('00000000-0000-4000-8000-000000000002'),'native_role_not_present_before_provider_removal');
+    ensure(before.authority?.source_scopes?.some(s=>s[0]==='local'&&s[1]==='volt-local-preview'&&s[2]==='all'),'native_scope_not_present_before_provider_removal');
+    const composeDirectory=arg('--compose-directory'), envFile=arg('--env-file'), project=arg('--project');
+    const controlScript="import json,pathlib,sys,urllib.request; token=pathlib.Path('/run/uvm-g7-secrets/oidc_operator_secret').read_text().strip(); body=json.loads(sys.argv[1]); req=urllib.request.Request('http://127.0.0.1:9000/__fixture/failure',data=json.dumps(body).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'}); response=urllib.request.urlopen(req,timeout=10); print(response.status)";
+    const control=execFileSync('docker',['compose','-f',path.join(composeDirectory,'compose.yaml'),'-f',path.join(composeDirectory,'demo.yaml'),'--env-file',envFile,'-p',project,'exec','-T','volt','/opt/uvm/venv/bin/python','-c',controlScript,JSON.stringify({mode:null,identities:[{subject,groups:[]}]})],{encoding:'utf8',stdio:['ignore','pipe','pipe']});
+    ensure(control.trim().split(/\r?\n/).at(-1)==='200','synthetic_provider_fixture_update_failed');
+    await page.waitForFunction(async()=>{const r=await fetch('/api/v1/auth/session',{cache:'no-store'});return r.status===401;},null,{timeout:30000});
+    await page.goto(origin+'/',{waitUntil:'domcontentloaded'});
+    await page.getByRole('link',{name:/sign in/i}).click();
+    await page.getByLabel('Username').fill(username);
+    await page.getByLabel('Password').fill(password);
+    await page.getByRole('button',{name:'Sign in'}).click();
+    await page.waitForFunction(async()=>{const r=await fetch('/api/v1/auth/session',{cache:'no-store'});return r.ok&&(await r.json()).authenticated===true;},null,{timeout:30000});
+    const after=(await api('/api/v1/auth/session')).body;
+    ensure(after.authority?.role_ids?.length===0,'fresh_signin_recovered_native_role_after_provider_group_removal');
+    ensure(after.authority?.source_scopes?.length===0,'fresh_signin_recovered_native_scope_after_provider_group_removal');
+    ensure(after.authority?.access_groups?.includes(saved.object.access_group_id),'provider_removal_erased_native_membership_history');
+    await writeFile(`${evidence}/provider-group-removal.json`,JSON.stringify({environment:'local synthetic OIDC Compose process',old_cookie_revoked:true,fresh_code_flow_authenticated:true,retained_native_access_group:true,effective_role_ids:after.authority.role_ids,effective_source_scopes:after.authority.source_scopes},null,2)+'\n',{mode:0o600});
   }
   console.log(JSON.stringify({browser_login:'passed',issuer,subject,principal_id:principal,admin_view:'loaded',admin_control:'enabled',...(readbackOnly?{restart_readback:readback.status}:{public_admin_readback:readback.status}),audited:true,audit_event_id:auditEvent.event_id,object_revision:item.revision,group_id:item.access_group_id,command_id:receipt.command_id}));
 }finally{await context.close();await browser.close();}

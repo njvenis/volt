@@ -31,6 +31,7 @@ class DemoPasswordLoginTests(unittest.TestCase):
         self.client = TestClient(provider.app)
         provider._login_states.clear()
         provider._login_attempts.clear()
+        provider._fixture_identities_override = None
         self.env = patch.dict("os.environ", {
             "UVM_OIDC_ISSUER": "http://127.0.0.1:8190",
             "UVM_OIDC_CLIENT_ID": "volt-compose-demo",
@@ -46,6 +47,7 @@ class DemoPasswordLoginTests(unittest.TestCase):
         self.env.stop()
         provider._login_states.clear()
         provider._login_attempts.clear()
+        provider._fixture_identities_override = None
         self.temp.cleanup()
 
     def authorize(self):
@@ -118,6 +120,26 @@ class DemoPasswordLoginTests(unittest.TestCase):
             response = self.authorize()
         self.assertEqual(response.status_code, 302)
         self.assertEqual(next(iter(provider._codes.values()))["subject"], "local-testing-admin-subject")
+
+    def test_identity_snapshot_override_requires_loopback_operator_control_and_exact_schema(self):
+        operator_secret = Path(self.temp.name) / "operator-secret"
+        operator_secret.write_text("fixture-control-secret")
+        with patch.dict("os.environ", {"UVM_OIDC_OPERATOR_SECRET_FILE": str(operator_secret)}):
+            client = TestClient(provider.app, client=("127.0.0.1", 8765))
+            accepted = client.post("/__fixture/failure", headers={
+                "Authorization": "Bearer fixture-control-secret"}, json={
+                    "mode": None, "identities": [{"subject": "local-testing-admin-subject", "groups": []}]})
+            self.assertEqual(accepted.status_code, 200, accepted.text)
+            self.assertFalse(provider._sync_paused)
+            self.assertEqual(provider._fixture_identities_override,
+                [{"subject": "local-testing-admin-subject", "groups": []}])
+            invalid = client.post("/__fixture/failure", headers={
+                "Authorization": "Bearer fixture-control-secret"}, json={
+                    "mode": None, "identities": [{"subject": "subject", "groups": ["group"], "email": "ignored"}]})
+            self.assertEqual(invalid.status_code, 422)
+            denied = client.post("/__fixture/failure", headers={"Authorization": "Bearer wrong"}, json={
+                "mode": None, "identities": []})
+            self.assertEqual(denied.status_code, 401)
 
     def test_verifier_requires_confirmation_and_minimum_length(self):
         for password, confirm in (("short", "short"), ("long-password-value", "other-password-value"),

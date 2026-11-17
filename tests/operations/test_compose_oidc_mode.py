@@ -182,6 +182,15 @@ class ExternalOIDCModeTests(unittest.TestCase):
     def test_external_https_origins_are_admitted(self):
         self.assertEqual(self.load(config())["issuer"], "https://id.example.org/")
 
+    def test_provider_role_mappings_reject_wildcards_and_empty_role_ids(self):
+        for role_ids in (["*"], [""]):
+            with self.subTest(role_ids=role_ids):
+                value = config()
+                value["group_mappings"] = {"00g-admin": {"role_ids": role_ids,
+                    "source_scopes": []}}
+                with self.assertRaisesRegex(RuntimeError, "mapping schema is invalid"):
+                    self.load(value)
+
     def test_external_mode_rejects_http_provider_and_callback_origins(self):
         for field in ("issuer", "discovery_url", "callback_url"):
             with self.subTest(field=field):

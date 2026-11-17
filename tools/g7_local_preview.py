@@ -107,8 +107,14 @@ def oidc_configuration(api_origin: str, oidc_origin: str) -> dict:
         "sync_secret_file": "/run/uvm-g7-secrets/oidc_sync_secret",
         "operator_secret_file": "/run/uvm-g7-secrets/oidc_operator_secret",
         "operator_actor_id": "volt-local-preview-operator", "allowed_algorithms": ["RS256"],
-        "allowed_endpoint_origins": [api_origin, oidc_origin, internal_origin], "source_scope_ceilings": [],
-        "group_mappings": {}, "mapping_revision": 1,
+        "allowed_endpoint_origins": [api_origin, oidc_origin, internal_origin],
+        "source_scope_ceilings": [{"source_family": "local",
+            "source_account_id": "volt-local-preview", "scope_key": "all"}],
+        "group_mappings": {"volt-local-preview-admin-group": {
+            "role_ids": ["00000000-0000-4000-8000-000000000002"],
+            "source_scopes": [{"source_family": "local",
+                "source_account_id": "volt-local-preview", "scope_key": "all"}]}},
+        "mapping_revision": 1,
         "session_ttl_seconds": 3600, "heartbeat_max_age_seconds": 120,
     }
 
@@ -477,7 +483,7 @@ def start(args) -> None:
         "DD_ALLOWED_HOSTS": "localhost,127.0.0.1", "DD_INITIALIZE": "true",
         "UVM_AUTH_MODE": "oidc", "UVM_OIDC_CONFIG": (root / "oidc.json").read_text().strip(),
         "UVM_OIDC_FIXTURE_SUBJECT": "volt-local-preview-admin-subject",
-        "UVM_OIDC_FIXTURE_IDENTITIES": '[{"subject":"volt-local-preview-admin-subject","groups":[]}]',
+        "UVM_OIDC_FIXTURE_IDENTITIES": '[{"subject":"volt-local-preview-admin-subject","groups":["volt-local-preview-admin-group"]}]',
         "UVM_OIDC_PROVIDER_PORT": "9000", "UVM_OIDC_BROWSER_AUTHORIZATION_ORIGIN": f"http://127.0.0.1:{info['oidc_port']}",
         "UVM_OIDC_INTERNAL_ENDPOINT_ORIGIN": "http://127.0.0.1:9000",
         "UVM_G3_BOOTSTRAP_PRINCIPAL": "volt-local-preview-admin",

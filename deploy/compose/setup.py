@@ -317,7 +317,13 @@ def init(args) -> None:
             "operator_secret_file": "/run/uvm-g7-secrets/oidc_operator_secret",
             "operator_actor_id": "volt-compose-demo-operator", "allowed_algorithms": ["RS256"],
             "allowed_endpoint_origins": [api_origin, oidc_origin, "http://127.0.0.1:9000"],
-            "source_scope_ceilings": [], "group_mappings": {}, "mapping_revision": 1,
+            "source_scope_ceilings": [{"source_family": "local",
+                "source_account_id": "volt-local-preview", "scope_key": "all"}],
+            "group_mappings": {"volt-compose-demo-admin-group": {
+                "role_ids": ["00000000-0000-4000-8000-000000000002"],
+                "source_scopes": [{"source_family": "local",
+                    "source_account_id": "volt-local-preview", "scope_key": "all"}]}},
+            "mapping_revision": 1,
             "session_ttl_seconds": 3600, "heartbeat_max_age_seconds": 120}
     if args.mode == "external":
         if not args.bootstrap_principal or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", args.bootstrap_principal):

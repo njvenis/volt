@@ -58,7 +58,9 @@ jobs:
           (cd ui && npx playwright install --with-deps chromium)
 
       - name: Check target Dockerfile
-        run: docker buildx build --check --platform "${{ matrix.platform }}" -f Dockerfile.g7 .
+        run: |
+          CE_IMAGE="$(python3 tools/release/portable_demo.py ce-image --platform "${{ matrix.platform }}")"
+          docker buildx build --check --platform "${{ matrix.platform }}" --build-arg "CE_IMAGE=$CE_IMAGE" -f Dockerfile.g7 .
 
       - name: Build and package native local demo
         run: |
@@ -74,7 +76,7 @@ jobs:
           python3 tools/release/portable_demo.py load \
             --archive "$RUNNER_TEMP/portable-demo/volt-portable-demo-${{ matrix.arch }}.tar.gz"
 
-      - name: Prepare local Compose installer and browser qualification
+      - name: Capture portable package metadata and Compose installer
         run: |
           python3 tools/build_compose_bundle.py build \
             --output "$RUNNER_TEMP/portable-demo/compose-bundle.tar.gz"
@@ -88,6 +90,8 @@ jobs:
               env.write(f"PORTABLE_SOURCE_SNAPSHOT={manifest['source_snapshot']}\n")
               env.write(f"PORTABLE_PLATFORM={manifest['platform']}\n")
           PY
+      - name: Run local Compose and browser qualification
+        run: |
           python3 tools/compose_release_qualification.py \
             --image-id "$PORTABLE_IMAGE_ID" \
             --source-snapshot "$PORTABLE_SOURCE_SNAPSHOT" \

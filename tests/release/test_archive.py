@@ -263,7 +263,7 @@ class OfflineArchiveTests(unittest.TestCase):
         self.assertIn('["registry_digest"]', verify)
         self.assertIn('["image_id"]', verify)
         self.assertIn('--image "$image_id"', verify)
-        self.assertIn("docker pull VOLT_RELEASE_IMAGE_REFERENCE", readme)
+        self.assertIn('docker pull --platform "$VOLT_PLATFORM" VOLT_RELEASE_IMAGE_REFERENCE', readme)
         self.assertIn("signed `manifest.json` `image_id` field", readme)
         with tempfile.TemporaryDirectory() as temp:
             package, _ = self.build_rc2_signed(Path(temp))

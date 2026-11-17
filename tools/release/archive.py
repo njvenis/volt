@@ -313,7 +313,7 @@ def _validate_oci(tf: tarfile.TarFile, members: dict, manifest: dict) -> dict:
         used.add(layer_path)
         if not isinstance(diff_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", diff_id) or _uncompressed_layer_digest(compressed, media) != diff_id:
             raise ValueError("OCI uncompressed layer diff ID disagrees with config")
-        if manifest.get("version") == EXPECTED_VERSION:
+        if manifest.get("version") in {EXPECTED_VERSION, "0.1.0-demo"}:
             _reject_rc2_snakeoil_key(compressed, media)
     compat_rows = json.loads(_member_bytes(tf, members, "manifest.json"))
     if not isinstance(compat_rows, list) or len(compat_rows) != 1 or not isinstance(compat_rows[0], dict):
@@ -359,7 +359,7 @@ def _check_image_labels(config: dict, manifest: dict) -> None:
     labels = config.get("config", {}).get("Labels") or {}
     if labels.get("org.opencontainers.image.revision") != manifest.get("source_commit") or labels.get("org.opencontainers.image.version") != manifest.get("version"):
         raise ValueError("image labels disagree with signed source/version")
-    if manifest.get("version") == EXPECTED_VERSION and (labels.get("org.volt.oidc-deployment-modes") != "demo,external"
+    if manifest.get("version") in {EXPECTED_VERSION, "0.1.0-demo"} and (labels.get("org.volt.oidc-deployment-modes") != "demo,external"
             or labels.get("org.volt.compose-install.contract") != "1"
             or labels.get("org.volt.compose.source-snapshot") != manifest.get("source_snapshot")):
         raise ValueError("image lacks the required Compose capability or source snapshot binding")
@@ -569,7 +569,7 @@ def validate_docker_archive(image_tar: Path, manifest: dict) -> dict:
                 digest = _uncompressed_layer_digest(compressed, None)
                 if digest != diff_id:
                     raise ValueError("Docker archive layer digest differs from config diff ID")
-                if manifest.get("version") == EXPECTED_VERSION:
+                if manifest.get("version") in {EXPECTED_VERSION, "0.1.0-demo"}:
                     _reject_rc2_snakeoil_key(compressed)
             allowed = {"manifest.json", config_name, *layer_names}
             if "repositories" in members:

@@ -31,6 +31,7 @@ COPY ui ./
 RUN npm run build
 
 FROM ${VALKEY_IMAGE} AS valkey-bin
+ARG TARGETARCH
 
 FROM ${CE_IMAGE} AS runtime
 ARG TARGETARCH
@@ -135,10 +136,13 @@ RUN set -eu; \
     python3 -c 'import importlib.metadata as m, oauthlib, requests_oauthlib; assert m.version("oauthlib") == oauthlib.__version__ == "4.0.1"; print("CE-global oauthlib", oauthlib.__version__, "requests-oauthlib", m.version("requests-oauthlib"))'; \
     python3 -m pip check; \
     rm -f /tmp/ce-global-python-requirements.txt /tmp/ce-global-oauthlib-license.txt
+RUN set -eu; case "$TARGETARCH" in amd64) musl_arch=x86_64;; arm64) musl_arch=aarch64;; *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1;; esac; \
+    cp "/lib/ld-musl-${musl_arch}.so.1" /tmp/volt-valkey-ld-musl.so.1; \
+    cp "/lib/libc.musl-${musl_arch}.so.1" /tmp/volt-valkey-libc.musl.so.1
 COPY --from=valkey-bin /usr/local/bin/valkey-server /opt/valkey/bin/valkey-server
 COPY --from=valkey-bin /usr/local/bin/valkey-cli /opt/valkey/bin/valkey-cli
-COPY --from=valkey-bin /lib/ld-musl-x86_64.so.1 /opt/valkey/lib/ld-musl-x86_64.so.1
-COPY --from=valkey-bin /lib/libc.musl-x86_64.so.1 /opt/valkey/lib/libc.musl-x86_64.so.1
+COPY --from=valkey-bin /tmp/volt-valkey-ld-musl.so.1 /opt/valkey/lib/ld-musl.so.1
+COPY --from=valkey-bin /tmp/volt-valkey-libc.musl.so.1 /opt/valkey/lib/libc.musl.so.1
 COPY --from=valkey-bin /usr/lib/libssl.so.3 /opt/valkey/lib/libssl.so.3
 COPY --from=valkey-bin /usr/lib/libcrypto.so.3 /opt/valkey/lib/libcrypto.so.3
 WORKDIR /opt/uvm/app
@@ -168,6 +172,7 @@ COPY docker/g7/healthcheck.sh /usr/local/bin/uvm-g7-healthcheck
 COPY docker/g7/valkey-server /usr/local/bin/valkey-server
 COPY docker/g7/valkey-cli /usr/local/bin/valkey-cli
 RUN chmod 0755 /usr/local/bin/uvm-g7-entrypoint /usr/local/bin/uvm-g7-healthcheck /usr/local/bin/valkey-server /usr/local/bin/valkey-cli
+RUN valkey-server --version && valkey-cli --version
 # pip is retained in the build stage for uv installation only. The final CE
 # runtime installs no packages dynamically; remove its installer and vendored
 # wheels so they do not ship as an unused, independently vulnerable toolchain.

@@ -101,6 +101,25 @@ def debian_source_groups(packages: list[dict], image_files: list[dict], out: Pat
     return sorted(groups.values(), key=lambda x: (x["source_package"], x["source_version"]))
 
 
+def index_dispositions(rows: list[dict], groups: list[dict]) -> dict[tuple[str, str], dict]:
+    """Reject stale inputs and report exact observed versions; never filter them."""
+    dispositions = {}
+    for row in rows:
+        key = (row.get("source_package"), row.get("source_version"))
+        if not all(key) or key in dispositions:
+            raise ValueError("Debian source disposition has missing or duplicate package/version identity")
+        dispositions[key] = row
+    known = {(row["source_package"], row["source_version"]) for row in groups}
+    stale = sorted(set(dispositions) - known)
+    if stale:
+        identities = ", ".join(f"{name}@{version}" for name, version in stale)
+        observed = ", ".join(f"{name}@{version}" for name, version in sorted(known)
+                             if name in {item[0] for item in stale}) or "<absent>"
+        raise ValueError(f"Debian source disposition contains stale package/version identities: {identities}; "
+                         f"observed source identities for those packages: {observed}")
+    return dispositions
+
+
 def copyright_stanzas(path: Path) -> list[dict]:
     """Return exact DEP-5 Files stanzas as hash-bound paragraphs."""
     rows = []
@@ -837,15 +856,7 @@ def main() -> int:
     disposition_rows = json.loads(args.debian_dispositions.read_text()) if args.debian_dispositions else []
     if not isinstance(disposition_rows, list):
         raise ValueError("--debian-dispositions must contain a JSON array")
-    dispositions = {}
-    for row in disposition_rows:
-        key = (row.get("source_package"), row.get("source_version"))
-        if not all(key) or key in dispositions:
-            raise ValueError("Debian source disposition has missing or duplicate package/version identity")
-        dispositions[key] = row
-    known = {(x["source_package"], x["source_version"]) for x in source_groups}
-    if set(dispositions) - known:
-        raise ValueError("Debian source disposition contains stale package/version identities")
+    dispositions = index_dispositions(disposition_rows, source_groups)
     copy_disposition_evidence(dispositions, out, args.debian_dispositions.resolve().parent if args.debian_dispositions else None)
     for disposition in dispositions.values():
         if disposition.get("decision") != "source-bundle":

@@ -213,6 +213,55 @@ class OfflineArchiveTests(unittest.TestCase):
             self.assertEqual(archive.main(), 0)
         return package, result
 
+    def test_signed_archive_round_trip_dereferences_shared_package_trust_files(self):
+        from tests.release.hardlink_fixture import retained_trust_material
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            package, _ = self.build_rc2_signed(root, version=archive.RC3_VERSION)
+            retained = retained_trust_material(root / "shared-trust", package)
+            manifest = archive.build_manifest(package, archive.RC3_VERSION, self.source_sha, self.image_id,
+                "linux/amd64", archive.identity_for_version(archive.RC3_VERSION), archive.EXPECTED_ISSUER,
+                (package / "registry-digest.txt").read_text().strip())
+            (package / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
+            with patch.object(sys, "argv", ["archive.py", "sign", "--directory", str(package), "--key", str(self.key)]):
+                self.assertEqual(archive.main(), 0)
+            packed = root / "signed-hardlinked-trust.tar"
+            with patch.object(sys, "argv", ["archive.py", "pack", "--directory", str(package),
+                "--archive", str(packed), "--test-public-key", str(self.public)]):
+                self.assertEqual(archive.main(), 0)
+            with tarfile.open(packed) as stream:
+                for name, data in retained.items():
+                    member = stream.getmember(name)
+                    self.assertTrue(member.isfile(), name)
+                    self.assertEqual(stream.extractfile(member).read(), data)
+            extracted = root / "extracted-final"
+            extracted.mkdir()
+            archive.safe_extract(packed, extracted)
+            admitted = archive.verify_directory(extracted, "unused", public_key=self.public,
+                expected_source=self.source_sha, expected_image=self.image_id)
+            self.assertEqual(admitted["files"], manifest["files"])
+            for name, data in retained.items():
+                self.assertEqual((extracted / name).read_bytes(), data)
+                self.assertEqual((extracted / name).stat().st_nlink, 1)
+
+    def test_safe_extractor_still_rejects_hardlinks_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            for kind in (tarfile.LNKTYPE, tarfile.SYMTYPE):
+                with self.subTest(kind=kind):
+                    packed = root / "unsafe.tar"
+                    with tarfile.open(packed, "w") as stream:
+                        member = tarfile.TarInfo("trust/original")
+                        member.size = 4
+                        stream.addfile(member, io.BytesIO(b"data"))
+                        link = tarfile.TarInfo("trust/package-specific-keyring.gpg")
+                        link.type = kind
+                        link.linkname = "trust/original"
+                        stream.addfile(link)
+                    with self.assertRaisesRegex(ValueError, "links and special files are prohibited"):
+                        archive.safe_extract(packed, root / "rejected")
+                    self.assertFalse((root / "rejected").exists())
+
     def test_standalone_bundle_requires_actual_signed_embedded_bytes_before_execution(self):
         with tempfile.TemporaryDirectory() as work:
             root = Path(work)

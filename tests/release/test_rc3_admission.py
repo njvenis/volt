@@ -118,6 +118,37 @@ class RC3AdmissionTests(unittest.TestCase):
         self.assertEqual(self.verify()["image_config_id"],self.image)
         self.assertEqual(self.verify()["source_snapshot"],self.snapshot)
 
+    def test_workflow_candidate_round_trip_dereferences_shared_package_trust_files(self):
+        import textwrap
+        from tests.release.hardlink_fixture import retained_trust_material
+        retained = retained_trust_material(self.root / "shared-trust", self.package / "notices")
+        candidate.seal(self.package)
+        expected_inventory = candidate.inventory(self.package)
+        workflow = (ROOT / ".github/workflows/release-rc3.yml").read_text()
+        body = workflow.split("          tar --", 1)[1].split("      - name: Upload verified", 1)[0]
+        command = "tar --" + textwrap.dedent(body).lstrip()
+        command = command.replace("${{ matrix.arch }}", "amd64")
+        result = subprocess.run(["bash", "-euo", "pipefail", "-c", command],
+            env={**os.environ, "stage": str(self.package), "RUNNER_TEMP": str(self.root)},
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        packed = self.root / "volt-rc3-candidate-amd64.tar.gz"
+        with tarfile.open(packed, "r:gz") as stream:
+            for name, data in retained.items():
+                member = stream.getmember("notices/" + name)
+                self.assertTrue(member.isfile(), member.name)
+                self.assertEqual(stream.extractfile(member).read(), data)
+        extracted = self.root / "extracted-candidate"
+        extracted.mkdir()
+        archive.safe_extract(packed, extracted)
+        self.assertEqual(candidate.inventory(extracted), expected_inventory)
+        self.package = extracted
+        self.assertEqual(self.verify()["image_config_id"], self.image)
+        for name, data in retained.items():
+            path = extracted / "notices" / name
+            self.assertEqual(path.read_bytes(), data)
+            self.assertEqual(path.stat().st_nlink, 1)
+
     def test_missing_extra_and_corrupt_inventory_fail_before_registry(self):
         original=(self.package/"source.bundle").read_bytes()
         (self.package/"source.bundle").unlink()

@@ -799,7 +799,7 @@ def create_archive(directory: Path, archive_path: Path) -> None:
     source_bytes = sum(p.stat().st_size for p in directory.rglob("*") if p.is_file())
     if free < source_bytes + max(512 * 1024**2, source_bytes // 20):
         raise ValueError("insufficient free space to create a duplicate offline archive")
-    with tarfile.open(archive_path, "w") as tf:
+    with tarfile.open(archive_path, "w", dereference=True) as tf:
         for path in sorted(directory.rglob("*")):
             tf.add(path, arcname=path.relative_to(directory).as_posix(), recursive=False)
 

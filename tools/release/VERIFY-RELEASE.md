@@ -4,7 +4,7 @@ This file is a separate GitHub Release asset. Obtain it from the VOLT release pa
 
 ## Prerequisites
 
-- Python 3.11 or later, Git, OpenSSL, gpgv, Docker Engine or Docker Desktop, and Docker Compose v2.
+- Python 3.11 or later, Git, OpenSSL, Docker Engine or Docker Desktop, and Docker Compose v2.
 - Network access to the public VOLT GitHub repository and the official Cosign release asset pinned in the fixed RC3 source.
 - The matching architecture archive: `amd64` for x86-64 or `arm64` for Apple Silicon/ARM64.
 
@@ -76,4 +76,4 @@ Then enter the extracted `volt-compose-0.1.0-rc.3` directory and follow its READ
 
 The signature authenticates the RC3 release workflow's manifest and payload inventory. It is not a third-party security certification or a claim that your local Okta tenant was tested.
 
-Verification/bootstrap requires Git and network access for the independently trusted release tag, pinned Cosign and Sigstore trust material. Archive verification also uses local Git and gpgv for bundled source and Debian signatures. Runtime installation needs no source build, Node.js or npm. Loading the authenticated image avoids transferring image layers again; Docker/Compose may still contact GHCR for the pinned reference, and external OIDC requires its issuer network. This guide does not establish fully offline verification or an offline external-identity runtime. The OCI index carries its own signature and provenance binding both child digests; each child carries its architecture-specific SPDX SBOM and source provenance.
+Verification/bootstrap requires Git and network access for the independently trusted release tag, pinned Cosign and Sigstore trust material. Destination archive verification uses local Git for bundled source and pinned Cosign for signatures. Candidate admission separately verifies Debian source signatures with gpgv and re-applies the retained scan policy; the destination verifier authenticates the signed evidence bytes and their image bindings without running a new vulnerability scan. Runtime installation needs no source build, Node.js or npm. Loading the authenticated image avoids transferring image layers again; Docker/Compose may still contact GHCR for the pinned reference, and external OIDC requires its issuer network. This guide does not establish fully offline verification or an offline external-identity runtime. The OCI index carries its own signature and provenance binding both child digests; each child carries its architecture-specific SPDX SBOM and source provenance.

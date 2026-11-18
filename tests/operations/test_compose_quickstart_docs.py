@@ -11,7 +11,8 @@ class ComposeQuickstartDocumentationTests(unittest.TestCase):
     def test_rc3_is_primary_arch_specific_evaluation_with_permanent_release_links(self):
         readme = (ROOT / "README.md").read_text()
         install = (ROOT / "docs/installation.md").read_text()
-        self.assertIn("Primary installation: VOLT 0.1.0-rc.3 Compose evaluation release", readme)
+        self.assertIn("Planned primary installation: VOLT 0.1.0-rc.3 Compose evaluation prerelease", readme)
+        self.assertIn("only after those assets are present and authenticated", readme)
         self.assertIn("linux/arm64", readme)
         self.assertIn("linux/amd64", readme)
         self.assertIn("optional Okta evaluation setup", readme)
@@ -25,16 +26,17 @@ class ComposeQuickstartDocumentationTests(unittest.TestCase):
             self.assertIn(asset, install)
         rc3 = install.split("## RC3 Compose installation", 1)[1].split(
             "## RC2 Compose installation", 1)[0]
-        self.assertLess(rc3.index("Authenticate `VERIFY-RELEASE.md`"),
+        self.assertLess(rc3.index("never execute verifier installation code selected by an archive field such as `source_commit`"),
             rc3.index("tar -xOf \"$VOLT_ARCHIVE\" volt-compose.tar.gz"))
         self.assertIn("Do not trust a verifier, checksum, signature key or Sigstore root solely because it was included", rc3)
         self.assertIn("does not require a VOLT checkout, Git, Node.js, npm", rc3)
+        self.assertIn("An offline image import assumes those verifier and trust materials are already provisioned", rc3)
         self.assertIn("Group removal revokes existing sessions", rc3)
 
-    def test_documentation_index_marks_rc3_current_and_rc2_historical(self):
+    def test_documentation_index_marks_rc3_planned_and_rc2_historical(self):
         index = (ROOT / "docs/README.md").read_text()
-        self.assertIn("RC3 is the current Compose evaluation prerelease", index)
-        self.assertIn("[RC3 Compose evaluation installation]", index)
+        self.assertIn("RC3 is the planned Compose evaluation prerelease", index)
+        self.assertIn("[Planned RC3 Compose evaluation installation]", index)
         self.assertIn("Historical RC2 Compose installation", index)
         self.assertNotIn("RC2 is the current Compose-compatible evaluation release", index)
 

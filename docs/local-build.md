@@ -1,6 +1,6 @@
 # Build and transfer a local VOLT demo
 
-This developer path builds one native Docker image for the machine that will run the demo. For the current signed RC3 evaluation release, use the [release installation guide](installation.md#rc3-compose-installation) instead. Use a clean, committed checkout for local builds. The package contains the exact source archive and image, records the selected platform and image ID, and validates the saved image before Docker imports it.
+This developer path builds one native Docker image for the machine that will run the demo. After signed RC3 assets are published, use the [release installation guide](installation.md#rc3-compose-installation) instead. Use a clean, committed checkout for local builds. The package contains the exact source archive and image, records the selected platform and image ID, and validates the saved image before Docker imports it.
 
 The portable demo package is **checksum-only local demo material**. Its checksums detect accidental corruption and its image admission binds the image to the captured source revision and platform. It is not signed and does not provide publisher authenticity. For signed release material, use the separate release archive verification instructions.
 

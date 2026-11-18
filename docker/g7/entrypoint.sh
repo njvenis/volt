@@ -4,6 +4,8 @@ umask 077
 source /usr/local/bin/uvm-g7-identity-runtime
 
 STATE=/run/uvm-g7
+# CE uses its pinned vendor interpreter/dependencies; UVM has a separate venv.
+CE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CHILD_PIDS=()
 CHILD_NAMES=()
 SERVICE_PIDS=()
@@ -313,6 +315,25 @@ UVM_PASSWORD_URL=$(printf %s "$UVM_PASSWORD" | urlpart)
 CE_PASSWORD_URL=$(printf %s "$CE_PASSWORD" | urlpart)
 export UVM_DB_URL="postgresql+psycopg://uvm_app:${UVM_PASSWORD_URL}@127.0.0.1:5432/uvm"
 export DD_DATABASE_URL="postgresql://ce_app:${CE_PASSWORD_URL}@127.0.0.1:5432/defectdojo"
+UVM_LOCAL_START_INITIAL=0
+if [[ ${UVM_AUTH_MODE:-} == local && ${UVM_G7_VERIFICATION_ONLY:-0} != 1 ]]; then
+  install -d -o root -g root -m 0700 /run/uvm-maintenance
+  python - <<'ENVIRONMENT'
+import json, os
+from pathlib import Path
+keys = ('UVM_DB_URL', 'UVM_AUTH_MODE', 'UVM_LOCAL_AUTH_CONFIG_FILE',
+        'UVM_LOCAL_RECOVERY_CONFIG_FILE', 'UVM_CONNECTOR_LOCAL_KEY_FILE',
+        'UVM_CONNECTOR_LOCAL_KEY_ID', 'UVM_SCANNER_EVIDENCE_DIR')
+path = Path('/run/uvm-maintenance/environment.json')
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+with os.fdopen(fd, 'w') as stream:
+    json.dump({key: os.environ[key] for key in keys}, stream)
+ENVIRONMENT
+  recovery_maintenance() {
+    /usr/local/bin/uvm-local-maintenance "$1" --config /etc/volt/local-auth.json
+  }
+  UVM_LOCAL_START_INITIAL=$(/opt/uvm/venv/bin/python -m uvm.installer.start_admission check)
+fi
 install -d -o root -g uvm -m 0750 /run/uvm-g7-secrets
 install -o root -g uvm -m 0640 /run/secrets/uvm_db_password /run/uvm-g7-secrets/uvm_db_password
 for recovery_material in recovery-server.crt recovery-server.key recovery-ca.crt; do
@@ -337,6 +358,9 @@ if [[ ${UVM_G7_VERIFICATION_ONLY:-0} == 1 && ! -s "$PGDATA/PG_VERSION" ]]; then
   exit 70
 fi
 if [[ ! -s "$PGDATA/PG_VERSION" ]]; then
+  if [[ ${UVM_AUTH_MODE:-} == local && $UVM_LOCAL_START_INITIAL != 1 ]]; then
+    echo 'G7_LOCAL_START=configured-instance-missing-postgresql' >&2; exit 70
+  fi
   install -d -o postgres -g postgres "$PGDATA"
   setpriv --reuid=postgres --regid=postgres --init-groups \
     /usr/lib/postgresql/18/bin/initdb -D "$PGDATA" --encoding=UTF8 --no-locale \
@@ -403,13 +427,32 @@ if [[ $G7_SCHEMA_MODE == upgrade-verification ]]; then
   PYTHONPATH=/opt/uvm/app /opt/uvm/venv/bin/python -m uvm.operations.startup_fence --check-schema-admission
   G7_SCHEMA_COMPAT_ADMITTED=1
 fi
+G7_SCHEMA_EMPTY_LOCAL_INSTALLATION=0
 if (( PG_CLUSTER_INITIALIZED )); then
   G7_SCHEMA_HEADS='[]'
 else
   if [[ $(psql_local -d postgres -Atc "SELECT 1 FROM pg_database WHERE datname='uvm'") == 1 ]]; then
-    G7_SCHEMA_QUERY=$(psql_local -d uvm -Atc "SELECT CASE WHEN to_regclass('public.alembic_version') IS NULL THEN '__MISSING__' ELSE COALESCE((SELECT json_agg(version_num ORDER BY version_num)::text FROM alembic_version), '[]') END")
-    [[ $G7_SCHEMA_QUERY != __MISSING__ ]] || { echo 'G7_SCHEMA_COMPATIBILITY_REJECTED reason=missing-version-table' >&2; exit 70; }
-    G7_SCHEMA_HEADS=$G7_SCHEMA_QUERY
+    if [[ $(psql_local -d uvm -Atc "SELECT to_regclass('public.alembic_version') IS NOT NULL") == t ]]; then
+      G7_SCHEMA_HEADS=$(psql_local -d uvm -Atc "SELECT COALESCE(json_agg(version_num ORDER BY version_num)::text, '[]') FROM alembic_version")
+    elif [[ ${UVM_AUTH_MODE:-} == local && $UVM_LOCAL_START_INITIAL == 1 && $G7_SCHEMA_MODE == normal \
+        && ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_G7_RECOVERY_STAGE:-} != released \
+        && $(psql_local -d uvm -Atc "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f','S')") == 0 ]]; then
+      # Interrupted first boot before migrations is distinct from an unsupported
+      # existing schema. Only a validated generation0 local fence and an empty
+      # application database admit this bounded resume path.
+      setpriv --reuid=uvm --regid=uvm --init-groups \
+        /opt/uvm/venv/bin/python -c 'from uvm.connectors.local_recovery import load_authority; a=load_authority(); assert a.fence["restore_generation"] == 0 and a.fence["recovery_epoch_id"] is None'
+      G7_SCHEMA_HEADS='[]'
+      G7_SCHEMA_EMPTY_LOCAL_INSTALLATION=1
+    else
+      echo 'G7_SCHEMA_COMPATIBILITY_REJECTED reason=missing-version-table' >&2; exit 70
+    fi
+  elif [[ ${UVM_AUTH_MODE:-} == local && $UVM_LOCAL_START_INITIAL == 1 && $G7_SCHEMA_MODE == normal \
+      && ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_G7_RECOVERY_STAGE:-} != released ]]; then
+    # A protected, unacknowledged first preparation may have stopped after
+    # initdb but before creating the application database.
+    G7_SCHEMA_HEADS='[]'
+    G7_SCHEMA_EMPTY_LOCAL_INSTALLATION=1
   else
     echo 'G7_SCHEMA_COMPATIBILITY_REJECTED reason=existing-cluster-missing-uvm-database' >&2; exit 70
   fi
@@ -418,7 +461,14 @@ fi
   --declared-head "$G7_SCHEMA_DECLARED_HEAD" --mode "$G7_SCHEMA_MODE" \
   --heads-json "$G7_SCHEMA_HEADS" \
   $([[ ${PG_CLUSTER_INITIALIZED:-0} == 1 ]] && printf '%s' --empty-cluster) \
+  $([[ $G7_SCHEMA_EMPTY_LOCAL_INSTALLATION == 1 ]] && printf '%s' --empty-local-installation) \
   $([[ $G7_SCHEMA_COMPAT_ADMITTED == 1 ]] && printf '%s' --compatibility-admitted)
+if [[ ${UVM_AUTH_MODE:-} == local && ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && $UVM_LOCAL_START_INITIAL == 0 ]]; then
+  # Existing-only validation precedes migrations and every local constructor.
+  # This fixed backend operation cannot initialize a missing profile binding.
+  recovery_maintenance apply-local-restore-fence > /run/uvm-maintenance/applied.json
+  chmod 0600 /run/uvm-maintenance/applied.json
+fi
 if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_G7_RECOVERY_STAGE:-} != released ]]; then
 psql_local -d postgres -v uvm_password="$UVM_PASSWORD" -v ce_password="$CE_PASSWORD" <<'SQL'
 SELECT format('CREATE ROLE uvm_app LOGIN PASSWORD %L', :'uvm_password')
@@ -444,13 +494,14 @@ CE_INITIALIZE=true
 if [[ ${UVM_G7_VERIFICATION_ONLY:-0} == 1 || ${UVM_G7_RECOVERY_STAGE:-} == released ]]; then CE_INITIALIZE=false; fi
 if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_G7_RECOVERY_STAGE:-} != released ]]; then
 echo 'G7_INIT=CE initialize'
-setpriv --reuid=1001 --regid=1337 --init-groups env -i PATH="$PATH" HOME=/nonexistent \
+setpriv --reuid=1001 --regid=1337 --init-groups env -i PATH="$CE_PATH" HOME=/nonexistent \
   DD_DATABASE_URL="$DD_DATABASE_URL" DD_SECRET_KEY="$DD_SECRET_KEY" \
   DD_CREDENTIAL_AES_256_KEY="$DD_CREDENTIAL_AES_256_KEY" DD_ADMIN_PASSWORD="$DD_ADMIN_PASSWORD" \
   DD_ADMIN_USER="${DD_ADMIN_USER:-admin}" DD_ADMIN_MAIL="${DD_ADMIN_MAIL:-admin@defectdojo.local}" \
   DD_ADMIN_FIRST_NAME="${DD_ADMIN_FIRST_NAME:-Synthetic}" DD_ADMIN_LAST_NAME="${DD_ADMIN_LAST_NAME:-Operator}" \
   DD_ALLOWED_HOSTS="${DD_ALLOWED_HOSTS:-*}" DD_INITIALIZE=true \
-  /entrypoint-initializer.sh /bin/true
+  /entrypoint-initializer.sh /bin/true | sed -E 's/^(JIRA Webhook Secret:).*/\1 [REDACTED]/'
+CE_INITIALIZE=false
 abort_if_shutdown
 fi
 if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_G7_RECOVERY_STAGE:-} != released ]]; then
@@ -461,26 +512,16 @@ setpriv --reuid=uvm --regid=uvm --init-groups env -i PATH="$PATH" HOME=/opt/uvm 
 abort_if_shutdown
 fi
 if [[ ${UVM_AUTH_MODE:-} == local && ${UVM_G7_VERIFICATION_ONLY:-0} != 1 ]]; then
-  install -d -o root -g root -m 0700 /run/uvm-maintenance
-  python - <<'ENVIRONMENT'
-import json, os
-from pathlib import Path
-keys = ('UVM_DB_URL', 'UVM_AUTH_MODE', 'UVM_LOCAL_AUTH_CONFIG_FILE',
-        'UVM_LOCAL_RECOVERY_CONFIG_FILE', 'UVM_CONNECTOR_LOCAL_KEY_FILE',
-        'UVM_CONNECTOR_LOCAL_KEY_ID', 'UVM_SCANNER_EVIDENCE_DIR')
-path = Path('/run/uvm-maintenance/environment.json')
-fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-with os.fdopen(fd, 'w') as stream:
-    json.dump({key: os.environ[key] for key in keys}, stream)
-ENVIRONMENT
-  recovery_maintenance() {
-    /usr/local/bin/uvm-local-maintenance "$1" --config /etc/volt/local-auth.json
-  }
-  recovery_maintenance prepare-initial-installation >/dev/null
-  recovery_maintenance validate-local-recovery > /run/uvm-maintenance/validated.json
-  recovery_maintenance apply-local-restore-fence > /run/uvm-maintenance/applied.json
+  if [[ $UVM_LOCAL_START_INITIAL == 1 ]]; then
+    recovery_maintenance prepare-initial-installation >/dev/null
+    recovery_maintenance validate-local-recovery > /run/uvm-maintenance/validated.json
+    recovery_maintenance apply-local-restore-fence > /run/uvm-maintenance/applied.json
+  fi
   chmod 0600 /run/uvm-maintenance/*.json
   recovery_maintenance initialize-scanner-rule >/dev/null
+  echo 'G7_LOCAL_START=awaiting-host-acknowledgement'
+  /opt/uvm/venv/bin/python -m uvm.installer.start_admission wait-release
+  echo 'G7_LOCAL_START=host-release-validated'
   abort_if_shutdown
 fi
 
@@ -494,6 +535,23 @@ start_child() {
   CHILD_NAMES+=("$name")
 }
 start_recovery_control() {
+  # The control listener shares the persisted database. Local installations
+  # must validate the same local identity and recovery binding as the product
+  # listener; verification-only keeps this process from owning scanner work.
+  local control_auth_mode=bearer
+  local -a control_auth_environment=()
+  if [[ ${UVM_AUTH_MODE:-bearer} == local ]]; then
+    control_auth_mode=local
+    control_auth_environment=(
+      "UVM_LOCAL_AUTH_CONFIG_FILE=$UVM_LOCAL_AUTH_CONFIG_FILE"
+      "UVM_LOCAL_RECOVERY_CONFIG_FILE=$UVM_LOCAL_RECOVERY_CONFIG_FILE"
+      "UVM_CONNECTOR_LOCAL_KEY_FILE=$UVM_CONNECTOR_LOCAL_KEY_FILE"
+      "UVM_CONNECTOR_LOCAL_KEY_ID=$UVM_CONNECTOR_LOCAL_KEY_ID"
+      "UVM_SCANNER_EVIDENCE_DIR=$UVM_SCANNER_EVIDENCE_DIR"
+      "UVM_INGRESS_ALLOWED_PEER_CIDRS=$UVM_INGRESS_ALLOWED_PEER_CIDRS"
+      "UVM_INGRESS_ALLOWED_HOSTS=$UVM_INGRESS_ALLOWED_HOSTS"
+    )
+  fi
   start_child recovery-control 1800 1800 env -i PATH="$PATH" HOME=/opt/uvm \
     PYTHONPATH=/opt/uvm/app UVM_DB_URL="$UVM_DB_URL" \
     UVM_API_CURSOR_SECRET="$UVM_API_CURSOR_SECRET" \
@@ -509,7 +567,8 @@ start_recovery_control() {
     UVM_G7_RECOVERY_TLS_CERT_FILE="$RECOVERY_TLS_DIR/server.crt" \
     UVM_G7_RECOVERY_TLS_KEY_FILE="$RECOVERY_TLS_DIR/server.key" \
     UVM_G7_RECOVERY_TLS_CA_FILE="$RECOVERY_TLS_DIR/client-ca.crt" \
-    UVM_AUTH_MODE=bearer python -m uvicorn uvm.api.app:app --host 0.0.0.0 \
+    UVM_AUTH_MODE="$control_auth_mode" "${control_auth_environment[@]}" \
+    python -m uvicorn uvm.api.app:app --host 0.0.0.0 \
       --port "${UVM_G7_RECOVERY_CONTROL_PORT:-8002}" --workers 1 --no-proxy-headers \
       --ssl-certfile "$RECOVERY_TLS_DIR/server.crt" \
       --ssl-keyfile "$RECOVERY_TLS_DIR/server.key" \
@@ -591,7 +650,7 @@ if [[ ${UVM_G7_RECOVERY_STAGE:-} == control-only ]]; then
 fi
 
 start_ce_web() {
-start_child ce-web 1001 1337 env -i PATH="$PATH" HOME=/nonexistent \
+start_child ce-web 1001 1337 env -i PATH="$CE_PATH" HOME=/nonexistent \
   UVM_G7_VERIFICATION_ONLY="${UVM_G7_VERIFICATION_ONLY-0}" \
   DD_DATABASE_URL="$DD_DATABASE_URL" DD_SECRET_KEY="$DD_SECRET_KEY" \
   DD_CREDENTIAL_AES_256_KEY="$DD_CREDENTIAL_AES_256_KEY" DD_ADMIN_PASSWORD="$DD_ADMIN_PASSWORD" \
@@ -608,7 +667,7 @@ if [[ ${UVM_G7_RECOVERY_STAGE:-} != control-only || $recovery_control_gate_passe
   start_ce_web
 fi
 if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 ]]; then
-start_child ce-worker 1001 1337 env -i PATH="$PATH" HOME=/nonexistent \
+start_child ce-worker 1001 1337 env -i PATH="$CE_PATH" HOME=/nonexistent \
   DD_DATABASE_URL="$DD_DATABASE_URL" DD_SECRET_KEY="$DD_SECRET_KEY" \
   DD_CREDENTIAL_AES_256_KEY="$DD_CREDENTIAL_AES_256_KEY" \
   DD_CELERY_BROKER_URL="$DD_CELERY_BROKER_URL" DD_CACHE_URL="$DD_CACHE_URL" \
@@ -616,7 +675,7 @@ start_child ce-worker 1001 1337 env -i PATH="$PATH" HOME=/nonexistent \
   DD_CELERY_LOG_LEVEL=INFO DD_CELERY_WORKER_POOL_TYPE=solo \
   DD_DEDUPLICATION_ALGORITHM_PER_PARSER='{"Generic Findings Import":"unique_id_from_tool"}' \
   /entrypoint-celery-worker.sh
-start_child ce-beat 1001 1337 env -i PATH="$PATH" HOME=/nonexistent \
+start_child ce-beat 1001 1337 env -i PATH="$CE_PATH" HOME=/nonexistent \
   PYTHONPATH=/app:/opt/uvm/app \
   UVM_G7_DISPOSABLE_MODE="${UVM_G7_DISPOSABLE_MODE-}" \
   UVM_G7_SCHEDULER_PROGRESS_FILE=/run/uvm-g7-scheduler/progress.json \
@@ -752,7 +811,7 @@ start_child api 1800 1800 env -i PATH="$PATH" HOME=/opt/uvm \
   UVM_INGRESS_ALLOWED_HOSTS="${UVM_INGRESS_ALLOWED_HOSTS-}" \
   UVM_UI_ROOT=/opt/uvm/ui \
   UVM_API_HOST="$UVM_API_HOST" UVM_API_PORT="$UVM_API_PORT" \
-  python -m uvicorn uvm.api.app:app --host "$UVM_API_HOST" --port "$UVM_API_PORT" --workers 2 --no-proxy-headers
+  python -m uvicorn uvm.api.app:app --host "$UVM_API_HOST" --port "$UVM_API_PORT" --workers 1 --no-proxy-headers
 if [[ ${UVM_G7_RECOVERY_STAGE:-} != control-only ]]; then start_recovery_control; fi
 if [[ ${UVM_EXCEPTION_WARNING_WORKER:-0} == 1 && ${UVM_G7_VERIFICATION_ONLY:-0} != 1 ]]; then
   if [[ ${UVM_G7_DISPOSABLE_MODE:-0} == 1 && -n ${UVM_EXCEPTION_WARNING_PAUSE_FILE:-} ]]; then

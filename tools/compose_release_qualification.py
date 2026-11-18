@@ -261,7 +261,7 @@ def validate_admission_fixture(path: Path, *, image_id: str, source_snapshot: st
         raise RuntimeError("fixture verifier ref must be independently pinned in the owned loopback registry")
     for name, artifact, signature in (("installer-bundle", bundle,
             root / "installer.bundle.sigstore.json"),):
-        argv = ["docker", "run", "--rm", "--network", "host", "--read-only", "--cap-drop=ALL",
+        argv = ["docker", "run", "--rm", "--platform", platform, "--network", "host", "--read-only", "--user", f"{os.getuid()}:{os.getgid()}", "--cap-drop=ALL",
         "--security-opt=no-new-privileges", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
         "--env", "HOME=/tmp", "--mount", f"type=bind,src={public_root},dst=/fixture,readonly",
         "--mount", f"type=bind,src={artifact},dst=/artifact,readonly", f"{COSIGN_IMAGE}",
@@ -270,13 +270,13 @@ def validate_admission_fixture(path: Path, *, image_id: str, source_snapshot: st
         run(f"fixture-{name}-signature", argv, evidence)
     # The verifier image itself is signed under the external fixture root. Its
     # provenance is also checked before any verifier code is executed.
-    run("fixture-verifier-signature", ["docker", "run", "--rm", "--network", "host", "--read-only",
-        "--cap-drop=ALL", "--security-opt=no-new-privileges", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
+    run("fixture-verifier-signature", ["docker", "run", "--rm", "--platform", platform, "--network", "host", "--read-only",
+        "--cap-drop=ALL", "--user", f"{os.getuid()}:{os.getgid()}", "--security-opt=no-new-privileges", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
         "--mount", f"type=bind,src={public_root},dst=/fixture,readonly", COSIGN_IMAGE, "verify",
         "--key", "/fixture/fixture.pub", "--trusted-root", "/fixture/trusted-root.json",
         verifier_reference], evidence)
-    run("fixture-verifier-provenance", ["docker", "run", "--rm", "--network", "host", "--read-only",
-        "--cap-drop=ALL", "--security-opt=no-new-privileges", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
+    run("fixture-verifier-provenance", ["docker", "run", "--rm", "--platform", platform, "--network", "host", "--read-only",
+        "--cap-drop=ALL", "--user", f"{os.getuid()}:{os.getgid()}", "--security-opt=no-new-privileges", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
         "--mount", f"type=bind,src={public_root},dst=/fixture,readonly", COSIGN_IMAGE,
         "verify-attestation", "--type", "https://slsa.dev/provenance/v1", "--key", "/fixture/fixture.pub",
         "--trusted-root", "/fixture/trusted-root.json", verifier_reference], evidence)
@@ -291,22 +291,28 @@ def validate_admission_fixture(path: Path, *, image_id: str, source_snapshot: st
             or not re.fullmatch(r"127\.0\.0\.1:46150/volt@sha256:[0-9a-f]{64}", manifest["release_image"])):
         raise RuntimeError("signed bundle descriptor does not bind the pinned fixture verifier and loopback runtime")
     image_reference = manifest["release_image"]
-    run("fixture-runtime-pull", ["docker", "pull", image_reference], evidence)
+    run("fixture-runtime-pull", ["docker", "pull", "--platform", platform, image_reference], evidence)
     inspected = run("fixture-runtime-inspect", ["docker", "image", "inspect", image_reference], evidence)
     try:
         image_row = json.loads(inspected.stdout)[0]
     except (json.JSONDecodeError, IndexError, TypeError) as exc:
         raise RuntimeError("fixture runtime inspection did not return one image") from exc
+    if (image_row.get("Descriptor") or {}).get("mediaType") in {"application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json"}:
+        inspected = run("fixture-runtime-selected-inspect", ["docker", "image", "inspect", "--platform", platform, image_reference], evidence)
+        image_row = json.loads(inspected.stdout)[0]
     if image_row.get("Id") != image_id:
-        raise RuntimeError("fixture runtime config ID differs from the requested candidate image ID")
+        raise RuntimeError("fixture selected config/manifest ID differs from the requested candidate image object")
+    native = run("native-engine-platform", ["docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"], evidence)
+    if native.stdout.strip() != platform:
+        raise RuntimeError("qualification requires the actual native engine platform; emulated execution is not admitted")
     index = run("fixture-runtime-index", ["docker", "buildx", "imagetools", "inspect", "--raw",
         image_reference], evidence)
     image_json = evidence / "runtime-image-inspect.json"
     index_json = evidence / "runtime-image-index.json"
     image_json.write_text(inspected.stdout, encoding="utf-8")
     index_json.write_text(index.stdout, encoding="utf-8")
-    admission_command = ["docker", "run", "--rm", "--network", "host",
-        "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--tmpfs",
+    admission_command = ["docker", "run", "--rm", "--platform", platform, "--network", "host",
+        "--read-only", "--cap-drop=ALL", "--user", f"{os.getuid()}:{os.getgid()}", "--security-opt=no-new-privileges", "--tmpfs",
         "/tmp:rw,noexec,nosuid,size=16m", "--env", "HOME=/tmp", "--mount",
         f"type=bind,src={public_root},dst=/fixture,readonly", "--mount",
         f"type=bind,src={bundle},dst=/bundle.tar.gz,readonly", "--mount",
@@ -329,7 +335,8 @@ def validate_admission_fixture(path: Path, *, image_id: str, source_snapshot: st
     if runtime.get("image_id") != image_id or runtime.get("platform") != platform:
         raise RuntimeError("independent verifier returned a different image ID or platform")
     result = {"bundle_version": version, "bundle_sha256": bundle_admission["bundle_sha256"],
-        "image_id": runtime["image_id"], "image_reference": image_reference,
+        "image_id": runtime["image_id"], "image_id_kind": runtime["image_id_kind"],
+        "image_config_id": runtime["image_config_id"], "image_reference": image_reference,
         "image_index_digest": runtime["image_index_digest"], "source_snapshot": source_snapshot,
         "source_commit": source_commit, "platform": platform,
         "verifier_reference": verifier_reference}
@@ -444,6 +451,179 @@ print(json.dumps({'session':'local_session','protected_admin':True,'deployment':
         raise RuntimeError("protected browser session did not produce deployment readback evidence")
 
 
+def qualify_runtime_custody(*, state: Path, project: str, admission: dict, evidence: Path) -> None:
+    """Prove the real API UID reads only the live, read-only, host-owned fence."""
+    container = project + '-volt-1'
+    script = r'''
+import json,os,stat
+from pathlib import Path
+from uvm.connectors.local_recovery import load_authority
+value=load_authority(); directory=Path('/run/volt-restore-fence'); file=directory/'fence.json'
+d=directory.stat(); f=file.stat(); owner=value.config['restore_fence_custody']['owner_uid']
+if os.geteuid()!=1800 or os.getegid()!=1800 or owner==1800:raise SystemExit('distinct host/runtime UID proof missing')
+if (d.st_uid,d.st_gid,stat.S_IMODE(d.st_mode))!=(owner,1800,0o710):raise SystemExit('runtime directory mapping differs')
+if (f.st_uid,f.st_gid,stat.S_IMODE(f.st_mode))!=(owner,1800,0o640):raise SystemExit('runtime file mapping differs')
+try:
+ with file.open('ab'):pass
+except OSError:pass
+else:raise SystemExit('API can write host fence')
+print(json.dumps({'runtime_uid':os.geteuid(),'runtime_gid':os.getegid(),'host_uid':owner,
+ 'directory_mode':'0710','file_mode':'0640','live_fence':'readable','write':'denied'}))
+'''
+    command = ['docker', 'exec', '--user', '1800:1800', container, '/opt/uvm/venv/bin/python', '-c', script]
+    run('actual-nonroot-live-fence', command, evidence)
+    directory = state / 'secrets/local-restore-fence'
+    original = (directory / 'fence.json').read_text()
+    inode = directory.stat().st_ino
+    writer = r'''
+import os,sys,secrets
+from pathlib import Path
+root=Path('/fence'); data=sys.stdin.buffer.read(); owner=root.stat().st_uid
+if data==b'REMOVE':(root/'fence.json').unlink()
+else:
+ temp=root/('.probe-'+secrets.token_hex(8)); fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+ os.fchmod(fd,0o640);os.fchown(fd,owner,1800)
+ with os.fdopen(fd,'wb') as stream:stream.write(data);stream.flush();os.fsync(stream.fileno())
+ os.replace(temp,root/'fence.json')
+fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
+'''
+    mutate = ['docker', 'run', '--rm', '-i', '--platform', admission['platform'], '--network', 'none', '--read-only', '--cap-drop=ALL',
+        '--cap-add=CHOWN', '--cap-add=DAC_OVERRIDE', '--security-opt=no-new-privileges',
+        '--user', '0:0', '--mount', f'type=bind,src={directory},dst=/fence',
+        '--entrypoint', '/opt/uvm/venv/bin/python', admission['image_reference'], '-c', writer]
+    try:
+        wrong = json.loads(original)
+        wrong['installation_id'] = str(uuid.uuid4())
+        run('host-atomic-contradictory-fence', mutate, evidence, input_text=json.dumps(wrong))
+        rejected = run('actual-live-fence-contradiction-negative', command, evidence, check=False)
+        if rejected.returncode == 0:
+            raise RuntimeError('API reads a stale copy after host atomic replacement')
+        run('host-remove-fence', mutate, evidence, input_text='REMOVE')
+        rejected = run('actual-live-fence-removal-negative', command, evidence, check=False)
+        if rejected.returncode == 0:
+            raise RuntimeError('API accepts missing authoritative live fence')
+    finally:
+        run('host-restore-current-fence', mutate, evidence, input_text=original)
+    if directory.stat().st_ino != inode:
+        raise RuntimeError('live fence directory inode was replaced')
+    run('actual-nonroot-live-fence-restored', command, evidence)
+
+
+def qualify_local_restore(*, setup: Path, launcher: Path | None, launcher_env: dict, state: Path,
+                          private: Path, evidence: Path, admission: dict, project: str,
+                          origin: str, password: str, consumed_capability: str,
+                          installation_id: str) -> None:
+    """Run cold backup/import/admission and the real closed-ingress restore path."""
+    cli = [sys.executable, str(setup)]
+    # Component development exercises the same maintained storage/session
+    # assertions through the existing setup CLI. The full entry point always
+    # supplies its independently authenticated source-free launcher.
+    stop = [*cli, 'stop', str(state)] if launcher is None else ['sh', str(launcher), 'stop', '--directory', str(state)]
+    run('local-cold-stop', stop, evidence, env=launcher_env)
+    run('local-backup-record', [*cli, 'backup-record', str(state)], evidence)
+    inventory = json.loads((state / 'instance.json').read_text())['backup_inventory']
+    (evidence / 'local-cold-store-inventories.json').write_text(json.dumps(inventory, sort_keys=True, indent=2) + '\n')
+    backup = private / 'cold-backup'
+    backup.mkdir(mode=0o700)
+    image = admission['image_reference']
+    for store in ('postgres', 'media', 'state'):
+        run('local-backup-' + store, ['docker', 'run', '--rm', '--platform', admission['platform'], '--network', 'none',
+            '--mount', f'type=volume,src={project}_{store},dst=/source,readonly',
+            '--mount', f'type=bind,src={backup},dst=/backup', '--entrypoint', '/bin/bash', image,
+            '-c', f'tar --numeric-owner -cpf /backup/{store}.tar -C /source .'], evidence)
+    # Tar preserves the host UID/fixed fence GID and root-private capability
+    # files. A host copytree would silently replace that ownership mapping.
+    run('local-backup-instance', ['docker', 'run', '--rm', '--platform', admission['platform'], '--network', 'none',
+        '--mount', f'type=bind,src={state},dst=/source,readonly',
+        '--mount', f'type=bind,src={backup},dst=/backup', '--entrypoint', '/bin/bash', image,
+        '-c', 'tar --numeric-owner -cpf /backup/instance.tar -C /source .'], evidence)
+    (evidence / 'local-backup-digests.json').write_text(json.dumps({
+        name: sha(backup / (name + '.tar')) for name in ('postgres', 'media', 'state', 'instance')},
+        sort_keys=True, indent=2) + '\n')
+    destroy = ([*cli, 'cleanup', str(state), '--confirm-project', project, '--remove-data'] if launcher is None
+        else ['sh', str(launcher), 'destroy', '--directory', str(state), '--confirm-project', project, '--remove-state'])
+    run('local-destroy-before-restore', destroy, evidence, env=launcher_env)
+    state.mkdir(mode=0o700)
+    run('local-restore-instance', ['docker', 'run', '--rm', '--platform', admission['platform'], '--network', 'none',
+        '--mount', f'type=bind,src={state},dst=/target',
+        '--mount', f'type=bind,src={backup},dst=/backup,readonly', '--entrypoint', '/bin/bash', image,
+        '-c', 'tar --numeric-owner -xpf /backup/instance.tar -C /target'], evidence)
+    run('local-restore-provision', [*cli, 'restore-provision', str(state)], evidence)
+    expected = json.loads((state / 'instance.json').read_text())['local_recovery_custody']
+    negative = run('local-restore-empty-import-negative', [*cli, 'restore-admit', str(state)], evidence, check=False)
+    if negative.returncode == 0:
+        raise RuntimeError('local restore accepted empty stores')
+    for store in ('postgres', 'media', 'state'):
+        run('local-restore-import-' + store, ['docker', 'run', '--rm', '--platform', admission['platform'], '--network', 'none',
+            '--mount', f'type=volume,src={project}_{store},dst=/target',
+            '--mount', f'type=bind,src={backup},dst=/backup,readonly', '--entrypoint', '/bin/bash', image,
+            '-c', f'tar --numeric-owner -xpf /backup/{store}.tar -C /target'], evidence)
+    # A real corruption is detected before runtime execution, then removed.
+    run('local-restore-corrupt-state', ['docker', 'run', '--rm', '--platform', admission['platform'], '--network', 'none',
+        '--mount', f'type=volume,src={project}_state,dst=/target', '--entrypoint', '/bin/bash', image,
+        '-c', 'printf corrupt > /target/.volt-qualification-corruption'], evidence)
+    negative = run('local-restore-corruption-negative', [*cli, 'restore-admit', str(state)], evidence, check=False)
+    if negative.returncode == 0:
+        raise RuntimeError('local restore accepted corrupted store')
+    run('local-restore-remove-corruption', ['docker', 'run', '--rm', '--platform', admission['platform'], '--network', 'none',
+        '--mount', f'type=volume,src={project}_state,dst=/target', '--entrypoint', '/bin/bash', image,
+        '-c', 'rm /target/.volt-qualification-corruption'], evidence)
+    run('local-restore-admit', [*cli, 'restore-admit', str(state)], evidence)
+    start = [*cli, 'start', str(state)] if launcher is None else ['sh', str(launcher), 'start', '--directory', str(state)]
+    run('local-restore-start', start, evidence, env=launcher_env)
+    qualify_restored_local_public_state(setup=setup, launcher=launcher, launcher_env=launcher_env,
+        state=state, private=private, evidence=evidence, origin=origin, password=password,
+        consumed_capability=consumed_capability, installation_id=installation_id, expected=expected)
+    (evidence / 'local-restore-journey.json').write_text(json.dumps({'status': 'passed',
+        'execution_scope': 'component_existing_setup' if launcher is None else 'source_free_signed_launcher',
+        'three_store_cold_backup': 'passed', 'offline_inventory_admission': 'passed',
+        'empty_and_corrupt_import_rejection': 'passed',
+        'public_outcomes': json.loads((evidence / 'local-restore-public-outcomes.json').read_text())},
+        sort_keys=True, indent=2) + '\n')
+
+
+def qualify_restored_local_public_state(*, setup: Path, launcher: Path | None, launcher_env: dict,
+        state: Path, private: Path, evidence: Path, origin: str, password: str,
+        consumed_capability: str, installation_id: str, expected: dict) -> None:
+    """Verify the public outcomes after the maintained offline restore/start."""
+    cli = [sys.executable, str(setup)]
+    wait_for_local(origin, evidence)
+    restored = json.loads((state / 'instance.json').read_text())
+    acknowledgement = restored.get('local_recovery_acknowledgement', {})
+    if (restored.get('restore_pending') or not restored.get('restore_sessions_revoked')
+            or not restored.get('restore_capabilities_revoked')
+            or any(acknowledgement.get(key) != value for key, value in expected.items())):
+        raise RuntimeError('normal ingress lacks an exact host-journalled restore acknowledgement')
+    (evidence / 'local-restore-acknowledgement.json').write_text(json.dumps(acknowledgement, sort_keys=True, indent=2) + '\n')
+    session_evidence = evidence / 'browser-restored-session'
+    session_evidence.mkdir(mode=0o700)
+    run('browser-restored-session-revocation', ['node', str(ROOT / 'tools/g7_local_preview_smoke.mjs'),
+        '--local', '--origin', origin, '--evidence', str(session_evidence), '--verify-restored-session',
+        '--browser-state', str(private / 'pre-restore-browser.json')], evidence)
+    setup_evidence = evidence / 'browser-restored-setup-closed'
+    setup_evidence.mkdir(mode=0o700)
+    run('browser-restored-setup-consumed', ['node', str(ROOT / 'tools/g7_local_preview_smoke.mjs'),
+        '--local', '--origin', origin, '--evidence', str(setup_evidence), '--verify-setup-closed',
+        '--credentials-stdin'], evidence, input_text=json.dumps({
+            'capability': consumed_capability, 'username': 'probe-' + uuid.uuid4().hex[:16],
+            'display_name': 'Restore denial probe', 'password': secrets.token_urlsafe(32) + 'A7!'}))
+    login = ['node', str(ROOT / 'tools/compose_release_login.mjs'), origin, str(private / 'cookie'), '--local-stdin']
+    run('browser-local-login-after-restore', login, evidence,
+        input_text=json.dumps({'username': 'qualification-admin', 'password': password}))
+    protected_local_readback(origin, private / 'cookie', installation_id, evidence, 'local-restored-protected-readback')
+    setup_again = ([*cli, 'prepare-setup', str(state), '--unattended'] if launcher is None
+        else ['sh', str(launcher), 'setup', '--directory', str(state)])
+    negative = run('local-restored-setup-maintenance-negative', setup_again,
+        evidence, env=launcher_env, check=False)
+    if negative.returncode == 0:
+        raise RuntimeError('claimed restored installation allowed setup preparation')
+    (evidence / 'local-restore-public-outcomes.json').write_text(json.dumps({'status': 'passed',
+        'execution_scope': 'component_existing_setup' if launcher is None else 'source_free_signed_launcher',
+        'exact_host_ack_before_ingress': 'passed',
+        'session_revocation': 'passed', 'consumed_setup_preserved': 'passed',
+        'protected_account_readback': 'passed'}, sort_keys=True, indent=2) + '\n')
+
+
 def qualify_local_runtime(*, package: Path, bundle: Path, admission: dict[str, str],
                           state: Path, private: Path, evidence: Path, password: str,
                           http_port: int, project_prefix: str) -> tuple[str, Path, dict[str, str]]:
@@ -459,8 +639,8 @@ def qualify_local_runtime(*, package: Path, bundle: Path, admission: dict[str, s
     os.chmod(outer / "installer.bundle.tar.gz", 0o600)
     for path in (outer / "installer.bundle.sigstore.json", outer / "launcher.sigstore.json"):
         os.chmod(path, 0o600)
-    run("fixture-trusted-launcher-signature", ["docker", "run", "--rm", "--network", "host",
-        "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--tmpfs",
+    run("fixture-trusted-launcher-signature", ["docker", "run", "--rm", "--platform", admission["platform"], "--network", "host",
+        "--read-only", "--cap-drop=ALL", "--user", f"{os.getuid()}:{os.getgid()}", "--security-opt=no-new-privileges", "--tmpfs",
         "/tmp:rw,noexec,nosuid,size=16m", "--mount", f"type=bind,src={evidence / 'fixture-trust-public'},dst=/fixture,readonly",
         "--mount", f"type=bind,src={launcher},dst=/launcher,readonly", COSIGN_IMAGE,
         "verify-blob", "--key", "/fixture/fixture.pub", "--trusted-root", "/fixture/trusted-root.json",
@@ -496,6 +676,7 @@ def qualify_local_runtime(*, package: Path, bundle: Path, admission: dict[str, s
     if not port.stdout.strip().startswith("127.0.0.1:"):
         raise RuntimeError("local VOLT application binding is not loopback-only")
     wait_for_local(origin, evidence)
+    qualify_runtime_custody(state=state, project=project, admission=admission, evidence=evidence)
     capability_file = state / "secrets/bootstrap-capability-output"
     if (capability_file.is_symlink() or not capability_file.is_file()
             or stat.S_IMODE(capability_file.stat().st_mode) != 0o600):
@@ -510,6 +691,7 @@ def qualify_local_runtime(*, package: Path, bundle: Path, admission: dict[str, s
     run("browser-first-admin", ["node", str(ROOT / "tools/g7_local_preview_smoke.mjs"), "--local",
         "--setup", "--origin", origin, "--evidence", str(ui_evidence), "--credentials-stdin"],
         evidence, input_text=json.dumps(credentials))
+    consumed_capability = capability
     capability = None
     capability_file.unlink(missing_ok=True)
     login = ["node", str(ROOT / "tools/compose_release_login.mjs"), origin, str(private / "cookie"), "--local-stdin"]
@@ -521,10 +703,14 @@ def qualify_local_runtime(*, package: Path, bundle: Path, admission: dict[str, s
     run("local-launcher-stop", ["sh", str(launcher), "stop", "--directory", str(state)], evidence, env=launcher_env)
     run("local-launcher-restart", ["sh", str(launcher), "start", "--directory", str(state)], evidence, env=launcher_env)
     wait_for_local(origin, evidence)
-    run("browser-local-login-after-restart", login, evidence,
+    run("browser-local-login-after-restart", [*login, "--save-browser-state", str(private / "pre-restore-browser.json")], evidence,
         input_text=json.dumps({"username": "qualification-admin", "password": password}))
     protected_local_readback(origin, private / "cookie", local_config["installation_id"],
                              evidence, "local-restart-protected-deployment-readback")
+    qualify_local_restore(setup=package / "setup.py", launcher=launcher, launcher_env=launcher_env,
+        state=state, private=private, evidence=evidence, admission=admission, project=project,
+        origin=origin, password=password, consumed_capability=consumed_capability,
+        installation_id=local_config["installation_id"])
     (evidence / "local-auth-journey.json").write_text(json.dumps({
         "status": "passed",
         "host_runtime": "POSIX shell and Docker/Compose only; Python/OpenSSL executed inside digest-admitted runtime",
@@ -539,7 +725,7 @@ def qualify_local_runtime(*, package: Path, bundle: Path, admission: dict[str, s
         "protected_deployment_readback": "passed",
         "restart_account_readback": "passed",
         "scanner_stage": "pending",
-        "restore_stage": "pending_backend_review_and_session_revocation_contract",
+        "restore_stage": "passed_cold_restore_authentication",
     }, sort_keys=True, indent=2) + "\n")
     return project, launcher, launcher_env
 
@@ -656,8 +842,8 @@ def main() -> int:
                 "result": "incomplete", "full_qualification": False, **release_metadata,
                 "project": project, "local_auth_process": "passed",
                 "scanner_provider": "Qualys", "scanner_stage": "pending",
-                "restore_stage": "pending_backend_session_revocation_review",
-                "reason": "Provider ingestion and safe restored-session revocation remain unqualified.",
+                "restore_stage": "passed_cold_restore_authentication",
+                "reason": "Provider ingestion and scanner recovery remain unqualified.",
             }, sort_keys=True, indent=2) + "\n")
             outcome = 2
         else:

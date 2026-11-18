@@ -1,5 +1,6 @@
 // Rendered synthetic API coverage, not persistent authentication evidence.
 import {test,before,after} from 'node:test';
+import {registerPackagedCompanionCases} from './packaged-companion-cases.mjs';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
 import {chromium} from 'playwright';
@@ -10,11 +11,11 @@ import {conformsToRegistrationContract} from './registration-contract.mjs';
 import {mkdtemp,readFile,rm,mkdir} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
-let directory,server,browser,origin;
+let directory,server,browser,origin,companionHandler;
 before(async()=>{
  directory=await mkdtemp(join(tmpdir(),'volt-local-ui-'));
- await build({stdin:{contents:`import {createRoot} from 'react-dom/client';import LocalAccess from './LocalAccess';import App from './App';import './tokens.css';import './styles.css';createRoot(document.getElementById('root')).render(location.search==='?app'?<App/>:<LocalAccess config={{schema_version:1,mode:'local',setup_state:'required'}} onAuthenticated={()=>{document.querySelector('h1').textContent='Session refresh requested';}}/>);`,resolveDir:resolve(import.meta.dirname,'../src'),loader:'tsx'},jsx:'automatic',bundle:true,format:'esm',outfile:join(directory,'app.js'),logLevel:'silent'});
- server=createServer(async(req,res)=>{if(['/app.js','/app.css'].includes(req.url)){res.setHeader('Content-Type',req.url.endsWith('css')?'text/css':'text/javascript');res.end(await readFile(join(directory,req.url)));return;}res.setHeader('Content-Type','text/html');res.end('<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Synthetic local access</title><link rel="stylesheet" href="/app.css"></head><body><main><h1>Synthetic local access</h1><div id="root"></div></main><script type="module" src="/app.js"></script></body></html>');});
+ await build({stdin:{contents:`import {createRoot} from 'react-dom/client';import LocalAccess from './LocalAccess';import App from './App';import './tokens.css';import './styles.css';createRoot(document.getElementById('root')).render((location.search==='?app'||window.__companionApp===true)?<App/>:<LocalAccess config={{schema_version:1,mode:'local',setup_state:'required'}} onAuthenticated={()=>{document.querySelector('h1').textContent='Session refresh requested';}}/>);`,resolveDir:resolve(import.meta.dirname,'../src'),loader:'tsx'},jsx:'automatic',bundle:true,format:'esm',outfile:join(directory,'app.js'),logLevel:'silent'});
+ server=createServer(async(req,res)=>{if(companionHandler&&req.url.startsWith('/api/')){const chunks=[];for await(const chunk of req)chunks.push(chunk);const raw=Buffer.concat(chunks).toString();return companionHandler({method:req.method,url:new URL(req.url,'http://127.0.0.1:46380'),headers:req.headers,body:raw?JSON.parse(raw):null},res);}if(['/app.js','/app.css'].includes(req.url)){res.setHeader('Content-Type',req.url.endsWith('css')?'text/css':'text/javascript');res.end(await readFile(join(directory,req.url)));return;}res.setHeader('Content-Type','text/html');res.end('<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Synthetic local access</title><link rel="stylesheet" href="/app.css"></head><body><main><h1>Synthetic local access</h1><div id="root"></div></main>'+ (companionHandler?'<script>window.__companionApp=true</script>':'') +'<script type="module" src="/app.js"></script></body></html>');});
  await new Promise(r=>server.listen(46380,'127.0.0.1',r));origin='http://127.0.0.1:46380';browser=await chromium.launch({headless:true});
 });
 after(async()=>{await browser?.close();if(server)await new Promise(r=>server.close(r));if(directory)await rm(directory,{recursive:true,force:true});});
@@ -581,3 +582,5 @@ test('finish clearance reconciliation hanging readback clears autofilled credent
  await page.getByLabel('Qualys username',{exact:true}).evaluate(el=>el.value='synthetic-autofill');await page.getByLabel('Qualys password',{exact:true}).evaluate(el=>el.value='synthetic-autofill-secret');await page.getByRole('button',{name:'Finish clearance reconciliation',exact:true}).click();await request;
  assert.equal(await page.getByLabel('Qualys username',{exact:true}).inputValue(),'');assert.equal(await page.getByLabel('Qualys password',{exact:true}).inputValue(),'');assert.deepEqual(await page.evaluate(()=>({...sessionStorage})),before);assert.equal(await page.locator('.scanner-workspace').getAttribute('aria-busy'),'true');assert.equal(await page.getByRole('status').filter({hasText:'Clearance reconciliation finished'}).count(),0);assert.equal(clearances.length,1);
 });
+
+registerPackagedCompanionCases({test,origin:()=>origin,setHandler:value=>{companionHandler=value;}});

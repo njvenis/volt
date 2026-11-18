@@ -59,7 +59,11 @@ def atomic_private_write(path: Path, value: str | bytes) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
-        path.chmod(0o600)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -138,12 +142,14 @@ def allowed_host_names(raw: str) -> str:
 
 def make_tls(directory: Path) -> None:
     command("openssl", "req", "-x509", "-newkey", "rsa:3072", "-nodes", "-days", "365",
+            "-addext", "basicConstraints=critical,CA:TRUE",
+            "-addext", "keyUsage=critical,keyCertSign,cRLSign",
             "-subj", "/CN=VOLT recovery CA", "-keyout", str(directory / "recovery-ca.key"),
             "-out", str(directory / "recovery-ca.crt"))
     command("openssl", "req", "-newkey", "rsa:3072", "-nodes", "-subj", "/CN=localhost",
             "-keyout", str(directory / "recovery-server.key"), "-out", str(directory / "server.csr"))
     ext = directory / "server.ext"
-    private_write(ext, "subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n")
+    private_write(ext, "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nsubjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n")
     command("openssl", "x509", "-req", "-in", str(directory / "server.csr"), "-CA",
             str(directory / "recovery-ca.crt"), "-CAkey", str(directory / "recovery-ca.key"),
             "-CAcreateserial", "-days", "365", "-sha256", "-extfile", str(ext),
@@ -151,7 +157,7 @@ def make_tls(directory: Path) -> None:
     command("openssl", "req", "-newkey", "rsa:3072", "-nodes", "-subj", "/CN=VOLT recovery client",
             "-keyout", str(directory / "recovery-client.key"), "-out", str(directory / "client.csr"))
     client_ext = directory / "client.ext"
-    private_write(client_ext, "extendedKeyUsage=clientAuth\n")
+    private_write(client_ext, "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n")
     command("openssl", "x509", "-req", "-in", str(directory / "client.csr"), "-CA",
             str(directory / "recovery-ca.crt"), "-CAkey", str(directory / "recovery-ca.key"),
             "-CAcreateserial", "-days", "365", "-sha256", "-extfile", str(client_ext),
@@ -174,6 +180,12 @@ def inspect_image(image: str, mode: str, expected_platform: str) -> dict:
         item = json.loads(command("docker", "image", "inspect", image, capture=True))[0]
     except (json.JSONDecodeError, IndexError) as exc:
         raise SystemExit("could not inspect the selected image") from exc
+    engine_id = item["Id"]
+    if (item.get("Descriptor") or {}).get("mediaType") in {"application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json"}:
+        item = json.loads(command("docker", "image", "inspect", "--platform", expected_platform, image, capture=True))[0]
+    descriptor = item.get("Descriptor") or {}
+    kind = "selected_manifest" if descriptor.get("digest") == item["Id"] and descriptor.get("mediaType") in {
+        "application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json"} else "config"
     config = item.get("Config") or {}
     labels = config.get("Labels") or {}
     os_name, arch = item.get("Os"), item.get("Architecture")
@@ -193,7 +205,8 @@ def inspect_image(image: str, mode: str, expected_platform: str) -> dict:
     version = labels.get("org.opencontainers.image.version", "")
     if not re.fullmatch(r"[0-9a-f]{40}", revision) or not version:
         raise SystemExit("image must declare source revision and version labels")
-    return {"id": item["Id"], "source_revision": revision, "version": version,
+    return {"id": item["Id"], "id_kind": kind, "engine_image_id": engine_id,
+            "selected_descriptor": descriptor if kind == "selected_manifest" else None, "source_revision": revision, "version": version,
             "source_snapshot": source_snapshot, "platform": actual_platform,
             "registry_digests": item.get("RepoDigests", [])}
 
@@ -339,8 +352,9 @@ def capability_from_delivery(value: bytes, operation: str) -> str:
         if (expected is None or not isinstance(document, dict)
                 or set(document) != {"schema_version", "purpose", "capability", "expires_in_seconds"}
                 or document["schema_version"] != 1 or document["purpose"] != expected[0]
-                or document["expires_in_seconds"] != expected[1]
-                or not isinstance(capability, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", capability)):
+                or type(document["expires_in_seconds"]) is not int
+                or not 0 <= document["expires_in_seconds"] <= expected[1]
+                or not isinstance(capability, str) or not re.fullmatch(r"[A-Za-z0-9_-]{24}\.[A-Za-z0-9_-]{43}", capability)):
             raise ValueError
     except (TypeError, KeyError, ValueError, json.JSONDecodeError):
         raise SystemExit("private capability delivery document is invalid for the requested operation") from None
@@ -402,7 +416,10 @@ def init(args) -> None:
                 raise ValueError
         except ValueError:
             raise SystemExit("runtime preparation requires a private Docker subnet") from None
-        admitted = {"id": args.admitted_image_id, "source_revision": args.admitted_source_revision,
+        admitted = {"id": args.admitted_image_id, "id_kind": args.admitted_image_id_kind,
+            "engine_image_id": args.admitted_engine_image_id, "image_config_id": args.admitted_image_config_id,
+            "selected_descriptor": json.loads(args.admitted_selected_descriptor) if args.admitted_selected_descriptor else None,
+            "source_revision": args.admitted_source_revision,
             "version": args.admitted_version, "source_snapshot": args.admitted_source_snapshot,
             "platform": args.platform, "registry_digests": [image]}
     else:
@@ -575,6 +592,7 @@ def init(args) -> None:
     metadata = {"format_version": 1, "project": project, "mode": args.mode, "image": image,
                 "image_admission": admitted, "oidc_config_sha256": hashlib.sha256((root / "oidc.json").read_bytes()).hexdigest(),
                 "compose_directory": str(compose_root), "owner_token": owner_token,
+                "host_instance_directory": host_instance_path if args.runtime_prepare else str(root),
                 "bootstrap_principal": args.bootstrap_principal,
                 "platform": admitted["platform"],
                 "demo_admin_subject": args.demo_subject if args.mode == "demo" else None,
@@ -588,13 +606,13 @@ def init(args) -> None:
         metadata["local_recovery_journal_id"] = str(uuid.uuid4())
         metadata["local_auth_config_sha256"] = hashlib.sha256((root / "local-auth.json").read_bytes()).hexdigest()
     metadata["env_sha256"] = hashlib.sha256((root / ".env").read_bytes()).hexdigest()
-    private_write(root / "instance.json", json.dumps(metadata, indent=2) + "\n")
+    atomic_private_write(root / "instance.json", json.dumps(metadata, indent=2) + "\n")
     private_write(root / ".project", project + "\n")
     private_write(root / ".owner-token", owner_token + "\n")
     print(f"instance={root}\nmode={args.mode}\nimage_id={admitted['id']}\nsource_revision={admitted['source_revision']}\nversion={admitted['version']}")
 
 
-def load_instance(path: str) -> tuple[Path, dict]:
+def load_instance(path: str, *, allow_restore_transition: bool = False) -> tuple[Path, dict]:
     root = Path(path).expanduser().absolute()
     if root.is_symlink() or (root / "instance.json").is_symlink() or (root / ".env").is_symlink():
         raise SystemExit("refusing symlinked instance metadata")
@@ -670,6 +688,61 @@ def load_instance(path: str) -> tuple[Path, dict]:
             recovery_valid = False
         if not recovery_valid:
             raise SystemExit("local recovery custody journal is missing or inconsistent")
+        pending_target = None
+        transition = metadata.get("restore_fence_transition")
+        if transition is not None:
+            if not allow_restore_transition:
+                raise SystemExit("pending restore requires the locked restore-provision writer")
+            if (not isinstance(transition, dict) or set(transition) != {"from", "to"}
+                    or transition['from'] != recovery or not isinstance(transition['to'], dict)
+                    or set(transition['to']) != set(recovery)
+                    or type(transition['to'].get('restore_generation')) is not int
+                    or transition['to']['restore_generation'] != recovery['restore_generation'] + 1
+                    or any(transition['to'][key] != value for key, value in recovery.items()
+                           if key not in {'restore_generation', 'recovery_epoch_id'})
+                    or metadata.get('established') is not False or metadata.get('restore_pending') is not True
+                    or metadata.get('local_start_record_pending') is not True
+                    or metadata.get('local_recovery_acknowledgement') is not None):
+                raise SystemExit("pending restore transition is inconsistent")
+            try:
+                if str(uuid.UUID(transition['to']['recovery_epoch_id'])) != transition['to']['recovery_epoch_id']:
+                    raise ValueError
+            except (ValueError, TypeError, AttributeError):
+                raise SystemExit("pending restore epoch is invalid") from None
+            pending_target = transition['to']
+        if not metadata.get("restore_pending") and (metadata.get("established") or recovery["restore_generation"] > 0):
+            ack = metadata.get("local_recovery_acknowledgement")
+            if (not isinstance(ack, dict) or any(type(ack.get(key)) is not type(value) or ack.get(key) != value
+                    for key, value in recovery.items())
+                    or ack.get("operation") != "apply-local-restore-fence"
+                    or ack.get("status") not in {"applied", "already_applied"}
+                    or any(type(ack.get(key)) is not int or ack[key] < 0 for key in
+                           ("revoked_sessions", "revoked_capabilities", "quarantined_connectors"))):
+                raise SystemExit("established instance lacks exact backend custody acknowledgement")
+        start_directory = root / "secrets/local-start-admission"
+        if (start_directory.is_symlink() or not start_directory.is_dir()
+                or start_directory.stat().st_uid != os.getuid() or stat.S_IMODE(start_directory.stat().st_mode) != 0o700):
+            raise SystemExit("local start admission directory is unsafe")
+        start_path = start_directory / "admission.json"
+        pinned_start = metadata.get("local_start_admission")
+        if start_path.exists() or start_path.is_symlink():
+            fd = os.open(start_path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
+                        or info.st_uid != os.getuid() or info.st_size > 16384):
+                    raise SystemExit("local start admission file unsafe")
+                record = json.loads(stream.read(16385))
+            canonical_start = lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+            if (not isinstance(pinned_start, dict)
+                    or metadata.get("local_start_admission_sha256") != hashlib.sha256(canonical_start(pinned_start)).hexdigest()
+                    or (record != pinned_start and record != {**pinned_start, "initial_preparation": False})
+                    or record.get("image_id") != metadata["image_admission"]["id"]
+                    or any(record.get(key) != recovery[key] for key in ("installation_id", "journal_id", "restore_generation", "recovery_epoch_id"))
+                    or (metadata.get("established") and record.get("initial_preparation"))):
+                raise SystemExit("local start admission contradicts committed journal")
+        elif (metadata.get("established") or (pinned_start is not None and not metadata.get("local_start_record_pending"))):
+            raise SystemExit("committed local start admission is missing")
         recovery_inventory = {
             "local-recovery.json": 0o600,
             "secrets/local-recovery-runtime/issuer.key": 0o600,
@@ -691,7 +764,7 @@ def load_instance(path: str) -> tuple[Path, dict]:
             directory_fd = os.open(fence_directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
                 directory_info = os.fstat(directory_fd)
-                file_fd = os.open("fence.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                file_fd = os.open("fence.json", os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory_fd)
                 with os.fdopen(file_fd, "rb") as stream:
                     file_info = os.fstat(stream.fileno())
                     if (stat.S_IMODE(directory_info.st_mode) != 0o710
@@ -699,8 +772,14 @@ def load_instance(path: str) -> tuple[Path, dict]:
                             or not stat.S_ISREG(file_info.st_mode) or stat.S_IMODE(file_info.st_mode) != 0o640
                             or file_info.st_uid != os.getuid() or file_info.st_gid != FENCE_RUNTIME_GID or file_info.st_size > 16384):
                         raise ValueError("fence mapping differs")
-                    if json.loads(stream.read(16385)) != recovery:
-                        raise ValueError("fence tuple differs")
+                    data = stream.read(16385)
+                    current = os.stat("fence.json", dir_fd=directory_fd, follow_symlinks=False)
+                    if (any(getattr(file_info, field) != getattr(candidate, field)
+                                for candidate in (os.fstat(stream.fileno()), current)
+                                for field in ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_size', 'st_mtime_ns', 'st_ctime_ns'))
+                            or len(data) != file_info.st_size
+                            or (json.loads(data) != recovery and (pending_target is None or json.loads(data) != pending_target))):
+                        raise ValueError("fence tuple differs or changed")
             finally:
                 os.close(directory_fd)
         except (OSError, ValueError):
@@ -761,9 +840,9 @@ def compose_files(info: dict) -> list[str]:
     files = ["-f", str(Path(info["compose_directory"]) / "compose.yaml")]
     if info["mode"] == "local":
         files += ["-f", str(Path(info["compose_directory"]) / "local.yaml")]
-        if (info.get("restore_pending") and info.get("restore_imported")
-                and not (info.get("restore_capabilities_revoked")
-                         and info.get("restore_sessions_revoked"))):
+        if (not info.get("local_recovery_acknowledgement") or
+                (info.get("restore_pending") and not (info.get("restore_capabilities_revoked")
+                         and info.get("restore_sessions_revoked")))):
             files += ["-f", str(Path(info["compose_directory"]) / "local-restore.yaml")]
     elif info["mode"] == "demo":
         files += ["-f", str(Path(info["compose_directory"]) / "demo.yaml")]
@@ -780,7 +859,7 @@ def resolved_compose(root: Path, info: dict):
                 or stat.S_IMODE(source.stat().st_mode) != 0o600):
             raise SystemExit(f"required private identity secret is missing or unsafe: {name}")
     envfile = root / ".env"
-    if hashlib.sha256(envfile.read_bytes()).hexdigest() != info.get("env_sha256"):
+    if hashlib.sha256(envfile.read_bytes()).hexdigest() not in {info.get("env_sha256"), info.get("local_start_environment_pending_sha256")}:
         raise SystemExit("instance environment file changed after admission; refusing Compose operation")
     clean_env = compose_environment()
     resolved = json.loads(command("docker", "compose", *files, "--env-file", str(envfile),
@@ -803,6 +882,7 @@ def resolved_compose(root: Path, info: dict):
             "/run/secrets/local-recovery-operator.pub": str(root / "secrets/local-recovery-runtime/operator.pub"),
             "/run/secrets/local-recovery-material.key": str(root / "secrets/local-recovery-runtime/material.key"),
             "/run/volt-restore-fence": str(root / "secrets/local-restore-fence"),
+            "/run/volt-start-admission": str(root / "secrets/local-start-admission"),
         })
     volume_names = resolved.get("volumes", {})
     validate_identity_secret_mounts(resolved, service, identity_secrets, info)
@@ -819,10 +899,16 @@ def resolved_compose(root: Path, info: dict):
             "/run/secrets/local-recovery-issuer.pub": True,
             "/run/secrets/local-recovery-operator.pub": True,
             "/run/secrets/local-recovery-material.key": True,
-            "/run/volt-restore-fence": True}
+            "/run/volt-restore-fence": True, "/run/volt-start-admission": True}
         environment = service.get("environment", {})
         local_source = json.loads((root / "local-auth.json").read_text())["secret_source"]["secret_source_id"]
-        if (any(bool(mounts_by_target.get(target, {}).get("read_only")) != read_only
+        expected_start_hash = (info.get("local_start_admission") or {}).get("resources_sha256", "")
+        observed_start_hash = environment.get("UVM_LOCAL_START_RESOURCES_SHA256", "")
+        pending_start_hash = (info.get("local_start_environment_pending_sha256") is not None
+            and not info.get("established") and re.fullmatch(r"[0-9a-f]{64}", observed_start_hash))
+        if (environment.get("UVM_LOCAL_START_IMAGE_ID") != info.get("image_admission", {}).get("id")
+                or (observed_start_hash != expected_start_hash and not pending_start_hash)
+                or any(bool(mounts_by_target.get(target, {}).get("read_only")) != read_only
                     for target, read_only in expected_access.items())
                 or environment.get("UVM_AUTH_MODE") != "local"
                 or environment.get("UVM_OIDC_DEPLOYMENT_MODE") != "local"
@@ -891,15 +977,96 @@ def compose(args, action: str) -> None:
 
 
 def admit_actual_local_container(root: Path, info: dict) -> None:
-    inspected = command("docker", "container", "inspect", f"{info['project']}-volt-1", capture=True)
-    command("docker", "run", "--rm", "-i", "--network", "none", "--read-only", "--cap-drop=ALL",
+    inspected = json.loads(command("docker", "container", "inspect", f"{info['project']}-volt-1", capture=True))
+    volumes = json.loads(command("docker", "volume", "inspect",
+        *(f"{info['project']}_{store}" for store in ("postgres", "media", "state")), capture=True))
+    command("docker", "run", "--rm", "--platform", info["platform"], "-i", "--network", "none", "--read-only", "--cap-drop=ALL",
         "--security-opt=no-new-privileges", "--user", f"{os.getuid()}:{os.getgid()}",
         "--mount", f"type=bind,src={root},dst=/instance,readonly",
         "--entrypoint", "/opt/uvm/venv/bin/python", info["image"], "-m", "uvm.installer.runtime_mounts",
-        "--instance-root", "/instance", "--host-root", str(root), input_data=inspected)
+        "--instance-root", "/instance", "--host-root", str(root), input_data=json.dumps({"containers": inspected, "volumes": volumes}))
+
+
+def start_resource_document(info: dict) -> str:
+    return json.dumps({
+        "containers": json.loads(command("docker", "container", "inspect", f"{info['project']}-volt-1", capture=True)),
+        "volumes": json.loads(command("docker", "volume", "inspect", *(f"{info['project']}_{store}" for store in ("postgres", "media", "state")), capture=True)),
+        "networks": json.loads(command("docker", "network", "inspect", f"{info['project']}_network", capture=True))})
+
+
+def local_host_helper(root: Path, info: dict, operation: str, document: str) -> None:
+    command("docker", "run", "--rm", "--platform", info["platform"], "-i", "--network", "none", "--read-only", "--cap-drop=ALL",
+        "--security-opt=no-new-privileges", "--user", f"{os.getuid()}:{os.getgid()}",
+        "--mount", f"type=bind,src={root},dst=/instance", "--entrypoint", "/opt/uvm/venv/bin/python",
+        info["image"], "-m", "uvm.installer.recovery_authority", operation, "--request-stdin",
+        "--instance-root", "/instance", input_data=document)
+
+
+def bootstrap_acknowledgement(info: dict) -> str:
+    import time
+    name = f"{info['project']}-volt-1"
+    for _ in range(360):
+        result = subprocess.run(("docker", "exec", "--user", "0:0", name, "cat", "/run/uvm-maintenance/applied.json"),
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        if result.returncode == 0 and 0 < len(result.stdout) <= 16384:
+            return result.stdout
+        state = command("docker", "inspect", name, "--format", "{{.State.Status}}", capture=True)
+        if state in {"exited", "dead", "restarting"}:
+            raise SystemExit("bootstrap maintenance exited before exact host acknowledgement; workers remain closed")
+        time.sleep(1)
+    raise SystemExit("bootstrap acknowledgement timed out before workers; inspect owned startup logs")
+
+
+def release_local_start(root: Path, info: dict) -> dict:
+    admit_actual_local_container(root, info)
+    local_host_helper(root, info, "acknowledge", bootstrap_acknowledgement(info))
+    refreshed = load_instance(str(root))[1]
+    record = (root / "secrets/local-start-admission/admission.json").read_text()
+    command("docker", "exec", "-i", "--user", "0:0", f"{info['project']}-volt-1", "/opt/uvm/venv/bin/python",
+        "-m", "uvm.installer.start_admission", "release", input_data=record)
+    wait_until_ready(refreshed)
+    return refreshed
+
+
+def start_local_loaded(root: Path, info: dict) -> None:
+    if info.get("restore_pending") and not info.get("restore_imported"):
+        raise SystemExit("offline restore admission is required before any local runtime starts")
+    admitted = inspect_image(info["image"], "local", info["platform"])
+    if admitted["id"] != info["image_admission"]["id"]:
+        raise SystemExit("selected immutable image changed")
+    check_owned_resources(info, allow_missing=not info.get("established"))
+    closed = not info.get("local_recovery_acknowledgement") or info.get("restore_pending")
+    files, envfile, clean_env = resolved_compose(root, info)
+    info.pop("backup_inventory", None)
+    atomic_private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
+    command("docker", "compose", *files, "--env-file", str(envfile), "-p", info["project"],
+        "create", "--force-recreate", env=clean_env)
+    admit_actual_local_container(root, info)
+    local_host_helper(root, info, "prepare-start", start_resource_document(info))
+    info = load_instance(str(root))[1]
+    files, envfile, clean_env = resolved_compose(root, info)
+    command("docker", "compose", *files, "--env-file", str(envfile), "-p", info["project"],
+        "create", "--force-recreate", env=clean_env)
+    admit_actual_local_container(root, info)
+    local_host_helper(root, info, "prepare-start", start_resource_document(info))
+    command("docker", "compose", *files, "--env-file", str(envfile), "-p", info["project"], "start", env=clean_env)
+    info = release_local_start(root, info)
+    if closed:
+        # The durable disarmed host record is current before any normal ingress.
+        files, envfile, clean_env = resolved_compose(root, info)
+        command("docker", "compose", *files, "--env-file", str(envfile), "-p", info["project"],
+            "create", "--force-recreate", env=clean_env)
+        admit_actual_local_container(root, info)
+        local_host_helper(root, info, "prepare-start", start_resource_document(info))
+        command("docker", "compose", *files, "--env-file", str(envfile), "-p", info["project"], "start", env=clean_env)
+        release_local_start(root, info)
+    print("local start acknowledged; workers and ingress released")
 
 
 def compose_loaded(root: Path, info: dict, action: str) -> None:
+    if action == "up" and info.get("mode") == "local":
+        start_local_loaded(root, info)
+        return
     if action == "up" and info.get("restore_pending") and not info.get("restore_imported"):
         raise SystemExit("offline restore volumes must be imported and admitted with restore-admit before any runtime starts")
     files, envfile, clean_env = resolved_compose(root, info)
@@ -916,35 +1083,13 @@ def compose_loaded(root: Path, info: dict, action: str) -> None:
         check_owned_resources(info, allow_missing=True)
     if action == "up":
         info.pop("backup_inventory", None)
-        private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
-    if action == "up" and info.get("mode") == "local":
-        command("docker", "compose", *files, "--env-file", str(envfile), "-p", info["project"], "create", env=clean_env)
-        admit_actual_local_container(root, info)
-        command("docker", "compose", *files, "--env-file", str(envfile), "-p", info["project"], "start", env=clean_env)
-    else:
-        command("docker", "compose", *files, "--env-file", str(envfile), "-p", info["project"], action,
-                *( ["-d"] if action == "up" else ["--timeout", "600"] if action == "stop" else []),
-                env=clean_env)
+        atomic_private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
+    command("docker", "compose", *files, "--env-file", str(envfile), "-p", info["project"], action,
+            *( ["-d"] if action == "up" else ["--timeout", "600"] if action == "stop" else []), env=clean_env)
     if action == "up":
         check_owned_resources(info, allow_missing=False)
-        if info.get("mode") == "local":
-            admit_actual_local_container(root, info)
         info["established"] = True
-        private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
-        if info.get("mode") == "local":
-            wait_until_ready(info)
-            acknowledgement = json.loads(command("docker", "compose", *files, "--env-file", str(envfile),
-                "-p", info["project"], "exec", "-T", "--user", "0:0", "volt", "cat",
-                "/run/uvm-maintenance/applied.json", capture=True, env=clean_env))
-            command("docker", "run", "--rm", "-i", "--network", "none", "--read-only", "--cap-drop=ALL",
-                "--security-opt=no-new-privileges", "--user", f"{os.getuid()}:{os.getgid()}",
-                "--mount", f"type=bind,src={root},dst=/instance", "--entrypoint", "/opt/uvm/venv/bin/python",
-                info["image"], "-m", "uvm.installer.recovery_authority", "acknowledge", "--request-stdin",
-                "--instance-root", "/instance", input_data=json.dumps(acknowledgement))
-            if info.get("restore_pending"):
-                # Exact durable backend ack permits the normal overlay only now.
-                refreshed = json.loads((root / "instance.json").read_text())
-                compose_loaded(root, refreshed, "up")
+        atomic_private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
     elif action == "stop":
         verify_cold_stop(info)
         print("controlled shutdown verified; cold backup inventory may now be captured")
@@ -993,22 +1138,26 @@ def volume_inventory(info: dict, store: str) -> dict:
     # --mount fails if a volume is missing only after Docker may create it; check
     # explicitly before invoking any helper and verify exact ownership first.
     command("docker", "volume", "inspect", name, capture=True)
-    return json.loads(command("docker", "run", "--rm", "--network", "none", "--read-only",
+    if inspect_image(info['image'], info['mode'], info['platform'])['id'] != info['image_admission']['id']:
+        raise SystemExit('inventory helper image differs from admitted selected platform')
+    return json.loads(command("docker", "run", "--rm", "--platform", info['platform'], "--network", "none", "--read-only",
         "--user", "0:0", "--mount", f"type=volume,src={name},dst=/restore,readonly",
-        "--entrypoint", "/opt/uvm/venv/bin/python", info["image_admission"]["id"],
+        "--entrypoint", "/opt/uvm/venv/bin/python", info["image"],
         "-c", INVENTORY_SCRIPT, capture=True))
 
 
 def record_backup(args) -> None:
     root, info = load_instance(args.directory)
-    check_owned_resources(info, allow_missing=False)
-    verify_cold_stop(info)
-    info["backup_inventory"] = {store: volume_inventory(info, store)
-                                for store in ("postgres", "media", "state")}
-    if not info["backup_inventory"]["postgres"]["postgres_version"]:
-        raise SystemExit("PostgreSQL inventory lacks PG_VERSION")
-    private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
-    print("all three cold store inventories recorded; copy instance metadata with the archives")
+    with exclusive_instance_lock(root):
+        root, info = load_instance(args.directory)
+        check_owned_resources(info, allow_missing=False)
+        verify_cold_stop(info)
+        info["backup_inventory"] = {store: volume_inventory(info, store)
+                                    for store in ("postgres", "media", "state")}
+        if not info["backup_inventory"]["postgres"]["postgres_version"]:
+            raise SystemExit("PostgreSQL inventory lacks PG_VERSION")
+        atomic_private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
+        print("all three cold store inventories recorded; copy instance metadata with the archives")
 
 
 def check_owned_resources(info: dict, *, allow_missing: bool) -> None:
@@ -1028,6 +1177,10 @@ def check_owned_resources(info: dict, *, allow_missing: bool) -> None:
                          f'{{{{index {field} "volt.compose.owner-token"}}}}', capture=True)
         if actual != owner:
             raise SystemExit(f"refusing resource without exact instance owner token: {name}")
+        if kind == "volume":
+            volume = json.loads(command("docker", "volume", "inspect", name, capture=True))[0]
+            if volume.get("Driver") != "local" or volume.get("Options") not in (None, {}):
+                raise SystemExit("owned volume uses unapproved driver options")
 
 
 def check_ports_available(ports) -> None:
@@ -1063,45 +1216,63 @@ def cleanup(args) -> None:
 
 
 def provision_restore(args) -> None:
-    root, info = load_instance(args.directory)
-    if info.get("restore_pending"):
-        raise SystemExit("this instance already has a restore fence; refusing to create another epoch")
-    if check_any_resource(info):
-        raise SystemExit("restore provisioning requires absent project resources on the fresh host")
-    inventory = info.get("backup_inventory", {})
-    if set(inventory) != {"postgres", "media", "state"} or not inventory["postgres"].get("postgres_version"):
-        raise SystemExit("restore provisioning requires the captured cold backup inventory")
-    resolved_compose(root, info)
-    if inspect_image(info["image"], info["mode"], info["platform"])["id"] != info["image_admission"]["id"]:
-        raise SystemExit("restore image differs from captured identity")
-    # Persist the fence before the first resource mutation, including partial failure.
-    info["established"] = False
-    info["restore_pending"] = True
-    info["restore_imported"] = False
-    info["restore_capabilities_revoked"] = False
-    info["restore_sessions_revoked"] = False
-    if info["mode"] == "local":
-        command("docker", "run", "--rm", "--network", "none", "--read-only",
-            "--cap-drop=ALL", "--cap-add=CHOWN", "--cap-add=SETUID", "--cap-add=DAC_OVERRIDE",
-            "--security-opt=no-new-privileges", "--user", "0:0",
-            "--mount", f"type=bind,src={root},dst=/instance",
-            "--entrypoint", "/opt/uvm/venv/bin/python", info["image"],
-            "-m", "uvm.installer.recovery_authority", "advance-fence", "--instance-root", "/instance")
-        info = json.loads((root / "instance.json").read_text())
-    else:
-        atomic_private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
-    labels = ["--label", f"volt.compose.owner-token={info['owner_token']}"]
-    for store in ("postgres", "media", "state"):
-        command("docker", "volume", "create", *labels,
+    root, info = load_instance(args.directory, allow_restore_transition=True)
+    with exclusive_instance_lock(root):
+        root, info = load_instance(args.directory, allow_restore_transition=True)
+        resuming = info.get('restore_pending') is True
+        if resuming and info.get('restore_imported') is not False:
+            raise SystemExit('restore provisioning cannot resume after import admission')
+        if resuming:
+            check_owned_resources(info, allow_missing=True)
+            if subprocess.run(('docker', 'container', 'inspect', f"{info['project']}-volt-1"),
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+                raise SystemExit('restore provisioning cannot resume with a runtime container')
+        elif check_any_resource(info):
+            raise SystemExit("restore provisioning requires absent project resources on the fresh host")
+        inventory = info.get("backup_inventory", {})
+        if set(inventory) != {"postgres", "media", "state"} or not inventory["postgres"].get("postgres_version"):
+            raise SystemExit("restore provisioning requires the captured cold backup inventory")
+        if inspect_image(info["image"], info["mode"], info["platform"])["id"] != info["image_admission"]["id"]:
+            raise SystemExit("restore image differs from captured identity")
+        # Persist the fence before the first resource mutation, including partial failure.
+        info["established"] = False
+        info["restore_pending"] = True
+        info["restore_imported"] = False
+        info["restore_capabilities_revoked"] = False
+        info["restore_sessions_revoked"] = False
+        if info["mode"] == "local" and (not resuming or info.get('restore_fence_transition') is not None):
+            command("docker", "run", "--rm", "--platform", info["platform"], "--network", "none", "--read-only",
+                "--cap-drop=ALL", "--cap-add=CHOWN", "--cap-add=SETUID", "--cap-add=DAC_OVERRIDE",
+                "--security-opt=no-new-privileges", "--user", "0:0",
+                "--mount", f"type=bind,src={root},dst=/instance",
+                "--entrypoint", "/opt/uvm/venv/bin/python", info["image"],
+                "-m", "uvm.installer.recovery_authority", "advance-fence", "--instance-root", "/instance")
+            info = json.loads((root / "instance.json").read_text())
+        elif not resuming:
+            atomic_private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
+        resolved_compose(root, info)
+        labels = ["--label", f"volt.compose.owner-token={info['owner_token']}"]
+        for store in ("postgres", "media", "state"):
+            command("docker", "volume", "create", *labels,
+                    "--label", f"com.docker.compose.project={info['project']}",
+                    "--label", f"com.docker.compose.volume={store}", f"{info['project']}_{store}")
+        network_name = f"{info['project']}_network"
+        network_exists = subprocess.run(('docker', 'network', 'inspect', network_name),
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        if network_exists:
+            network = json.loads(command('docker', 'network', 'inspect', network_name, capture=True))[0]
+            if (network.get('Driver') != 'bridge' or network.get('Internal') is not False
+                    or network.get('IPAM', {}).get('Config') != [{'Subnet': info['subnet'], 'Gateway': info['gateway']}]
+                    or network.get('Containers')):
+                raise SystemExit('pending restore network differs or has attached containers')
+        else:
+            command("docker", "network", "create", "--driver", "bridge", *labels,
                 "--label", f"com.docker.compose.project={info['project']}",
-                "--label", f"com.docker.compose.volume={store}", f"{info['project']}_{store}")
-    command("docker", "network", "create", "--driver", "bridge", *labels,
-            "--label", f"com.docker.compose.project={info['project']}",
-            "--label", "com.docker.compose.network=application",
-            "--subnet", info["subnet"], "--gateway", info["gateway"], f"{info['project']}_network")
-    info["restore_pending"] = True
-    atomic_private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
-    print("empty owned volumes and private network provisioned; no VOLT runtime was started")
+                "--label", "com.docker.compose.network=application",
+                "--subnet", info["subnet"], "--gateway", info["gateway"], f"{info['project']}_network")
+        info["restore_pending"] = True
+        atomic_private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
+        print("empty owned volumes and private network provisioned; no VOLT runtime was started")
 
 
 def check_any_resource(info: dict) -> bool:
@@ -1116,21 +1287,23 @@ def check_any_resource(info: dict) -> bool:
 
 def restore_admit(args) -> None:
     root, info = load_instance(args.directory)
-    if not info.get("restore_pending") or info.get("restore_imported"):
-        raise SystemExit("instance is not awaiting offline volume import")
-    check_owned_resources(info, allow_missing=True)
-    if subprocess.run(("docker", "container", "inspect", f"{info['project']}-volt-1"),
-                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-        raise SystemExit("restore admission requires no runtime container")
-    for store in ("postgres", "media", "state"):
-        actual = volume_inventory(info, store)
-        if actual != info.get("backup_inventory", {}).get(store):
-            raise SystemExit(f"offline {store} import differs from captured inventory")
-    if not info["backup_inventory"]["postgres"].get("postgres_version"):
-        raise SystemExit("restored PostgreSQL lacks PG_VERSION")
-    info["restore_imported"] = True
-    private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
-    print("all three offline imports match captured inventories and PostgreSQL contains PG_VERSION; runtime may now start with ingress closed")
+    with exclusive_instance_lock(root):
+        root, info = load_instance(args.directory)
+        if not info.get("restore_pending") or info.get("restore_imported"):
+            raise SystemExit("instance is not awaiting offline volume import")
+        check_owned_resources(info, allow_missing=True)
+        if subprocess.run(("docker", "container", "inspect", f"{info['project']}-volt-1"),
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+            raise SystemExit("restore admission requires no runtime container")
+        for store in ("postgres", "media", "state"):
+            actual = volume_inventory(info, store)
+            if actual != info.get("backup_inventory", {}).get(store):
+                raise SystemExit(f"offline {store} import differs from captured inventory")
+        if not info["backup_inventory"]["postgres"].get("postgres_version"):
+            raise SystemExit("restored PostgreSQL lacks PG_VERSION")
+        info["restore_imported"] = True
+        atomic_private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
+        print("all three offline imports match captured inventories and PostgreSQL contains PG_VERSION; runtime may now start with ingress closed")
 
 
 def link_subject(args) -> None:
@@ -1288,6 +1461,7 @@ def host_validate(args) -> None:
             or info.get("platform") not in SUPPORTED_PLATFORMS):
         raise SystemExit("instance runtime version or platform is not admitted by this installer")
     print(f"project={info['project']}\nowner_token={info['owner_token']}\nmode={info['mode']}\nplatform={info['platform']}\nhttp_port={info['ports'][0]}"
+          f"\nstart_closed={int(not bool(info.get('local_recovery_acknowledgement')) or bool(info.get('restore_pending')))}"
           f"\nrestore_pending={int(bool(info.get('restore_pending')))}"
           f"\nrestore_imported={int(bool(info.get('restore_imported')))}"
           f"\nrestore_capabilities_revoked={int(bool(info.get('restore_capabilities_revoked')))}"
@@ -1338,6 +1512,10 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--runtime-prepare", action="store_true",
                         help=argparse.SUPPRESS)
     create.add_argument("--admitted-image-id", help=argparse.SUPPRESS)
+    create.add_argument("--admitted-image-id-kind", choices=("config", "selected_manifest"), default="config", help=argparse.SUPPRESS)
+    create.add_argument("--admitted-image-config-id", help=argparse.SUPPRESS)
+    create.add_argument("--admitted-engine-image-id", help=argparse.SUPPRESS)
+    create.add_argument("--admitted-selected-descriptor", help=argparse.SUPPRESS)
     create.add_argument("--admitted-source-revision", help=argparse.SUPPRESS)
     create.add_argument("--admitted-source-snapshot", help=argparse.SUPPRESS)
     create.add_argument("--admitted-version", help=argparse.SUPPRESS)

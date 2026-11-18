@@ -232,6 +232,20 @@ def group_scope_covered(connection, context: AuthorityContext | None, group_ids,
         for required in required_by_group.values()) and set(required_by_group) == set(groups)
 
 
+def configured_service_principals(principals, token):
+    """Existing service-token selector, shared without constructing an OIDC service.
+
+    Returns configured identities only. Callers retain their own current
+    permission checks; this does not grant roles or create an authority context.
+    """
+    if not isinstance(principals,dict) or not isinstance(token,str) or not token.isascii() or len(token)>512:
+        return ()
+    return tuple(name for name,item in principals.items()
+        if isinstance(item,dict) and item.get('actor_kind')=='service'
+        and isinstance(item.get('token'),str) and item['token'].isascii()
+        and hmac.compare_digest(token,item['token']))
+
+
 class OIDCAuth:
     def __init__(self, engine, principals: dict[str, dict[str, Any]]):
         self.engine = engine
@@ -248,10 +262,8 @@ class OIDCAuth:
         self.operator_secret = _secret_value(self.config["operator_secret_file"], "operator")
 
     def _service_context(self, token: str) -> AuthorityContext | None:
-        for name, item in self.principals.items():
-            if (item.get("actor_kind") == "service" and isinstance(item.get("token"), str)
-                    and hmac.compare_digest(token, item["token"])):
-                return self.service_context_for_principal(name)
+        for name in configured_service_principals(self.principals,token):
+            return self.service_context_for_principal(name)
         return None
 
     def service_context_for_principal(self, principal_id: str) -> AuthorityContext | None:

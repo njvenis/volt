@@ -116,7 +116,7 @@ def _cosign_fixture(policy: dict, *args: str) -> str:
 
 
 def verify_platform_configs(runtime: dict, *, reference: str, source_revision: str,
-                            source_snapshot: str, version: str, index_data: bytes, fixture: bool,
+                            source_snapshot: str, version: str, index_data: bytes, fixture: bool, image_output: str | None = None,
                             fetch=None) -> dict[str, str]:
     """Bind both signed platform children to actual immutable manifest/config bytes."""
     from urllib.error import HTTPError
@@ -207,8 +207,24 @@ def verify_platform_configs(runtime: dict, *, reference: str, source_revision: s
                 'application/vnd.oci.image.config.v1+json', 'application/vnd.docker.container.image.v1+json'}:
             raise ValueError('actual platform config media type unsupported')
         configs[platform] = config_digest
-    if configs[runtime['platform']] != runtime['image_id']:
-        raise ValueError('selected Docker config ID differs from signed platform child')
+    selected_config = configs[runtime['platform']]
+    if selected_config != runtime['image_id']:
+        # Docker29's containerd image store reports the manifest/index descriptor
+        # as .Id. Admit only that exact authenticated descriptor, while retaining
+        # the selected config identity separately. Unknown IDs still fail closed.
+        image = json.loads(image_output)[0] if image_output is not None else {}
+        descriptor = image.get('Descriptor') or {}
+        selected_child = runtime['platform_children'][runtime['platform']]
+        expected = descriptors[selected_child] if runtime['image_id'] == selected_child else None
+        if (expected is None or descriptor.get('digest') != runtime['image_id']
+                or any(descriptor.get(key) != expected.get(key) for key in ('digest', 'mediaType', 'size'))
+                or expected.get('mediaType') not in {'application/vnd.oci.image.manifest.v1+json',
+                    'application/vnd.docker.distribution.manifest.v2+json', 'application/vnd.oci.image.index.v1+json',
+                    'application/vnd.docker.distribution.manifest.list.v2+json'}):
+            raise ValueError('selected Docker config/descriptor ID differs from signed platform child')
+    runtime['image_config_id'] = selected_config
+    runtime['image_id_kind'] = 'config' if selected_config == runtime['image_id'] else 'selected_manifest'
+    runtime['selected_descriptor'] = descriptors[runtime['platform_children'][runtime['platform']]]
     return configs
 
 
@@ -256,7 +272,8 @@ def verify(args: argparse.Namespace) -> dict:
         platform=args.platform, bundle_sha256=bundle["bundle_sha256"])
     runtime["platform_configs"] = verify_platform_configs(runtime, reference=args.reference,
         source_revision=args.source_revision, source_snapshot=args.source_snapshot,
-        version=args.version, index_data=args.index.read_bytes(), fixture=FIXTURE_POLICY.is_file())
+        version=args.version, index_data=args.index.read_bytes(), fixture=FIXTURE_POLICY.is_file(),
+        image_output=args.image_inspect.read_text())
     return {"bundle": bundle, "runtime": runtime}
 
 

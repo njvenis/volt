@@ -63,18 +63,29 @@ class PlatformConfigAdmissionTests(unittest.TestCase):
         runtime = {"image_id": image_id, "platform": "linux/amd64", "platform_children": children}
         return records, index, runtime
 
-    def verify(self, records, index, runtime):
+    def verify(self, records, index, runtime, image_output=None):
         return verify_platform_configs(runtime, reference="127.0.0.1:46150/volt@sha256:" + "d" * 64,
             source_revision="a" * 40, source_snapshot="sha256:" + "b" * 64, version="0.1.0-rc.4",
-            index_data=json.dumps(index).encode(), fixture=True, fetch=lambda kind, digest: records[kind, digest])
+            index_data=json.dumps(index).encode(), fixture=True, image_output=image_output, fetch=lambda kind, digest: records[kind, digest])
 
     def test_both_actual_children_admit_and_selected_config_is_bound(self):
         records, index, runtime = self.fixture()
         admitted = self.verify(records, index, runtime)
         self.assertEqual(admitted["linux/amd64"], runtime["image_id"])
         self.assertEqual(set(admitted), {"linux/amd64", "linux/arm64"})
-        with self.assertRaisesRegex(ValueError, "selected Docker config"):
+        with self.assertRaisesRegex(ValueError, "selected Docker config") :
             self.verify(records, index, {**runtime, "image_id": "sha256:" + "0" * 64})
+
+    def test_docker29_descriptor_ids_require_the_exact_authenticated_manifest_or_index(self):
+        records, index, runtime = self.fixture()
+        index["mediaType"] = "application/vnd.oci.image.index.v1+json"
+        child = index["manifests"][0]
+        engine = {**runtime, "image_id": child["digest"]}
+        inspected = json.dumps([{"Id": child["digest"], "Descriptor": child}])
+        result = self.verify(records, index, engine, inspected)
+        self.assertEqual(engine["image_config_id"], result["linux/amd64"])
+        with self.assertRaisesRegex(ValueError, "descriptor ID"):
+            self.verify(records, index, engine, json.dumps([{"Descriptor": {**child, "size": child["size"] + 1}}]))
 
     def test_mixed_source_other_platform_cannot_be_labelled_as_current(self):
         records, index, runtime = self.fixture(arm_source="e" * 40)

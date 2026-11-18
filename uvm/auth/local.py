@@ -649,20 +649,26 @@ class LocalAuth:
             public = {"/api/v1/auth/config", "/api/v1/auth/setup/claim", "/api/v1/auth/local/login",
                 "/api/v1/auth/local/enrol", "/api/v1/auth/local/recovery", "/healthz", "/health"}
             path = request.url.path
+            async def deny(exc):
+                # Middleware sits outside ExceptionMiddleware: use the same
+                # registered canonical formatter as route-raised HTTP errors.
+                response = await app.exception_handlers[HTTPException](request, exc)
+                response.headers["Cache-Control"] = "no-store"
+                return response
             if path.startswith("/api/v1/") and path not in public and path != "/api/v1/auth/session":
                 raw = request.cookies.get(COOKIE_NAME)
                 if raw:
                     write = request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
                     if write:
                         if request.headers.get("origin") != self.config["public_origin"] or not request.headers.get("x-csrf-token"):
-                            return JSONResponse(status_code=403, content={"detail": {"code": "csrf_failed", "message": "Request verification failed"}}, headers={"Cache-Control": "no-store"})
+                            return await deny(HTTPException(403, {"code": "csrf_failed", "message": "Request verification failed"}))
                     try:
                         with self.engine.connect() as c:
                             context = self.resolve_cookie(c, raw, csrf_token=request.headers.get("x-csrf-token") if write else None)
                         request.state.authority_context = context; request.state.raw_session_cookie = raw
                         AUTHORITY_CONTEXT.set(context)
                     except HTTPException as exc:
-                        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers={"Cache-Control": "no-store"})
+                        return await deny(exc)
             response = await call_next(request)
             if path.startswith("/api/v1/auth/"):
                 response.headers["Cache-Control"] = "no-store"; response.headers["Referrer-Policy"] = "no-referrer"

@@ -47,3 +47,8 @@ UI retains frontend/generated schemas/Node companions. Delivery retains image/en
 ## Decisive verification
 
 Actual local HTTP protocol fixture plus PostgreSQL and packaged browser: register→save→secret→test→activate→collect→populated source observations. Assert local-only stages issue no HTTP; two pages/QID grouping/distinct TCP-UDP records/private exact bytes/durable readback. Cover401/403/throttle/TLS-network errors, hostile XML/continuations/redirects, bounds, cross-source access, policy/credential revocation between pages, interrupted finalisation/restart and idempotent replay. Fixture transport is isolated from production origin policy and cannot be selected by ordinary installation configuration. Live Qualys remains separately unverified.
+
+
+## Packaged local protocol qualification
+
+The [qualification-only composition](qualys-packaged-fixture.md) uses an independently signed derived fixture runtime, verified TLS and an isolated fixed-hostname network. It does not add production fixture switches or establish live-provider acceptance.

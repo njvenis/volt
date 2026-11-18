@@ -28,6 +28,7 @@ PATH_POLICY = {
     "authority_directory": "secrets/local-recovery-authority",
     "fence_directory": "secrets/local-restore-fence",
     "journal": "instance.json",
+    "start_directory": "secrets/local-start-admission",
 }
 
 
@@ -275,12 +276,23 @@ def _write_exclusive(path: Path, data: bytes) -> None:
         os.close(descriptor)
 
 
+def _file_identity(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+            info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
 def _private_file(path: Path) -> bytes:
-    info = path.lstat()
-    if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
-            or info.st_uid != os.getuid()):
-        raise ValueError("committed custody file is unsafe")
-    return path.read_bytes()
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_uid != os.getuid() or info.st_size > 1024 * 1024):
+            raise ValueError("committed custody file is unsafe")
+        data = stream.read(1024 * 1024 + 1)
+        current = path.stat(follow_symlinks=False)
+        if _file_identity(info) != _file_identity(os.fstat(stream.fileno())) or _file_identity(current) != _file_identity(info) or len(data) != info.st_size:
+            raise ValueError("committed custody changed during read")
+        return data
 
 
 def _fence_read(directory: Path, owner_uid: int) -> bytes:
@@ -290,13 +302,17 @@ def _fence_read(directory: Path, owner_uid: int) -> bytes:
         if (not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o710
                 or info.st_uid != owner_uid or info.st_gid != RUNTIME_GID):
             raise ValueError("live fence directory custody differs")
-        fd = os.open("fence.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=descriptor)
+        fd = os.open("fence.json", os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=descriptor)
         with os.fdopen(fd, "rb") as stream:
             info = os.fstat(stream.fileno())
             if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o640
                     or info.st_uid != owner_uid or info.st_gid != RUNTIME_GID or info.st_size > MAX_REQUEST):
                 raise ValueError("live fence file custody differs")
-            return stream.read(MAX_REQUEST + 1)
+            data = stream.read(MAX_REQUEST + 1)
+            current = os.stat("fence.json", dir_fd=descriptor, follow_symlinks=False)
+            if _file_identity(info) != _file_identity(os.fstat(stream.fileno())) or _file_identity(current) != _file_identity(info) or len(data) != info.st_size:
+                raise ValueError("live fence changed during read")
+            return data
     finally:
         os.close(descriptor)
 
@@ -311,8 +327,8 @@ def _publish_fence(root: Path, value: dict) -> None:
     temporary = directory / (".fence." + secrets.token_hex(8))
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
-        os.fchown(descriptor, owner, RUNTIME_GID)
         os.fchmod(descriptor, 0o640)
+        os.fchown(descriptor, owner, RUNTIME_GID)
         with os.fdopen(descriptor, "wb", closefd=False) as stream:
             stream.write(_canonical(value) + b"\n")
             stream.flush()
@@ -343,6 +359,11 @@ def advance_fence(args) -> None:
     root = Path(args.instance_root)
     _host_writer(root)
     request = _request_for_instance(root)
+    metadata = json.loads(_private_file(root / "instance.json"), object_pairs_hook=_pairs)
+    if metadata.get("restore_fence_transition") is not None:
+        _resume(root, request, repair_restore=True)
+        print("restore_fence=advanced")
+        return
     _resume(root, request)
     metadata = json.loads(_private_file(root / "instance.json"), object_pairs_hook=_pairs)
     if metadata.get("restore_pending") or set(metadata.get("backup_inventory", {})) != {"postgres", "media", "state"}:
@@ -350,13 +371,106 @@ def advance_fence(args) -> None:
     custody = {**metadata["local_recovery_custody"],
                "restore_generation": metadata["local_recovery_custody"]["restore_generation"] + 1,
                "recovery_epoch_id": str(uuid.uuid4())}
-    _publish_fence(root, custody)
+    # Commit the intended epoch before changing either live projection. A
+    # killed writer can only finish this exact transition, never grant initial.
     metadata.update(established=False, restore_pending=True, restore_imported=False,
                     restore_capabilities_revoked=False, restore_sessions_revoked=False,
-                    local_recovery_custody=custody)
+                    local_start_record_pending=True,
+                    restore_fence_transition={"from": metadata["local_recovery_custody"], "to": custody})
     metadata.pop("local_recovery_acknowledgement", None)
     _commit_metadata(root, metadata)
+    _resume(root, request, repair_restore=True)
     print("restore_fence=advanced")
+
+
+def pending_restore_target(metadata: dict) -> dict | None:
+    transition = metadata.get("restore_fence_transition")
+    if transition is None:
+        return None
+    if (not isinstance(transition, dict) or set(transition) != {"from", "to"}
+            or transition["from"] != metadata["local_recovery_custody"]
+            or metadata.get("established") is not False or metadata.get("restore_pending") is not True
+            or metadata.get("local_recovery_acknowledgement") is not None
+            or metadata.get("local_start_record_pending") is not True
+            or metadata.get("restore_imported") is not False
+            or metadata.get("restore_capabilities_revoked") is not False
+            or metadata.get("restore_sessions_revoked") is not False
+            or set(metadata.get("backup_inventory", {})) != {"postgres", "media", "state"}):
+        raise ValueError("pending restore journal is inconsistent")
+    previous, target = transition["from"], transition["to"]
+    if (not isinstance(target, dict) or set(target) != set(previous)
+            or type(target.get("restore_generation")) is not int
+            or target["restore_generation"] != previous["restore_generation"] + 1
+            or not isinstance(target.get("recovery_epoch_id"), str)
+            or str(uuid.UUID(target["recovery_epoch_id"])) != target["recovery_epoch_id"]
+            or any(target[key] != value for key, value in previous.items()
+                   if key not in {"restore_generation", "recovery_epoch_id"})):
+        raise ValueError("pending restore target differs from next exact epoch")
+    return target
+
+
+def _finish_restore_transition(root: Path, metadata: dict, target: dict) -> None:
+    # Only the durable pending transition permits removing interrupted writer
+    # files. Validate all names/types before any unlink; never follow them.
+    fence = root / PATH_POLICY['fence_directory']
+    _discard_fence_temporaries(fence, root.stat().st_uid)
+    raw_env = _private_file(root / '.env')
+    if hashlib.sha256(raw_env).hexdigest() not in {metadata['env_sha256'], metadata.get('local_start_environment_pending_sha256')}:
+        raise ValueError('restore environment differs from durable journal')
+    lines = [line for line in raw_env.decode().splitlines()
+             if not line.startswith('VOLT_LOCAL_START_RESOURCES_SHA256=')]
+    environment = ('\n'.join([*lines, "VOLT_LOCAL_START_RESOURCES_SHA256=''"]) + '\n').encode()
+    metadata['local_start_environment_pending_sha256'] = hashlib.sha256(environment).hexdigest()
+    _commit_metadata(root, metadata)
+    temporary = root / ('.env.' + secrets.token_hex(8))
+    _write_exclusive(temporary, environment)
+    os.replace(temporary, root / '.env')
+    admission = root / PATH_POLICY["start_directory"] / "admission.json"
+    if admission.exists():
+        admission.unlink()
+        descriptor = os.open(admission.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    for key in ("local_start_admission", "local_start_admission_sha256", "local_start_resources"):
+        metadata.pop(key, None)
+    metadata["local_start_record_pending"] = True
+    _publish_fence(root, target)
+    metadata["local_recovery_custody"] = target
+    metadata.pop("restore_fence_transition")
+    metadata['env_sha256'] = hashlib.sha256(environment).hexdigest()
+    metadata.pop('local_start_environment_pending_sha256', None)
+    _commit_metadata(root, metadata)
+
+
+def _fence_temporary_names(directory: Path, owner: int) -> list[str]:
+    names = []
+    for item in directory.iterdir():
+        if item.name == 'fence.json':
+            continue
+        info = item.lstat()
+        if (len(names) >= 16 or not re.fullmatch(r'\.fence\.[0-9a-f]{16}', item.name)
+                or not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) not in {0o600, 0o640}
+                or info.st_uid not in {0, owner} or info.st_gid not in {0, RUNTIME_GID, directory.parent.stat().st_gid}
+                or info.st_size > MAX_REQUEST + 1):
+            raise ValueError('unexpected interrupted fence writer file')
+        names.append(item.name)
+    return names
+
+
+def _discard_fence_temporaries(directory: Path, owner: int) -> None:
+    names = _fence_temporary_names(directory, owner)
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for name in names:
+            info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError('interrupted fence writer changed type')
+            os.unlink(name, dir_fd=descriptor)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _safe_response(instance_id: str, journal_id: str, issuer_id: str,
@@ -398,6 +512,90 @@ def _commit_metadata(root: Path, metadata: dict) -> None:
         os.close(descriptor)
 
 
+def publish_start_record(root: Path, value: dict) -> None:
+    from uvm.installer.start_admission import validate_record
+    validate_record(value)
+    directory = root / PATH_POLICY["start_directory"]
+    _validate_directory(directory, {"admission.json"} if (directory / "admission.json").exists() else set())
+    temporary = directory / (".admission." + secrets.token_hex(8))
+    _write_exclusive(temporary, _canonical(value) + b"\n")
+    os.replace(temporary, directory / "admission.json")
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def prepare_start(args) -> None:
+    from uvm.installer.runtime_mounts import validate
+    from uvm.installer.start_admission import read_host_record
+    root = Path(args.instance_root)
+    request = _request_for_instance(root)
+    _resume(root, request)
+    metadata = json.loads(_private_file(root / "instance.json"), object_pairs_hook=_pairs)
+    document = _read_document(sys.stdin)
+    if set(document) != {"containers", "volumes", "networks"} or len(document["containers"]) != 1 or len(document["networks"]) != 1:
+        raise ValueError("closed actual start resource inspection required")
+    host_root = metadata.get("host_instance_directory")
+    if not isinstance(host_root, str) or not Path(host_root).is_absolute() or os.path.normpath(host_root) != host_root:
+        raise ValueError("committed host instance directory missing")
+    container = document["containers"][0]
+    validate(root, Path(host_root), metadata, container, document["volumes"])
+    network = document["networks"][0]
+    name = metadata["project"] + "_network"
+    if (network.get("Name") != name or network.get("Driver") != "bridge"
+            or (network.get("Labels") or {}).get("volt.compose.owner-token") != metadata["owner_token"]
+            or container.get("HostConfig", {}).get("NetworkMode") != name
+            or not isinstance(network.get("Id"), str) or not re.fullmatch(r"[0-9a-f]{64}", network["Id"])
+            or network.get("IPAM", {}).get("Config") != [{"Subnet": metadata["subnet"], "Gateway": metadata["gateway"]}]):
+        raise ValueError("actual start network differs from owned instance")
+    attached_id = container['NetworkSettings']['Networks'][name].get('NetworkID')
+    if (attached_id not in ("", network['Id'])
+            or (container.get('State', {}).get('Running') and attached_id != network['Id'])):
+        raise ValueError("actual start attachment names a different network identity")
+    resources = {"schema_version": 1, "image_id": metadata["image_admission"]["id"],
+        "image_id_kind": metadata["image_admission"].get("id_kind", "config"),
+        "project": metadata["project"], "owner_token": metadata["owner_token"],
+        "network": {"name": name, "id": network["Id"], "driver": "bridge", "internal": bool(network.get("Internal")),
+                    "subnet": metadata["subnet"], "gateway": metadata["gateway"]},
+        "volumes": sorted(({"name": volume["Name"], "driver": volume["Driver"], "scope": volume.get("Scope"),
+            "mountpoint": volume["Mountpoint"], "options": {}} for volume in document["volumes"]), key=lambda value: value["name"])}
+    previous_resources = metadata.get("local_start_resources")
+    if previous_resources is not None and resources != previous_resources:
+        raise ValueError("committed actual start resources changed")
+    prior = read_host_record(root, metadata, allow_unprepared=not metadata.get("established"))
+    initial = (metadata.get("established") is False and not metadata.get("local_recovery_acknowledgement")
+        and not metadata.get("restore_pending") and metadata["local_recovery_custody"]["restore_generation"] == 0
+        and (prior is None or prior["initial_preparation"]))
+    custody = metadata["local_recovery_custody"]
+    record = {**custody, "document_type": "local_start_admission", "image_id": metadata["image_admission"]["id"],
+        "resources_sha256": hashlib.sha256(_canonical(resources)).hexdigest(), "initial_preparation": initial}
+    raw_env = _private_file(root / ".env")
+    if hashlib.sha256(raw_env).hexdigest() not in {metadata["env_sha256"], metadata.get("local_start_environment_pending_sha256")}:
+        raise ValueError("committed start environment changed")
+    line = "VOLT_LOCAL_START_RESOURCES_SHA256='" + record["resources_sha256"] + "'"
+    lines = raw_env.decode().splitlines()
+    lines = [value for value in lines if not value.startswith("VOLT_LOCAL_START_RESOURCES_SHA256=")] + [line]
+    environment_bytes = ("\n".join(lines) + "\n").encode()
+    metadata["local_start_environment_pending_sha256"] = hashlib.sha256(environment_bytes).hexdigest()
+    _commit_metadata(root, metadata)
+    temporary = root / (".env." + secrets.token_hex(8))
+    _write_exclusive(temporary, environment_bytes)
+    os.replace(temporary, root / ".env")
+    metadata["env_sha256"] = hashlib.sha256(_private_file(root / ".env")).hexdigest()
+    metadata.pop("local_start_environment_pending_sha256", None)
+    metadata["local_start_resources"] = resources
+    metadata["local_start_admission"] = record
+    metadata["local_start_admission_sha256"] = hashlib.sha256(_canonical(record)).hexdigest()
+    metadata["local_start_record_pending"] = True
+    _commit_metadata(root, metadata)
+    publish_start_record(root, record)
+    metadata["local_start_record_pending"] = False
+    _commit_metadata(root, metadata)
+    print("initial_preparation=" + str(int(initial)))
+
+
 def acknowledge(args) -> None:
     root = Path(args.instance_root)
     request = _request_for_instance(root)
@@ -416,6 +614,16 @@ def acknowledge(args) -> None:
         raise ValueError("backend acknowledgement differs from current host custody")
     if metadata.get("restore_pending") and not metadata.get("restore_imported"):
         raise ValueError("restore has not passed offline import admission")
+    record = metadata.get("local_start_admission")
+    if not isinstance(record, dict):
+        raise ValueError("current actual-resource start admission is required before acknowledgement")
+    if record is not None:
+        # Disarm the live host record durably BEFORE establishment. A crash
+        # here is a permitted forward-only disarm, never fresh permission.
+        record = {**record, "initial_preparation": False}
+        publish_start_record(root, record)
+        metadata["local_start_admission"] = record
+        metadata["local_start_admission_sha256"] = hashlib.sha256(_canonical(record)).hexdigest()
     metadata["local_recovery_acknowledgement"] = acknowledgement
     if metadata.get("restore_pending"):
         if custody["restore_generation"] < 1:
@@ -428,7 +636,22 @@ def acknowledge(args) -> None:
     print("acknowledged=1")
 
 
-def _resume(root: Path, request: dict) -> dict:
+def validate_acknowledgement(metadata: dict, custody: dict) -> None:
+    if metadata.get("restore_pending"):
+        return
+    if not metadata.get("established") and custody["restore_generation"] == 0:
+        return
+    ack = metadata.get("local_recovery_acknowledgement")
+    if (not isinstance(ack, dict) or any(type(ack.get(key)) is not type(value) or ack.get(key) != value
+            for key, value in custody.items())
+            or ack.get("operation") != "apply-local-restore-fence"
+            or ack.get("status") not in {"applied", "already_applied"}
+            or any(type(ack.get(key)) is not int or ack[key] < 0
+                for key in ("revoked_sessions", "revoked_capabilities", "quarantined_connectors"))):
+        raise ValueError("established instance lacks exact backend custody acknowledgement")
+
+
+def _resume(root: Path, request: dict, *, repair_restore: bool = False) -> dict:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
@@ -436,7 +659,10 @@ def _resume(root: Path, request: dict) -> dict:
         ("runtime_directory", "authority_directory", "fence_directory"))
     _validate_directory(runtime, {"issuer.key", "issuer.pub", "operator.pub", "material.key"})
     _validate_directory(authority, {"operator.key", "operator.pub", "issuer.pub", "host.json"})
-    if {item.name for item in fence.iterdir()} != {"fence.json"}:
+    metadata = json.loads(_private_file(root / "instance.json"), object_pairs_hook=_pairs)
+    if repair_restore and metadata.get('restore_fence_transition') is not None:
+        _fence_temporary_names(fence, root.stat().st_uid)
+    elif {item.name for item in fence.iterdir()} != {"fence.json"}:
         raise ValueError("live fence directory inventory differs")
     issuer_seed = _private_file(runtime / "issuer.key")
     operator_seed = _private_file(authority / "operator.key")
@@ -463,7 +689,6 @@ def _resume(root: Path, request: dict) -> dict:
         object_pairs_hook=_pairs, parse_float=_no_float, parse_constant=_no_float)
     fence_value = json.loads(_fence_read(fence, root.stat().st_uid),
         object_pairs_hook=_pairs, parse_float=_no_float, parse_constant=_no_float)
-    metadata = json.loads(_private_file(root / "instance.json"), object_pairs_hook=_pairs)
     tuple_value = metadata.get("local_recovery_custody") if isinstance(metadata, dict) else None
     if (not isinstance(tuple_value, dict)
             or set(tuple_value) != {"schema_version", "profile", "installation_id", "journal_id",
@@ -479,11 +704,14 @@ def _resume(root: Path, request: dict) -> dict:
         "installation_id": request["installation_id"], "journal_id": request["journal_id"],
         "restore_generation": tuple_value["restore_generation"],
         "recovery_epoch_id": tuple_value["recovery_epoch_id"]}
+    pending_target = pending_restore_target(metadata)
+    if pending_target is not None and not repair_restore:
+        raise ValueError("pending restore requires the locked host restore writer")
     if (not isinstance(metadata, dict)
             or metadata.get("installation_id") != request["installation_id"]
             or metadata.get("local_recovery_journal_id") != request["journal_id"]
             or tuple_value != expected_tuple
-            or fence_value != expected_tuple
+            or (fence_value != expected_tuple and (pending_target is None or fence_value != pending_target))
             or api_config.get("installation_id") != request["installation_id"]
             or api_config.get("profile") != PROFILE
             or host_config.get("installation_id") != request["installation_id"]
@@ -519,6 +747,15 @@ def _resume(root: Path, request: dict) -> dict:
         raise ValueError("committed closed configuration differs from admitted policy")
     if metadata.get("local_recovery_inventory") != custody_inventory(root):
         raise ValueError("committed custody fingerprints changed")
+    if pending_target is not None:
+        _finish_restore_transition(root, metadata, pending_target)
+        expected_tuple = pending_target
+        tuple_value = pending_target
+    from uvm.installer.start_admission import read_host_record
+    read_host_record(root, metadata, allow_unprepared=(not metadata.get("established")
+        and (metadata.get("restore_pending") or metadata.get("local_start_admission") is None
+             or metadata.get("local_start_record_pending"))))
+    validate_acknowledgement(metadata, expected_tuple)
     return _safe_response(request["installation_id"], request["journal_id"],
                           issuer_id, operator_id, issuer_public, operator_public,
                           restore_generation=tuple_value["restore_generation"],
@@ -552,6 +789,7 @@ def prepare(args) -> None:
     runtime = root / PATH_POLICY["runtime_directory"]
     authority = root / PATH_POLICY["authority_directory"]
     fence = root / PATH_POLICY["fence_directory"]
+    start_directory = root / PATH_POLICY["start_directory"]
     created = []
     try:
         present = [directory.exists() or directory.is_symlink()
@@ -564,13 +802,13 @@ def prepare(args) -> None:
             return
         if "local_recovery_custody" in metadata:
             raise ValueError("custody journal exists but committed key directories are missing")
-        for directory in (runtime, authority, fence):
+        for directory in (runtime, authority, fence, start_directory):
             directory.mkdir(mode=0o700)
-            if os.geteuid() == 0:
-                os.chown(directory, os.getuid(), -1)
             if directory == fence:
-                os.chown(directory, os.getuid(), RUNTIME_GID)
                 directory.chmod(0o710)
+                os.chown(directory, os.getuid(), RUNTIME_GID)
+            elif os.geteuid() == 0:
+                os.chown(directory, os.getuid(), -1)
             created.append(directory)
         issuer_seed, operator_seed, material_key = (secrets.token_bytes(32) for _ in range(3))
         issuer_private = Ed25519PrivateKey.from_private_bytes(issuer_seed)
@@ -612,7 +850,7 @@ def prepare(args) -> None:
         for path, data in values:
             _write_exclusive(path, data)
         _publish_fence(root, tuple_value)
-        for directory in (runtime, authority, fence, root / "secrets", root):
+        for directory in (runtime, authority, fence, start_directory, root / "secrets", root):
             directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
             try:
                 os.fsync(directory_fd)
@@ -747,6 +985,9 @@ def main() -> None:
     summary_parser = subparsers.add_parser("summarize-import")
     summary_parser.add_argument("--request-stdin", action="store_true", required=True)
     summary_parser.add_argument("--source", required=True)
+    start_parser = subparsers.add_parser("prepare-start")
+    start_parser.add_argument("--request-stdin", action="store_true", required=True)
+    start_parser.add_argument("--instance-root", required=True)
     advance_parser = subparsers.add_parser("advance-fence")
     advance_parser.add_argument("--instance-root", required=True)
     ack_parser = subparsers.add_parser("acknowledge")
@@ -754,7 +995,9 @@ def main() -> None:
     ack_parser.add_argument("--instance-root", required=True)
     args = parser.parse_args()
     try:
-        if args.operation == "advance-fence":
+        if args.operation == "prepare-start":
+            prepare_start(args)
+        elif args.operation == "advance-fence":
             advance_fence(args)
         elif args.operation == "acknowledge":
             acknowledge(args)

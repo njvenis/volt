@@ -31,7 +31,12 @@ services:
       - postgres:/var/lib/postgresql/data
       - media:/app/media
       - state:/opt/uvm/state
-      - ${VOLT_INSTANCE_DIR:?run setup first}/oidc.json:/etc/volt/oidc.json:ro
+      - type: bind
+        source: ${VOLT_INSTANCE_DIR:?run setup first}/oidc.json
+        target: /etc/volt/oidc.json
+        read_only: true
+        bind:
+          create_host_path: false
     secrets:
       - uvm_db_password
       - ce_db_password

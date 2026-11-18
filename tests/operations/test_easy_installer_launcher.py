@@ -21,7 +21,7 @@ class EasyInstallerLauncherTests(unittest.TestCase):
         self.assertLess(source.index("--bundle-only"), source.index('tar -xzf "$BUNDLE"'))
         self.assertNotIn('"$IMAGE_REF" -m uvm.installer.admission', source)
         self.assertLess(source.index("graph-admission.json"), source.index('tar -xzf "$BUNDLE"'))
-        self.assertLess(source.index("--runtime-prepare"), source.index('locked_compose create'))
+        self.assertLess(source.index("--runtime-prepare"), source.index('  start_local_instance\n'))
         self.assertLess(source.index("verify_actual_mounts"), source.index('locked_compose start'))
         self.assertIn("--network none --read-only --cap-drop=ALL", source)
         self.assertLess(source.index("remote Docker contexts are unsupported"), source.index('docker pull "$VERIFIER_IMAGE"'))
@@ -60,10 +60,10 @@ class EasyInstallerLauncherTests(unittest.TestCase):
     def test_launcher_restore_fence_fails_before_start_and_uses_closed_ingress_overlay(self):
         source = (ROOT / "deploy/compose/launcher.sh").read_text()
         start = source.split('elif [ "$ACTION" = start ]; then', 1)[1].split('elif [ "$ACTION" = stop ]; then', 1)[0]
-        self.assertLess(start.index('RESTORE_IMPORTED'), start.index('locked_compose create'))
-        self.assertLess(start.index('verify_actual_mounts'), start.index('locked_compose start'))
-        self.assertLess(start.index('acknowledge_start'), start.index('read_instance'))
-        self.assertLess(start.index('read_instance'), start.rindex('locked_compose create'))
+        self.assertLess(start.index('RESTORE_IMPORTED'), start.index('start_local_instance'))
+        release = source.split('release_start() {', 1)[1].split('\n}', 1)[0]
+        self.assertLess(release.index('recovery_helper acknowledge'), release.index('start_admission release'))
+        self.assertLess(release.index('start_admission release'), release.index('wait_healthy'))
         self.assertIn('local-restore.yaml', source.split('locked_compose() {', 1)[1].split('\n}', 1)[0])
         for field in ("restore_pending", "restore_imported", "restore_capabilities_revoked", "restore_sessions_revoked"):
             self.assertIn(f"{field})", source)
@@ -80,7 +80,10 @@ class EasyInstallerLauncherTests(unittest.TestCase):
         install = source.split('if [ "$ACTION" = install ]; then', 1)[1].split('elif [ "$ACTION" = start ]; then', 1)[0]
         start = source.split('elif [ "$ACTION" = start ]; then', 1)[1].split('elif [ "$ACTION" = stop ]; then', 1)[0]
         for action in (install, start):
-            self.assertLess(action.index("verify_actual_mounts"), action.index("locked_compose start"))
+            self.assertIn("start_local_instance", action)
+        prepared = source.split("prepare_start_container() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("verify_actual_mounts", prepared)
+        self.assertIn("recovery_helper prepare-start", prepared)
 
     def test_operator_approval_wrapper_streams_proofs_through_networkless_isolated_helper(self):
         source = (ROOT / "deploy/compose/launcher.sh").read_text()

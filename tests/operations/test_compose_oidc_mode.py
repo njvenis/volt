@@ -68,7 +68,7 @@ class ExternalOIDCModeTests(unittest.TestCase):
         self.assertIn("/package/compose/okta-publisher.yaml",compose_files(external))
         external["okta_publisher_config_sha256"] = None
         self.assertNotIn("/package/compose/okta-publisher.yaml",compose_files(external))
-        local = {"mode":"local", "compose_directory":"/package/compose"}
+        local = {"mode":"local", "compose_directory":"/package/compose", "local_recovery_acknowledgement":{"status":"applied"}}
         self.assertEqual(compose_files(local),["-f","/package/compose/compose.yaml","-f","/package/compose/local.yaml"])
         restoring = {**local, "restore_pending":True, "restore_imported":True}
         self.assertEqual(compose_files(restoring)[-2:], ["-f","/package/compose/local-restore.yaml"])
@@ -174,7 +174,8 @@ class ExternalOIDCModeTests(unittest.TestCase):
                     host_instance_directory=unsafe)
 
     def test_capability_delivery_parser_extracts_only_matching_versioned_purpose(self):
-        token = "A" * 43
+        from uvm.auth.local import _new_capability
+        token = _new_capability("setup", "fixture-install", None, 1, 0)[2]
         document = json.dumps({"schema_version":1, "purpose":"setup", "capability":token,
             "expires_in_seconds":1800}).encode()
         self.assertEqual(capability_from_delivery(document, "prepare-setup"), token)
@@ -220,6 +221,7 @@ class ExternalOIDCModeTests(unittest.TestCase):
             (root/"secrets"/"local-auth-key").write_bytes(b"k"*32)
             (root/"secrets"/"local-auth-key").chmod(0o600)
             (root/"secrets"/"bootstrap-delivery").mkdir(mode=0o700)
+            (root/"secrets"/"local-start-admission").mkdir(mode=0o700)
             journal_id=str(uuid.uuid4())
             recovery={"schema_version":1,"profile":"volt_local_recovery_v1",
                 "installation_id":installation,"journal_id":journal_id,
@@ -288,11 +290,12 @@ class ExternalOIDCModeTests(unittest.TestCase):
             envfile.write_text("\n".join(compose_env_line(name,value) for name,value in values.items())+"\n")
             info = {"mode":"local", "project":"volt-delivery-config-test",
                 "owner_token":"owner-fixture", "image":values["VOLT_IMAGE"],
+                "image_admission":{"id":values["VOLT_IMAGE_ID"]},
                 "platform":"linux/amd64", "compose_directory":str(Path(__file__).resolve().parents[2] / "deploy/compose"),
                 "env_sha256":hashlib.sha256(envfile.read_bytes()).hexdigest(),
                 "okta_publisher_config_sha256":None}
             files, resolved_env, _ = resolved_compose(root, info)
-            self.assertEqual(files[-2:], ["-f",str(Path(__file__).resolve().parents[2] / "deploy/compose/local.yaml")])
+            self.assertEqual(files[-2:], ["-f",str(Path(__file__).resolve().parents[2] / "deploy/compose/local-restore.yaml")])
             self.assertEqual(resolved_env, envfile)
             result = subprocess.run(("docker", "compose", "-f", str(Path(__file__).resolve().parents[2] / "deploy/compose/compose.yaml"),
                 "-f", str(Path(__file__).resolve().parents[2] / "deploy/compose/local.yaml"),

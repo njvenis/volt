@@ -35,6 +35,8 @@ def render_bootstrap(*, version: str, signer: str, issuer: str, verifier_image: 
     # independently pinned verifier accepts the exact launcher blob.
     return "\n".join((
         "set -eu",
+        "bootstrap_platform=$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')",
+        'case "$bootstrap_platform" in linux/amd64|linux/arm64) ;; *) echo "Unsupported native Docker platform" >&2; exit 1 ;; esac',
         'verify_dir=$(mktemp -d "${TMPDIR:-/tmp}/volt-launcher.XXXXXX")',
         'trap \'rm -rf "$verify_dir"\' 0 HUP INT TERM',
         'cat ./launcher.sh > "$verify_dir/launcher.sh"',
@@ -43,18 +45,18 @@ def render_bootstrap(*, version: str, signer: str, issuer: str, verifier_image: 
         'cat ./installer.bundle.sigstore.json > "$verify_dir/installer.bundle.sigstore.json"',
         'chmod 0400 "$verify_dir/launcher.sh" "$verify_dir/launcher.sigstore.json" '
         '"$verify_dir/installer.bundle.tar.gz" "$verify_dir/installer.bundle.sigstore.json"',
-        'docker run --rm --read-only --cap-drop=ALL '
+        'docker run --platform "$bootstrap_platform" --rm --read-only --user "$(id -u):$(id -g)" --cap-drop=ALL '
         '--security-opt=no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=16m '
         '--env HOME=/tmp '
         '--mount "type=bind,src=$verify_dir,dst=/package,readonly" '
         f'{COSIGN_IMAGE} verify-blob --bundle /package/launcher.sigstore.json '
         f'--certificate-identity {signer} --certificate-oidc-issuer {issuer} '
         f'/package/launcher.sh',
-        'docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges '
+        'docker run --platform "$bootstrap_platform" --rm --read-only --user "$(id -u):$(id -g)" --cap-drop=ALL --security-opt=no-new-privileges '
         '--tmpfs /tmp:rw,noexec,nosuid,size=16m --env HOME=/tmp '
         f'{COSIGN_IMAGE} verify --certificate-identity {signer} '
         f'--certificate-oidc-issuer {issuer} {verifier_image}',
-        'docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges '
+        'docker run --platform "$bootstrap_platform" --rm --read-only --user "$(id -u):$(id -g)" --cap-drop=ALL --security-opt=no-new-privileges '
         '--tmpfs /tmp:rw,noexec,nosuid,size=16m --env HOME=/tmp '
         f'{COSIGN_IMAGE} verify-attestation --type https://slsa.dev/provenance/v1 '
         f'--certificate-identity {signer} --certificate-oidc-issuer {issuer} {verifier_image}',

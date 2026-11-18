@@ -119,3 +119,67 @@ before recreating with normal ingress. No count, status or tuple is inferred
 from ordinary readiness. `advance-fence` is the fixed root helper used by
 restore-provision: it increments generation, creates a new epoch and publishes
 only a correctly owned/mapped fence before committing the pending journal.
+
+## Initial start admission and bootstrap release
+
+The start directory is the fixed path-policy member
+`start_directory=secrets/local-start-admission`. It is stable, host-owned0700;
+only `admission.json` is durably present, host-owned0600. Its sole API mount is
+read-only `/run/volt-start-admission`. The record is exactly the closed schema
+in the adopted `local-start-admission.md`; no environment boolean authorizes
+initialization. `UVM_LOCAL_START_IMAGE_ID` and
+`UVM_LOCAL_START_RESOURCES_SHA256` carry only independently admitted expected
+immutable identities, and must exactly match the protected record.
+
+`prepare-start --request-stdin --instance-root /instance` accepts the closed
+actual inspection object with members `containers` (one API inspect object),
+`volumes` (three owned named-volume inspect objects), and `networks` (one owned
+bridge inspect object). It checks exact image/owner/mounts, empty local-volume
+driver options, network identity and IPAM. Its canonical resource projection is:
+
+```
+{schema_version:1,image_id,image_id_kind,project,owner_token,
+ network:{name,id,driver:"bridge",internal,subnet,gateway},
+ volumes:[{name,driver:"local",scope,mountpoint,options:{}}]}
+```
+
+Volumes sort by name; all other values come from the validated instance and
+actual resource inspection. The hash is lowercase SHA256 of canonical sorted
+compact JSON. It excludes timestamps, transient container IDs, health and
+process state. Typed image identity and actual selected-child evidence are
+retained separately in image admission; an index alone is not selected-platform
+proof. Journal fields are `host_instance_directory`, `local_start_resources`,
+`local_start_admission`, `local_start_admission_sha256`, and
+`local_start_record_pending`, and `local_start_environment_pending_sha256`.
+The final environment hash is durably pinned before its atomic replacement;
+only that exact planned hash may reconcile a crash forwards. The resource projection cannot change on normal
+resume. Explicit offline restore invalidates it before admission of new owned
+resources; the new epoch is never initial preparation.
+
+Initial true is possible only for the independently unestablished, unacknowledged
+generation0/null journal. Resource/record creation is journalled as pending,
+then atomically published and fsynced, then committed complete. A missing
+configured record fails closed. A durable true-to-false disarm published just
+before a crash may reconcile forward; it can never become true again.
+
+Both host start paths first create the container with unpublished ingress,
+validate actual mounts/resources, prepare the record and expected hash, and
+recreate with those fixed inputs before starting. The root entrypoint consumes
+initial permission once per container before any PostgreSQL initialization;
+automatic retries with a stale initial record fail closed. Only a controlled
+host-locked recreation may retry still-unacknowledged preparation. Disarmed
+starts never run the local installation constructor, initialize a missing
+profile, or issue setup; the existing-only backend apply operation validates
+identity/profile before migrations.
+
+Bootstrap migrations and fixed recovery maintenance produce their exact safe
+acknowledgement at `/run/uvm-maintenance/applied.json` before normal API/workers
+and without waiting for health. The host validates it, durably publishes
+`initial_preparation=false` BEFORE journal establishment, records the exact
+acknowledgement, then invokes the root-only fixed
+`python -m uvm.installer.start_admission release` via protected stdin. It accepts
+only the current disarmed record and retains it in a root0600 in-container
+release file. The entrypoint's bounded release wait requires both the current
+live disarm and that exact host release before workers start. No health-to-ack
+cycle or user-held plan is used. Initial/recovery ingress is published only
+through subsequent configured recreation and renewed admission/release.

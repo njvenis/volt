@@ -43,11 +43,6 @@ RUN set -eu; case "$TARGETARCH" in amd64) musl_arch=x86_64;; arm64) musl_arch=aa
 
 FROM ${CE_IMAGE} AS runtime
 ARG TARGETARCH
-ARG VOLT_OIDC_DEPLOYMENT_MODES=demo,external,local
-ARG VOLT_SOURCE_SNAPSHOT=unspecified
-LABEL org.volt.oidc-deployment-modes=${VOLT_OIDC_DEPLOYMENT_MODES} \
-      org.volt.compose.source-snapshot=${VOLT_SOURCE_SNAPSHOT} \
-      org.volt.compose-install.contract=1
 USER root
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN python3 - <<'PY'
@@ -88,7 +83,7 @@ RUN set -eu; \
     export DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none; \
     apt-get update -qq; \
     mkdir -p /tmp/os-packages; cd /tmp/os-packages; \
-    packages=''; expected_delta=''; \
+    packages=''; expected_delta=''; verified_debs=(); \
     dpkg-query -W -f='${Package}=${Version}\n' | sort > /tmp/g7-packages-before; \
     while IFS='=|' read -r key version digest; do \
       arch=''; case "$key" in *:amd64) arch=amd64 ;; *:arm64) arch=arm64 ;; esac; \
@@ -104,9 +99,10 @@ RUN set -eu; \
       deb=$(find . -maxdepth 1 -type f -name "${package%%:*}_*.deb" -print -quit); \
       test -n "$deb"; \
       printf '%s  %s\n' "$digest" "$deb" | sha256sum -c -; \
+      verified_debs+=("$deb"); \
       packages="$packages $package=$version"; \
     done < <(grep -E '^os_(delta_)?package_' /tmp/uvm-g7-versions.lock); \
-    apt-get install -yqq --no-install-recommends $packages; \
+    apt-get install -yqq --no-install-recommends "${verified_debs[@]}"; \
     for entry in $packages; do expected=${entry#*=}; package=${entry%%=*}; \
       actual=$(dpkg-query -W -f='${Version}' "$package"); test "$actual" = "$expected"; \
     done; \
@@ -198,6 +194,11 @@ for path in (Path('/usr/local/bin/pip'), Path('/usr/local/bin/pip3'), Path('/usr
 if pip.exists() or list(site.glob('pip-*.dist-info')):
     raise SystemExit('pip remains in final runtime')
 PY
+ARG VOLT_OIDC_DEPLOYMENT_MODES=demo,external,local
+ARG VOLT_SOURCE_SNAPSHOT=unspecified
+LABEL org.volt.oidc-deployment-modes=${VOLT_OIDC_DEPLOYMENT_MODES} \
+      org.volt.compose.source-snapshot=${VOLT_SOURCE_SNAPSHOT} \
+      org.volt.compose-install.contract=1
 ENV PATH=/opt/uvm/venv/bin:$PATH \
     PYTHONPATH=/opt/uvm/app \
     PGDATA=/var/lib/postgresql/data \

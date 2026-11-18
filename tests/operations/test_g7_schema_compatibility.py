@@ -17,6 +17,13 @@ class SchemaCompatibilityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_heads(declared_head="0066", heads=["0066"], mode="normal")
 
+    def test_only_empty_current_local_installation_may_resume_before_first_migration(self):
+        validate_heads(declared_head="0067", heads=[], mode="normal", empty_local_installation=True)
+        for head, heads, mode in (("0067", ["0066"], "normal"), ("0067", [], "upgrade-verification"),
+                                  ("0062", [], "normal")):
+            with self.subTest(head=head, heads=heads, mode=mode), self.assertRaises(ValueError):
+                validate_heads(declared_head=head, heads=heads, mode=mode, empty_local_installation=True)
+
     def test_declared_head_matches_the_single_alembic_graph_head(self):
         from alembic.config import Config
         from alembic.script import ScriptDirectory

@@ -516,6 +516,57 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 install_auth(app)
 
+    def test_public_local_denials_share_canonical_session_deployment_and_csrf_errors(self):
+        from datetime import datetime,timedelta,timezone
+        from uvm.persistence.auth_schema import local_sessions
+        correlation=str(uuid.uuid4())
+        def canonical(response,status,code,*,cached=False):
+            self.assertEqual(response.status_code,status,response.text)
+            body=response.json()
+            self.assertEqual(set(body),{'schema_version','error'})
+            self.assertEqual(body['schema_version'],1)
+            self.assertEqual(set(body['error']),{'code','message','correlation_id','details'})
+            self.assertEqual(body['error']['code'],code)
+            self.assertEqual(body['error']['correlation_id'],correlation)
+            self.assertIsInstance(body['error']['details'],dict)
+            self.assertNotIn('detail',body)
+            if cached:self.assertEqual(response.headers.get('cache-control'),'no-store')
+        # Setup-open and setup-closed anonymous paths must use the same wire.
+        headers={'X-Correlation-ID':correlation}
+        for path in ('/api/v1/auth/session','/api/v1/deployment'):
+            canonical(self.client.get(path,headers=headers),401,'authentication_required')
+        self._local_admin()
+        csrf_denied=self.client.post('/api/v1/auth/local/logout',headers=headers)
+        canonical(csrf_denied,403,'csrf_failed',cached=True)
+        # A captured cookie remains present after its durable session expires.
+        with self.engine.begin() as c:
+            c.execute(local_sessions.update().values(expires_at=datetime.now(timezone.utc)-timedelta(seconds=1)))
+        self.assertTrue(self.client.cookies.get('uvm_session'))
+        for path in ('/api/v1/auth/session','/api/v1/deployment'):
+            canonical(self.client.get(path,headers=headers),401,'authentication_required',cached=True)
+        malformed=self.client.get('/api/v1/deployment',headers={'X-Correlation-ID':'invalid'})
+        self.assertEqual(str(uuid.UUID(malformed.json()['error']['correlation_id'])),malformed.json()['error']['correlation_id'])
+        self.client.cookies.clear()
+        for path in ('/api/v1/auth/session','/api/v1/deployment'):
+            canonical(self.client.get(path,headers=headers),401,'authentication_required')
+
+    def test_local_middleware_preserves_canonical_exception_headers_and_details(self):
+        from fastapi import HTTPException
+        self._local_admin()
+        correlation=str(uuid.uuid4())
+        # Isolated transport failure injection checks headers, not permission.
+        for status,code in ((401,'authentication_required'),(429,'authentication_throttled')):
+            failure=HTTPException(status,{'code':code,'message':'Request denied','details':{'retryable':True}},
+                headers={'Retry-After':'17','WWW-Authenticate':'Bearer'})
+            with patch.object(self.app.state.oidc_auth,'resolve_cookie',side_effect=failure):
+                response=self.client.get('/api/v1/deployment',headers={'X-Correlation-ID':correlation})
+            self.assertEqual(response.status_code,status,response.text)
+            self.assertEqual(response.json(),{'schema_version':1,'error':{'code':code,
+                'message':'Request denied','correlation_id':correlation,'details':{'retryable':True}}})
+            self.assertEqual(response.headers['retry-after'],'17')
+            self.assertEqual(response.headers['www-authenticate'],'Bearer')
+            self.assertEqual(response.headers['cache-control'],'no-store')
+
     def test_non_admin_cannot_read_deployment_inventory(self):
         self._local_admin()
         from uvm.auth.maintenance import run as maintain
@@ -1149,6 +1200,280 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
                 self.assertEqual(called,[])
             finally:
                 key.write_bytes(original);key.chmod(0o600)
+
+    def _configured_control_host(self):
+        """Actual app/PG authority, isolated registry/signing fixture, no TLS claim."""
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import Encoding,PublicFormat
+        from uvm.api.app import create_app
+        _,csrf=self._local_admin()
+        self.control_token=secrets.token_urlsafe(32)
+        self.control_principal='configured-host-controller'
+        self.control_deployment=self.installation_id
+        self.control_signer=Ed25519PrivateKey.generate()
+        public=Path(self.temp.name)/'host-control-public.pem'
+        public.write_bytes(self.control_signer.public_key().public_bytes(Encoding.PEM,PublicFormat.SubjectPublicKeyInfo));public.chmod(0o600)
+        self.control_registry=Path(self.temp.name)/'host-control-registry.json'
+        self.control_registry_entries=[{'deployment_id':self.control_deployment,'label':'Isolated host-control fixture',
+            'host_principal_id':self.control_principal,'verification_key_file':str(public)}]
+        self.control_registry.write_text(json.dumps(self.control_registry_entries));self.control_registry.chmod(0o600)
+        self.control_principals={self.control_principal:{'token':self.control_token,'actor_kind':'service','scopes':[],
+            'origin':'configured-host-controller'}}
+        self.app.state.principals.update(self.control_principals)
+        os.environ.update({'UVM_G7_RECOVERY_CONTROL_ONLY':'1','UVM_G7_VERIFICATION_ONLY':'1',
+            'UVM_G7_RECOVERY_CONTROL_PORT':'8002','UVM_OBSERVER_DEPLOYMENT_REGISTRY_FILE':str(self.control_registry),
+            'UVM_G7_HOST_KEY_ID':'configured-host-key','UVM_G7_CONTROLLER_INSTANCE_ID':str(uuid.uuid4()),
+            'UVM_G7_INITIAL_MAXIMUM_FUTURE_SKEW_SECONDS':'30'})
+        control=create_app(self.engine,principals=self.control_principals,cursor_secret=secrets.token_bytes(32))
+        @control.middleware('http')
+        async def uvicorn_server_scope(request,call_next):
+            # This Starlette TestClient emits a list; actual Uvicorn supplies
+            # the tuple consumed by the existing listener fence. No TLS claim.
+            request.scope['server']=tuple(request.scope['server'])
+            return await call_next(request)
+        return control,csrf
+
+    def test_local_control_cookie_less_configured_host_read_and_signed_policy_write(self):
+        from datetime import datetime,timedelta,timezone
+        import base64
+        from uvm.auth.local import LocalAuth
+        from uvm.operations.backup_host import canonical_json,digest
+        control,_=self._configured_control_host()
+        self.assertIsInstance(control.state.oidc_auth,LocalAuth)
+        url=f'/recovery-control/v1/{self.control_deployment}'
+        headers={'Authorization':'Bearer '+self.control_token}
+        with TestClient(control,base_url='http://127.0.0.1:8002',client=('127.0.0.1',52189)) as client:
+            desired=client.get(url+'/desired',headers=headers)
+            self.assertEqual(desired.status_code,200,desired.text)
+            self.assertEqual(desired.json()['deployment_id'],self.control_deployment)
+            self.assertEqual(len(client.cookies),0)
+            policy={'revision':1,'bounds':{
+                'interval_seconds':{'min':60,'max':3600},'timeout_seconds':{'min':1,'max':1800},
+                'maximum_backup_age_seconds':{'min':60,'max':86400},
+                'restore_verification_timeout_seconds':{'min':1,'max':3600}},
+                'archive_target_refs':['owned-archive'],'recovery_profile_refs':['owned-profile'],
+                'maximum_report_age_seconds':300,'maximum_future_skew_seconds':30}
+            policy['digest']='sha256:'+digest(policy)
+            now=datetime.now(timezone.utc)
+            stamp=lambda value:value.isoformat().replace('+00:00','Z')
+            report={'schema_version':1,'deployment_id':self.control_deployment,'report_id':str(uuid.uuid4()),
+                'sequence':1,'controller_instance_id':os.environ['UVM_G7_CONTROLLER_INSTANCE_ID'],
+                'report_kind':'policy','host_policy':policy,'desired':None,'settings_application':None,
+                'completed_archive':None,'freshness':None,'restore_verification':None,'recovery_epoch':None,
+                'observed_at':stamp(now),'fresh_until':stamp(now+timedelta(seconds=300))}
+            report['signature']={'algorithm':'Ed25519','key_id':'configured-host-key',
+                'value':base64.urlsafe_b64encode(self.control_signer.sign(canonical_json(report))).decode().rstrip('=')}
+            accepted=client.post(url+'/reports',json=report,headers=headers)
+            self.assertEqual(accepted.status_code,200,accepted.text)
+            self.assertEqual(client.get(url+'/desired',headers=headers).json()['revisions']['host_policy'],1)
+            self.assertEqual(len(client.cookies),0)
+            original_fence=json.loads(self.recovery_fence_path.read_text())
+            try:
+                self._replace_recovery_fence({**original_fence,'restore_generation':1,'recovery_epoch_id':str(uuid.uuid4())})
+                pending=client.get(url+'/desired',headers=headers)
+                self.assertEqual(pending.status_code,200,pending.text)
+                with self.engine.connect() as c:
+                    self.assertEqual(c.exec_driver_sql('select applied_restore_generation from local_recovery_installation').scalar_one(),0)
+            finally:self._replace_recovery_fence(original_fence)
+        with self.engine.connect() as c:
+            self.assertEqual(c.exec_driver_sql('select count(*) from local_accounts').scalar_one(),1)
+            self.assertEqual(c.exec_driver_sql('select count(*) from local_sessions').scalar_one(),1)
+            self.assertEqual(c.exec_driver_sql('select installation_id from local_auth_installation').scalar_one(),self.installation_id)
+            self.assertEqual(c.exec_driver_sql('select count(*) from local_recovery_installation').scalar_one(),1)
+            self.assertEqual(c.exec_driver_sql('select count(*) from g7_backup_host_records').scalar_one(),1)
+
+    def test_local_control_rechecks_registry_actor_token_and_current_policy(self):
+        import copy
+        from uvm.assessment.policy_lock import lock_policy
+        from uvm.persistence.assessment_schema import assessment_policy
+        control,_=self._configured_control_host()
+        url=f'/recovery-control/v1/{self.control_deployment}/desired'
+        headers={'Authorization':'Bearer '+self.control_token}
+        with TestClient(control,base_url='http://127.0.0.1:8002',client=('127.0.0.1',52191)) as client:
+            self.assertEqual(client.get(url,headers=headers).status_code,200)
+            for header in ({},{'Authorization':'Basic ignored'},{'Authorization':'Bearer wrong'},
+                    {'Authorization':'Bearer '},{'Authorization':'Bearer '+'x'*513}):
+                denied=client.get(url,headers=header);self.assertEqual(denied.status_code,401,denied.text)
+            client.cookies.set('uvm_session',self.client.cookies.get('uvm_session'),domain='127.0.0.1',path='/')
+            self.assertEqual(client.get(url).status_code,401)
+            configured=dict(self.control_principals)
+            self.control_principals.clear()
+            self.assertEqual(client.get(url,headers=headers).status_code,401)
+            self.control_principals.update(configured)
+            self.control_principals[self.control_principal]['actor_kind']='principal'
+            self.assertEqual(client.get(url,headers=headers).status_code,401)
+            self.control_principals[self.control_principal]['actor_kind']='service'
+            self.control_principals[self.control_principal]['enabled']=False
+            self.assertEqual(client.get(url,headers=headers).status_code,403)
+            self.control_principals[self.control_principal].pop('enabled')
+            self.control_principals['ambiguous-service']={**self.control_principals[self.control_principal]}
+            self.assertEqual(client.get(url,headers=headers).status_code,401)
+            self.control_principals.pop('ambiguous-service')
+            for entries in ([],[self.control_registry_entries[0],{**self.control_registry_entries[0],'deployment_id':'second-deployment'}]):
+                self.control_registry.write_text(json.dumps(entries))
+                self.assertEqual(client.get(url,headers=headers).status_code,403)
+            self.control_registry.write_text('invalid JSON')
+            self.assertEqual(client.get(url,headers=headers).status_code,503)
+            self.control_registry.write_text(json.dumps(self.control_registry_entries))
+            with self.engine.connect() as c:original=c.execute(sa.select(assessment_policy.c.document)).scalar_one()
+            for disabled in (True,False):
+                document=copy.deepcopy(original)
+                if disabled:document.setdefault('principals',{})[self.control_principal]={'enabled':False}
+                else:document.setdefault('denies',[]).append({'principal_id':self.control_principal,
+                    'actions':['*'],'target_ids':[self.control_deployment]})
+                try:
+                    with self.engine.begin() as c:
+                        lock_policy(c);c.execute(assessment_policy.update().where(assessment_policy.c.policy_id==1).values(document=document))
+                    denied=client.get(url,headers=headers);self.assertEqual(denied.status_code,403,denied.text)
+                finally:
+                    with self.engine.begin() as c:
+                        lock_policy(c);c.execute(assessment_policy.update().where(assessment_policy.c.policy_id==1).values(document=original))
+            self.assertEqual(client.get(url,headers=headers).status_code,200)
+            self.assertEqual(client.get('/recovery-control/v1/another-deployment/desired',headers=headers).status_code,404)
+
+    def test_local_control_gate_cannot_be_selected_by_main_bearer_cookie_or_headers(self):
+        control,_=self._configured_control_host()
+        headers={'Authorization':'Bearer '+self.control_token}
+        with TestClient(self.app,base_url='http://127.0.0.1:8000',client=('127.0.0.1',52193)) as main:
+            target=f'/api/v1/operations/observer-settings/{self.control_deployment}/host/desired'
+            denied=main.get(target,headers=headers);self.assertEqual(denied.status_code,401,denied.text)
+            spoof={**headers,'Host':'127.0.0.1:8002','X-Forwarded-Proto':'https','X-Forwarded-Port':'8002',
+                'X-SSL-Client-Verify':'SUCCESS'}
+            response=main.get(f'/recovery-control/v1/{self.control_deployment}/desired',headers=spoof)
+            self.assertEqual(response.status_code,404,response.text)
+        with TestClient(control,base_url='http://127.0.0.1:8000',client=('127.0.0.1',52195)) as wrong_port:
+            response=wrong_port.get(f'/recovery-control/v1/{self.control_deployment}/desired',headers=spoof)
+            self.assertEqual(response.status_code,404,response.text)
+        with TestClient(control,base_url='http://127.0.0.1:8002',client=('127.0.0.1',52197)) as listener:
+            self.assertEqual(listener.get('/api/v1/deployment',headers=headers).status_code,404)
+        with self.engine.begin() as c:
+            from uvm.persistence.local_recovery_schema import local_recovery_installation
+            c.execute(local_recovery_installation.delete())
+        with TestClient(control,base_url='http://127.0.0.1:8002',client=('127.0.0.1',52199)) as listener:
+            denied=listener.get(f'/recovery-control/v1/{self.control_deployment}/desired',headers=headers)
+            self.assertEqual(denied.status_code,503,denied.text)
+
+    def test_control_factory_configuration_and_existing_service_selector(self):
+        from uvm.api.app import create_app
+        from uvm.auth.service import configured_service_principals
+        for values in ({'UVM_G7_RECOVERY_CONTROL_ONLY':'1','UVM_G7_VERIFICATION_ONLY':'0'},
+                {'UVM_G7_RECOVERY_CONTROL_ONLY':'invalid'},
+                {'UVM_G7_RECOVERY_CONTROL_ONLY':'1','UVM_G7_VERIFICATION_ONLY':'1','UVM_G7_RECOVERY_CONTROL_PORT':'0'},
+                {'UVM_G7_RECOVERY_CONTROL_ONLY':'1','UVM_G7_VERIFICATION_ONLY':'1','UVM_G7_RECOVERY_CONTROL_PORT':'65536'},
+                {'UVM_G7_RECOVERY_CONTROL_ONLY':'1','UVM_G7_VERIFICATION_ONLY':'1','UVM_G7_RECOVERY_CONTROL_PORT':'not-a-port'}):
+            with patch.dict(os.environ,values):
+                with self.assertRaises(RuntimeError):create_app(self.engine,principals={},cursor_secret=secrets.token_bytes(32))
+        token=secrets.token_urlsafe(24)
+        principals={'first':{'actor_kind':'service','token':token},'human':{'actor_kind':'principal','token':token},
+            'second':{'actor_kind':'service','token':token}}
+        self.assertEqual(configured_service_principals(principals,token),('first','second'))
+        self.assertEqual(configured_service_principals(principals,'wrong'),())
+        self.assertEqual(configured_service_principals(principals,'x'*513),())
+        self.assertEqual(configured_service_principals(principals,'non-ascii-\u00e9'),())
+        # Exercise the existing OIDC caller too, using its real context builder
+        # and current PG policy revision, without constructing a new OIDC service.
+        from uvm.auth.service import OIDCAuth
+        self._local_admin()  # Supported public claim creates the current policy.
+        legacy=OIDCAuth.__new__(OIDCAuth)
+        legacy.engine=self.engine;legacy.principals=principals;legacy.config={'mapping_revision':7}
+        context=legacy._service_context(token)
+        self.assertEqual(context.principal_id,'first')
+        self.assertEqual(context.credential_mode,'service_bearer')
+        self.assertEqual(context.mapping_revision,7)
+        with self.engine.connect() as connection:
+            from uvm.persistence.assessment_schema import assessment_policy
+            current=connection.execute(sa.select(assessment_policy.c.revision)).scalar_one()
+        self.assertEqual(context.policy_revision,current)
+        self.assertIsNone(legacy._service_context('wrong'))
+
+    def test_live_fence_exact_custody_modes_owner_group_type_and_private_boundary(self):
+        """Privileged OWNED fixture metadata only; not non-root Docker proof."""
+        _,csrf=self._local_admin()
+        _,receipt=self._registered_scanner(csrf,'live-fence-validation')
+        ids=receipt['result']['allocated_ids'];path=self.recovery_fence_path;directory=path.parent
+        original=json.loads(path.read_text());owner=os.geteuid()
+        def read():return self.client.get(f"/api/v1/scanners/{ids['connector_id']}",params={'source_id':ids['source_id']})
+        self.assertEqual(read().status_code,200)
+        cases=[('file0600',lambda:path.chmod(0o600)),('file0660',lambda:path.chmod(0o660)),
+            ('file0644',lambda:path.chmod(0o644)),('directory0700',lambda:directory.chmod(0o700)),
+            ('directory0750',lambda:directory.chmod(0o750)),('directory0730',lambda:directory.chmod(0o730)),
+            ('file-group',lambda:os.chown(path,-1,1801)),('directory-group',lambda:os.chown(directory,-1,1801)),
+            ('file-owner',lambda:os.chown(path,owner+1,1800)),('directory-owner',lambda:os.chown(directory,owner+1,1800))]
+        for name,mutate in cases:
+            with self.subTest(case=name):
+                try:
+                    mutate();response=read();self.assertEqual(response.status_code,503,response.text)
+                finally:
+                    os.chown(directory,owner,1800);directory.chmod(0o710)
+                    self._replace_recovery_fence(original)
+        for kind in ('symlink','directory','fifo'):
+            with self.subTest(kind=kind):
+                path.unlink()
+                if kind=='symlink':path.symlink_to(self.config_path)
+                elif kind=='directory':path.mkdir(mode=0o640)
+                else:os.mkfifo(path,mode=0o640)
+                if kind!='symlink':os.chown(path,owner,1800)
+                try:
+                    response=read();self.assertEqual(response.status_code,503,response.text)
+                finally:
+                    if path.is_symlink() or not path.is_dir():path.unlink()
+                    else:path.rmdir()
+                    self._replace_recovery_fence(original)
+        config_path=self.recovery_config_path;config=json.loads(config_path.read_text())
+        for custody in ({'owner_uid':True,'runtime_gid':1800},{'owner_uid':owner,'runtime_gid':True},
+                {'owner_uid':owner,'runtime_gid':1801},{'owner_uid':owner},
+                {'owner_uid':owner,'runtime_gid':1800,'extra':True}):
+            try:
+                config_path.write_text(json.dumps({**config,'restore_fence_custody':custody}))
+                response=read();self.assertEqual(response.status_code,503,response.text)
+            finally:config_path.write_text(json.dumps(config))
+        # A matching new file+config owner is still a changed persisted contract,
+        # never an inferred authority or automatic binding backfill.
+        try:
+            config_path.write_text(json.dumps({**config,'restore_fence_custody':{'owner_uid':owner+1,'runtime_gid':1800}}))
+            os.chown(directory,owner+1,1800);os.chown(path,owner+1,1800)
+            response=read();self.assertEqual(response.status_code,503,response.text)
+        finally:
+            os.chown(directory,owner,1800);directory.chmod(0o710)
+            config_path.write_text(json.dumps(config));self._replace_recovery_fence(original)
+        key=Path(config['issuer_private_key_file'])
+        try:
+            key.chmod(0o640)
+            response=read();self.assertEqual(response.status_code,503,response.text)
+        finally:key.chmod(0o600)
+        self.assertEqual(config_path.stat().st_mode & 0o777,0o600)
+        self.assertEqual(read().status_code,200)
+
+    def test_live_fence_reopens_atomic_replacement_and_removal_without_copy_or_backfill(self):
+        from uvm.connectors.local_recovery import load_authority
+        _,csrf=self._local_admin()
+        _,receipt=self._registered_scanner(csrf,'live-fence-reopen')
+        ids=receipt['result']['allocated_ids'];path=self.recovery_fence_path
+        original=json.loads(path.read_text());before=path.stat().st_ino
+        def read():return self.client.get(f"/api/v1/scanners/{ids['connector_id']}",params={'source_id':ids['source_id']})
+        self.assertEqual(read().status_code,200)
+        changed={**original,'restore_generation':1,'recovery_epoch_id':str(uuid.uuid4())}
+        try:
+            self._replace_recovery_fence(changed)
+            self.assertNotEqual(path.stat().st_ino,before)
+            self.assertEqual(load_authority().fence,changed)
+            response=read();self.assertEqual(response.status_code,503,response.text)
+            path.unlink()
+            response=read();self.assertEqual(response.status_code,503,response.text)
+        finally:self._replace_recovery_fence(original)
+        self.assertEqual(load_authority().fence,original)
+        self.assertEqual(read().status_code,200)
+        saved=path.parent.with_name('saved-live-fence')
+        path.parent.rename(saved);path.parent.symlink_to(saved,target_is_directory=True)
+        try:
+            response=read();self.assertEqual(response.status_code,503,response.text)
+        finally:
+            path.parent.unlink();saved.rename(path.parent)
+        try:
+            path.write_bytes(b' ' * 16_385)
+            response=read();self.assertEqual(response.status_code,503,response.text)
+        finally:self._replace_recovery_fence(original)
+        self.assertEqual(read().status_code,200)
 
     def _replace_recovery_fence(self,document):
         """Owned disposable fixture only; not the delivery host producer."""

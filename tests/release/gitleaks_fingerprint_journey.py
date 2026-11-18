@@ -74,8 +74,6 @@ def main() -> int:
         run("unbare", ["git", "config", "core.bare", "false"], cwd=snapshot)
         run("checkout", ["git", "checkout", "--force", "--detach", revision], cwd=snapshot)
         run("captured-refs", ["git", "show-ref"], cwd=snapshot)
-        empty = private / "empty-ignore"
-        empty.mkdir()
 
         def scan(label, checkout, mode, expected, *, control=False):
             report = evidence / f"{label}.json"
@@ -85,10 +83,17 @@ def main() -> int:
                     "--redact=100", "--report-format", "json", "--report-path", f"/evidence/{report.name}"]
             if mode == "git":
                 argv.append("--log-opts=--all")
+            ignore = checkout / ".gitleaksignore"
+            retained_ignore = ignore.read_bytes() if control else None
             if control:
-                # Empty private directory removes only the disposition for the control.
-                argv.extend(["--gitleaks-ignore-path", "/evidence/" + empty.relative_to(evidence).as_posix()])
-            run(label, argv, expected=expected)
+                # Explicitly remove the disposition only in this disposable
+                # checkout; an empty override path may retain auto-discovery.
+                ignore.unlink()
+            try:
+                run(label, argv, expected=expected)
+            finally:
+                if retained_ignore is not None:
+                    ignore.write_bytes(retained_ignore)
             raw = report.read_text()
             if any(value in raw for value in forbidden_values):
                 report.write_text("[]\n")

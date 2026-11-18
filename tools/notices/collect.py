@@ -476,12 +476,38 @@ def admit_pinned_source_image(source_ref: str, source_id: str, platform: str = "
     if not isinstance(rows, list) or len(rows) != 1:
         raise ValueError("Docker did not resolve exactly one pinned source image")
     info = rows[0]
+    selected_from_index = f"{info.get('Os')}/{info.get('Architecture')}" != platform
+    if selected_from_index:
+        # A multi-platform containerd store can inspect the host's default
+        # child even after pulling another platform. Select the exact child.
+        run(["docker", "pull", f"--platform={platform}", source_ref])
+        rows = json.loads(run(["docker", "image", "inspect", "--platform", platform, source_ref]))
+        if not isinstance(rows, list) or len(rows) != 1:
+            raise ValueError("Docker did not resolve exactly one platform-selected source image")
+        info = rows[0]
     if f"{info.get('Os')}/{info.get('Architecture')}" != platform:
         raise ValueError(f"expected pinned source {platform}, found {info.get('Os')}/{info.get('Architecture')}")
     if f"{repository}@{source_id}" not in (info.get("RepoDigests") or []):
         raise ValueError("resolved source image RepoDigests do not contain the pinned repository digest")
     if not IMAGE_RE.fullmatch(info.get("Id", "")):
         raise ValueError("Docker returned no immutable local source image ID")
+    if selected_from_index and info.get("Descriptor"):
+        descriptor = info["Descriptor"]
+        child_digest = descriptor.get("digest", "")
+        child_platform = descriptor.get("platform", {})
+        if (descriptor.get("mediaType") not in {"application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json"}
+                or not IMAGE_RE.fullmatch(child_digest) or child_digest != info["Id"]
+                or f"{child_platform.get('os')}/{child_platform.get('architecture')}" != platform):
+            raise ValueError("platform-selected source descriptor identity differs")
+        # Some stores expose this immutable child through --platform but do not
+        # address it by ID until its descriptor has its own local pull record.
+        child_ref = f"{repository}@{child_digest}"
+        run(["docker", "pull", f"--platform={platform}", child_ref])
+        children = json.loads(run(["docker", "image", "inspect", child_ref]))
+        if (not isinstance(children, list) or len(children) != 1 or children[0].get("Id") != info["Id"]
+                or f"{children[0].get('Os')}/{children[0].get('Architecture')}" != platform
+                or child_ref not in (children[0].get("RepoDigests") or [])):
+            raise ValueError("materialised source child differs from the pinned index selection")
     return {**info, "RegistryReference": source_ref, "RegistryDigest": source_id, "LocalImageId": info["Id"], "Platform": platform}
 
 
@@ -561,9 +587,11 @@ def extract_notice_files(image: str, dest: Path, cleanup_log: list[dict] | None 
         remove_owned_export_container(cid, mounts, cleanup_log, cleanup_record_path)
 
 
-def docker_export_file_hashes(image: str, paths: dict[str, str], cleanup_log: list[dict], cleanup_record_path: Path | None = None) -> dict[str, dict]:
+def docker_export_file_hashes(image: str, paths: dict[str, str], cleanup_log: list[dict], cleanup_record_path: Path | None = None, *, platform: str | None = None) -> dict[str, dict]:
     """Hash selected source-image paths, following in-image symlinks, and remove only our export container/volumes."""
-    cid = run(["docker", "create", image]).strip()
+    if platform is not None and platform not in SUPPORTED_PLATFORMS:
+        raise ValueError("unsupported source export platform")
+    cid = run(["docker", "create", *(["--platform", platform] if platform else []), image]).strip()
     if not cid:
         raise ValueError("docker create returned no container ID for source evidence")
     mounts = []
@@ -670,7 +698,7 @@ def main() -> int:
         "/usr/lib/libcrypto.so.3": "/opt/valkey/lib/libcrypto.so.3",
     }
     source_paths = {key.replace("x86_64", SUPPORTED_PLATFORMS[args.platform]): value.replace("x86_64", SUPPORTED_PLATFORMS[args.platform]) for key, value in source_paths.items()}
-    source_file_hashes = docker_export_file_hashes(source_image_id, source_paths, docker_cleanup, cleanup_record_path)
+    source_file_hashes = docker_export_file_hashes(source_image_id, source_paths, docker_cleanup, cleanup_record_path, platform=args.platform)
     target_file_hashes = {"/" + x["path"]: x for x in image_files if x.get("kind") == "copied-runtime-binary"}
     for target_path, source_row in source_file_hashes.items():
         target_row = target_file_hashes.get(target_path)

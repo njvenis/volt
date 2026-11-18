@@ -6147,6 +6147,2869 @@
         ]
       }
     },
+    "/api/v1/scanners/{connector_id}": {
+      "get": {
+        "operationId": "view_api_v1_scanners__connector_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connector_id",
+            "required": true,
+            "schema": {
+              "title": "Connector Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "account_label": {
+                      "title": "Account Label",
+                      "type": "string"
+                    },
+                    "active_configuration_revision": {
+                      "anyOf": [
+                        {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Active Configuration Revision"
+                    },
+                    "collection_mode": {
+                      "const": "manual",
+                      "title": "Collection Mode",
+                      "type": "string"
+                    },
+                    "collection_recency": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "as_of": {
+                          "title": "As Of",
+                          "type": "string"
+                        },
+                        "last_complete_at": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "title": "Last Complete At"
+                        },
+                        "status": {
+                          "enum": [
+                            "never",
+                            "recent",
+                            "stale"
+                          ],
+                          "title": "Status",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "as_of",
+                        "last_complete_at"
+                      ],
+                      "title": "CollectionRecencyView",
+                      "type": "object"
+                    },
+                    "configuration_revision": {
+                      "minimum": 0,
+                      "title": "Configuration Revision",
+                      "type": "integer"
+                    },
+                    "connector_id": {
+                      "title": "Connector Id",
+                      "type": "string"
+                    },
+                    "credential": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "revision": {
+                          "minimum": 0,
+                          "title": "Revision",
+                          "type": "integer"
+                        },
+                        "secret_id": {
+                          "title": "Secret Id",
+                          "type": "string"
+                        },
+                        "state": {
+                          "enum": [
+                            "unconfigured",
+                            "inactive",
+                            "active",
+                            "revoked",
+                            "quarantined"
+                          ],
+                          "title": "State",
+                          "type": "string"
+                        },
+                        "version_id": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "title": "Version Id"
+                        }
+                      },
+                      "required": [
+                        "secret_id",
+                        "version_id",
+                        "state",
+                        "revision"
+                      ],
+                      "title": "CredentialView",
+                      "type": "object"
+                    },
+                    "display_name": {
+                      "title": "Display Name",
+                      "type": "string"
+                    },
+                    "environment_label": {
+                      "title": "Environment Label",
+                      "type": "string"
+                    },
+                    "expected_revisions": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "authority": {
+                          "minimum": 0,
+                          "title": "Authority",
+                          "type": "integer"
+                        },
+                        "connector": {
+                          "minimum": 0,
+                          "title": "Connector",
+                          "type": "integer"
+                        },
+                        "identity_membership": {
+                          "minimum": 0,
+                          "title": "Identity Membership",
+                          "type": "integer"
+                        },
+                        "owners": {
+                          "minimum": 0,
+                          "title": "Owners",
+                          "type": "integer"
+                        },
+                        "policy": {
+                          "minimum": 0,
+                          "title": "Policy",
+                          "type": "integer"
+                        },
+                        "secret": {
+                          "type": "null"
+                        },
+                        "secret_source": {
+                          "minimum": 0,
+                          "title": "Secret Source",
+                          "type": "integer"
+                        },
+                        "source": {
+                          "minimum": 0,
+                          "title": "Source",
+                          "type": "integer"
+                        },
+                        "target": {
+                          "minimum": 0,
+                          "title": "Target",
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "target",
+                        "policy",
+                        "identity_membership",
+                        "owners",
+                        "authority",
+                        "connector",
+                        "source",
+                        "secret_source",
+                        "secret"
+                      ],
+                      "title": "ExpectedRevisions",
+                      "type": "object"
+                    },
+                    "latest_attempt_run_id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Latest Attempt Run Id"
+                    },
+                    "latest_complete_run_id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Latest Complete Run Id"
+                    },
+                    "lifecycle": {
+                      "enum": [
+                        "disabled",
+                        "staged",
+                        "active"
+                      ],
+                      "title": "Lifecycle",
+                      "type": "string"
+                    },
+                    "limits": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "max_attempts_per_page": {
+                          "default": 3,
+                          "minimum": 0,
+                          "title": "Max Attempts Per Page",
+                          "type": "integer"
+                        },
+                        "max_detections": {
+                          "default": 100000,
+                          "minimum": 0,
+                          "title": "Max Detections",
+                          "type": "integer"
+                        },
+                        "max_operation_bytes": {
+                          "default": 52428800,
+                          "minimum": 0,
+                          "title": "Max Operation Bytes",
+                          "type": "integer"
+                        },
+                        "max_page_bytes": {
+                          "default": 10485760,
+                          "minimum": 0,
+                          "title": "Max Page Bytes",
+                          "type": "integer"
+                        },
+                        "max_pages": {
+                          "default": 10,
+                          "minimum": 0,
+                          "title": "Max Pages",
+                          "type": "integer"
+                        },
+                        "overall_deadline_seconds": {
+                          "default": 120,
+                          "minimum": 0,
+                          "title": "Overall Deadline Seconds",
+                          "type": "integer"
+                        },
+                        "request_timeout_seconds": {
+                          "default": 30,
+                          "minimum": 0,
+                          "title": "Request Timeout Seconds",
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "max_pages",
+                        "max_page_bytes",
+                        "max_operation_bytes",
+                        "max_detections",
+                        "overall_deadline_seconds",
+                        "request_timeout_seconds",
+                        "max_attempts_per_page"
+                      ],
+                      "title": "ScannerLimitsView",
+                      "type": "object"
+                    },
+                    "platform_id": {
+                      "title": "Platform Id",
+                      "type": "string"
+                    },
+                    "product": {
+                      "const": "qualys_vm",
+                      "title": "Product",
+                      "type": "string"
+                    },
+                    "schedule_supported": {
+                      "const": false,
+                      "title": "Schedule Supported",
+                      "type": "boolean"
+                    },
+                    "schema_version": {
+                      "const": 1,
+                      "minimum": 0,
+                      "title": "Schema Version",
+                      "type": "integer"
+                    },
+                    "scope": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "account_visible",
+                          "title": "Kind",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ],
+                      "title": "ScannerScopeView",
+                      "type": "object"
+                    },
+                    "source_id": {
+                      "title": "Source Id",
+                      "type": "string"
+                    },
+                    "source_tuple": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "scope_key": {
+                          "title": "Scope Key",
+                          "type": "string"
+                        },
+                        "source_account_id": {
+                          "title": "Source Account Id",
+                          "type": "string"
+                        },
+                        "source_family": {
+                          "const": "qualys",
+                          "title": "Source Family",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "source_family",
+                        "source_account_id",
+                        "scope_key"
+                      ],
+                      "title": "SourceTupleView",
+                      "type": "object"
+                    },
+                    "validation": {
+                      "anyOf": [
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "checked_at": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ],
+                              "title": "Checked At"
+                            },
+                            "configuration_revision": {
+                              "anyOf": [
+                                {
+                                  "minimum": 0,
+                                  "type": "integer"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ],
+                              "title": "Configuration Revision"
+                            },
+                            "credential_version_id": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ],
+                              "title": "Credential Version Id"
+                            },
+                            "error_code": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ],
+                              "title": "Error Code"
+                            },
+                            "operation_id": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ],
+                              "title": "Operation Id"
+                            },
+                            "status": {
+                              "enum": [
+                                "unverified",
+                                "succeeded",
+                                "failed"
+                              ],
+                              "title": "Status",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "status",
+                            "checked_at",
+                            "configuration_revision",
+                            "credential_version_id",
+                            "operation_id",
+                            "error_code"
+                          ],
+                          "title": "ValidationView",
+                          "type": "object"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "schema_version",
+                    "connector_id",
+                    "source_id",
+                    "source_tuple",
+                    "display_name",
+                    "account_label",
+                    "environment_label",
+                    "product",
+                    "platform_id",
+                    "scope",
+                    "lifecycle",
+                    "configuration_revision",
+                    "active_configuration_revision",
+                    "credential",
+                    "expected_revisions",
+                    "validation",
+                    "limits",
+                    "collection_mode",
+                    "schedule_supported",
+                    "latest_attempt_run_id",
+                    "latest_complete_run_id",
+                    "collection_recency"
+                  ],
+                  "title": "ScannerView",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Current source configuration"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "View",
+        "x-uvm-auth-modes": [
+          "local"
+        ]
+      }
+    },
+    "/api/v1/scanners/{connector_id}/commands": {
+      "post": {
+        "operationId": "command_api_v1_scanners__connector_id__commands_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connector_id",
+            "required": true,
+            "schema": {
+              "title": "Connector Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "action": {
+                        "const": "scanner.configuration.save",
+                        "title": "Action",
+                        "type": "string"
+                      },
+                      "command_id": {
+                        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                        "title": "Command Id",
+                        "type": "string"
+                      },
+                      "expected_revisions": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "authority": {
+                            "minimum": 0,
+                            "title": "Authority",
+                            "type": "integer"
+                          },
+                          "connector": {
+                            "minimum": 0,
+                            "title": "Connector",
+                            "type": "integer"
+                          },
+                          "identity_membership": {
+                            "minimum": 0,
+                            "title": "Identity Membership",
+                            "type": "integer"
+                          },
+                          "owners": {
+                            "minimum": 0,
+                            "title": "Owners",
+                            "type": "integer"
+                          },
+                          "policy": {
+                            "minimum": 0,
+                            "title": "Policy",
+                            "type": "integer"
+                          },
+                          "secret": {
+                            "title": "Secret",
+                            "type": "null"
+                          },
+                          "secret_source": {
+                            "minimum": 0,
+                            "title": "Secret Source",
+                            "type": "integer"
+                          },
+                          "source": {
+                            "minimum": 0,
+                            "title": "Source",
+                            "type": "integer"
+                          },
+                          "target": {
+                            "minimum": 0,
+                            "title": "Target",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "target",
+                          "policy",
+                          "identity_membership",
+                          "owners",
+                          "authority",
+                          "connector",
+                          "source",
+                          "secret_source",
+                          "secret"
+                        ],
+                        "title": "RevisionVector",
+                        "type": "object"
+                      },
+                      "membership_ids": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "maxItems": 0,
+                        "title": "Membership Ids",
+                        "type": "array"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "evidence_ref": {
+                            "maxLength": 2048,
+                            "minLength": 1,
+                            "pattern": "\\S",
+                            "title": "Evidence Ref",
+                            "type": "string"
+                          },
+                          "rationale": {
+                            "maxLength": 2048,
+                            "minLength": 1,
+                            "pattern": "\\S",
+                            "title": "Rationale",
+                            "type": "string"
+                          },
+                          "settings": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "api_version": {
+                                "const": "2.0",
+                                "title": "Api Version",
+                                "type": "string"
+                              },
+                              "collection_mode": {
+                                "const": "manual",
+                                "title": "Collection Mode",
+                                "type": "string"
+                              },
+                              "platform_id": {
+                                "enum": [
+                                  "us1",
+                                  "us2",
+                                  "us3",
+                                  "eu1",
+                                  "eu2",
+                                  "in1"
+                                ],
+                                "title": "Platform Id",
+                                "type": "string"
+                              },
+                              "product": {
+                                "const": "qualys_vm",
+                                "title": "Product",
+                                "type": "string"
+                              },
+                              "scope": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "account_visible",
+                                    "title": "Kind",
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "kind"
+                                ],
+                                "title": "AccountVisibleScope",
+                                "type": "object"
+                              }
+                            },
+                            "required": [
+                              "product",
+                              "api_version",
+                              "platform_id",
+                              "scope",
+                              "collection_mode"
+                            ],
+                            "title": "QualysSettings",
+                            "type": "object"
+                          },
+                          "source_id": {
+                            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                            "title": "Source Id",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "source_id",
+                          "rationale",
+                          "evidence_ref",
+                          "settings"
+                        ],
+                        "title": "SavePayload",
+                        "type": "object"
+                      },
+                      "schema_version": {
+                        "maximum": 1,
+                        "minimum": 1,
+                        "title": "Schema Version",
+                        "type": "integer"
+                      },
+                      "target_id": {
+                        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                        "title": "Target Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "schema_version",
+                      "command_id",
+                      "target_id",
+                      "membership_ids",
+                      "expected_revisions",
+                      "action",
+                      "payload"
+                    ],
+                    "title": "SaveCommand",
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "action": {
+                        "const": "scanner.connection.test",
+                        "title": "Action",
+                        "type": "string"
+                      },
+                      "command_id": {
+                        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                        "title": "Command Id",
+                        "type": "string"
+                      },
+                      "expected_revisions": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "authority": {
+                            "minimum": 0,
+                            "title": "Authority",
+                            "type": "integer"
+                          },
+                          "connector": {
+                            "minimum": 0,
+                            "title": "Connector",
+                            "type": "integer"
+                          },
+                          "identity_membership": {
+                            "minimum": 0,
+                            "title": "Identity Membership",
+                            "type": "integer"
+                          },
+                          "owners": {
+                            "minimum": 0,
+                            "title": "Owners",
+                            "type": "integer"
+                          },
+                          "policy": {
+                            "minimum": 0,
+                            "title": "Policy",
+                            "type": "integer"
+                          },
+                          "secret": {
+                            "title": "Secret",
+                            "type": "null"
+                          },
+                          "secret_source": {
+                            "minimum": 0,
+                            "title": "Secret Source",
+                            "type": "integer"
+                          },
+                          "source": {
+                            "minimum": 0,
+                            "title": "Source",
+                            "type": "integer"
+                          },
+                          "target": {
+                            "minimum": 0,
+                            "title": "Target",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "target",
+                          "policy",
+                          "identity_membership",
+                          "owners",
+                          "authority",
+                          "connector",
+                          "source",
+                          "secret_source",
+                          "secret"
+                        ],
+                        "title": "RevisionVector",
+                        "type": "object"
+                      },
+                      "membership_ids": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "maxItems": 0,
+                        "title": "Membership Ids",
+                        "type": "array"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "configuration_revision": {
+                            "minimum": 1,
+                            "title": "Configuration Revision",
+                            "type": "integer"
+                          },
+                          "credential_version_id": {
+                            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                            "title": "Credential Version Id",
+                            "type": "string"
+                          },
+                          "evidence_ref": {
+                            "maxLength": 2048,
+                            "minLength": 1,
+                            "pattern": "\\S",
+                            "title": "Evidence Ref",
+                            "type": "string"
+                          },
+                          "rationale": {
+                            "maxLength": 2048,
+                            "minLength": 1,
+                            "pattern": "\\S",
+                            "title": "Rationale",
+                            "type": "string"
+                          },
+                          "source_id": {
+                            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                            "title": "Source Id",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "source_id",
+                          "rationale",
+                          "evidence_ref",
+                          "configuration_revision",
+                          "credential_version_id"
+                        ],
+                        "title": "OperationPayload",
+                        "type": "object"
+                      },
+                      "schema_version": {
+                        "maximum": 1,
+                        "minimum": 1,
+                        "title": "Schema Version",
+                        "type": "integer"
+                      },
+                      "target_id": {
+                        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                        "title": "Target Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "schema_version",
+                      "command_id",
+                      "target_id",
+                      "membership_ids",
+                      "expected_revisions",
+                      "action",
+                      "payload"
+                    ],
+                    "title": "TestCommand",
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "action": {
+                        "const": "scanner.configuration.activate",
+                        "title": "Action",
+                        "type": "string"
+                      },
+                      "command_id": {
+                        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                        "title": "Command Id",
+                        "type": "string"
+                      },
+                      "expected_revisions": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "authority": {
+                            "minimum": 0,
+                            "title": "Authority",
+                            "type": "integer"
+                          },
+                          "connector": {
+                            "minimum": 0,
+                            "title": "Connector",
+                            "type": "integer"
+                          },
+                          "identity_membership": {
+                            "minimum": 0,
+                            "title": "Identity Membership",
+                            "type": "integer"
+                          },
+                          "owners": {
+                            "minimum": 0,
+                            "title": "Owners",
+                            "type": "integer"
+                          },
+                          "policy": {
+                            "minimum": 0,
+                            "title": "Policy",
+                            "type": "integer"
+                          },
+                          "secret": {
+                            "title": "Secret",
+                            "type": "null"
+                          },
+                          "secret_source": {
+                            "minimum": 0,
+                            "title": "Secret Source",
+                            "type": "integer"
+                          },
+                          "source": {
+                            "minimum": 0,
+                            "title": "Source",
+                            "type": "integer"
+                          },
+                          "target": {
+                            "minimum": 0,
+                            "title": "Target",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "target",
+                          "policy",
+                          "identity_membership",
+                          "owners",
+                          "authority",
+                          "connector",
+                          "source",
+                          "secret_source",
+                          "secret"
+                        ],
+                        "title": "RevisionVector",
+                        "type": "object"
+                      },
+                      "membership_ids": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "maxItems": 0,
+                        "title": "Membership Ids",
+                        "type": "array"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "configuration_revision": {
+                            "minimum": 1,
+                            "title": "Configuration Revision",
+                            "type": "integer"
+                          },
+                          "credential_version_id": {
+                            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                            "title": "Credential Version Id",
+                            "type": "string"
+                          },
+                          "evidence_ref": {
+                            "maxLength": 2048,
+                            "minLength": 1,
+                            "pattern": "\\S",
+                            "title": "Evidence Ref",
+                            "type": "string"
+                          },
+                          "rationale": {
+                            "maxLength": 2048,
+                            "minLength": 1,
+                            "pattern": "\\S",
+                            "title": "Rationale",
+                            "type": "string"
+                          },
+                          "source_id": {
+                            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                            "title": "Source Id",
+                            "type": "string"
+                          },
+                          "validation_operation_id": {
+                            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                            "title": "Validation Operation Id",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "source_id",
+                          "rationale",
+                          "evidence_ref",
+                          "configuration_revision",
+                          "credential_version_id",
+                          "validation_operation_id"
+                        ],
+                        "title": "ActivatePayload",
+                        "type": "object"
+                      },
+                      "schema_version": {
+                        "maximum": 1,
+                        "minimum": 1,
+                        "title": "Schema Version",
+                        "type": "integer"
+                      },
+                      "target_id": {
+                        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                        "title": "Target Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "schema_version",
+                      "command_id",
+                      "target_id",
+                      "membership_ids",
+                      "expected_revisions",
+                      "action",
+                      "payload"
+                    ],
+                    "title": "ActivateCommand",
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "action": {
+                        "const": "scanner.collection.start",
+                        "title": "Action",
+                        "type": "string"
+                      },
+                      "command_id": {
+                        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                        "title": "Command Id",
+                        "type": "string"
+                      },
+                      "expected_revisions": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "authority": {
+                            "minimum": 0,
+                            "title": "Authority",
+                            "type": "integer"
+                          },
+                          "connector": {
+                            "minimum": 0,
+                            "title": "Connector",
+                            "type": "integer"
+                          },
+                          "identity_membership": {
+                            "minimum": 0,
+                            "title": "Identity Membership",
+                            "type": "integer"
+                          },
+                          "owners": {
+                            "minimum": 0,
+                            "title": "Owners",
+                            "type": "integer"
+                          },
+                          "policy": {
+                            "minimum": 0,
+                            "title": "Policy",
+                            "type": "integer"
+                          },
+                          "secret": {
+                            "title": "Secret",
+                            "type": "null"
+                          },
+                          "secret_source": {
+                            "minimum": 0,
+                            "title": "Secret Source",
+                            "type": "integer"
+                          },
+                          "source": {
+                            "minimum": 0,
+                            "title": "Source",
+                            "type": "integer"
+                          },
+                          "target": {
+                            "minimum": 0,
+                            "title": "Target",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "target",
+                          "policy",
+                          "identity_membership",
+                          "owners",
+                          "authority",
+                          "connector",
+                          "source",
+                          "secret_source",
+                          "secret"
+                        ],
+                        "title": "RevisionVector",
+                        "type": "object"
+                      },
+                      "membership_ids": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "maxItems": 0,
+                        "title": "Membership Ids",
+                        "type": "array"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "configuration_revision": {
+                            "minimum": 1,
+                            "title": "Configuration Revision",
+                            "type": "integer"
+                          },
+                          "credential_version_id": {
+                            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                            "title": "Credential Version Id",
+                            "type": "string"
+                          },
+                          "evidence_ref": {
+                            "maxLength": 2048,
+                            "minLength": 1,
+                            "pattern": "\\S",
+                            "title": "Evidence Ref",
+                            "type": "string"
+                          },
+                          "rationale": {
+                            "maxLength": 2048,
+                            "minLength": 1,
+                            "pattern": "\\S",
+                            "title": "Rationale",
+                            "type": "string"
+                          },
+                          "source_id": {
+                            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                            "title": "Source Id",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "source_id",
+                          "rationale",
+                          "evidence_ref",
+                          "configuration_revision",
+                          "credential_version_id"
+                        ],
+                        "title": "OperationPayload",
+                        "type": "object"
+                      },
+                      "schema_version": {
+                        "maximum": 1,
+                        "minimum": 1,
+                        "title": "Schema Version",
+                        "type": "integer"
+                      },
+                      "target_id": {
+                        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                        "title": "Target Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "schema_version",
+                      "command_id",
+                      "target_id",
+                      "membership_ids",
+                      "expected_revisions",
+                      "action",
+                      "payload"
+                    ],
+                    "title": "CollectCommand",
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "action": {
+                        "const": "scanner.configuration.disable",
+                        "title": "Action",
+                        "type": "string"
+                      },
+                      "command_id": {
+                        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                        "title": "Command Id",
+                        "type": "string"
+                      },
+                      "expected_revisions": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "authority": {
+                            "minimum": 0,
+                            "title": "Authority",
+                            "type": "integer"
+                          },
+                          "connector": {
+                            "minimum": 0,
+                            "title": "Connector",
+                            "type": "integer"
+                          },
+                          "identity_membership": {
+                            "minimum": 0,
+                            "title": "Identity Membership",
+                            "type": "integer"
+                          },
+                          "owners": {
+                            "minimum": 0,
+                            "title": "Owners",
+                            "type": "integer"
+                          },
+                          "policy": {
+                            "minimum": 0,
+                            "title": "Policy",
+                            "type": "integer"
+                          },
+                          "secret": {
+                            "title": "Secret",
+                            "type": "null"
+                          },
+                          "secret_source": {
+                            "minimum": 0,
+                            "title": "Secret Source",
+                            "type": "integer"
+                          },
+                          "source": {
+                            "minimum": 0,
+                            "title": "Source",
+                            "type": "integer"
+                          },
+                          "target": {
+                            "minimum": 0,
+                            "title": "Target",
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "target",
+                          "policy",
+                          "identity_membership",
+                          "owners",
+                          "authority",
+                          "connector",
+                          "source",
+                          "secret_source",
+                          "secret"
+                        ],
+                        "title": "RevisionVector",
+                        "type": "object"
+                      },
+                      "membership_ids": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "maxItems": 0,
+                        "title": "Membership Ids",
+                        "type": "array"
+                      },
+                      "payload": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "evidence_ref": {
+                            "maxLength": 2048,
+                            "minLength": 1,
+                            "pattern": "\\S",
+                            "title": "Evidence Ref",
+                            "type": "string"
+                          },
+                          "rationale": {
+                            "maxLength": 2048,
+                            "minLength": 1,
+                            "pattern": "\\S",
+                            "title": "Rationale",
+                            "type": "string"
+                          },
+                          "source_id": {
+                            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                            "title": "Source Id",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "source_id",
+                          "rationale",
+                          "evidence_ref"
+                        ],
+                        "title": "SourcePayload",
+                        "type": "object"
+                      },
+                      "schema_version": {
+                        "maximum": 1,
+                        "minimum": 1,
+                        "title": "Schema Version",
+                        "type": "integer"
+                      },
+                      "target_id": {
+                        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                        "title": "Target Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "schema_version",
+                      "command_id",
+                      "target_id",
+                      "membership_ids",
+                      "expected_revisions",
+                      "action",
+                      "payload"
+                    ],
+                    "title": "DisableCommand",
+                    "type": "object"
+                  }
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "action": {
+                          "const": "scanner.configuration.save",
+                          "title": "Action",
+                          "type": "string"
+                        },
+                        "audit_event_id": {
+                          "title": "Audit Event Id",
+                          "type": "string"
+                        },
+                        "command_id": {
+                          "title": "Command Id",
+                          "type": "string"
+                        },
+                        "committed_revision": {
+                          "minimum": 0,
+                          "title": "Committed Revision",
+                          "type": "integer"
+                        },
+                        "decision_id": {
+                          "title": "Decision Id",
+                          "type": "string"
+                        },
+                        "intent_id": {
+                          "title": "Intent Id",
+                          "type": "string"
+                        },
+                        "intents": {
+                          "items": {
+                            "additionalProperties": true,
+                            "type": "object"
+                          },
+                          "title": "Intents",
+                          "type": "array"
+                        },
+                        "occurred_at": {
+                          "title": "Occurred At",
+                          "type": "string"
+                        },
+                        "policy_revision": {
+                          "minimum": 0,
+                          "title": "Policy Revision",
+                          "type": "integer"
+                        },
+                        "projection": {
+                          "additionalProperties": true,
+                          "title": "Projection",
+                          "type": "object"
+                        },
+                        "result": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "configuration_revision": {
+                              "minimum": 0,
+                              "title": "Configuration Revision",
+                              "type": "integer"
+                            },
+                            "lifecycle": {
+                              "enum": [
+                                "disabled",
+                                "staged",
+                                "active"
+                              ],
+                              "title": "Lifecycle",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "lifecycle",
+                            "configuration_revision"
+                          ],
+                          "title": "SaveConfigurationResult",
+                          "type": "object"
+                        },
+                        "schema_version": {
+                          "const": 1,
+                          "minimum": 0,
+                          "title": "Schema Version",
+                          "type": "integer"
+                        },
+                        "target_id": {
+                          "title": "Target Id",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "schema_version",
+                        "command_id",
+                        "decision_id",
+                        "audit_event_id",
+                        "intent_id",
+                        "committed_revision",
+                        "projection",
+                        "action",
+                        "target_id",
+                        "policy_revision",
+                        "intents",
+                        "occurred_at",
+                        "result"
+                      ],
+                      "title": "SaveConfigurationReceipt",
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "action": {
+                          "const": "scanner.connection.test",
+                          "title": "Action",
+                          "type": "string"
+                        },
+                        "audit_event_id": {
+                          "title": "Audit Event Id",
+                          "type": "string"
+                        },
+                        "command_id": {
+                          "title": "Command Id",
+                          "type": "string"
+                        },
+                        "committed_revision": {
+                          "minimum": 0,
+                          "title": "Committed Revision",
+                          "type": "integer"
+                        },
+                        "decision_id": {
+                          "title": "Decision Id",
+                          "type": "string"
+                        },
+                        "intent_id": {
+                          "title": "Intent Id",
+                          "type": "string"
+                        },
+                        "intents": {
+                          "items": {
+                            "additionalProperties": true,
+                            "type": "object"
+                          },
+                          "title": "Intents",
+                          "type": "array"
+                        },
+                        "occurred_at": {
+                          "title": "Occurred At",
+                          "type": "string"
+                        },
+                        "policy_revision": {
+                          "minimum": 0,
+                          "title": "Policy Revision",
+                          "type": "integer"
+                        },
+                        "projection": {
+                          "additionalProperties": true,
+                          "title": "Projection",
+                          "type": "object"
+                        },
+                        "result": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "error_code": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ],
+                              "title": "Error Code"
+                            },
+                            "operation_id": {
+                              "title": "Operation Id",
+                              "type": "string"
+                            },
+                            "status": {
+                              "enum": [
+                                "succeeded",
+                                "failed",
+                                "interrupted"
+                              ],
+                              "title": "Status",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "status",
+                            "error_code"
+                          ],
+                          "title": "TestConnectionResult",
+                          "type": "object"
+                        },
+                        "schema_version": {
+                          "const": 1,
+                          "minimum": 0,
+                          "title": "Schema Version",
+                          "type": "integer"
+                        },
+                        "target_id": {
+                          "title": "Target Id",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "schema_version",
+                        "command_id",
+                        "decision_id",
+                        "audit_event_id",
+                        "intent_id",
+                        "committed_revision",
+                        "projection",
+                        "action",
+                        "target_id",
+                        "policy_revision",
+                        "intents",
+                        "occurred_at",
+                        "result"
+                      ],
+                      "title": "TestConnectionReceipt",
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "action": {
+                          "const": "scanner.configuration.activate",
+                          "title": "Action",
+                          "type": "string"
+                        },
+                        "audit_event_id": {
+                          "title": "Audit Event Id",
+                          "type": "string"
+                        },
+                        "command_id": {
+                          "title": "Command Id",
+                          "type": "string"
+                        },
+                        "committed_revision": {
+                          "minimum": 0,
+                          "title": "Committed Revision",
+                          "type": "integer"
+                        },
+                        "decision_id": {
+                          "title": "Decision Id",
+                          "type": "string"
+                        },
+                        "intent_id": {
+                          "title": "Intent Id",
+                          "type": "string"
+                        },
+                        "intents": {
+                          "items": {
+                            "additionalProperties": true,
+                            "type": "object"
+                          },
+                          "title": "Intents",
+                          "type": "array"
+                        },
+                        "occurred_at": {
+                          "title": "Occurred At",
+                          "type": "string"
+                        },
+                        "policy_revision": {
+                          "minimum": 0,
+                          "title": "Policy Revision",
+                          "type": "integer"
+                        },
+                        "projection": {
+                          "additionalProperties": true,
+                          "title": "Projection",
+                          "type": "object"
+                        },
+                        "result": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "active_configuration_revision": {
+                              "minimum": 0,
+                              "title": "Active Configuration Revision",
+                              "type": "integer"
+                            },
+                            "configuration_revision": {
+                              "minimum": 0,
+                              "title": "Configuration Revision",
+                              "type": "integer"
+                            },
+                            "lifecycle": {
+                              "const": "active",
+                              "title": "Lifecycle",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "lifecycle",
+                            "configuration_revision",
+                            "active_configuration_revision"
+                          ],
+                          "title": "ActivateConfigurationResult",
+                          "type": "object"
+                        },
+                        "schema_version": {
+                          "const": 1,
+                          "minimum": 0,
+                          "title": "Schema Version",
+                          "type": "integer"
+                        },
+                        "target_id": {
+                          "title": "Target Id",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "schema_version",
+                        "command_id",
+                        "decision_id",
+                        "audit_event_id",
+                        "intent_id",
+                        "committed_revision",
+                        "projection",
+                        "action",
+                        "target_id",
+                        "policy_revision",
+                        "intents",
+                        "occurred_at",
+                        "result"
+                      ],
+                      "title": "ActivateConfigurationReceipt",
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "action": {
+                          "const": "scanner.collection.start",
+                          "title": "Action",
+                          "type": "string"
+                        },
+                        "audit_event_id": {
+                          "title": "Audit Event Id",
+                          "type": "string"
+                        },
+                        "command_id": {
+                          "title": "Command Id",
+                          "type": "string"
+                        },
+                        "committed_revision": {
+                          "minimum": 0,
+                          "title": "Committed Revision",
+                          "type": "integer"
+                        },
+                        "decision_id": {
+                          "title": "Decision Id",
+                          "type": "string"
+                        },
+                        "intent_id": {
+                          "title": "Intent Id",
+                          "type": "string"
+                        },
+                        "intents": {
+                          "items": {
+                            "additionalProperties": true,
+                            "type": "object"
+                          },
+                          "title": "Intents",
+                          "type": "array"
+                        },
+                        "occurred_at": {
+                          "title": "Occurred At",
+                          "type": "string"
+                        },
+                        "policy_revision": {
+                          "minimum": 0,
+                          "title": "Policy Revision",
+                          "type": "integer"
+                        },
+                        "projection": {
+                          "additionalProperties": true,
+                          "title": "Projection",
+                          "type": "object"
+                        },
+                        "result": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "error_code": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ],
+                              "title": "Error Code"
+                            },
+                            "operation_id": {
+                              "title": "Operation Id",
+                              "type": "string"
+                            },
+                            "run_id": {
+                              "title": "Run Id",
+                              "type": "string"
+                            },
+                            "status": {
+                              "enum": [
+                                "succeeded",
+                                "partial",
+                                "failed",
+                                "interrupted"
+                              ],
+                              "title": "Status",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "operation_id",
+                            "run_id",
+                            "status",
+                            "error_code"
+                          ],
+                          "title": "CollectResult",
+                          "type": "object"
+                        },
+                        "schema_version": {
+                          "const": 1,
+                          "minimum": 0,
+                          "title": "Schema Version",
+                          "type": "integer"
+                        },
+                        "target_id": {
+                          "title": "Target Id",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "schema_version",
+                        "command_id",
+                        "decision_id",
+                        "audit_event_id",
+                        "intent_id",
+                        "committed_revision",
+                        "projection",
+                        "action",
+                        "target_id",
+                        "policy_revision",
+                        "intents",
+                        "occurred_at",
+                        "result"
+                      ],
+                      "title": "CollectReceipt",
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "action": {
+                          "const": "scanner.configuration.disable",
+                          "title": "Action",
+                          "type": "string"
+                        },
+                        "audit_event_id": {
+                          "title": "Audit Event Id",
+                          "type": "string"
+                        },
+                        "command_id": {
+                          "title": "Command Id",
+                          "type": "string"
+                        },
+                        "committed_revision": {
+                          "minimum": 0,
+                          "title": "Committed Revision",
+                          "type": "integer"
+                        },
+                        "decision_id": {
+                          "title": "Decision Id",
+                          "type": "string"
+                        },
+                        "intent_id": {
+                          "title": "Intent Id",
+                          "type": "string"
+                        },
+                        "intents": {
+                          "items": {
+                            "additionalProperties": true,
+                            "type": "object"
+                          },
+                          "title": "Intents",
+                          "type": "array"
+                        },
+                        "occurred_at": {
+                          "title": "Occurred At",
+                          "type": "string"
+                        },
+                        "policy_revision": {
+                          "minimum": 0,
+                          "title": "Policy Revision",
+                          "type": "integer"
+                        },
+                        "projection": {
+                          "additionalProperties": true,
+                          "title": "Projection",
+                          "type": "object"
+                        },
+                        "result": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "configuration_revision": {
+                              "minimum": 0,
+                              "title": "Configuration Revision",
+                              "type": "integer"
+                            },
+                            "lifecycle": {
+                              "const": "disabled",
+                              "title": "Lifecycle",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "lifecycle",
+                            "configuration_revision"
+                          ],
+                          "title": "DisableConfigurationResult",
+                          "type": "object"
+                        },
+                        "schema_version": {
+                          "const": 1,
+                          "minimum": 0,
+                          "title": "Schema Version",
+                          "type": "integer"
+                        },
+                        "target_id": {
+                          "title": "Target Id",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "schema_version",
+                        "command_id",
+                        "decision_id",
+                        "audit_event_id",
+                        "intent_id",
+                        "committed_revision",
+                        "projection",
+                        "action",
+                        "target_id",
+                        "policy_revision",
+                        "intents",
+                        "occurred_at",
+                        "result"
+                      ],
+                      "title": "DisableConfigurationReceipt",
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "command_id": {
+                          "title": "Command Id",
+                          "type": "string"
+                        },
+                        "configuration_revision": {
+                          "minimum": 0,
+                          "title": "Configuration Revision",
+                          "type": "integer"
+                        },
+                        "credential_version_id": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "title": "Credential Version Id"
+                        },
+                        "error_code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "title": "Error Code"
+                        },
+                        "finished_at": {
+                          "format": "date-time",
+                          "type": "string"
+                        },
+                        "kind": {
+                          "enum": [
+                            "test",
+                            "collect"
+                          ],
+                          "title": "Kind",
+                          "type": "string"
+                        },
+                        "operation_id": {
+                          "title": "Operation Id",
+                          "type": "string"
+                        },
+                        "receipt_id": {
+                          "type": "null"
+                        },
+                        "run_id": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "title": "Run Id"
+                        },
+                        "schema_version": {
+                          "const": 1,
+                          "minimum": 0,
+                          "title": "Schema Version",
+                          "type": "integer"
+                        },
+                        "started_at": {
+                          "format": "date-time",
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "failed",
+                            "partial",
+                            "interrupted"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "schema_version",
+                        "operation_id",
+                        "command_id",
+                        "kind",
+                        "status",
+                        "configuration_revision",
+                        "credential_version_id",
+                        "started_at",
+                        "finished_at",
+                        "run_id",
+                        "error_code",
+                        "receipt_id"
+                      ],
+                      "title": "OperationView",
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Audited receipt or receipt-less failed/partial/interrupted operation"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "command_id": {
+                      "title": "Command Id",
+                      "type": "string"
+                    },
+                    "configuration_revision": {
+                      "minimum": 0,
+                      "title": "Configuration Revision",
+                      "type": "integer"
+                    },
+                    "credential_version_id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Credential Version Id"
+                    },
+                    "error_code": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Error Code"
+                    },
+                    "finished_at": {
+                      "type": "null"
+                    },
+                    "kind": {
+                      "enum": [
+                        "test",
+                        "collect"
+                      ],
+                      "title": "Kind",
+                      "type": "string"
+                    },
+                    "operation_id": {
+                      "title": "Operation Id",
+                      "type": "string"
+                    },
+                    "receipt_id": {
+                      "type": "null"
+                    },
+                    "run_id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Run Id"
+                    },
+                    "schema_version": {
+                      "const": 1,
+                      "minimum": 0,
+                      "title": "Schema Version",
+                      "type": "integer"
+                    },
+                    "started_at": {
+                      "format": "date-time",
+                      "type": "string"
+                    },
+                    "status": {
+                      "const": "running",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "schema_version",
+                    "operation_id",
+                    "command_id",
+                    "kind",
+                    "status",
+                    "configuration_revision",
+                    "credential_version_id",
+                    "started_at",
+                    "finished_at",
+                    "run_id",
+                    "error_code",
+                    "receipt_id"
+                  ],
+                  "title": "OperationView",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Running admitted operation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Command",
+        "x-uvm-auth-modes": [
+          "local"
+        ]
+      }
+    },
+    "/api/v1/scanners/{connector_id}/operations/{operation_id}": {
+      "get": {
+        "operationId": "operation_api_v1_scanners__connector_id__operations__operation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connector_id",
+            "required": true,
+            "schema": {
+              "title": "Connector Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "command_id": {
+                          "title": "Command Id",
+                          "type": "string"
+                        },
+                        "configuration_revision": {
+                          "minimum": 0,
+                          "title": "Configuration Revision",
+                          "type": "integer"
+                        },
+                        "credential_version_id": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "title": "Credential Version Id"
+                        },
+                        "error_code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "title": "Error Code"
+                        },
+                        "finished_at": {
+                          "type": "null"
+                        },
+                        "kind": {
+                          "enum": [
+                            "test",
+                            "collect"
+                          ],
+                          "title": "Kind",
+                          "type": "string"
+                        },
+                        "operation_id": {
+                          "title": "Operation Id",
+                          "type": "string"
+                        },
+                        "receipt_id": {
+                          "type": "null"
+                        },
+                        "run_id": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "title": "Run Id"
+                        },
+                        "schema_version": {
+                          "const": 1,
+                          "minimum": 0,
+                          "title": "Schema Version",
+                          "type": "integer"
+                        },
+                        "started_at": {
+                          "format": "date-time",
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": "running",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "schema_version",
+                        "operation_id",
+                        "command_id",
+                        "kind",
+                        "status",
+                        "configuration_revision",
+                        "credential_version_id",
+                        "started_at",
+                        "finished_at",
+                        "run_id",
+                        "error_code",
+                        "receipt_id"
+                      ],
+                      "title": "OperationView",
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "command_id": {
+                          "title": "Command Id",
+                          "type": "string"
+                        },
+                        "configuration_revision": {
+                          "minimum": 0,
+                          "title": "Configuration Revision",
+                          "type": "integer"
+                        },
+                        "credential_version_id": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "title": "Credential Version Id"
+                        },
+                        "error_code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "title": "Error Code"
+                        },
+                        "finished_at": {
+                          "format": "date-time",
+                          "type": "string"
+                        },
+                        "kind": {
+                          "enum": [
+                            "test",
+                            "collect"
+                          ],
+                          "title": "Kind",
+                          "type": "string"
+                        },
+                        "operation_id": {
+                          "title": "Operation Id",
+                          "type": "string"
+                        },
+                        "receipt_id": {
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "run_id": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "title": "Run Id"
+                        },
+                        "schema_version": {
+                          "const": 1,
+                          "minimum": 0,
+                          "title": "Schema Version",
+                          "type": "integer"
+                        },
+                        "started_at": {
+                          "format": "date-time",
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": "succeeded",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "schema_version",
+                        "operation_id",
+                        "command_id",
+                        "kind",
+                        "status",
+                        "configuration_revision",
+                        "credential_version_id",
+                        "started_at",
+                        "finished_at",
+                        "run_id",
+                        "error_code",
+                        "receipt_id"
+                      ],
+                      "title": "OperationView",
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "command_id": {
+                          "title": "Command Id",
+                          "type": "string"
+                        },
+                        "configuration_revision": {
+                          "minimum": 0,
+                          "title": "Configuration Revision",
+                          "type": "integer"
+                        },
+                        "credential_version_id": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "title": "Credential Version Id"
+                        },
+                        "error_code": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "title": "Error Code"
+                        },
+                        "finished_at": {
+                          "format": "date-time",
+                          "type": "string"
+                        },
+                        "kind": {
+                          "enum": [
+                            "test",
+                            "collect"
+                          ],
+                          "title": "Kind",
+                          "type": "string"
+                        },
+                        "operation_id": {
+                          "title": "Operation Id",
+                          "type": "string"
+                        },
+                        "receipt_id": {
+                          "anyOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "minLength": 1,
+                              "type": "string"
+                            }
+                          ]
+                        },
+                        "run_id": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "title": "Run Id"
+                        },
+                        "schema_version": {
+                          "const": 1,
+                          "minimum": 0,
+                          "title": "Schema Version",
+                          "type": "integer"
+                        },
+                        "started_at": {
+                          "format": "date-time",
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "failed",
+                            "partial",
+                            "interrupted"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "schema_version",
+                        "operation_id",
+                        "command_id",
+                        "kind",
+                        "status",
+                        "configuration_revision",
+                        "credential_version_id",
+                        "started_at",
+                        "finished_at",
+                        "run_id",
+                        "error_code",
+                        "receipt_id"
+                      ],
+                      "title": "OperationView",
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Safe operation metadata"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Operation",
+        "x-uvm-auth-modes": [
+          "local"
+        ]
+      }
+    },
+    "/api/v1/scanners/{connector_id}/runs/{run_id}/detections": {
+      "get": {
+        "operationId": "detections_api_v1_scanners__connector_id__runs__run_id__detections_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connector_id",
+            "required": true,
+            "schema": {
+              "title": "Connector Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "as_of": {
+                      "title": "As Of",
+                      "type": "string"
+                    },
+                    "collection_recency": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "as_of": {
+                          "title": "As Of",
+                          "type": "string"
+                        },
+                        "last_complete_at": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "title": "Last Complete At"
+                        },
+                        "status": {
+                          "enum": [
+                            "never",
+                            "recent",
+                            "stale"
+                          ],
+                          "title": "Status",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "as_of",
+                        "last_complete_at"
+                      ],
+                      "title": "CollectionRecencyView",
+                      "type": "object"
+                    },
+                    "coverage": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason_codes": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "title": "Reason Codes",
+                          "type": "array"
+                        },
+                        "status": {
+                          "const": "unknown",
+                          "title": "Status",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "reason_codes"
+                      ],
+                      "title": "CoverageView",
+                      "type": "object"
+                    },
+                    "items": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "collected_at": {
+                            "title": "Collected At",
+                            "type": "string"
+                          },
+                          "detection_type": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Detection Type"
+                          },
+                          "evidence_ref": {
+                            "title": "Evidence Ref",
+                            "type": "string"
+                          },
+                          "evidence_sha256": {
+                            "title": "Evidence Sha256",
+                            "type": "string"
+                          },
+                          "group_id": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Group Id"
+                          },
+                          "host_id": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Host Id"
+                          },
+                          "identity_resolution": {
+                            "title": "Identity Resolution",
+                            "type": "string"
+                          },
+                          "observation_id": {
+                            "title": "Observation Id",
+                            "type": "string"
+                          },
+                          "observed_at": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Observed At"
+                          },
+                          "port": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Port"
+                          },
+                          "protocol": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Protocol"
+                          },
+                          "qid": {
+                            "title": "Qid",
+                            "type": "string"
+                          },
+                          "severity": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Severity"
+                          },
+                          "ssl": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Ssl"
+                          },
+                          "unique_vuln_id": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Unique Vuln Id"
+                          },
+                          "vendor_status": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Vendor Status"
+                          },
+                          "vendor_timestamps": {
+                            "additionalProperties": {
+                              "type": "string"
+                            },
+                            "title": "Vendor Timestamps",
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "observation_id",
+                          "group_id",
+                          "qid",
+                          "host_id",
+                          "detection_type",
+                          "severity",
+                          "vendor_status",
+                          "port",
+                          "protocol",
+                          "ssl",
+                          "unique_vuln_id",
+                          "vendor_timestamps",
+                          "collected_at",
+                          "observed_at",
+                          "identity_resolution",
+                          "evidence_ref",
+                          "evidence_sha256"
+                        ],
+                        "title": "DetectionView",
+                        "type": "object"
+                      },
+                      "title": "Items",
+                      "type": "array"
+                    },
+                    "next_cursor": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Next Cursor"
+                    },
+                    "retrieval": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason_codes": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "title": "Reason Codes",
+                          "type": "array"
+                        },
+                        "status": {
+                          "enum": [
+                            "complete",
+                            "partial",
+                            "failed"
+                          ],
+                          "title": "Status",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "reason_codes"
+                      ],
+                      "title": "RetrievalView",
+                      "type": "object"
+                    },
+                    "run_id": {
+                      "title": "Run Id",
+                      "type": "string"
+                    },
+                    "schema_version": {
+                      "const": 1,
+                      "minimum": 0,
+                      "title": "Schema Version",
+                      "type": "integer"
+                    },
+                    "source_freshness": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason_codes": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "title": "Reason Codes",
+                          "type": "array"
+                        },
+                        "status": {
+                          "const": "unknown",
+                          "title": "Status",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "reason_codes"
+                      ],
+                      "title": "SourceFreshnessView",
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "schema_version",
+                    "run_id",
+                    "as_of",
+                    "items",
+                    "next_cursor",
+                    "retrieval",
+                    "coverage",
+                    "source_freshness",
+                    "collection_recency"
+                  ],
+                  "title": "DetectionPage",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Published source observations"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Detections",
+        "x-uvm-auth-modes": [
+          "local"
+        ]
+      }
+    },
     "/api/v1/unresolved": {
       "get": {
         "operationId": "list_unresolved_api_v1_unresolved_get",

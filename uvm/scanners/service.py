@@ -27,6 +27,8 @@ from uvm.persistence.ingestion_store import IngestionStore
 from uvm.persistence.observation_store import ObservationRepository
 from uvm.persistence.identity_repository import IdentityRepository
 from uvm.scanners import contracts as dto, store
+from uvm.scanners.wire import COMMAND_ADAPTER
+from pydantic import ValidationError
 from uvm.scanners.evidence import PrivateEvidenceStore
 from uvm.scanners.qualys_vm import (QualysError, QualysVMClient,
     MAX_PAGES, MAX_PAGE_ATTEMPTS, TOTAL_DEADLINE_SECONDS, PLATFORM_ORIGINS, observations_for_page)
@@ -63,6 +65,10 @@ def digest(value):
 
 def parse_command(connector_id, command):
     canonical_uuid(connector_id)
+    try:
+        COMMAND_ADAPTER.validate_python(command)
+    except ValidationError:
+        raise store.OperationError('invalid_request') from None
     keys = {'schema_version', 'command_id', 'action', 'target_id', 'membership_ids',
         'expected_revisions', 'payload'}
     if (type(command) is not dict or set(command) != keys
@@ -243,6 +249,8 @@ class ScannerService:
 
     @staticmethod
     def _operation_view(row):
+        if row['status'] == 'succeeded' and not row['receipt_id']:
+            raise store.OperationError('inconsistent_operation')
         return asdict(dto.OperationView(1, str(row['operation_id']), row['command_id'],
             row['action'], row['status'], row['configuration_revision'],
             row['credential_version_id'], instant(row['started_at']),
@@ -267,6 +275,8 @@ class ScannerService:
             raise store.OperationError('outcome_unknown')
         row = store.scoped_operation(tx.connection, tx.snapshot.connector_id,
             tx.snapshot.source_id, operation_id)
+        if row['receipt_id'] is not None or row['status'] not in {'running', 'failed', 'partial', 'interrupted'}:
+            raise store.OperationError('inconsistent_operation')
         return self._operation_view(row), 202 if row['status'] == 'running' else 200
 
     def command(self, request, connector_id, command):

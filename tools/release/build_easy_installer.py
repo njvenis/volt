@@ -7,7 +7,12 @@ import gzip
 import io
 from pathlib import Path, PurePosixPath
 import re
+import sys
 import tarfile
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from tools.build_compose_bundle import verify
 from tools.release.easy_bootstrap import VERIFIER_IMAGE_PATTERN

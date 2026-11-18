@@ -487,6 +487,23 @@ class ScannerCommandIntent:
 
 
 @dataclass(frozen=True)
+class ScannerCommandAbandonment:
+    """Backend-owned audited terminal fact in the existing0065 shared ledger.
+
+    A matching fact proves this exact actor/action/public-command digest cannot
+    later admit. It contains no network operation, findings or credential bytes.
+    Connector/source binding is included in that original command digest and is
+    checked against the current authorized transaction before returning the fact.
+    """
+    command_id: str
+    principal_id: str
+    action: ScannerAction
+    request_digest: str
+    audit_event_id: str
+    occurred_at: str
+
+
+@dataclass(frozen=True)
 class ScannerCommandState:
     intent: ScannerCommandIntent
     receipt: ScannerCommandReceipt | None
@@ -512,12 +529,35 @@ class ScannerTransaction(Protocol):
     def snapshot(self) -> ScannerBindingSnapshot: ...
 
     def read_command(self, *, command_id: str,
-                     request_digest: str) -> ScannerCommandState | None:
+                     request_digest: str
+                     ) -> ScannerCommandState | ScannerCommandAbandonment | None:
         """Current-authorized replay lookup, before new-command revision checks.
 
         Enforce current principal/action/connector/source/digest exact binding;
         changed actor/content conflicts. Never return another source's record.
         May use transaction without old expected revisions to read a replay.
+        Check the existing0065 shared abandonment ledger in the same lookup;
+        matching terminal facts return ScannerCommandAbandonment, changed
+        principal/action/digest conflicts. A tombstone together with a retained
+        admission/receipt is inconsistent, never definitive noncommit.
+        """
+        ...
+
+    def record_audited_abandonment(self, *, command_id: str, request_digest: str,
+                                    rationale: str, evidence_ref: str
+                                    ) -> ScannerCommandAbandonment:
+        """Audit and fence an unadmitted command using this SAME connection.
+
+        Current session/CSRF/exact source authority uses the original scanner
+        action; historical admission revisions are intentionally not evaluated.
+        Derive actor/action/source from the live handle. Recheck no receipt or
+        admitted intent exists under the shared policy/connector lock, then
+        atomically append audit plus the existing0065 terminal ledger row. Do
+        not synthesize operation admission or replace original stale fences.
+        Exact matching replay returns the original fact without a new audit;
+        changed actor/action/digest conflicts. Persistence/audit failure rolls
+        back the tombstone. Result is not a commit proof until context exit and
+        current-authorized durable readback. No HTTP or provider audit SQL.
         """
         ...
 

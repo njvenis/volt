@@ -25,6 +25,7 @@ from uvm.persistence.identity_repository import IdentityRepository, Authorisatio
 from uvm.scanners.api import install_scanner_routes, scanner_worker_lifespan
 from uvm.scanners.evidence import PrivateEvidenceStore
 from uvm.scanners.qualys_vm import QualysVMClient, _production_transport, ENDPOINT_PATH
+from wire_validation import assert_response
 from support_bridge import Bridge, bindings, commands, audit, metadata
 from test_qualys_vm_protocol import PAGE, LAST_PAGE, local_https_server
 from http.server import BaseHTTPRequestHandler
@@ -125,6 +126,7 @@ class CoordinatorPostgresTests(unittest.TestCase):
                 self.recovered_at_startup = worker_stack.enter_context(self.service.worker_lifetime())
                 with TestClient(app) as browser:
                     self.browser = browser
+                    self.app = app
                     yield
 
     def command(self, action, **extra):
@@ -139,6 +141,8 @@ class CoordinatorPostgresTests(unittest.TestCase):
         response = self.browser.post(f'/api/v1/scanners/{self.connector_id}/commands',
             json=command, headers={'Origin': 'http://testserver', 'X-CSRF-Token': 'fixture-only'})
         self.assertEqual(response.headers['cache-control'], 'no-store')
+        if response.status_code in (200, 202):
+            assert_response(self, self.app, '/api/v1/scanners/{connector_id}/commands', response)
         return response
 
     def save(self):
@@ -184,6 +188,7 @@ class CoordinatorPostgresTests(unittest.TestCase):
             url = f'/api/v1/scanners/{self.connector_id}/runs/{run_id}/detections'
             page = self.browser.get(url, params={'source_id': self.source_id, 'limit': 2})
             self.assertEqual(page.status_code, 200, page.text)
+            assert_response(self, self.app, '/api/v1/scanners/{connector_id}/runs/{run_id}/detections', page, 'get')
             first = page.json()
             second = self.browser.get(url, params={'source_id': self.source_id,
                 'cursor': first['next_cursor'], 'limit': 2}).json()
@@ -691,6 +696,28 @@ print('second process denied; no recovery')
             PrivateEvidenceStore(Path(self.directory.name)))
         with another.worker_lifetime() as recovered:
             self.assertEqual(recovered, 0)
+
+
+    def test_succeeded_without_shared_receipt_is_inconsistent_and_never_replayed(self):
+        with self.composition():
+            self.activate()
+            command = self.command('scanner.collection.start', **self.version())
+            response = self.post(command)
+            self.assertEqual(response.status_code, 200, response.text)
+            operation_id = response.json()['result']['operation_id']
+            with self.engine.begin() as connection:
+                connection.execute(commands.update().where(commands.c.connector_id == self.connector_id,
+                    commands.c.command_id == command['command_id']).values(receipt=None))
+                connection.execute(store.operations.update().where(
+                    store.operations.c.operation_id == operation_id).values(receipt_id=None))
+            before = len(self.calls)
+            replay = self.post(command)
+            self.assertEqual(replay.status_code, 503, replay.text)
+            self.assertEqual(replay.json()['error']['code'], 'inconsistent_operation')
+            metadata = self.browser.get(f'/api/v1/scanners/{self.connector_id}/operations/{operation_id}',
+                params={'source_id': self.source_id})
+            self.assertEqual(metadata.status_code, 503)
+            self.assertEqual(len(self.calls), before)
 
 
 class RouteConstructionTests(unittest.TestCase):

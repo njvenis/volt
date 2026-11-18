@@ -137,6 +137,7 @@ jobs:
           runtime_repo="ghcr.io/njvenis/volt"
           verifier_repo="ghcr.io/njvenis/volt-installer-verifier"
           sha_tag="sha-$CANDIDATE_SOURCE_SHA"
+          expected_snapshot="sha256:$(git archive --format=tar "$CANDIDATE_SOURCE_SHA" | sha256sum | cut -d' ' -f1)"
           printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           for kind in runtime verifier; do
             for arch in amd64 arm64; do
@@ -154,6 +155,7 @@ jobs:
               test "$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}')" = "linux/$arch"
               test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$CANDIDATE_SOURCE_SHA"
               test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.volt.compose.source-snapshot"}}')" = "$expected_snapshot"
+              test "$(cat "$root/$kind-$arch/source-snapshot.txt")" = "$expected_snapshot"
               docker push "$image"
             done
             if [ "$kind" = runtime ]; then repository="$runtime_repo"; else repository="$verifier_repo"; fi
@@ -255,7 +257,7 @@ jobs:
             --source-snapshot "$source_snapshot" --version 0.1.0-rc.4 \
             --platform linux/amd64 --image-inspect /inputs/image.json --index /inputs/index.json \
             --output-dir /tmp/admission
-          python3 tools/release/build_easy_installer.py build \
+          python3 tools/release/build_easy_installer.py \
             --output "$root/payload/volt-compose-0.1.0-rc.4-installer.tar.gz" \
             --bundle "$root/payload/installer.bundle.tar.gz" \
             --launcher-signature "$root/payload/launcher.sigstore.json" \

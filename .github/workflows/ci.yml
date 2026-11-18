@@ -157,8 +157,10 @@ jobs:
           set -eu
           test "$(uname -m)" = "$MACHINE"
           SOURCE_SNAPSHOT="sha256:$(git archive --format=tar HEAD | sha256sum | cut -d' ' -f1)"
+          CE_IMAGE="$(python3 tools/release/portable_demo.py ce-image --platform "linux/$ARCH")"
           IMAGE="volt-easy-rc4:${ARCH}"
           docker buildx build --platform "linux/$ARCH" --load -f Dockerfile.g7 \
+            --build-arg "CE_IMAGE=$CE_IMAGE" \
             --build-arg "VOLT_SOURCE_SNAPSHOT=$SOURCE_SNAPSHOT" \
             --label org.opencontainers.image.version=0.1.0-rc.4 \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \

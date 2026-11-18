@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 
 from tools.build_compose_bundle import build as build_bundle
-from tools.release.build_easy_installer import FILES, build
+from tools.release.build_easy_installer import FILES
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -32,9 +34,14 @@ class EasyInstallerPackageTests(unittest.TestCase):
             launcher_signature.write_text("fixture detached signature bundle\n")
             bundle_signature.write_text("fixture detached signature bundle\n")
             output = root / "small-package.tar.gz"
-            build(output, bundle=bundle, launcher_signature=launcher_signature,
-                  bundle_signature=bundle_signature, verifier_reference=VERIFIER,
-                  source_root=source)
+            result = subprocess.run((sys.executable,
+                str(ROOT / "tools/release/build_easy_installer.py"),
+                "--output", str(output), "--bundle", str(bundle),
+                "--launcher-signature", str(launcher_signature),
+                "--bundle-signature", str(bundle_signature),
+                "--verifier-reference", VERIFIER, "--source-root", str(source)),
+                check=False, capture_output=True, text=True, cwd=ROOT)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             with tarfile.open(bundle, "r:gz") as archive:
                 expected_launcher = archive.extractfile(next(m for m in archive.getmembers()
                     if Path(m.name).name == "launcher.sh")).read()
@@ -55,10 +62,14 @@ class EasyInstallerPackageTests(unittest.TestCase):
             build_bundle(bundle, IMAGE, source, verifier_reference=VERIFIER)
             signature = root / "signature.json"
             signature.write_text("fixture\n")
-            with self.assertRaisesRegex(SystemExit, "official verifier digest"):
-                build(root / "must-not-exist.tar.gz", bundle=bundle,
-                      launcher_signature=signature, bundle_signature=signature,
-                      verifier_reference="127.0.0.1:46150/volt-installer-verifier@sha256:" + "e" * 64)
+            result = subprocess.run((sys.executable,
+                str(ROOT / "tools/release/build_easy_installer.py"),
+                "--output", str(root / "must-not-exist.tar.gz"), "--bundle", str(bundle),
+                "--launcher-signature", str(signature), "--bundle-signature", str(signature),
+                "--verifier-reference", "127.0.0.1:46150/volt-installer-verifier@sha256:" + "e" * 64),
+                check=False, capture_output=True, text=True, cwd=ROOT)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("official verifier digest", result.stderr)
 
 
 if __name__ == "__main__":

@@ -60,28 +60,29 @@ class RC3WorkflowContractTests(unittest.TestCase):
                 item = tarfile.TarInfo("manifest.json")
                 item.size = len(manifest)
                 bundle.addfile(item, io.BytesIO(manifest))
-            fake_bin = root / "bin"
-            fake_bin.mkdir()
-            fake_git = fake_bin / "git"
-            fake_git.write_text(
-                "#!/bin/sh\n"
-                "if [ \"$1\" = ls-remote ]; then "
-                "printf '%s\\t%s\\n' '" + trusted_source + "' 'refs/tags/v0.1.0-rc.3'; "
-                "else exit 91; fi\n"
-            )
-            fake_git.chmod(0o755)
+            # Model ls-remote as a shell function: keep fixture data in process
+            # memory instead of interpolating it into a persisted executable.
+            fake_git = """git() {
+  if [ "$1" = ls-remote ]; then
+    printf '%s\\t%s\\n' "$VOLT_TEST_TRUSTED_SOURCE" 'refs/tags/v0.1.0-rc.3'
+  else
+    return 91
+  fi
+}
+"""
             environment = {
-                **os.environ,
-                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "PATH": os.defpath,
+                "VOLT_TEST_TRUSTED_SOURCE": trusted_source,
                 "ARCHIVE": str(archive),
                 "REPOSITORY": "https://github.com/njvenis/volt.git",
                 "RELEASE_TAG": "v0.1.0-rc.3",
             }
-            result = subprocess.run(["bash", "-c", pin_source], env=environment,
+            result = subprocess.run(["bash", "-c", fake_git + pin_source], env=environment,
                                     capture_output=True, text=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), trusted_source)
             self.assertNotEqual(result.stdout.strip(), malicious_source)
+            self.assertEqual({path.name for path in root.iterdir()}, {"attacker.tar.gz"})
 
 
 if __name__ == "__main__":

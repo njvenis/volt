@@ -13,6 +13,7 @@ import urllib.parse
 import urllib.request
 
 REPOSITORY = "njvenis/volt"
+RELEASE_VERSION_TAGS = {"0.1.0-rc.2", "0.1.0-rc.3"}
 REGISTRY = "https://ghcr.io"
 ACCEPT = ", ".join((
     "application/vnd.oci.image.index.v1+json",
@@ -106,11 +107,24 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--version-tag", required=True)
     parser.add_argument("--sha-tag", required=True)
+    parser.add_argument("--amd64-tag")
+    parser.add_argument("--arm64-tag")
     parser.add_argument("--expected-digest")
+    parser.add_argument("--expected-amd64-digest")
+    parser.add_argument("--expected-arm64-digest")
     parser.add_argument("--anonymous", action="store_true", help="verify public pull access without credentials")
     args = parser.parse_args()
-    if args.version_tag != "0.1.0-rc.2" or not re.fullmatch(r"sha-[0-9a-f]{40}", args.sha_tag):
-        parser.error("only the prepared RC2 and full source SHA tag are accepted")
+    if args.version_tag not in RELEASE_VERSION_TAGS or not re.fullmatch(r"sha-[0-9a-f]{40}", args.sha_tag):
+        parser.error("only explicitly prepared RC2/RC3 version and full source-SHA tags are accepted")
+    source_sha = args.sha_tag.removeprefix("sha-")
+    rc3_tags = (f"sha-{source_sha}-linux-amd64", f"sha-{source_sha}-linux-arm64")
+    if args.version_tag == "0.1.0-rc.3":
+        if (args.amd64_tag, args.arm64_tag) != rc3_tags:
+            parser.error("RC3 requires the exact source-bound amd64 and arm64 child-image tags")
+    elif args.amd64_tag or args.arm64_tag or args.expected_amd64_digest or args.expected_arm64_digest:
+        parser.error("platform child tags are supported only for the fixed multi-platform RC3")
+    if not args.expected_digest and (args.expected_amd64_digest or args.expected_arm64_digest):
+        parser.error("expected platform digests require an expected index digest")
     username = password = None
     if not args.anonymous:
         username = os.environ.get("GITHUB_ACTOR")
@@ -122,16 +136,26 @@ def main() -> int:
         if args.expected_digest:
             if not re.fullmatch(r"sha256:[0-9a-f]{64}", args.expected_digest):
                 raise RuntimeError("expected digest is malformed")
-            for tag in (args.version_tag, args.sha_tag):
+            checks = [(args.version_tag, args.expected_digest), (args.sha_tag, args.expected_digest)]
+            if args.version_tag == "0.1.0-rc.3":
+                for tag, digest in ((args.amd64_tag, args.expected_amd64_digest),
+                                    (args.arm64_tag, args.expected_arm64_digest)):
+                    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                        raise RuntimeError("RC3 requires both immutable child image digests")
+                    checks.append((tag, digest))
+            for tag, expected in checks:
                 actual = tag_digest(tag, username=username, password=password, anonymous=args.anonymous)
-                if actual != args.expected_digest:
-                    raise RuntimeError(f"tag {tag} resolves to {actual}, expected {args.expected_digest}")
-            print("both immutable GHCR tags resolve to the expected digest")
+                if actual != expected:
+                    raise RuntimeError(f"tag {tag} resolves to {actual}, expected {expected}")
+            print("all required GHCR tags resolve to their expected immutable index/platform digests")
             return 0
-        for tag in (args.version_tag, args.sha_tag):
+        tags = [args.version_tag, args.sha_tag]
+        if args.version_tag == "0.1.0-rc.3":
+            tags.extend([args.amd64_tag, args.arm64_tag])
+        for tag in tags:
             if not unused_tag(tag, username=username, password=password, anonymous=args.anonymous):
                 raise RuntimeError(f"immutable release tag already exists: {tag}")
-        print("GHCR version and source-SHA tags are unused")
+        print("all required GHCR version, source-SHA and platform tags are unused")
         return 0
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)

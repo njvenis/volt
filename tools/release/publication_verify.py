@@ -21,19 +21,27 @@ def statement_rows(raw: str) -> list[dict]:
     return rows
 
 def verify(cosign: str, digest: str, source: str, image_id: str, spdx: Path, provenance: Path,
-           notice_manifest: Path, controller_commit: str | None = None) -> None:
+           notice_manifest: Path, controller_commit: str | None = None, *,
+           version: str = "0.1.0-rc.2", platform: str = "linux/amd64") -> None:
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or not re.fullmatch(r"[0-9a-f]{40}", source): raise ValueError("immutable registry digest or source commit is malformed")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id): raise ValueError("image config ID is malformed")
     notice = json.loads(notice_manifest.read_text())
-    if notice.get("image_id") != image_id or notice.get("platform") != "linux/amd64": raise ValueError("notice manifest does not match the exact image config ID/platform")
+    if version not in {"0.1.0-rc.2", "0.1.0-rc.3"} or platform not in {"linux/amd64", "linux/arm64"}:
+        raise ValueError("publication verification version/platform is not explicitly admitted")
+    if version == "0.1.0-rc.2" and platform != "linux/amd64":
+        raise ValueError("RC2 publication verification remains amd64-only")
+    if notice.get("image_id") != image_id or notice.get("platform") != platform: raise ValueError("notice manifest does not match the exact image config ID/platform")
     sbom_hash = hashlib.sha256(spdx.read_bytes()).hexdigest()
     notice_files = notice.get("files")
     if not isinstance(notice_files, list) or not any(isinstance(row, dict) and row.get("path") == "sbom.spdx.json" and row.get("sha256") == sbom_hash for row in notice_files):
         raise ValueError("SPDX SBOM digest is not present in the verified notice inventory")
     ref = f"{REPO}@{digest}"
-    subprocess.run([cosign, "verify", "--output=json", "--certificate-identity", IDENTITY, "--certificate-oidc-issuer", ISSUER, ref], check=True, text=True, capture_output=True)
+    identity = ("https://github.com/njvenis/volt/.github/workflows/release-rc3.yml@refs/heads/main"
+                if version == "0.1.0-rc.3" else IDENTITY)
+    workflow_ref = identity.removeprefix("https://github.com/")
+    subprocess.run([cosign, "verify", "--output=json", "--certificate-identity", identity, "--certificate-oidc-issuer", ISSUER, ref], check=True, text=True, capture_output=True)
     def attest(predicate_type):
-        return statement_rows(subprocess.run([cosign, "verify-attestation", "--output=json", "--type", predicate_type, "--certificate-identity", IDENTITY, "--certificate-oidc-issuer", ISSUER, ref], check=True, text=True, capture_output=True).stdout)
+        return statement_rows(subprocess.run([cosign, "verify-attestation", "--output=json", "--type", predicate_type, "--certificate-identity", identity, "--certificate-oidc-issuer", ISSUER, ref], check=True, text=True, capture_output=True).stdout)
     spdx_rows = attest("spdxjson")
     prov_rows = attest("slsaprovenance1")
     wanted = digest.removeprefix("sha256:")
@@ -44,12 +52,14 @@ def verify(cosign: str, digest: str, source: str, image_id: str, spdx: Path, pro
     if not any(subject_matches(row) and row.get("predicateType") == "https://spdx.dev/Document" and row.get("predicate") == expected_spdx for row in spdx_rows):
         raise ValueError("verified SPDX attestation does not match the release SBOM and registry digest")
     expected_prov = json.loads(provenance.read_text())
-    provenance_validator.validate(expected_prov, source, expected_controller_commit=controller_commit)
+    provenance_validator.validate(expected_prov, source, expected_controller_commit=controller_commit,
+                                  expected_workflow_ref=workflow_ref)
     def provenance_matches(row: dict) -> bool:
         predicate = row.get("predicate")
         if not isinstance(predicate, dict): return False
         try:
-            provenance_validator.validate(predicate, source, expected_controller_commit=controller_commit)
+            provenance_validator.validate(predicate, source, expected_controller_commit=controller_commit,
+                                           expected_workflow_ref=workflow_ref)
         except ValueError:
             return False
         return subject_matches(row) and row.get("predicateType") == "https://slsa.dev/provenance/v1" and predicate == expected_prov
@@ -57,7 +67,7 @@ def verify(cosign: str, digest: str, source: str, image_id: str, spdx: Path, pro
         raise ValueError("verified provenance attestation does not match the exact source commit and registry digest")
 
 def main() -> int:
-    p=argparse.ArgumentParser(); p.add_argument("--cosign",required=True); p.add_argument("--digest",required=True); p.add_argument("--source",required=True); p.add_argument("--image-id",required=True); p.add_argument("--spdx",type=Path,required=True); p.add_argument("--provenance",type=Path,required=True); p.add_argument("--notice-manifest",type=Path,required=True); p.add_argument("--controller-commit"); a=p.parse_args()
-    try: verify(a.cosign,a.digest,a.source,a.image_id,a.spdx,a.provenance,a.notice_manifest,a.controller_commit); print(f"verified registry signature, SPDX and provenance for {REPO}@{a.digest}"); return 0
+    p=argparse.ArgumentParser(); p.add_argument("--cosign",required=True); p.add_argument("--digest",required=True); p.add_argument("--source",required=True); p.add_argument("--image-id",required=True); p.add_argument("--spdx",type=Path,required=True); p.add_argument("--provenance",type=Path,required=True); p.add_argument("--notice-manifest",type=Path,required=True); p.add_argument("--controller-commit"); p.add_argument("--version",choices=("0.1.0-rc.2","0.1.0-rc.3"),default="0.1.0-rc.2"); p.add_argument("--platform",choices=("linux/amd64","linux/arm64"),default="linux/amd64"); a=p.parse_args()
+    try: verify(a.cosign,a.digest,a.source,a.image_id,a.spdx,a.provenance,a.notice_manifest,a.controller_commit,version=a.version,platform=a.platform); print(f"verified registry signature, SPDX and provenance for {REPO}@{a.digest}"); return 0
     except (OSError,ValueError,subprocess.CalledProcessError,json.JSONDecodeError) as exc: print(f"publication verification failed: {exc}",file=sys.stderr); return 2
 if __name__ == "__main__": raise SystemExit(main())

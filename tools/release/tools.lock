@@ -1,11 +1,14 @@
-# Exact scanner release asset pins for linux/amd64.
+# Exact scanner and Cosign release asset pins.
 trivy_version=0.76.1
 trivy_release=https://github.com/aquasecurity/trivy/releases/download/v0.76.1/trivy_0.76.1_Linux-64bit.tar.gz
 trivy_linux_amd64_sha256=c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0
 gitleaks_image=ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:b109bc5f8f76a38196a3e413704fc5b9e3c32360bce4e4b603bd6f45b3721dbb
 cosign_version=3.1.4
-cosign_release=https://github.com/sigstore/cosign/releases/download/v3.1.4/cosign-linux-amd64
+cosign_release_template=https://github.com/sigstore/cosign/releases/download/v{version}/cosign-{platform}
 cosign_linux_amd64_sha256=424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa
+cosign_linux_arm64_sha256=ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2
+cosign_darwin_amd64_sha256=9d1e4abe2b6be279ed0d2ff706fde1ccd738747c834e3e6d44039c238867334f
+cosign_darwin_arm64_sha256=9f9b8cd557cf2e5b3df3373a00baa005a86b02391e3e06dd0ce37b3a1533d3a4
 actionlint_version=1.7.12
 actionlint_release=https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
 actionlint_linux_amd64_sha256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8

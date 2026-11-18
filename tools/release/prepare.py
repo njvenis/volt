@@ -27,8 +27,8 @@ def main() -> int:
     parser.add_argument("--at", help="UTC date for deterministic policy checks (YYYY-MM-DD)")
     args = parser.parse_args()
 
-    if not re.fullmatch(r"0\.1\.0-rc\.2", args.version):
-        parser.error("only the prepared version 0.1.0-rc.2 is configured")
+    if args.version not in {"0.1.0-rc.2", "0.1.0-rc.3"}:
+        parser.error("only explicitly prepared RC2 and RC3 versions are configured")
     if args.exception:
         from datetime import date
 

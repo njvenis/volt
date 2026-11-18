@@ -4,6 +4,7 @@ import base64
 import copy
 import hashlib
 import json
+import secrets
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,14 +22,12 @@ from uvm.auth import synthetic_provider as provider
 class DemoPasswordLoginTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.credentials = Path(self.temp.name) / "credentials.json"
-        # This static salted verifier is a synthetic fixture, not the plaintext
-        # password used by the request tests below.
-        self.credentials.write_text(json.dumps({"schema": "uvm.demo-credential.v1",
-            "username": "named-admin", "salt": "000102030405060708090a0b0c0d0e0f",
-            "password_hash": "c000ef9581e24eb51ae1b3d41a793dd37b138acb1e55223d674dee5c3a166e6c"}),
-            encoding="utf-8")
-        self.credentials.chmod(0o600)
+        self.password = secrets.token_urlsafe(24) + "A7!"
+        self.credential = json.loads(demo_password_verifier(
+            "named-admin", self.password, self.password).decode("utf-8"))
+        credential_patch = patch.object(provider, "_credential", return_value=self.credential)
+        credential_patch.start()
+        self.addCleanup(credential_patch.stop)
         self.client_secret = Path(self.temp.name) / "client-secret"
         self.client_secret.write_text("synthetic-client-secret")
         self.signing_key = Path(self.temp.name) / "provider-private.pem"
@@ -46,7 +45,7 @@ class DemoPasswordLoginTests(unittest.TestCase):
             "UVM_OIDC_CLIENT_ID": "volt-compose-demo",
             "UVM_OIDC_CALLBACK_URL": "http://127.0.0.1:8180/api/v1/auth/callback",
             "UVM_OIDC_FIXTURE_SUBJECT": "local-testing-admin-subject",
-            "UVM_OIDC_DEMO_CREDENTIALS_FILE": str(self.credentials),
+            "UVM_OIDC_DEMO_CREDENTIALS_FILE": "in-memory-test-verifier",
             "UVM_OIDC_CLIENT_SECRET_FILE": str(self.client_secret),
             "UVM_OIDC_PROVIDER_KEY_FILE": str(self.signing_key),
         }, clear=True)
@@ -81,7 +80,7 @@ class DemoPasswordLoginTests(unittest.TestCase):
         page = self.authorize()
         self.assertEqual(page.status_code, 200)
         self.assertIn("Local demo sign in", page.text)
-        result = self.login(page, "named-admin", "long-test-password-value")
+        result = self.login(page, "named-admin", self.password)
         self.assertEqual(result.status_code, 302)
         self.assertIn("state=state-value", result.headers["location"])
         self.assertEqual(len(provider._codes), 1)
@@ -89,7 +88,7 @@ class DemoPasswordLoginTests(unittest.TestCase):
 
     def test_password_login_completes_oidc_code_exchange_with_stable_subject(self):
         page = self.authorize()
-        result = self.login(page, "named-admin", "long-test-password-value")
+        result = self.login(page, "named-admin", self.password)
         params = parse_qs(urlsplit(result.headers["location"]).query)
         self.assertEqual(params["state"], ["state-value"])
         token = self.client.post("/token", auth=("volt-compose-demo", "synthetic-client-secret"), data={
@@ -109,7 +108,7 @@ class DemoPasswordLoginTests(unittest.TestCase):
         self.assertNotIn("named-admin", wrong.text)
 
     def test_csrf_mismatch_is_rejected_without_attempting_credentials(self):
-        response = self.login(self.authorize(), "named-admin", "long-test-password-value", csrf="attacker")
+        response = self.login(self.authorize(), "named-admin", self.password, csrf="attacker")
         self.assertEqual(response.status_code, 400)
         self.assertEqual(provider._login_attempts, {})
 
@@ -117,7 +116,7 @@ class DemoPasswordLoginTests(unittest.TestCase):
         for _ in range(10):
             failed = self.login(self.authorize(), "named-admin", "incorrect-password-value")
             self.assertEqual(failed.status_code, 401)
-        limited = self.login(self.authorize(), "named-admin", "long-test-password-value")
+        limited = self.login(self.authorize(), "named-admin", self.password)
         self.assertEqual(limited.status_code, 429)
 
     def test_password_login_is_disabled_without_demo_credential_file(self):

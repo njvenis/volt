@@ -42,8 +42,11 @@ class ComposeQuickstartDocumentationTests(unittest.TestCase):
         self.assertIn("--source-sha \"$SOURCE_SHA\"", rc3)
         self.assertLess(rc3.index("authenticate-bundle"), rc3.index("tar -xzf \"$VOLT_BUNDLE\""))
         self.assertLess(rc3.index("authenticate-bundle"), rc3.index("EXPECTED_BUNDLE_SHA="))
-        self.assertIn("registry_digest`/`image_index_id` identify the multi-platform index", rc3)
-        self.assertIn("image_id`/`image_config_id` identify the selected platform image", rc3)
+        self.assertIn("`registry_digest` is the published common multi-platform registry index digest", rc3)
+        self.assertIn("`image_index_id` is the saved archive's image index ID and may be null", rc3)
+        self.assertIn("`platform_manifest_digest` identifies the saved archive's platform manifest", rc3)
+        self.assertIn("published platform-specific child digest is recorded separately in `platform-digest.txt`", rc3)
+        self.assertIn("`image_id` and `image_config_id` identify the selected local platform image", rc3)
         self.assertIn("Group removal revokes existing sessions", rc3)
 
     def test_documentation_index_marks_rc3_planned_and_rc2_historical(self):

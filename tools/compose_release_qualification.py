@@ -222,7 +222,6 @@ def main() -> int:
     extracted = None
     state = None
     cookie = None
-    qualification_password = None
     project = f"{args.project_prefix}-{os.getpid()}"
     password_value = None
     setup = None
@@ -240,10 +239,7 @@ def main() -> int:
         extracted = Path(tempfile.mkdtemp(prefix=f"{args.project_prefix}-bundle-", dir=bundle_tmp))
         os.chmod(extracted, 0o700)
         cookie = private / "cookie"
-        qualification_password = private / "qualification-password"
         password_value = secrets.token_urlsafe(32) + "A7!"
-        qualification_password.write_text(password_value)
-        os.chmod(qualification_password, 0o600)
         shutil.unpack_archive(str(args.bundle), extracted, "gztar")
         candidates = list(extracted.glob("*/setup.py"))
         if len(candidates) != 1:
@@ -261,7 +257,6 @@ def main() -> int:
         run_getpass("init", init_command(cli, state, project, ports, args.image_id, platform), evidence,
             [(b"New local demo admin password", password_value),
              (b"Confirm local demo admin password", password_value)])
-        del password_value
         info = json.loads((state / "instance.json").read_text())
         admission = info["image_admission"]
         if (admission["id"] != args.image_id or admission["platform"] != platform
@@ -286,22 +281,23 @@ def main() -> int:
         run("link-admin", [*cli,"link-admin",str(state)], evidence)
         origin = f"http://127.0.0.1:{ports[0]}"
         run("browser-login", ["node",str(ROOT/"tools/compose_release_login.mjs"),origin,str(cookie),
-            "qualification-admin",str(qualification_password)], evidence)
+            "qualification-admin"], evidence, input_text=password_value)
         run_getpass("initialize-authority", [*cli,"initialize-authority",str(state)], evidence,
                     cookie.read_text())
         cookie.unlink(missing_ok=True)
         smoke = ["node",str(ROOT/"tools/g7_local_preview_smoke.mjs"),"--origin",origin,
                  "--issuer",f"http://127.0.0.1:{ports[2]}","--subject","volt-compose-demo-admin-subject",
                  "--principal","volt-compose-demo-admin","--evidence",str(evidence),
-                 "--username","qualification-admin","--password-file",str(qualification_password)]
-        run("audited-operation", smoke, evidence)
+                 "--username","qualification-admin","--password-stdin"]
+        run("audited-operation", smoke, evidence, input_text=password_value)
         run("stop", [*cli,"stop",str(state)], evidence); started = False
         run("restart", [*cli,"start",str(state)], evidence); started = True
         run("restart-health", [sys.executable,"-c",f"import sys;sys.path.insert(0,{str(ROOT)!r});from deploy.compose.setup import load_instance,wait_until_ready;wait_until_ready(load_instance({str(state)!r})[1]);print('healthy')"],evidence)
         run("restart-readback", ["node",str(ROOT/"tools/g7_local_preview_smoke.mjs"),"--origin",origin,
             "--issuer",f"http://127.0.0.1:{ports[2]}","--subject","volt-compose-demo-admin-subject",
             "--principal","volt-compose-demo-admin","--evidence",str(evidence),"--readback",
-            "--username","qualification-admin","--password-file",str(qualification_password)], evidence)
+            "--username","qualification-admin","--password-stdin"], evidence,
+            input_text=password_value)
         run("cold-stop", [*cli,"stop",str(state)], evidence); started = False
         run("backup-record", [*cli,"backup-record",str(state)], evidence)
         inventories = json.loads((state/"instance.json").read_text())["backup_inventory"]
@@ -367,14 +363,15 @@ def main() -> int:
         run("restore-readback", ["node",str(ROOT/"tools/g7_local_preview_smoke.mjs"),"--origin",origin,
             "--issuer",f"http://127.0.0.1:{ports[2]}","--subject","volt-compose-demo-admin-subject",
             "--principal","volt-compose-demo-admin","--evidence",str(evidence),"--readback",
-            "--username","qualification-admin","--password-file",str(qualification_password)], evidence)
+            "--username","qualification-admin","--password-stdin"], evidence,
+            input_text=password_value)
         run("provider-group-removal-fresh-login", ["node",str(ROOT/"tools/g7_local_preview_smoke.mjs"),
             "--origin",origin,"--issuer",f"http://127.0.0.1:{ports[2]}",
             "--subject","volt-compose-demo-admin-subject","--principal","volt-compose-demo-admin",
             "--evidence",str(evidence),"--readback","--verify-provider-revocation",
-            "--username","qualification-admin","--password-file",str(qualification_password),
+            "--username","qualification-admin","--password-stdin",
             "--compose-directory",str(info["compose_directory"]),"--env-file",str(state/".env"),
-            "--project",project], evidence)
+            "--project",project], evidence, input_text=password_value)
         # The exact-owner cleanup below performs the final stop and removes only
         # this private project, avoiding a second graceful stop before cleanup.
         execution_environment = {key: os.environ[key] for key in ("GITHUB_ACTIONS", "RUNNER_ENVIRONMENT")
@@ -399,8 +396,7 @@ def main() -> int:
     finally:
         if cookie is not None:
             cookie.unlink(missing_ok=True)
-        if qualification_password is not None:
-            qualification_password.unlink(missing_ok=True)
+        password_value = None
         if state is not None and state.exists() and setup:
             try:
                 # cleanup verifies per-resource owner labels and removes only this unique project.

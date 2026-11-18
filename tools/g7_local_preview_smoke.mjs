@@ -11,7 +11,11 @@ const origin=arg('--origin'), issuer=arg('--issuer'), subject=arg('--subject'), 
 const deploymentLabel=process.argv.includes('--deployment-label')?arg('--deployment-label'):'Synthetic local demo';
 const readbackOnly=process.argv.includes('--readback');
 const verifyProviderRevocation=process.argv.includes('--verify-provider-revocation');
-const username=arg('--username'), password=await readFile(arg('--password-file'),'utf8');
+const username=arg('--username');
+if(!process.argv.includes('--password-stdin'))throw new Error('missing --password-stdin');
+const passwordChunks=[];
+for await(const chunk of process.stdin)passwordChunks.push(Buffer.from(chunk));
+const password=Buffer.concat(passwordChunks).toString('utf8');
 await mkdir(evidence,{recursive:true,mode:0o700});
 const launchOptions={headless:true};
 if(process.env.CHROMIUM_EXECUTABLE_PATH)launchOptions.executablePath=process.env.CHROMIUM_EXECUTABLE_PATH;

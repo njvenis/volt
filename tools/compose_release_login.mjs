@@ -1,7 +1,9 @@
 import {chromium} from '../ui/node_modules/playwright/index.mjs';
-import {readFile, writeFile} from 'node:fs/promises';
-const [origin, cookiePath, username, passwordPath] = process.argv.slice(2);
-const password = await readFile(passwordPath, 'utf8');
+import {writeFile} from 'node:fs/promises';
+const [origin, cookiePath, username] = process.argv.slice(2);
+const passwordChunks = [];
+for await (const chunk of process.stdin) passwordChunks.push(Buffer.from(chunk));
+const password = Buffer.concat(passwordChunks).toString('utf8');
 const browser = await chromium.launch({headless:true});
 try {
   const context = await browser.newContext({ignoreHTTPSErrors:true});

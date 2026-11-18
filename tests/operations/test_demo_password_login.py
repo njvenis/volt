@@ -22,7 +22,13 @@ class DemoPasswordLoginTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.credentials = Path(self.temp.name) / "credentials.json"
-        self.credentials.write_bytes(demo_password_verifier("named-admin", "long-test-password-value", "long-test-password-value"))
+        # This static salted verifier is a synthetic fixture, not the plaintext
+        # password used by the request tests below.
+        self.credentials.write_text(json.dumps({"schema": "uvm.demo-credential.v1",
+            "username": "named-admin", "salt": "000102030405060708090a0b0c0d0e0f",
+            "password_hash": "c000ef9581e24eb51ae1b3d41a793dd37b138acb1e55223d674dee5c3a166e6c"}),
+            encoding="utf-8")
+        self.credentials.chmod(0o600)
         self.client_secret = Path(self.temp.name) / "client-secret"
         self.client_secret.write_text("synthetic-client-secret")
         self.signing_key = Path(self.temp.name) / "provider-private.pem"

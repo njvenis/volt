@@ -627,29 +627,24 @@ def smoke(args) -> None:
     evidence = Path(args.evidence)
     evidence.mkdir(mode=0o700, parents=True, exist_ok=True)
     verify_private_ingress(info, evidence)
-    password_path = Path(args.password_file).expanduser() if args.password_file else root / "secrets" / ".smoke-password"
-    temporary_password = args.password_file is None
-    if temporary_password:
+    if args.password_file:
+        password_path = Path(args.password_file).expanduser()
+        password = private_password_file(password_path)
+    else:
         password = getpass.getpass("Local preview admin password: ")
-        password_path.write_text(password + "\n", encoding="utf-8")
-        password_path.chmod(0o600)
-        del password
+    command = ["node", "tools/g7_local_preview_smoke.mjs", "--origin",
+        f"http://127.0.0.1:{info['api_port']}", "--issuer",
+        f"http://127.0.0.1:{info['oidc_port']}", "--subject",
+        "volt-local-preview-admin-subject", "--principal", "volt-local-preview-admin",
+        "--evidence", str(evidence), "--username", args.admin_username, "--password-stdin"]
+    if args.readback:
+        command.append("--readback")
+    else:
+        command.append("--initialize-development")
     try:
-        private_password_file(password_path)
-        command = ["node", "tools/g7_local_preview_smoke.mjs", "--origin",
-            f"http://127.0.0.1:{info['api_port']}", "--issuer",
-            f"http://127.0.0.1:{info['oidc_port']}", "--subject",
-            "volt-local-preview-admin-subject", "--principal", "volt-local-preview-admin",
-            "--evidence", str(evidence), "--username", args.admin_username,
-            "--password-file", str(password_path)]
-        if args.readback:
-            command.append("--readback")
-        else:
-            command.append("--initialize-development")
-        subprocess.run(command, check=True)
+        subprocess.run(command, input=password, text=True, check=True)
     finally:
-        if temporary_password:
-            password_path.unlink(missing_ok=True)
+        password = None
 
 
 def main() -> None:

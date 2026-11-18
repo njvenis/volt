@@ -161,21 +161,22 @@ class ComposeQualificationPlatformTests(unittest.TestCase):
             init_command(["python", "setup.py"], Path("/tmp/volt-demo"), "volt-demo",
                          [18080, 18081, 18090], "sha256:" + "a" * 64, "linux/ppc64le")
 
-    def test_maintained_qualification_imports_password_generator_and_retains_secret_until_cleanup(self):
+    def test_maintained_qualification_streams_password_without_plaintext_file(self):
         root = Path(__file__).resolve().parents[2]
         source = (root / "tools/compose_release_qualification.py").read_text()
         tree = ast.parse(source)
         imports = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import)
             for alias in node.names}
         self.assertIn("secrets", imports)
-        self.assertIn('qualification_password.unlink(missing_ok=True)', source)
-        self.assertIn('"--password-file",str(qualification_password)', source)
-        self.assertIn('del password_value', source)
+        self.assertNotIn("qualification-password", source)
+        self.assertNotIn("qualification_password.write_text", source)
+        self.assertGreaterEqual(source.count('"--password-stdin"'), 4)
+        self.assertGreaterEqual(source.count("input_text=password_value"), 5)
 
     def test_browser_smoke_uses_password_login_for_fresh_sessions_without_fixture_bypass(self):
         root = Path(__file__).resolve().parents[2]
         source = (root / "tools/g7_local_preview_smoke.mjs").read_text()
-        self.assertIn("readFile(arg('--password-file')", source)
+        self.assertIn("process.argv.includes('--password-stdin')", source)
         self.assertIn("getByLabel('Username').fill(username)", source)
         self.assertIn("getByLabel('Password').fill(password)", source)
         self.assertNotIn("VOLT_SMOKE_FIXTURE_SUBJECT", source)
@@ -183,7 +184,7 @@ class ComposeQualificationPlatformTests(unittest.TestCase):
         self.assertIn("await page.reload({waitUntil:'domcontentloaded'})", revocation)
         self.assertLess(revocation.index("await page.reload"),
             revocation.index("getByRole('link',{name:/sign in/i})"))
-        self.assertIn('"--password-file",str(qualification_password)',
+        self.assertIn('"--password-stdin"',
             (root / "tools/compose_release_qualification.py").read_text())
 
 

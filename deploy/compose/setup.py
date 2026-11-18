@@ -384,17 +384,90 @@ def choose_network() -> tuple[str, str]:
     raise SystemExit("no unused private Docker subnet found; choose one after reviewing host and Docker routes")
 
 
-def init(args) -> None:
+RUNTIME_INIT_FIELDS = (
+    'directory', 'project', 'image', 'platform', 'http_port', 'recovery_port', 'oidc_port',
+    'admitted_image_id', 'admitted_image_id_kind', 'admitted_engine_image_id',
+    'admitted_image_config_id', 'admitted_selected_descriptor', 'admitted_source_revision',
+    'admitted_source_snapshot', 'admitted_version', 'owner_token', 'network_subnet',
+    'network_gateway', 'runtime_compose_directory', 'host_instance_directory',
+)
+
+
+def runtime_init_request(args) -> dict:
+    if args.mode != 'local' or args.runtime_prepare is not True:
+        raise SystemExit('fixed runtime initialization requires the local prepared profile')
+    values = {name: getattr(args, name) for name in RUNTIME_INIT_FIELDS}
+    for name, value in values.items():
+        if name in {'http_port', 'recovery_port', 'oidc_port'}:
+            if type(value) is not int or not 1 <= value <= 65535:
+                raise SystemExit('runtime initialization port is invalid')
+        elif not isinstance(value, str) or not value or len(value) > 16384 or '\x00' in value:
+            raise SystemExit('runtime initialization admission data is invalid')
+    return {'schema_version': 1, 'profile': 'volt_local_runtime_init_v1', 'arguments': values,
+            'setup_sha256': 'sha256:' + hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+
+
+def runtime_init_arguments(document: dict, instance_root: Path):
+    if (not isinstance(document, dict) or set(document) != {'schema_version', 'profile', 'arguments', 'setup_sha256'}
+            or type(document['schema_version']) is not int or document['schema_version'] != 1
+            or document['profile'] != 'volt_local_runtime_init_v1'
+            or not isinstance(document['setup_sha256'], str)
+            or re.fullmatch(r'sha256:[0-9a-f]{64}', document['setup_sha256']) is None
+            or not isinstance(document['arguments'], dict) or set(document['arguments']) != set(RUNTIME_INIT_FIELDS)
+            or document['arguments']['directory'] != str(instance_root)):
+        raise SystemExit('fixed runtime initialization request is invalid')
+    arguments = document['arguments']
+    argv = ['init', str(instance_root), '--mode', 'local', '--runtime-prepare']
+    for name in RUNTIME_INIT_FIELDS:
+        if name != 'directory':
+            value = arguments[name]
+            if name in {'http_port', 'recovery_port', 'oidc_port'}:
+                if type(value) is not int or not 1 <= value <= 65535:
+                    raise SystemExit('runtime initialization port is invalid')
+            elif not isinstance(value, str) or not value or len(value) > 16384 or '\x00' in value:
+                raise SystemExit('runtime initialization admission data is invalid')
+            argv += ['--' + name.replace('_', '-'), str(value)]
+    result = parser().parse_args(argv)
+    runtime_init_request(result)
+    return result
+
+
+def validate_runtime_initial_root(root: Path, lifecycle_lock_fd: int | None) -> None:
+    if lifecycle_lock_fd is None:
+        raise SystemExit('runtime preparation requires the initializing lock owner')
+    compose_assets = root / 'compose'
+    info = root.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700 or info.st_uid != os.getuid()
+            or {item.name for item in root.iterdir()} != {'compose', '.install.lock'}
+            or compose_assets.is_symlink() or not compose_assets.is_dir()
+            or {item.name for item in compose_assets.iterdir()} != {'compose.yaml', 'local.yaml', 'local-restore.yaml'}
+            or any(item.is_symlink() or not item.is_file() for item in compose_assets.iterdir())):
+        raise SystemExit('runtime preparation requires the exact private initial asset inventory')
+    descriptor = os.fstat(lifecycle_lock_fd)
+    current = (root / '.install.lock').stat(follow_symlinks=False)
+    fields = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+    if (not stat.S_ISREG(descriptor.st_mode) or stat.S_IMODE(descriptor.st_mode) != 0o600
+            or descriptor.st_uid != os.getuid() or descriptor.st_nlink != 1 or descriptor.st_size != 0
+            or any(getattr(descriptor, name) != getattr(current, name) for name in fields)):
+        raise SystemExit('initializing lock descriptor differs from the private current inode')
+    try:
+        # The actual descriptor is retained by this initializer's lock holder.
+        # Reassert ownership on that descriptor; somebody else's lock is no proof.
+        fcntl.flock(lifecycle_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, ValueError):
+        raise SystemExit('initializer does not own the exclusive lifecycle descriptor') from None
+    after = (root / '.install.lock').stat(follow_symlinks=False)
+    if any(getattr(descriptor, name) != getattr(after, name) for name in fields):
+        raise SystemExit('initializing lock inode changed during ownership validation')
+
+
+def init(args, *, lifecycle_lock_fd: int | None = None) -> None:
+    if getattr(args, 'emit_runtime_init_request', False):
+        print(json.dumps(runtime_init_request(args), sort_keys=True, separators=(',', ':')))
+        return
     root = Path(args.directory).expanduser().absolute()
     if args.runtime_prepare:
-        compose_assets = root / "compose"
-        expected_assets = {"compose.yaml", "local.yaml", "local-restore.yaml"}
-        if (not root.is_dir() or root.is_symlink() or stat.S_IMODE(root.stat().st_mode) != 0o700
-                or {item.name for item in root.iterdir()} != {"compose"}
-                or compose_assets.is_symlink() or not compose_assets.is_dir()
-                or {item.name for item in compose_assets.iterdir()} != expected_assets
-                or any(item.is_symlink() or not item.is_file() for item in compose_assets.iterdir())):
-            raise SystemExit("runtime preparation requires an empty private instance plus the closed Compose asset set")
+        validate_runtime_initial_root(root, lifecycle_lock_fd)
     elif root.exists():
         raise SystemExit(f"refusing to initialize existing instance path: {root}")
     image = args.image
@@ -1511,6 +1584,7 @@ def parser() -> argparse.ArgumentParser:
                         help="exact local browser origin; local mode defaults to its loopback HTTP port")
     create.add_argument("--runtime-prepare", action="store_true",
                         help=argparse.SUPPRESS)
+    create.add_argument('--emit-runtime-init-request', action='store_true', help=argparse.SUPPRESS)
     create.add_argument("--admitted-image-id", help=argparse.SUPPRESS)
     create.add_argument("--admitted-image-id-kind", choices=("config", "selected_manifest"), default="config", help=argparse.SUPPRESS)
     create.add_argument("--admitted-image-config-id", help=argparse.SUPPRESS)

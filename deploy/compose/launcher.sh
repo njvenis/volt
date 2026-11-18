@@ -408,12 +408,19 @@ EOF_MOUNTS
 take_lock() {
   [ -z "$LOCK_NAME" ] || return 0
   LOCK_NAME="volt-lock-${PROJECT}-$$"
-  docker run --platform "$PLATFORM" -d --name "$LOCK_NAME" --restart=no --network none --read-only \
+  init_request=${1:-}
+  set -- docker run --platform "$PLATFORM" -d --name "$LOCK_NAME" --restart=no --network none --read-only \
     --label "volt.compose.owner-token=$OWNER_TOKEN" --label "volt.compose.project=$PROJECT" \
     --cap-drop=ALL --security-opt=no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=8m \
     --user "$(id -u):$(id -g)" --mount "type=bind,src=$STATE,dst=/state" \
-    --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -m uvm.installer.lock /state/.install.lock >/dev/null \
-    || fail 'another lifecycle operation may already hold the private instance lock'
+    --mount "type=bind,src=$PACKAGE,dst=/package,readonly"
+  if [ -n "$init_request" ]; then
+    [ "$init_request" = "$WORK/runtime-init-request.json" ] || fail 'fixed initialization request path differs'
+    set -- "$@" --mount "type=bind,src=$WORK/runtime-init-request.json,dst=/run/volt-initialization/request.json,readonly"
+  fi
+  set -- "$@" --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -m uvm.installer.lock /state/.install.lock
+  if [ -n "$init_request" ]; then set -- "$@" --initialize-local; fi
+  "$@" >/dev/null || fail 'another lifecycle operation may already hold the private instance lock'
   LOCK_CREATED=1
   attempts=0
   while [ "$attempts" -lt 30 ]; do
@@ -680,7 +687,6 @@ if [ "$ACTION" = install ]; then
       --label "com.docker.compose.project=$PROJECT" --label "com.docker.compose.volume=$volume" \
       "${PROJECT}_$volume" >/dev/null || fail "could not create privately owned $volume volume"
   done
-  take_lock
   SUBNET=$(docker network inspect "$NETWORK" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}')
   GATEWAY=$(docker network inspect "$NETWORK" --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}')
   case "$SUBNET" in *[!0-9./]*|'') fail 'Docker returned an invalid private network subnet' ;; esac
@@ -688,17 +694,19 @@ if [ "$ACTION" = install ]; then
   docker run --platform "$PLATFORM" --rm --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
     --tmpfs /tmp:rw,noexec,nosuid,size=16m --user "$(id -u):$(id -g)" \
     --mount "type=bind,src=$PACKAGE,dst=/package,readonly" \
-    --mount "type=bind,src=$STATE,dst=/state" --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" \
+    --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" \
     /package/setup.py init /state --mode local --project "$PROJECT" --image "$IMAGE_REF" \
     --platform "$PLATFORM" --http-port "$HTTP_PORT" --recovery-port "$((HTTP_PORT + 1))" \
-    --oidc-port "$((HTTP_PORT + 2))" --runtime-prepare --admitted-image-id "$IMAGE_ID" \
+    --oidc-port "$((HTTP_PORT + 2))" --runtime-prepare --emit-runtime-init-request --admitted-image-id "$IMAGE_ID" \
     --admitted-image-id-kind "$IMAGE_ID_KIND" --admitted-engine-image-id "$IMAGE_ENGINE_ID" \
     --admitted-image-config-id "$IMAGE_CONFIG_ID" --admitted-selected-descriptor "$SELECTED_DESCRIPTOR" \
     --admitted-source-revision "$SOURCE_REVISION" --admitted-source-snapshot "$SOURCE_SNAPSHOT" \
     --admitted-version "$IMAGE_VERSION" --owner-token "$OWNER_TOKEN" \
     --network-subnet "$SUBNET" --network-gateway "$GATEWAY" \
     --runtime-compose-directory "$STATE/compose" --host-instance-directory "$STATE" \
-    >/dev/null || fail 'private runtime preparation failed'
+    >"$WORK/runtime-init-request.json" || fail 'fixed initialization request emission failed'
+  chmod 600 "$WORK/runtime-init-request.json"
+  take_lock "$WORK/runtime-init-request.json"
   MODE=local
   prepare_local_custody
 else

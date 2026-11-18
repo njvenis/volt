@@ -384,23 +384,99 @@ def qualify_admission_negatives(command: list[str], bundle: Path, image_json: Pa
 
 
 def trusted_launcher_environment(bin_directory: Path, admission: dict) -> dict[str, str]:
-    environment = launcher_minimal_environment(bin_directory)
+    registries = {COSIGN_IMAGE.split('/', 1)[0], admission['verifier_reference'].split('/', 1)[0],
+                  admission['image_reference'].split('/', 1)[0]}
+    environment = launcher_minimal_environment(bin_directory, registries=tuple(sorted(registries)))
     environment.update({"VOLT_EXPECTED_VERIFIER_IMAGE": admission["verifier_reference"],
         "VOLT_EXPECTED_VERSION": "0.1.0-rc.4", "VOLT_EXPECTED_SIGNER": SIGNER,
         "VOLT_EXPECTED_ISSUER": ISSUER, "VOLT_BOOTSTRAP_VERIFIER_VERIFIED": "1"})
     return environment
 
 
-def launcher_minimal_environment(bin_directory: Path) -> dict[str, str]:
-    """Expose only POSIX utilities and Docker to the installed host launcher."""
-    allowed = ("sh", "docker", "tar", "mktemp", "dirname", "mkdir", "chmod", "cp", "rm",
+def host_dependency_json(path: Path) -> dict:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, 'rb') as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > 1024 * 1024:
+            raise ValueError('host dependency metadata is not a bounded regular file')
+        raw = stream.read(1024 * 1024 + 1)
+        fields = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        if (len(raw) != before.st_size or any(getattr(before, field) != getattr(after, field)
+                for after in (os.fstat(stream.fileno()), path.stat(follow_symlinks=False)) for field in fields)):
+            raise ValueError('host dependency metadata changed during read')
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError('host dependency metadata must be an object')
+        return value
+
+
+def docker_credential_helper_selection(registries: tuple[str, ...]) -> dict:
+    """Read only helper selection, never retain Docker authentication values."""
+    config_path = Path(os.environ.get('DOCKER_CONFIG', str(Path.home() / '.docker'))) / 'config.json'
+    config = {}
+    if config_path.exists() or config_path.is_symlink():
+        try:
+            config = host_dependency_json(config_path)
+        except (OSError, ValueError):
+            raise RuntimeError('trusted host Docker credential configuration is invalid') from None
+    per_registry = config.get('credHelpers', {})
+    if not isinstance(per_registry, dict):
+        raise RuntimeError('trusted host Docker credential helper selection is invalid')
+    selected = []
+    for registry in registries:
+        field = 'credHelpers' if registry in per_registry else 'credsStore'
+        suffix = per_registry.get(registry) if field == 'credHelpers' else config.get('credsStore')
+        if suffix in (None, ''):
+            continue
+        if not isinstance(suffix, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', suffix):
+            raise RuntimeError('trusted host Docker credential helper name is invalid')
+        selected.append({'registry': registry, 'config_field': field, 'executable': 'docker-credential-' + suffix})
+    return {'config_path': str(config_path), 'selections': selected}
+
+
+def launcher_minimal_environment(bin_directory: Path, *, registries: tuple[str, ...] = ()) -> dict[str, str]:
+    """Expose POSIX/Docker plus its exact configured credential dependencies."""
+    allowed = ("sh", "docker", "tar", "gzip", "mktemp", "dirname", "mkdir", "chmod", "cp", "rm",
                "cat", "cut", "grep", "env", "id", "sleep", "mv")
+    selection = docker_credential_helper_selection(registries)
+    names = (*allowed, *sorted({item['executable'] for item in selection['selections']}))
+    if bin_directory.is_symlink():
+        raise RuntimeError('minimal host binary directory cannot be a symlink')
     bin_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    for name in allowed:
+    info = bin_directory.stat()
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700
+            or info.st_uid != os.getuid() or any(item.name not in names for item in bin_directory.iterdir())):
+        raise RuntimeError('minimal host binary directory custody or inventory differs')
+    tools = []
+    for name in names:
         source = shutil.which(name)
         if source is None:
             raise RuntimeError(f"launcher qualification host is missing required POSIX/Docker command: {name}")
-        (bin_directory / name).symlink_to(source)
+        selected = Path(source).absolute()
+        resolved = selected.resolve(strict=True)
+        info = resolved.stat()
+        if not stat.S_ISREG(info.st_mode) or not os.access(resolved, os.X_OK):
+            raise RuntimeError('required host Docker/POSIX dependency is not executable')
+        link = bin_directory / name
+        if link.exists() or link.is_symlink():
+            if (not link.is_symlink() or os.readlink(link) != str(selected)
+                    or link.resolve(strict=True) != resolved):
+                raise RuntimeError('existing minimal host executable contradicts its trusted target')
+        else:
+            link.symlink_to(selected)
+        tools.append({'name': name, 'selected_path': str(selected), 'resolved_path': str(resolved),
+            'sha256': sha(resolved), 'mode': stat.S_IMODE(info.st_mode), 'uid': info.st_uid, 'gid': info.st_gid})
+    record = {'schema_version': 1, 'registries': list(registries), 'credential_helper_selection': selection,
+              'tools': tools}
+    record_path = bin_directory.parent / 'minimal-host-tools.json'
+    if record_path.is_symlink():
+        raise RuntimeError('minimal host dependency record cannot be a symlink')
+    if record_path.exists() and host_dependency_json(record_path) != record:
+        raise RuntimeError('minimal host Docker/POSIX dependencies changed during the lifecycle')
+    if not record_path.exists():
+        descriptor = os.open(record_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, 'w') as stream:
+            json.dump(record, stream, sort_keys=True, indent=2); stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
     environment = {"PATH": str(bin_directory), "HOME": str(Path.home())}
     for name in ("DOCKER_CONFIG", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"):
         if name in os.environ:
@@ -653,6 +729,7 @@ def qualify_local_runtime(*, package: Path, bundle: Path, admission: dict[str, s
     }, sort_keys=True, indent=2) + "\n")
     launcher_bin = private / "minimal-host-path"
     launcher_env = trusted_launcher_environment(launcher_bin, admission)
+    shutil.copyfile(private / 'minimal-host-tools.json', evidence / 'minimal-host-tools.json')
     run("minimal-host-compose-preflight", ["docker", "compose", "version"], evidence, env=launcher_env)
     run("minimal-host-launcher-syntax", ["sh", "-n", str(launcher)], evidence, env=launcher_env)
     origin = f"http://127.0.0.1:{http_port}"

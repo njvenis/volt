@@ -72,8 +72,8 @@ def test_catalog_is_portable_and_keeps_six_distinct_index_routes():
     assert not (CATALOG.parent / "keyrings" / "debian-developer-keyring.gpg").exists()
     acl = next(x for x in catalog["groups"] if x["source_package"] == "acl" and x["source_version"] == "2.3.2-2")
     assert acl["immutable_dsc_sha1"] == "a78c0a5e511ee122ba5976bbd7cabeff0fd7cbe6"
-    apt = next(x for x in catalog["groups"] if x["source_package"] == "apt" and x["source_version"] == "3.0.3")
-    assert apt["immutable_dsc_sha1"] == "75cc2d8a7adec664f1b1058dcab263372da25df5"
+    apt = next(x for x in catalog["groups"] if x["source_package"] == "apt" and x["source_version"] == "3.0.4")
+    assert apt["immutable_dsc_sha1"] == "10cfc55acc4632dce0336edd1a40ad51b46ea50a"
     immutable = [x for x in catalog["groups"] if "immutable_dsc_sha1" in x]
     assert len(immutable) == 76
     assert all(len(x["immutable_dsc_sha1"]) == 40
@@ -467,3 +467,46 @@ def test_catalog_rejects_source_version_or_stanza_drift():
     candidates[0]["file_stanzas"] = []
     with pytest.raises(ValueError, match="stanza bindings"):
         catalog_matches(catalog, candidates)
+
+
+def test_catalog_closes_exact_apt_observations_from_both_retained_native_images(tmp_path):
+    from tools.notices.collect import debian_source_groups, index_dispositions
+    fixture = json.loads((Path(__file__).parent / "fixtures/rc3-native-apt-source.json").read_text())
+    catalog = json.loads(CATALOG.read_text())
+    apt = next(row for row in catalog["groups"] if row["source_package"] == "apt")
+    observed = fixture["candidate"]
+    candidates = [{key: row[key] for key in ("source_package", "source_version", "license_declarations",
+                  "copyright_files", "file_stanzas")} for row in catalog["groups"] if row["source_package"] != "apt"]
+    catalog_matches(catalog, [*candidates, observed])
+    assert apt["source_version"] == "3.0.4"
+    assert apt["dsc_sha256"] == fixture["authenticated_source"]["dsc_sha256"]
+    assert apt["immutable_dsc_sha1"] == fixture["authenticated_source"]["immutable_dsc_sha1"]
+    for arch, image in fixture["architectures"].items():
+        groups = debian_source_groups(image["packages"], [], tmp_path)
+        assert {(row["source_package"], row["source_version"]) for row in groups} == {("apt", "3.0.4")}, arch
+        assert set(index_dispositions([apt], groups)) == {("apt", "3.0.4")}
+        with pytest.raises(ValueError, match=r"stale package/version identities: apt@3\.0\.3;.*apt@3\.0\.4"):
+            index_dispositions([{**apt, "source_version": "3.0.3"}], groups)
+    with pytest.raises(ValueError, match="package/version set"):
+        catalog_matches(catalog, [*candidates, {**observed, "source_version": "3.0.3"}])
+
+
+def test_apt_source_catalog_tracks_unchanged_runtime_pins_for_each_architecture():
+    catalog = json.loads(CATALOG.read_text())
+    apt = next(row for row in catalog["groups"] if row["source_package"] == "apt")
+    root = CATALOG.parents[2]
+    pins = dict(line.split("=", 1) for line in (root / "docker/g7/versions.lock").read_text().splitlines()
+                if line and not line.startswith("#"))
+    for arch in ("amd64", "arm64"):
+        for binary in ("apt", "libapt-pkg7.0"):
+            assert pins[f"os_delta_package_{binary}:{arch}"].split("|", 1)[0] == apt["source_version"]
+
+
+def test_disposition_admission_retains_missing_duplicate_and_extra_identity_rejection():
+    from tools.notices.collect import index_dispositions
+    group = {"source_package": "apt", "source_version": "3.0.4"}
+    for rows in ([{"source_package": "apt"}], [group, group]):
+        with pytest.raises(ValueError, match="missing or duplicate"):
+            index_dispositions(rows, [group])
+    with pytest.raises(ValueError, match="stale package/version identities: other@1"):
+        index_dispositions([group, {"source_package": "other", "source_version": "1"}], [group])

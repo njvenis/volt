@@ -860,7 +860,7 @@
           "sha256": "77ab918ade9bce20b07524572fc8eab3f8c0cab4d246f282043892aaa9538803"
         }
       ],
-      "dsc_sha256": "ccf1666e5b268d76bf62aafb22db089a2fdae9c17d1d1c446546b3621768add7",
+      "dsc_sha256": "efc029dbfb0e264dfb38a8bf34398a8d3709cd35a463c270153b59e2e4ffb404",
       "file_stanzas": [
         {
           "copyright_path": "/usr/share/doc/libapt-pkg7.0/copyright",
@@ -968,15 +968,15 @@
       ],
       "source_files": [
         {
-          "filename": "apt_3.0.3.tar.xz",
-          "sha256": "5b5f6f6d26121742a83aa80d4ed0eb0c6ce9bea259518db412edefd95760e4ef",
-          "fallback_url": "https://deb.debian.org/debian/pool/main/a/apt/apt_3.0.3.tar.xz"
+          "filename": "apt_3.0.4.tar.xz",
+          "sha256": "e853aec49afbe520ebcd4dbcbc98e1c55262c6bf1c119cf43e6aec69752443c6",
+          "fallback_url": "https://deb.debian.org/debian/pool/main/a/apt/apt_3.0.4.tar.xz"
         }
       ],
       "source_package": "apt",
-      "source_version": "3.0.3",
-      "immutable_dsc_sha1": "75cc2d8a7adec664f1b1058dcab263372da25df5",
-      "immutable_dsc_fallback_url": "https://deb.debian.org/debian/pool/main/a/apt/apt_3.0.3.dsc"
+      "source_version": "3.0.4",
+      "immutable_dsc_sha1": "10cfc55acc4632dce0336edd1a40ad51b46ea50a",
+      "immutable_dsc_fallback_url": "https://deb.debian.org/debian/pool/main/a/apt/apt_3.0.4.dsc"
     },
     {
       "copyright_files": [

@@ -294,7 +294,8 @@ def test_export_failure_still_removes_recorded_container_and_volumes(tmp_path, m
     assert json.loads((tmp_path / "cleanup.json").read_text()) == records
 
 
-def test_copied_binary_source_hash_follows_symlink_and_records_removal(monkeypatch):
+@pytest.mark.parametrize("platform", [None, "linux/amd64", "linux/arm64"])
+def test_copied_binary_source_hash_follows_symlink_and_records_removal(monkeypatch, platform):
     import tarfile
     archive_bytes = io.BytesIO()
     with tarfile.open(fileobj=archive_bytes, mode="w") as archive:
@@ -311,14 +312,14 @@ def test_copied_binary_source_hash_follows_symlink_and_records_removal(monkeypat
         returncode = 0
         stderr = ""
     def fake_command(args):
-        if args == ["docker", "create", "source-image"]: return "source-container"
+        if args == ["docker", "create", *(["--platform", platform] if platform else []), "source-image"]: return "source-container"
         if args == ["docker", "inspect", "source-container"]: return json.dumps([{"Mounts": []}])
         raise AssertionError(args)
     monkeypatch.setattr(COLLECT, "run", fake_command)
     monkeypatch.setattr(COLLECT.subprocess, "Popen", lambda *a, **k: Process())
     monkeypatch.setattr(COLLECT.subprocess, "run", lambda *a, **k: Result())
     cleanup = []
-    result = COLLECT.docker_export_file_hashes("source-image", {"/usr/lib/libssl.so.3": "/opt/valkey/lib/libssl.so.3"}, cleanup)
+    result = COLLECT.docker_export_file_hashes("source-image", {"/usr/lib/libssl.so.3": "/opt/valkey/lib/libssl.so.3"}, cleanup, platform=platform)
     assert result["/opt/valkey/lib/libssl.so.3"]["resolved_source_path"] == "/usr/lib/libssl.so.3.1"
     assert result["/opt/valkey/lib/libssl.so.3"]["sha256"] == hashlib.sha256(b"pinned-source-bytes").hexdigest()
     assert cleanup[0]["command"] == ["docker", "rm", "--volumes", "source-container"]
@@ -917,3 +918,36 @@ def test_arm64_collection_admits_exact_platform_source_and_rejects_amd64(monkeyp
         COLLECT.admit_pinned_source_image(reference, digest, "linux/arm64")
     with pytest.raises(ValueError):
         COLLECT.acceptable_image(info["Id"], "linux/arm64")
+
+
+@pytest.mark.parametrize("corruption", [None, "parent-digest", "descriptor-platform", "descriptor-media", "child-platform", "child-id", "child-digest"])
+def test_index_store_selects_and_materialises_exact_source_platform_child(monkeypatch, corruption):
+    parent = "sha256:" + "e" * 64
+    child = "sha256:" + "c" * 64
+    reference = "valkey/valkey:9.1.2-alpine@" + parent
+    child_ref = "valkey/valkey@" + child
+    calls = []
+    def fake_run(argv):
+        calls.append(argv)
+        if argv == ["docker", "image", "inspect", reference]:
+            return json.dumps([{"Id":parent,"Os":"linux","Architecture":"amd64","RepoDigests":["valkey/valkey@"+parent]}])
+        if argv in (["docker","pull","--platform=linux/arm64",reference], ["docker","pull","--platform=linux/arm64",child_ref]):
+            return "pulled"
+        if argv == ["docker","image","inspect","--platform","linux/arm64",reference]:
+            return json.dumps([{"Id":child,"Os":"linux","Architecture":"arm64",
+                "RepoDigests":["valkey/valkey@"+("sha256:"+"0"*64 if corruption=="parent-digest" else parent)],
+                "Descriptor":{"mediaType":"application/vnd.oci.image.index.v1+json" if corruption=="descriptor-media" else "application/vnd.oci.image.manifest.v1+json","digest":child,"platform":{"os":"linux","architecture":"amd64" if corruption=="descriptor-platform" else "arm64"}}}])
+        if argv == ["docker","image","inspect",child_ref]:
+            return json.dumps([{"Id":"sha256:"+"0"*64 if corruption=="child-id" else child,"Os":"linux",
+                "Architecture":"amd64" if corruption=="child-platform" else "arm64",
+                "RepoDigests":["valkey/valkey@sha256:"+"0"*64 if corruption=="child-digest" else child_ref]}])
+        raise AssertionError(argv)
+    monkeypatch.setattr(COLLECT,"run",fake_run)
+    if corruption:
+        with pytest.raises(ValueError): COLLECT.admit_pinned_source_image(reference,parent,"linux/arm64")
+    else:
+        admitted=COLLECT.admit_pinned_source_image(reference,parent,"linux/arm64")
+        assert admitted["LocalImageId"]==child
+        assert admitted["RegistryDigest"]==parent
+        assert admitted["Platform"]=="linux/arm64"
+        assert calls[-2:]==[["docker","pull","--platform=linux/arm64",child_ref],["docker","image","inspect",child_ref]]

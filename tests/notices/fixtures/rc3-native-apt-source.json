@@ -1,0 +1,175 @@
+{
+  "architectures": {
+    "amd64": {
+      "candidate_count": 82,
+      "group_count": 114,
+      "image_config_id": "sha256:dbbe690628295390024725d3c3392b7ba68545b814313ff3f004195263e51df2",
+      "packages": [
+        {
+          "metadata": {
+            "source": "apt",
+            "sourceVersion": ""
+          },
+          "name": "libapt-pkg7.0",
+          "type": "deb",
+          "version": "3.0.4"
+        }
+      ],
+      "retained_image_id": "sha256:dbbe690628295390024725d3c3392b7ba68545b814313ff3f004195263e51df2"
+    },
+    "arm64": {
+      "candidate_count": 82,
+      "group_count": 114,
+      "image_config_id": "sha256:b820049943cf02846a4d7e68088ac84bf0dac2f44125b955596abbdbc7faa499",
+      "packages": [
+        {
+          "metadata": {
+            "source": "apt",
+            "sourceVersion": ""
+          },
+          "name": "libapt-pkg7.0",
+          "type": "deb",
+          "version": "3.0.4"
+        }
+      ],
+      "retained_image_id": "sha256:b820049943cf02846a4d7e68088ac84bf0dac2f44125b955596abbdbc7faa499"
+    }
+  },
+  "authenticated_source": {
+    "developer_keyring_sha256": "81e08f47b0dd8a563a2742ad90878ccefe53aa0728b095acbea3efda84381ea9",
+    "dsc_sha256": "efc029dbfb0e264dfb38a8bf34398a8d3709cd35a463c270153b59e2e4ffb404",
+    "immutable_dsc_sha1": "10cfc55acc4632dce0336edd1a40ad51b46ea50a",
+    "source_files": [
+      {
+        "fallback_url": "https://deb.debian.org/debian/pool/main/a/apt/apt_3.0.4.tar.xz",
+        "filename": "apt_3.0.4.tar.xz",
+        "sha256": "e853aec49afbe520ebcd4dbcbc98e1c55262c6bf1c119cf43e6aec69752443c6",
+        "size": 2423460
+      }
+    ],
+    "verification_exit": 0
+  },
+  "candidate": {
+    "copyright_files": [
+      {
+        "inventory_file": "notices/image-files/8b42e20e1c811829-copyright",
+        "path": "/usr/share/doc/libapt-pkg7.0/copyright",
+        "sha256": "77ab918ade9bce20b07524572fc8eab3f8c0cab4d246f282043892aaa9538803"
+      },
+      {
+        "inventory_file": "notices/image-files/df60b44b85b568d3-copyright",
+        "path": "/usr/share/doc/apt/copyright",
+        "sha256": "77ab918ade9bce20b07524572fc8eab3f8c0cab4d246f282043892aaa9538803"
+      }
+    ],
+    "file_stanzas": [
+      {
+        "copyright_path": "/usr/share/doc/libapt-pkg7.0/copyright",
+        "copyright_sha256": "77ab918ade9bce20b07524572fc8eab3f8c0cab4d246f282043892aaa9538803",
+        "files_patterns": [
+          "*"
+        ],
+        "license": "GPL-2+",
+        "stanza_sha256": "6be3768b1251dd38bef293e02649ed239395bcc5927eb848fdbe3bee5ff918b7"
+      },
+      {
+        "copyright_path": "/usr/share/doc/libapt-pkg7.0/copyright",
+        "copyright_sha256": "77ab918ade9bce20b07524572fc8eab3f8c0cab4d246f282043892aaa9538803",
+        "files_patterns": [
+          "methods/connect.c"
+        ],
+        "license": "GPL-2+ and curl",
+        "stanza_sha256": "ce981fed7e993f3f9016de92d1f12566d8d4394ec196abd302e5231bcc992438"
+      },
+      {
+        "copyright_path": "/usr/share/doc/libapt-pkg7.0/copyright",
+        "copyright_sha256": "77ab918ade9bce20b07524572fc8eab3f8c0cab4d246f282043892aaa9538803",
+        "files_patterns": [
+          "CMake/FindBerkeley.cmake"
+        ],
+        "license": "BSD-3-clause",
+        "stanza_sha256": "f00a1166d8d0c2d11df3a2d537393b0100181cfddc511782ade9b62d830f459f"
+      },
+      {
+        "copyright_path": "/usr/share/doc/libapt-pkg7.0/copyright",
+        "copyright_sha256": "77ab918ade9bce20b07524572fc8eab3f8c0cab4d246f282043892aaa9538803",
+        "files_patterns": [
+          "CMake/Documentation.cmake",
+          "CMake/FindLFS.cmake"
+        ],
+        "license": "Expat",
+        "stanza_sha256": "5e4f1c1fb144bf071a8880297f9191b62a1cf665c5e99d7a0a1d6be2df1946fc"
+      },
+      {
+        "copyright_path": "/usr/share/doc/apt/copyright",
+        "copyright_sha256": "77ab918ade9bce20b07524572fc8eab3f8c0cab4d246f282043892aaa9538803",
+        "files_patterns": [
+          "*"
+        ],
+        "license": "GPL-2+",
+        "stanza_sha256": "6be3768b1251dd38bef293e02649ed239395bcc5927eb848fdbe3bee5ff918b7"
+      },
+      {
+        "copyright_path": "/usr/share/doc/apt/copyright",
+        "copyright_sha256": "77ab918ade9bce20b07524572fc8eab3f8c0cab4d246f282043892aaa9538803",
+        "files_patterns": [
+          "methods/connect.c"
+        ],
+        "license": "GPL-2+ and curl",
+        "stanza_sha256": "ce981fed7e993f3f9016de92d1f12566d8d4394ec196abd302e5231bcc992438"
+      },
+      {
+        "copyright_path": "/usr/share/doc/apt/copyright",
+        "copyright_sha256": "77ab918ade9bce20b07524572fc8eab3f8c0cab4d246f282043892aaa9538803",
+        "files_patterns": [
+          "CMake/FindBerkeley.cmake"
+        ],
+        "license": "BSD-3-clause",
+        "stanza_sha256": "f00a1166d8d0c2d11df3a2d537393b0100181cfddc511782ade9b62d830f459f"
+      },
+      {
+        "copyright_path": "/usr/share/doc/apt/copyright",
+        "copyright_sha256": "77ab918ade9bce20b07524572fc8eab3f8c0cab4d246f282043892aaa9538803",
+        "files_patterns": [
+          "CMake/Documentation.cmake",
+          "CMake/FindLFS.cmake"
+        ],
+        "license": "Expat",
+        "stanza_sha256": "5e4f1c1fb144bf071a8880297f9191b62a1cf665c5e99d7a0a1d6be2df1946fc"
+      }
+    ],
+    "license_declarations": [
+      {
+        "copyright_path": "/usr/share/doc/apt/copyright",
+        "copyright_sha256": "77ab918ade9bce20b07524572fc8eab3f8c0cab4d246f282043892aaa9538803",
+        "observed_types": [
+          "declared"
+        ],
+        "observed_values": [
+          "GPL-2"
+        ],
+        "spdx_expression": "GPL-2.0-only",
+        "type": "declared",
+        "value": "GPL-2"
+      },
+      {
+        "copyright_path": "/usr/share/doc/apt/copyright",
+        "copyright_sha256": "77ab918ade9bce20b07524572fc8eab3f8c0cab4d246f282043892aaa9538803",
+        "observed_types": [
+          "declared"
+        ],
+        "observed_values": [
+          "GPL-2+"
+        ],
+        "spdx_expression": "GPL-2.0-or-later",
+        "type": "declared",
+        "value": "GPL-2+"
+      }
+    ],
+    "source_package": "apt",
+    "source_version": "3.0.4"
+  },
+  "image_source_commit": "522f2342e54cc56f343215284f3466dc0298e442",
+  "preparation_run_id": "44219872608",
+  "schema": "volt-retained-native-source-observation/v1"
+}

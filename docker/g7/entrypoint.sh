@@ -1,6 +1,7 @@
 #!/bin/bash
 set -Eeuo pipefail
 umask 077
+source /usr/local/bin/uvm-g7-identity-runtime
 
 STATE=/run/uvm-g7
 CHILD_PIDS=()
@@ -108,7 +109,7 @@ stop_phase() {
 stop_all() {
   local status=0
   rm -f "$STATE/ready"
-  stop_phase writers oidc-sync-api recovery-control api oidc-provider ce-web || status=1
+  stop_phase writers okta-identity-publisher oidc-sync-api recovery-control api oidc-provider ce-web || status=1
   stop_phase workers exception-warning-worker ce-beat ce-worker || status=1
   if [[ -s /run/valkey/valkey.pid ]]; then
     valkey-cli -h 127.0.0.1 shutdown nosave >/dev/null 2>&1 || { echo 'G7_STOP_ERROR service=valkey' >&2; status=1; }
@@ -131,7 +132,7 @@ staged_quiesce() {
   local status=0 acknowledged=0
   rm -f "$STATE/ready"
   # Stop periodic producers before admission surfaces and side-effect dispatch.
-  stop_phase quiesce-producers oidc-sync-api ce-beat || status=1
+  stop_phase quiesce-producers okta-identity-publisher oidc-sync-api ce-beat || status=1
   stop_phase quiesce-admission recovery-control api oidc-provider ce-web || status=1
   stop_phase quiesce-effects exception-warning-worker || status=1
   if (( status )); then return 1; fi
@@ -262,6 +263,9 @@ if [[ ${UVM_AUTH_MODE:-bearer} == oidc ]]; then
       }
   fi
 fi
+uvm_g7_stage_identity_material /run/secrets /run/uvm-g7-secrets /opt/uvm/state \
+  "${UVM_AUTH_MODE:-bearer}" "$UVM_OIDC_DEPLOYMENT_MODE" \
+  "${UVM_G7_VERIFICATION_ONLY:-0}" "${UVM_G7_RECOVERY_STAGE:-}"
 UVM_PASSWORD_URL=$(printf %s "$UVM_PASSWORD" | urlpart)
 CE_PASSWORD_URL=$(printf %s "$CE_PASSWORD" | urlpart)
 export UVM_DB_URL="postgresql+psycopg://uvm_app:${UVM_PASSWORD_URL}@127.0.0.1:5432/uvm"
@@ -559,6 +563,10 @@ start_child ce-beat 1001 1337 env -i PATH="$PATH" HOME=/nonexistent \
   /entrypoint-celery-beat.sh
 fi
 if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_AUTH_MODE:-bearer} == oidc && $UVM_OIDC_DEPLOYMENT_MODE == demo ]]; then
+  provider_credential_env=()
+  if [[ -n ${UVM_OIDC_DEMO_CREDENTIALS_FILE:-} ]]; then
+    provider_credential_env=("UVM_OIDC_DEMO_CREDENTIALS_FILE=$UVM_OIDC_DEMO_CREDENTIALS_FILE")
+  fi
   start_child oidc-provider 1800 1800 env -i PATH="$PATH" HOME=/opt/uvm \
     PYTHONPATH=/opt/uvm/app UVM_OIDC_ISSUER="$UVM_OIDC_ISSUER" \
     UVM_OIDC_CLIENT_ID="$UVM_OIDC_CLIENT_ID" UVM_OIDC_CALLBACK_URL="$UVM_OIDC_CALLBACK_URL" \
@@ -572,6 +580,7 @@ if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_AUTH_MODE:-bearer} == oidc &&
     UVM_OIDC_FIXTURE_HOLD_SYNC="${UVM_OIDC_FIXTURE_HOLD_SYNC-}" \
     UVM_OIDC_FIXTURE_SUBJECT="$UVM_OIDC_FIXTURE_SUBJECT" \
     UVM_OIDC_FIXTURE_IDENTITIES="$UVM_OIDC_FIXTURE_IDENTITIES" \
+    "${provider_credential_env[@]}" \
     UVM_G7_DISPOSABLE_MODE="${UVM_G7_DISPOSABLE_MODE-}" \
     UVM_G7_TEST_CLOCK_FILE="${UVM_G7_TEST_CLOCK_FILE-}" \
     python -m uvicorn uvm.auth.synthetic_provider:app --host 0.0.0.0 --port "${UVM_OIDC_PROVIDER_PORT:-9000}" --workers 1 --no-proxy-headers
@@ -731,6 +740,16 @@ if [[ ${UVM_G7_VERIFICATION_ONLY:-0} != 1 && ${UVM_AUTH_MODE:-bearer} == oidc ]]
     wait_for 'local OIDC provider' curl --fail --silent "http://127.0.0.1:${UVM_OIDC_PROVIDER_PORT:-9000}/healthz"
   fi
   wait_for 'loopback OIDC sync adapter' curl --fail --silent http://127.0.0.1:8001/healthz
+fi
+if [[ -n ${UVM_G7_OKTA_PUBLISHER_CONFIG_FILE:-} ]]; then
+  uvm_g7_invalidate_publisher_readiness /opt/uvm/state/oidc-publisher
+  start_child okta-identity-publisher 1800 1800 env -i PATH="$PATH" HOME=/opt/uvm \
+    PYTHONPATH=/opt/uvm/app UVM_OIDC_SYNC_SECRET_FILE=/run/uvm-g7-secrets/oidc_sync_secret \
+    /opt/uvm/venv/bin/python -m uvm.auth.okta_publisher \
+      --config "$UVM_G7_OKTA_PUBLISHER_CONFIG_FILE"
+  wait_for 'Okta publisher first successful full snapshot' \
+    /opt/uvm/venv/bin/python -m uvm.auth.okta_publisher \
+      --config "$UVM_G7_OKTA_PUBLISHER_CONFIG_FILE" --status
 fi
 wait_for 'UVM API' curl --fail --silent http://127.0.0.1:8000/openapi.json
 for pid in "${CHILD_PIDS[@]}"; do

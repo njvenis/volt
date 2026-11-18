@@ -13,6 +13,7 @@ import re
 import secrets
 import socket
 import shutil
+import stat
 import subprocess
 import sys
 from http.cookiejar import CookieJar
@@ -25,6 +26,7 @@ HISTORICAL_RC1_IMAGE = "ghcr.io/njvenis/volt@sha256:c0c49bc9c38a0ea946d1868748fc
 SECRET_SIZES = {"uvm_db_password": 32, "ce_db_password": 32, "ce_admin_password": 32,
                 "ce_secret_key": 64, "ce_credential_key": 32, "uvm_cursor_secret": 48,
                 "oidc_client_secret": 48, "oidc_sync_secret": 48, "oidc_operator_secret": 48}
+SUPPORTED_PLATFORMS = ("linux/amd64", "linux/arm64")
 
 
 def command(*args: str, capture: bool = False, env: dict | None = None,
@@ -53,6 +55,18 @@ def private_secret(path: Path) -> bytes:
     if not value.strip():
         raise SystemExit("OIDC client secret must be non-empty")
     return value
+
+
+def demo_password_verifier(username: str, password: str, confirmation: str) -> bytes:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,63}", username):
+        raise SystemExit("demo admin username must be 1-64 simple ASCII characters")
+    if len(password) < 16 or len(password.encode("utf-8")) > 1024 or password != confirmation:
+        raise SystemExit("demo admin password must be 16-1024 UTF-8 bytes and both entries must match")
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**15, r=8, p=1,
+                           dklen=32, maxmem=64 * 1024 * 1024)
+    return json.dumps({"schema": "uvm.demo-credential.v1", "username": username,
+        "salt": salt.hex(), "password_hash": digest.hex()}, sort_keys=True, separators=(",", ":")).encode() + b"\n"
 
 
 def allowed_host_names(raw: str) -> str:
@@ -94,9 +108,11 @@ def make_tls(directory: Path) -> None:
     (directory / "recovery-client.key").chmod(0o600)
 
 
-def inspect_image(image: str, mode: str) -> dict:
+def inspect_image(image: str, mode: str, expected_platform: str) -> dict:
     if not ("@sha256:" in image or re.fullmatch(r"sha256:[0-9a-f]{64}", image)):
         raise SystemExit("image must be an immutable registry digest or local sha256 image ID")
+    if expected_platform not in SUPPORTED_PLATFORMS:
+        raise SystemExit("platform must be one of the admitted package platforms: linux/amd64, linux/arm64")
     try:
         item = json.loads(command("docker", "image", "inspect", image, capture=True))[0]
     except (json.JSONDecodeError, IndexError) as exc:
@@ -104,8 +120,9 @@ def inspect_image(image: str, mode: str) -> dict:
     config = item.get("Config") or {}
     labels = config.get("Labels") or {}
     os_name, arch = item.get("Os"), item.get("Architecture")
-    if (os_name, arch) != ("linux", "amd64"):
-        raise SystemExit("selected image must be linux/amd64")
+    actual_platform = f"{os_name}/{arch}"
+    if actual_platform != expected_platform:
+        raise SystemExit(f"selected image platform {actual_platform} does not match declared package platform {expected_platform}")
     if labels.get("org.volt.oidc-deployment-modes") != "demo,external":
         raise SystemExit("this image is not Compose-install compatible; RC1 does not support the OIDC config-file contract; pass an explicitly built candidate image with both deployment modes")
     source_snapshot = labels.get("org.volt.compose.source-snapshot", "")
@@ -118,7 +135,7 @@ def inspect_image(image: str, mode: str) -> dict:
     if not re.fullmatch(r"[0-9a-f]{40}", revision) or not version:
         raise SystemExit("image must declare source revision and version labels")
     return {"id": item["Id"], "source_revision": revision, "version": version,
-            "source_snapshot": source_snapshot, "platform": f"{os_name}/{arch}",
+            "source_snapshot": source_snapshot, "platform": actual_platform,
             "registry_digests": item.get("RepoDigests", [])}
 
 
@@ -152,6 +169,79 @@ def validate_external(path: Path) -> dict:
     return config
 
 
+def validate_okta_publisher(path: Path, oidc: dict) -> tuple[dict, bytes]:
+    if path.is_symlink() or not path.is_file():
+        raise SystemExit("Okta publisher configuration must be a regular non-symlink file")
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise SystemExit("Okta publisher configuration must be readable JSON") from None
+    required = {"schema_version", "provider_id", "org_url", "api_issuer", "api_base_url",
+        "client_id", "app_id", "key_id", "private_key_file", "oidc_config_file",
+        "subject_by_user_id", "group_ids", "poll_interval_seconds", "heartbeat_max_age_seconds"}
+    token = r"[A-Za-z0-9._:-]{1,256}"
+    if not isinstance(config, dict) or set(config) != required or config.get("schema_version") != 1:
+        raise SystemExit("Okta publisher config must match schema version 1")
+    if (config["provider_id"] != oidc["provider_id"]
+            or config["heartbeat_max_age_seconds"] != oidc["heartbeat_max_age_seconds"]
+            or not isinstance(config["group_ids"], list) or not config["group_ids"]
+            or any(not isinstance(group, str) or not re.fullmatch(token, group)
+                   for group in config["group_ids"])
+            or len(set(config["group_ids"])) != len(config["group_ids"])
+            or set(config["group_ids"]) != set(oidc["group_mappings"])):
+        raise SystemExit("Okta publisher provider, heartbeat or group IDs must match the external OIDC authority config")
+    if (type(config["poll_interval_seconds"]) is not int
+            or type(config["heartbeat_max_age_seconds"]) is not int
+            or config["poll_interval_seconds"] < 5
+            or config["poll_interval_seconds"] * 3 > config["heartbeat_max_age_seconds"]):
+        raise SystemExit("Okta publisher interval must leave at least three polls within the heartbeat freshness limit")
+    subjects = config["subject_by_user_id"]
+    if (not isinstance(subjects, dict) or not subjects
+            or any(not isinstance(user, str) or not re.fullmatch(token, user)
+                   or not isinstance(subject, str) or not 1 <= len(subject) <= 255
+                   or any(ord(char) < 0x20 or ord(char) == 0x7f for char in subject)
+                   for user, subject in subjects.items())
+            or len(set(subjects.values())) != len(subjects)):
+        raise SystemExit("Okta publisher requires explicit unique Okta user ID to OIDC subject mappings")
+    for key in ("client_id", "app_id", "key_id"):
+        if not isinstance(config[key], str) or not re.fullmatch(token, config[key]):
+            raise SystemExit(f"Okta publisher {key} is invalid")
+    org = config["org_url"].rstrip("/")
+    parsed = urlsplit(org)
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+            or parsed.path or parsed.query or parsed.fragment
+            or config["api_issuer"] != org + "/oauth2/v1"
+            or config["api_base_url"] != org + "/api/v1"):
+        raise SystemExit("Okta API issuer and base URL must be the exact org Management API origins")
+    allowed_origins = {urlsplit(item).scheme + "://" + urlsplit(item).netloc
+                       for item in oidc["allowed_endpoint_origins"]}
+    if org not in allowed_origins:
+        raise SystemExit("Okta API org origin must match an admitted OIDC provider origin")
+    key_path = Path(config["private_key_file"]).expanduser()
+    try:
+        if key_path.is_symlink() or not key_path.is_file() or stat.S_IMODE(key_path.stat().st_mode) & 0o077:
+            raise OSError
+        key = key_path.read_bytes()
+        if not key:
+            raise OSError
+    except OSError:
+        raise SystemExit("Okta service private key must be a non-empty regular file with mode 0600 or stricter") from None
+    config["private_key_file"] = "/run/uvm-g7-secrets/okta_service_private_key"
+    config["oidc_config_file"] = "/etc/volt/oidc.json"
+    return config, key
+
+
+def demo_identity(principal: str | None, subject: str | None) -> tuple[str, str]:
+    principal = "volt-compose-demo-admin" if principal is None else principal
+    subject = "volt-compose-demo-admin-subject" if subject is None else subject
+    pattern = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
+    if not re.fullmatch(pattern, principal):
+        raise SystemExit("demo bootstrap principal must be a stable principal ID")
+    if not re.fullmatch(pattern, subject):
+        raise SystemExit("demo subject must be a stable provider subject")
+    return principal, subject
+
+
 def choose_network() -> tuple[str, str]:
     used = []
     try:
@@ -183,8 +273,13 @@ def init(args) -> None:
     image = args.image
     if not image:
         raise SystemExit(f"Compose installation requires --image with an explicitly built compatible candidate; historical RC1 {HISTORICAL_RC1_IMAGE} is retained for launcher users and lacks the Compose contract")
-    admitted = inspect_image(image, args.mode)
+    admitted = inspect_image(image, args.mode, args.platform)
+    okta_config, okta_private_key = None, None
     if args.mode == "external":
+        if args.demo_admin_username is not None:
+            raise SystemExit("--demo-admin-username is available only in demo mode")
+        if args.demo_subject is not None:
+            raise SystemExit("--demo-subject is available only in labelled synthetic demo mode")
         oidc = validate_external(Path(args.external_config).expanduser())
         if not args.client_secret_file:
             raise SystemExit("external mode requires --client-secret-file for the configured OIDC client")
@@ -192,9 +287,24 @@ def init(args) -> None:
         callback_host = urlsplit(oidc["callback_url"]).hostname.lower().rstrip(".")
         if callback_host not in {v.lower().rstrip(".") for v in args.allowed_hosts.split(",")}:
             raise SystemExit("external OIDC callback hostname must appear exactly in --allowed-hosts")
+        if args.okta_publisher_config:
+            okta_config, okta_private_key = validate_okta_publisher(
+                Path(args.okta_publisher_config).expanduser(), oidc)
+        else:
+            okta_config, okta_private_key = None, None
     else:
+        if not args.demo_admin_username:
+            raise SystemExit("demo mode requires --demo-admin-username and a hidden password prompt")
+        if args.okta_publisher_config:
+            raise SystemExit("--okta-publisher-config is available only in external mode")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,63}", args.demo_admin_username):
+            raise SystemExit("demo admin username must be 1-64 simple ASCII characters")
+        password = getpass.getpass("New local demo admin password (16+ characters): ")
+        confirmation = getpass.getpass("Confirm local demo admin password: ")
+        demo_credentials = demo_password_verifier(args.demo_admin_username, password, confirmation)
+        del password, confirmation
         external_client_secret = None
-        args.bootstrap_principal = "volt-compose-demo-admin"
+        args.bootstrap_principal, args.demo_subject = demo_identity(args.bootstrap_principal, args.demo_subject)
         if args.external_config:
             raise SystemExit("demo mode does not accept an external OIDC config")
         api_origin = f"http://127.0.0.1:{args.http_port}"
@@ -207,7 +317,13 @@ def init(args) -> None:
             "operator_secret_file": "/run/uvm-g7-secrets/oidc_operator_secret",
             "operator_actor_id": "volt-compose-demo-operator", "allowed_algorithms": ["RS256"],
             "allowed_endpoint_origins": [api_origin, oidc_origin, "http://127.0.0.1:9000"],
-            "source_scope_ceilings": [], "group_mappings": {}, "mapping_revision": 1,
+            "source_scope_ceilings": [{"source_family": "local",
+                "source_account_id": "volt-local-preview", "scope_key": "all"}],
+            "group_mappings": {"volt-compose-demo-admin-group": {
+                "role_ids": ["00000000-0000-4000-8000-000000000002"],
+                "source_scopes": [{"source_family": "local",
+                    "source_account_id": "volt-local-preview", "scope_key": "all"}]}},
+            "mapping_revision": 1,
             "session_ttl_seconds": 3600, "heartbeat_max_age_seconds": 120}
     if args.mode == "external":
         if not args.bootstrap_principal or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", args.bootstrap_principal):
@@ -228,6 +344,12 @@ def init(args) -> None:
         private_write(secrets_dir / name, secrets.token_urlsafe(size) + "\n")
     if args.mode == "external":
         private_write(secrets_dir / "oidc_client_secret", external_client_secret)
+        if okta_config is not None:
+            private_write(secrets_dir / "okta_service_private_key", okta_private_key)
+            private_write(root / "okta-publisher.json",
+                          json.dumps(okta_config, sort_keys=True, separators=(",", ":")) + "\n")
+    else:
+        private_write(secrets_dir / "demo_admin_credentials", demo_credentials)
     make_tls(secrets_dir)
     private_write(root / "oidc.json", json.dumps(oidc, separators=(",", ":")) + "\n")
     compose_root = Path(__file__).resolve().parent
@@ -247,6 +369,9 @@ def init(args) -> None:
             "prohibited_action_pairs": []}}
     env = "\n".join((f"VOLT_PROJECT={project}", f"VOLT_INSTANCE_DIR={root}", f"VOLT_IMAGE={image}",
                       f"VOLT_IMAGE_ID={admitted['id']}",
+                      f"VOLT_PLATFORM={admitted['platform']}",
+                      f"VOLT_OKTA_PUBLISHER_CONFIG_FILE={'/run/uvm-g7-secrets/okta-publisher.json' if okta_config else ''}",
+                      f"VOLT_DEMO_ADMIN_SUBJECT={args.demo_subject or ''}",
                       f"VOLT_BOOTSTRAP_PRINCIPAL={args.bootstrap_principal}",
                       "VOLT_NATIVE_GRANTABLE_ENVELOPE=" + json.dumps(envelope, separators=(",", ":")),
                       f"VOLT_OWNER_TOKEN={owner_token}", f"VOLT_SUBNET={subnet}", f"VOLT_GATEWAY={gateway}",
@@ -257,6 +382,11 @@ def init(args) -> None:
                 "image_admission": admitted, "oidc_config_sha256": hashlib.sha256((root / "oidc.json").read_bytes()).hexdigest(),
                 "compose_directory": str(compose_root), "owner_token": owner_token,
                 "bootstrap_principal": args.bootstrap_principal,
+                "platform": admitted["platform"],
+                "demo_admin_subject": args.demo_subject if args.mode == "demo" else None,
+                "demo_admin_username": args.demo_admin_username if args.mode == "demo" else None,
+                "okta_publisher_config_sha256": hashlib.sha256((root / "okta-publisher.json").read_bytes()).hexdigest()
+                    if okta_config else None,
                 "ports": [args.http_port, args.recovery_port, args.oidc_port],
                 "subnet": subnet, "gateway": gateway, "established": False, "initialized": True}
     metadata["env_sha256"] = hashlib.sha256((root / ".env").read_bytes()).hexdigest()
@@ -276,6 +406,26 @@ def load_instance(path: str) -> tuple[Path, dict]:
         raise SystemExit("instance metadata is not recognized")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", metadata.get("bootstrap_principal", "")):
         raise SystemExit("instance bootstrap principal metadata is invalid")
+    if (metadata.get("platform") not in SUPPORTED_PLATFORMS
+            or (metadata.get("image_admission") or {}).get("platform") != metadata.get("platform")):
+        raise SystemExit("instance platform metadata does not match its admitted image")
+    if (metadata.get("mode") == "demo" and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", metadata.get("demo_admin_subject", ""))):
+        raise SystemExit("instance demo subject metadata is invalid")
+    if metadata.get("mode") == "demo":
+        credential = root / "secrets" / "demo_admin_credentials"
+        if (credential.is_symlink() or not credential.is_file()
+                or stat.S_IMODE(credential.stat().st_mode) != 0o600):
+            raise SystemExit("demo admin credential verifier is missing or not private")
+        try:
+            value = json.loads(credential.read_text())
+        except (OSError, json.JSONDecodeError):
+            raise SystemExit("demo admin credential verifier is invalid") from None
+        if (not isinstance(value, dict) or value.get("schema") != "uvm.demo-credential.v1"
+                or value.get("username") != metadata.get("demo_admin_username")
+                or not re.fullmatch(r"[0-9a-f]{32}", value.get("salt", ""))
+                or not re.fullmatch(r"[0-9a-f]{64}", value.get("password_hash", ""))):
+            raise SystemExit("demo admin credential verifier does not match initialized account")
     for name in (*SECRET_SIZES, "recovery-server.crt", "recovery-server.key", "recovery-client.crt",
                  "recovery-client.key", "recovery-ca.crt"):
         secret = root / "secrets" / name
@@ -284,6 +434,15 @@ def load_instance(path: str) -> tuple[Path, dict]:
     actual = hashlib.sha256((root / "oidc.json").read_bytes()).hexdigest()
     if actual != metadata.get("oidc_config_sha256"):
         raise SystemExit("OIDC config changed after initialization; use explicit reconfigure after review")
+    publisher_digest = metadata.get("okta_publisher_config_sha256")
+    if publisher_digest is not None:
+        config_file = root / "okta-publisher.json"
+        private_key = root / "secrets" / "okta_service_private_key"
+        if (metadata.get("mode") != "external" or config_file.is_symlink() or not config_file.is_file()
+                or private_key.is_symlink() or not private_key.is_file()
+                or stat.S_IMODE(private_key.stat().st_mode) != 0o600
+                or hashlib.sha256(config_file.read_bytes()).hexdigest() != publisher_digest):
+            raise SystemExit("Okta publisher config or private key changed after initialization")
     return root, metadata
 
 
@@ -293,10 +452,22 @@ def compose_environment() -> dict[str, str]:
             if not k.startswith(("VOLT_", "COMPOSE_")) and k != "ENV"}
 
 
-def resolved_compose(root: Path, info: dict):
+def compose_files(info: dict) -> list[str]:
     files = ["-f", str(Path(info["compose_directory"]) / "compose.yaml")]
     if info["mode"] == "demo":
         files += ["-f", str(Path(info["compose_directory"]) / "demo.yaml")]
+    elif info.get("okta_publisher_config_sha256") is not None:
+        files += ["-f", str(Path(info["compose_directory"]) / "okta-publisher.yaml")]
+    return files
+
+
+def resolved_compose(root: Path, info: dict):
+    files = compose_files(info)
+    identity_secrets = identity_secret_sources(root, info)
+    for name, source in identity_secrets.items():
+        if (source.is_symlink() or not source.is_file() or not source.read_bytes().strip()
+                or stat.S_IMODE(source.stat().st_mode) != 0o600):
+            raise SystemExit(f"required private identity secret is missing or unsafe: {name}")
     envfile = root / ".env"
     if hashlib.sha256(envfile.read_bytes()).hexdigest() != info.get("env_sha256"):
         raise SystemExit("instance environment file changed after admission; refusing Compose operation")
@@ -311,18 +482,57 @@ def resolved_compose(root: Path, info: dict):
         "/etc/volt/oidc.json": str(root / "oidc.json"),
     }
     volume_names = resolved.get("volumes", {})
+    validate_identity_secret_mounts(resolved, service, identity_secrets, info)
     actual_mounts = {item.get("target"): (volume_names.get(item.get("source"), {}).get("name", item.get("source"))
                                            if item.get("type") == "volume" else item.get("source"))
                      for item in service.get("volumes", [])}
     labels = service.get("labels", {})
-    if (service.get("image") != info["image"] or actual_mounts != expected_mounts or
+    if (service.get("image") != info["image"] or service.get("platform") != info["platform"]
+            or actual_mounts != expected_mounts or
             resolved.get("networks", {}).get("application", {}).get("name") != f"{info['project']}_network" or
             labels.get("volt.compose.owner-token") != info["owner_token"] or
             resolved.get("volumes", {}).get("postgres", {}).get("name") != f"{info['project']}_postgres" or
             resolved.get("volumes", {}).get("media", {}).get("name") != f"{info['project']}_media" or
             resolved.get("volumes", {}).get("state", {}).get("name") != f"{info['project']}_state"):
-        raise SystemExit("resolved Compose image, mounts, network, volumes or ownership differ from admitted instance metadata")
+        raise SystemExit("resolved Compose image, platform, mounts, network, volumes or ownership differ from admitted instance metadata")
     return files, envfile, clean_env
+
+
+def identity_secret_sources(root: Path, info: dict) -> dict[str, Path]:
+    """Return only mode-authorized identity files that Compose may mount."""
+    if info.get("mode") == "demo":
+        if info.get("okta_publisher_config_sha256") is not None:
+            raise SystemExit("demo mode cannot admit external Okta publisher secrets")
+        return {"demo-admin-credentials": root / "secrets" / "demo_admin_credentials"}
+    if info.get("mode") != "external":
+        raise SystemExit("instance identity mode is unsupported")
+    if info.get("okta_publisher_config_sha256") is None:
+        return {}
+    return {"okta-publisher.json": root / "okta-publisher.json",
+        "okta_service_private_key": root / "secrets" / "okta_service_private_key"}
+
+
+def validate_identity_secret_mounts(resolved: dict, service: dict,
+                                    expected_sources: dict[str, Path], info: dict) -> None:
+    refs = service.get("secrets", [])
+    mounts = {(item.get("source"), item.get("target", item.get("source")))
+        for item in refs if isinstance(item, dict)}
+    definitions = resolved.get("secrets", {})
+    identity_names = {"demo-admin-credentials", "okta-publisher.json", "okta_service_private_key"}
+    expected_names = set(expected_sources)
+    defined_identity = set(definitions) & identity_names
+    mounted_identity = {source for source, _target in mounts if source in identity_names}
+    mounted_identity |= {target.rsplit("/", 1)[-1] for _source, target in mounts
+        if target.rsplit("/", 1)[-1] in identity_names}
+    if defined_identity != expected_names or mounted_identity != expected_names:
+        raise SystemExit("resolved Compose identity secrets differ from the exact admitted deployment mode")
+    for name, path in expected_sources.items():
+        definition = definitions.get(name)
+        targets = {name, f"/run/secrets/{name}"}
+        if (not any(source == name and target in targets for source, target in mounts)
+                or not isinstance(definition, dict)
+                or Path(definition.get("file", "")).resolve() != path.resolve()):
+            raise SystemExit(f"resolved Compose identity secret mount is missing or mismatched: {name}")
 
 
 def compose(args, action: str) -> None:
@@ -331,7 +541,7 @@ def compose(args, action: str) -> None:
         raise SystemExit("offline restore volumes must be imported and admitted with restore-admit before any runtime starts")
     files, envfile, clean_env = resolved_compose(root, info)
     if action == "up":
-        admitted = inspect_image(info["image"], info["mode"])
+        admitted = inspect_image(info["image"], info["mode"], info["platform"])
         if admitted["id"] != info["image_admission"]["id"]:
             raise SystemExit("selected image identity changed since initialization")
         check_owned_resources(info, allow_missing=not info.get("established"))
@@ -476,7 +686,7 @@ def provision_restore(args) -> None:
     if set(inventory) != {"postgres", "media", "state"} or not inventory["postgres"].get("postgres_version"):
         raise SystemExit("restore provisioning requires the captured cold backup inventory")
     resolved_compose(root, info)
-    if inspect_image(info["image"], info["mode"])["id"] != info["image_admission"]["id"]:
+    if inspect_image(info["image"], info["mode"], info["platform"])["id"] != info["image_admission"]["id"]:
         raise SystemExit("restore image differs from captured identity")
     # Persist the fence before the first resource mutation, including partial failure.
     info["established"] = False
@@ -530,9 +740,10 @@ def link_subject(args) -> None:
     root, info = load_instance(args.directory)
     files, envfile, clean_env = resolved_compose(root, info)
     if info["mode"] == "demo":
-        issuer = json.loads((root / "oidc.json").read_text())["issuer"]
-        subject = "volt-compose-demo-admin-subject"
-        principal = "volt-compose-demo-admin"
+        oidc = json.loads((root / "oidc.json").read_text())
+        issuer = oidc["issuer"]
+        subject = info["demo_admin_subject"]
+        principal = info["bootstrap_principal"]
         rationale = "Explicit labelled local demo bootstrap"
         evidence_ref = "volt-compose-demo-bootstrap"
     else:
@@ -616,9 +827,14 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--mode", choices=("demo", "external"), required=True)
     create.add_argument("--project", default="volt-compose")
     create.add_argument("--image", required=True, help="explicit immutable Compose-compatible candidate image; historical RC1 lacks this contract")
+    create.add_argument("--platform", choices=SUPPORTED_PLATFORMS, required=True,
+                        help="platform declared by the verified package manifest; must match Docker image inspection")
     create.add_argument("--external-config")
     create.add_argument("--client-secret-file")
+    create.add_argument("--okta-publisher-config", help="optional Okta trusted membership publisher config (external mode only)")
     create.add_argument("--bootstrap-principal", help="stable principal ID to link and initialize as the first administrator")
+    create.add_argument("--demo-subject", help="stable subject ID for the synthetic local demo administrator")
+    create.add_argument("--demo-admin-username", help="required named local demo login; password is entered through a hidden prompt")
     create.add_argument("--http-port", type=int, default=8180)
     create.add_argument("--recovery-port", type=int, default=8181)
     create.add_argument("--oidc-port", type=int, default=8190)

@@ -14,9 +14,20 @@ export function requireAdminRendered(state) {
   }
 }
 
+export function policyExpectedRevisions(catalogue, objectRevision) {
+  if (![catalogue?.policy_revision, catalogue?.authority_revision,
+        catalogue?.ownership_revision, objectRevision].every(Number.isInteger)) {
+    throw new Error('policy_revision_catalogue_incomplete');
+  }
+  return {target:catalogue.policy_revision,policy:catalogue.policy_revision,
+    authority:catalogue.authority_revision,ownership:catalogue.ownership_revision,
+    access_group:objectRevision,identity_membership:0,owners:0};
+}
+
 export function requireReceipt(receipt, expected) {
+  const action=expected.action??'access_group.create';
   if (!receipt || typeof receipt !== 'object' || receipt.schema_version !== 1
-      || receipt.command_id !== expected.commandId || receipt.action !== 'access_group.create'
+      || receipt.command_id !== expected.commandId || receipt.action !== action
       || receipt.target_id !== expected.targetId || !isUuid(receipt.decision_id)
       || !isUuid(receipt.audit_event_id) || !Number.isInteger(receipt.committed_revision)
       || receipt.committed_revision < 1 || receipt.policy_revision !== receipt.committed_revision
@@ -24,27 +35,48 @@ export function requireReceipt(receipt, expected) {
       || receipt.result?.object_kind !== 'access_group'
       || receipt.result?.object_id !== expected.groupId
       || !Number.isInteger(receipt.result?.object_revision) || receipt.result.object_revision < 1
+      || (expected.objectRevision!==undefined&&receipt.result.object_revision!==expected.objectRevision)
       || receipt.result.authority_mode !== 'uvm_native_v1') {
     throw new Error('public_admin_command_receipt_mismatch');
   }
 }
 
 export function requireAudit(item, event, expected) {
-  if (!item || item.access_group_id !== expected.groupId || item.display_name !== expected.displayName
-      || item.revision !== expected.objectRevision || !event
-      || event.event_id !== expected.auditEventId || event.action !== 'access_group.create'
-      || event.actor_id !== expected.actorId || event.after_value?.access_group_id !== expected.groupId
-      || event.after_value?.revision !== expected.objectRevision
-      || event.after_value?.display_name !== item.display_name
-      || event.after_value?.description !== item.description || event.after_value?.enabled !== item.enabled) {
+  const after=event?.after_value;
+  const action=expected.action??'access_group.create';
+  const membership=expected.membershipPrincipal&&after?.memberships?.find(item=>
+    item.principal_id===expected.membershipPrincipal&&item.enabled===true);
+  if (!item || item.access_group_id !== expected.groupId || !event
+      || event.event_id !== expected.auditEventId || event.action !== action
+      || event.actor_id !== expected.actorId || after?.access_group_id !== expected.groupId
+      || after?.revision !== expected.objectRevision
+      || (expected.displayName!==undefined&&after.display_name!==expected.displayName)
+      || (expected.description!==undefined&&after.description!==expected.description)
+      || (expected.enabled!==undefined&&after.enabled!==expected.enabled)
+      || (expected.membershipPrincipal!==undefined&&!membership)) {
     throw new Error('public_admin_audit_or_object_mismatch');
   }
 }
 
-export function requirePersistedState(item, event, state) {
-  if (!item || !event || event.event_id !== state.receipt.audit_event_id
-      || event.action !== 'access_group.create' || event.actor_id !== state.principal_id
-      || JSON.stringify(event.after_value) !== JSON.stringify(state.audit_after_value)
+export function requirePersistedState(item, createEvent, membershipEvent, state) {
+  const createReceipt=state.receipts?.create;
+  const membershipReceipt=state.receipts?.membership;
+  if (!item || !createEvent || !membershipEvent
+      || !createReceipt || !membershipReceipt
+      || createEvent.event_id !== createReceipt.audit_event_id
+      || createEvent.action !== 'access_group.create' || createEvent.actor_id !== state.principal_id
+      || JSON.stringify(createEvent.after_value) !== JSON.stringify(state.audit_after_values.create)
+      || createEvent.after_value?.access_group_id !== state.object.access_group_id
+      || createReceipt.result?.object_id !== state.object.access_group_id
+      || createReceipt.result?.object_revision !== state.audit_after_values.create?.revision
+      || membershipEvent.event_id !== membershipReceipt.audit_event_id
+      || membershipEvent.action !== 'access_group.membership.set'
+      || membershipEvent.actor_id !== state.principal_id
+      || JSON.stringify(membershipEvent.after_value) !== JSON.stringify(state.audit_after_values.membership)
+      || membershipEvent.after_value?.access_group_id !== state.object.access_group_id
+      || membershipReceipt.result?.object_id !== state.object.access_group_id
+      || membershipReceipt.result?.object_revision !== state.audit_after_values.membership?.revision
+      || membershipReceipt.result?.object_revision !== state.object.revision
       || item.access_group_id !== state.object.access_group_id
       || item.display_name !== state.object.display_name || item.description !== state.object.description
       || item.enabled !== state.object.enabled || item.revision !== state.object.revision) {

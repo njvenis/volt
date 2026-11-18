@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Download the pinned Cosign binary and verify the upstream release checksum."""
 import hashlib
+import platform
 import re
 import subprocess
 import urllib.request
@@ -18,9 +19,24 @@ def pin(key: str) -> str:
     raise ValueError(f"missing tool pin {key}")
 
 
+def target_platform(system: str | None = None, machine: str | None = None) -> str:
+    os_name = (system or platform.system()).lower()
+    cpu = (machine or platform.machine()).lower()
+    os_map = {"linux": "linux", "darwin": "darwin"}
+    arch_map = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
+    if os_name not in os_map or cpu not in arch_map:
+        raise SystemExit("pinned Cosign installer supports only Linux/macOS amd64/arm64 hosts")
+    return f"{os_map[os_name]}_{arch_map[cpu]}"
+
+
 def main() -> None:
-    version, url, expected = (pin(k) for k in ("cosign_version", "cosign_release", "cosign_linux_amd64_sha256"))
-    if not re.fullmatch(r"[0-9a-f]{64}", expected) or f"/v{version}/cosign-linux-amd64" not in url:
+    version = pin("cosign_version")
+    target = target_platform()
+    os_name, arch = target.split("_", 1)
+    url = pin("cosign_release_template").format(version=version, platform=f"{os_name}-{arch}")
+    expected = pin(f"cosign_{os_name}_{arch}_sha256")
+    if (not re.fullmatch(r"[0-9a-f]{64}", expected)
+            or url != f"https://github.com/sigstore/cosign/releases/download/v{version}/cosign-{os_name}-{arch}"):
         raise SystemExit("invalid Cosign version, URL, or SHA-256 pin")
     DEST.mkdir(parents=True, exist_ok=True)
     binary = DEST / "cosign"

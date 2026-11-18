@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import getpass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,6 +24,14 @@ def run(*args: str, capture: bool = False) -> str:
     return result.stdout.strip() if capture else ""
 
 
+def source_checkout() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def repository_git(*args: str, capture: bool = False) -> str:
+    return run("git", "-C", str(source_checkout()), *args, capture=capture)
+
+
 def state_dir(instance: str) -> Path:
     if not instance or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for c in instance):
         raise SystemExit("instance must contain only letters, digits, hyphen and underscore")
@@ -34,6 +44,33 @@ def secret(path: Path, size: int = 48) -> str:
     path.write_text(value + "\n", encoding="ascii")
     path.chmod(0o600)
     return value
+
+
+def private_password_file(path: Path) -> str:
+    if path.is_symlink() or not path.is_file():
+        raise SystemExit("admin password file must be a regular private file with mode 0600 or stricter")
+    metadata = path.stat()
+    if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+        raise SystemExit("admin password file must be a regular private file with mode 0600 or stricter")
+    value = path.read_text(encoding="utf-8").rstrip("\r\n")
+    if not value:
+        raise SystemExit("admin password file must not be empty")
+    return value
+
+
+def demo_admin_verifier(username: str, password: str) -> bytes:
+    # Keep the preview CLI source-free at runtime; mirror the demo credential
+    # format using only Python's standard library. This must match setup.py.
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,63}", username):
+        raise SystemExit("demo admin username must be 1-64 simple ASCII characters")
+    if len(password) < 16 or len(password.encode("utf-8")) > 1024:
+        raise SystemExit("demo admin password must be 16-1024 UTF-8 bytes")
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**15, r=8,
+                            p=1, dklen=32, maxmem=64 * 1024 * 1024)
+    return json.dumps({"schema": "uvm.demo-credential.v1", "username": username,
+        "salt": salt.hex(), "password_hash": digest.hex()}, sort_keys=True,
+        separators=(",", ":")).encode() + b"\n"
 
 
 def make_tls(directory: Path) -> None:
@@ -70,8 +107,14 @@ def oidc_configuration(api_origin: str, oidc_origin: str) -> dict:
         "sync_secret_file": "/run/uvm-g7-secrets/oidc_sync_secret",
         "operator_secret_file": "/run/uvm-g7-secrets/oidc_operator_secret",
         "operator_actor_id": "volt-local-preview-operator", "allowed_algorithms": ["RS256"],
-        "allowed_endpoint_origins": [api_origin, oidc_origin, internal_origin], "source_scope_ceilings": [],
-        "group_mappings": {}, "mapping_revision": 1,
+        "allowed_endpoint_origins": [api_origin, oidc_origin, internal_origin],
+        "source_scope_ceilings": [{"source_family": "local",
+            "source_account_id": "volt-local-preview", "scope_key": "all"}],
+        "group_mappings": {"volt-local-preview-admin-group": {
+            "role_ids": ["00000000-0000-4000-8000-000000000002"],
+            "source_scopes": [{"source_family": "local",
+                "source_account_id": "volt-local-preview", "scope_key": "all"}]}},
+        "mapping_revision": 1,
         "session_ttl_seconds": 3600, "heartbeat_max_age_seconds": 120,
     }
 
@@ -104,15 +147,28 @@ def ingress_hostnames() -> str:
 
 
 def initialize(args) -> None:
-    dirty = run("git", "status", "--porcelain", capture=True)
+    dirty = repository_git("status", "--porcelain", capture=True)
     if dirty:
         raise SystemExit("initialize from a committed, clean source revision so the image can be bound to an exact SHA")
     root = state_dir(args.instance)
     if root.exists():
         raise SystemExit(f"instance already initialized: {root}")
+    if not args.admin_username:
+        raise SystemExit("init requires --admin-username")
+    if args.admin_password_file:
+        password = private_password_file(Path(args.admin_password_file).expanduser())
+    else:
+        password = getpass.getpass("New local preview admin password (16+ characters): ")
+        confirmation = getpass.getpass("Confirm local preview admin password: ")
+        if password != confirmation:
+            raise SystemExit("admin password entries did not match")
+    credential = demo_admin_verifier(args.admin_username, password)
     root.mkdir(mode=0o700, parents=True)
     secrets_dir = root / "secrets"
     secrets_dir.mkdir(mode=0o700)
+    (secrets_dir / "demo-admin-credentials").write_bytes(credential)
+    (secrets_dir / "demo-admin-credentials").chmod(0o600)
+    del password
     for name, size in (("uvm_db_password", 32), ("ce_db_password", 32),
                        ("ce_admin_password", 32), ("ce_secret_key", 64),
                        ("ce_credential_key", 32), ("uvm_cursor_secret", 48),
@@ -132,7 +188,7 @@ def initialize(args) -> None:
     (root / "operator-link.json").chmod(0o600)
     owner_token = secrets.token_hex(32)
     suffix = owner_token[:16]
-    helper_revision = run("git", "rev-parse", "HEAD", capture=True)
+    helper_revision = repository_git("rev-parse", "HEAD", capture=True)
     metadata = {"instance": args.instance, "owner_token": owner_token,
         "container": f"volt-g7-preview-{args.instance}-{suffix}",
         "container_id": None, "container_resource_id": str(uuid.uuid4()),
@@ -372,9 +428,9 @@ def start(args) -> None:
     resources = preflight(info, require_complete=True)
     if resources["container"]:
         raise SystemExit(f"owned container already exists; use restart or stop first: {info['container']}")
-    current = run("git", "rev-parse", "HEAD", capture=True)
+    current = repository_git("rev-parse", "HEAD", capture=True)
     helper_revision = info.get("helper_revision", info.get("source_revision"))
-    if current != helper_revision or run("git", "status", "--porcelain", capture=True):
+    if current != helper_revision or repository_git("status", "--porcelain", capture=True):
         raise SystemExit("source revision changed after init; destroy and reinitialize from a committed clean helper revision")
 
     if no_build:
@@ -427,7 +483,7 @@ def start(args) -> None:
         "DD_ALLOWED_HOSTS": "localhost,127.0.0.1", "DD_INITIALIZE": "true",
         "UVM_AUTH_MODE": "oidc", "UVM_OIDC_CONFIG": (root / "oidc.json").read_text().strip(),
         "UVM_OIDC_FIXTURE_SUBJECT": "volt-local-preview-admin-subject",
-        "UVM_OIDC_FIXTURE_IDENTITIES": '[{"subject":"volt-local-preview-admin-subject","groups":[]}]',
+        "UVM_OIDC_FIXTURE_IDENTITIES": '[{"subject":"volt-local-preview-admin-subject","groups":["volt-local-preview-admin-group"]}]',
         "UVM_OIDC_PROVIDER_PORT": "9000", "UVM_OIDC_BROWSER_AUTHORIZATION_ORIGIN": f"http://127.0.0.1:{info['oidc_port']}",
         "UVM_OIDC_INTERNAL_ENDPOINT_ORIGIN": "http://127.0.0.1:9000",
         "UVM_G3_BOOTSTRAP_PRINCIPAL": "volt-local-preview-admin",
@@ -566,34 +622,42 @@ def destroy(args) -> None:
 
 
 def smoke(args) -> None:
-    _root, info = load(args.instance)
+    root, info = load(args.instance)
     preflight(info, require_container=True, require_complete=True)
     evidence = Path(args.evidence)
     evidence.mkdir(mode=0o700, parents=True, exist_ok=True)
     verify_private_ingress(info, evidence)
+    if args.password_file:
+        password_path = Path(args.password_file).expanduser()
+        password = private_password_file(password_path)
+    else:
+        password = getpass.getpass("Local preview admin password: ")
     command = ["node", "tools/g7_local_preview_smoke.mjs", "--origin",
         f"http://127.0.0.1:{info['api_port']}", "--issuer",
         f"http://127.0.0.1:{info['oidc_port']}", "--subject",
         "volt-local-preview-admin-subject", "--principal", "volt-local-preview-admin",
-        "--evidence", str(evidence)]
+        "--evidence", str(evidence), "--username", args.admin_username, "--password-stdin"]
     if args.readback:
         command.append("--readback")
     else:
         command.append("--initialize-development")
-    subprocess.run(command, check=True)
+    try:
+        subprocess.run(command, input=password, text=True, check=True)
+    finally:
+        password = None
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    p = sub.add_parser("init"); p.add_argument("instance"); p.add_argument("--api-port", type=int, default=8180); p.add_argument("--oidc-port", type=int, default=8190); p.set_defaults(fn=initialize)
+    p = sub.add_parser("init"); p.add_argument("instance"); p.add_argument("--api-port", type=int, default=8180); p.add_argument("--oidc-port", type=int, default=8190); p.add_argument("--admin-username", required=True); p.add_argument("--admin-password-file"); p.set_defaults(fn=initialize)
     p = sub.add_parser("start"); p.add_argument("instance"); p.add_argument("--image", help="build output tag (default: revision-qualified preview tag)"); p.add_argument("--no-build", action="store_true", help="start an already-loaded, exactly admitted image without building"); p.add_argument("--expected-image-id"); p.add_argument("--expected-image-source-revision"); p.add_argument("--expected-image-version"); p.add_argument("--expected-platform"); p.set_defaults(fn=start)
     p = sub.add_parser("status"); p.add_argument("instance"); p.set_defaults(fn=lambda a: docker_for(a, "status"))
     p = sub.add_parser("wait"); p.add_argument("instance"); p.add_argument("--timeout", type=int, default=900); p.set_defaults(fn=wait_healthy)
     for cmd in ("stop", "restart"):
         p = sub.add_parser(cmd); p.add_argument("instance"); p.set_defaults(fn=lambda a, c=cmd: docker_for(a, c))
     p = sub.add_parser("link-admin"); p.add_argument("instance"); p.set_defaults(fn=link_admin)
-    p = sub.add_parser("smoke"); p.add_argument("instance"); p.add_argument("--evidence", default="evidence/g7-local-preview"); p.add_argument("--readback", action="store_true"); p.set_defaults(fn=smoke)
+    p = sub.add_parser("smoke"); p.add_argument("instance"); p.add_argument("--evidence", default="evidence/g7-local-preview"); p.add_argument("--readback", action="store_true"); p.add_argument("--admin-username", required=True); p.add_argument("--password-file"); p.set_defaults(fn=smoke)
     p = sub.add_parser("destroy"); p.add_argument("instance"); p.set_defaults(fn=destroy)
     args = parser.parse_args(); args.fn(args)
 

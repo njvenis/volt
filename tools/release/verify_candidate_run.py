@@ -34,12 +34,17 @@ def workflow_path_matches(value: object, workflow: str) -> bool:
     return path == workflow and (not separator or ref in {"main", "refs/heads/main"})
 
 
+def expected_rc3_artifact(name: str | None, source: str) -> bool:
+    return bool(name and re.fullmatch(rf"volt-rc3-candidate-{source}-linux-(?:amd64|arm64)", name))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--source", required=True)
     parser.add_argument("--repository", required=True)
     parser.add_argument("--workflow", default=".github/workflows/release.yml")
+    parser.add_argument("--artifact-name")
     parser.add_argument("--artifact-id")
     parser.add_argument("--artifact-digest")
     parser.add_argument("--controller-source")
@@ -64,8 +69,14 @@ def main() -> int:
                 or run.get("head_branch") != "main" or run.get("head_sha") != args.source
                 or run.get("status") != "completed" or run.get("conclusion") != "success"):
             raise RuntimeError("candidate run must be a successful, completed main dispatch for this exact source and workflow")
+        if args.workflow not in {".github/workflows/release.yml", ".github/workflows/release-rc3.yml"}:
+            raise RuntimeError("candidate workflow is not an explicitly approved release workflow")
+        if args.workflow.endswith("release-rc3.yml") and not expected_rc3_artifact(args.artifact_name, args.source):
+            raise RuntimeError("RC3 candidate must name one source-bound platform artifact")
         artifacts = api(f"{prefix}/runs/{args.run_id}/artifacts", token).get("artifacts")
-        expected_name = f"volt-rc2-candidate-{args.source}"
+        expected_name = args.artifact_name or f"volt-rc2-candidate-{args.source}"
+        if not re.fullmatch(rf"volt-(?:rc2-candidate-{args.source}|rc3-candidate-{args.source}-linux-(?:amd64|arm64))", expected_name):
+            raise RuntimeError("candidate artifact name is not one of the fixed source-bound RC2/RC3 artifacts")
         matches = [item for item in artifacts or [] if item.get("name") == expected_name and not item.get("expired")]
         if (len(matches) != 1 or type(matches[0].get("id")) is not int
                 or not isinstance(matches[0].get("digest"), str)

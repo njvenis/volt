@@ -25,6 +25,15 @@ EXPECTED_COPIED_ASSETS = ["/opt/valkey/bin/valkey-server", "/opt/valkey/bin/valk
 DEBIAN_DEVELOPER_KEYRING_SHA256 = "81e08f47b0dd8a563a2742ad90878ccefe53aa0728b095acbea3efda84381ea9"
 
 
+SUPPORTED_PLATFORMS = {"linux/amd64": "x86_64", "linux/arm64": "aarch64"}
+
+
+def copied_assets(platform: str) -> list[str]:
+    if platform not in SUPPORTED_PLATFORMS:
+        raise ValueError("unsupported notice platform")
+    return [path.replace("-x86_64", "").replace(".musl-x86_64", ".musl") for path in EXPECTED_COPIED_ASSETS]
+
+
 def run(args: list[str], *, stdout=None) -> str:
     p = subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE if stdout is None else stdout, stderr=subprocess.PIPE)
     return p.stdout if stdout is None else ""
@@ -318,7 +327,7 @@ def verify_pip_launcher_evidence(image_files: list[dict], image_metadata: list[d
     return {"package": "pip vendored distlib Windows launchers", "version": "distlib 0.4.2 via pip 26.2.1", "license_expression": meta["license_expression"], "copyright": meta["copyright"], "content_sha256": [{"path": path, "sha256": observed[path]["sha256"], "size": meta["launcher_files"][Path(path).name]["size"], "source_archive_path": meta["launcher_files"][Path(path).name]["archive_path"], "source_sha256": meta["launcher_files"][Path(path).name]["sha256"], "source_size": meta["launcher_files"][Path(path).name]["size"]} for path in sorted(expected_paths)], "license_texts": [{"path": "third-party/notices/" + meta["license_file"], "inventory_file": "notices/" + license_target.name, "sha256": meta["license_file_sha256"]}], "source_material": [{"path": meta["wheel_url"], "sha256": meta["wheel_sha256"], "inventory_file": "notices/source-material/" + wheel_target.name}, {"path": meta["distlib_launcher_source_url"], "sha256": meta["distlib_launcher_source_sha256"], "inventory_file": "notices/source-material/" + source_target.name}], "obligation_resolution": "Exact pip wheel and installed vendor.txt both identify distlib 0.4.2; all six installed PE bytes match independently hashed wheel members. The exact distlib 0.4.2 launcher source header supplies the copyright and two binary/source redistribution conditions, which are checked against the bundled notice; the complete wheel license text is also retained verbatim.", "provenance": {"pip_version": meta["version"], "metadata_path": matches[0]["metadata_path"], "wheel_url": meta["wheel_url"], "wheel_sha256": meta["wheel_sha256"], "wheel_size": meta["wheel_size"], "distlib_launcher_source_url": meta["distlib_launcher_source_url"], "distlib_launcher_source_sha256": meta["distlib_launcher_source_sha256"], "vendor_manifest_path": installed_vendor[0]["path"], "vendor_manifest_sha256": installed_vendor[0]["sha256"], "pypi_release_url": meta["pypi_release_url"]}}
 
 
-def verify_musl_license(source_evidence: dict, copied: dict[str, dict], source_image_id: str, dest: Path) -> dict:
+def verify_musl_license(source_evidence: dict, copied: dict[str, dict], source_image_id: str, dest: Path, platform: str = "linux/amd64") -> dict:
     """Bind full tagged musl notice text to the copied Alpine runtime binaries."""
     asset_dir = ROOT / "third-party/notices"
     manifest = json.loads((asset_dir / "MUSL-LICENSE-EVIDENCE.json").read_text())
@@ -333,7 +342,7 @@ def verify_musl_license(source_evidence: dict, copied: dict[str, dict], source_i
     musl = source_evidence.get("musl", {})
     if musl.get("version") != "1.2.6-r2" or not any("MIT" == (x.get("spdx_expression") or x.get("value")) for x in musl.get("licenses", [])):
         raise ValueError("pinned Alpine source image does not match musl 1.2.6-r2 MIT evidence")
-    paths = ("/opt/valkey/lib/ld-musl-x86_64.so.1", "/opt/valkey/lib/libc.musl-x86_64.so.1")
+    paths = [path for path in copied_assets(platform) if "musl" in path]
     if any(path not in copied for path in paths):
         raise ValueError("one or more copied musl runtime binaries lack content hashes")
     target = dest / manifest["license_file"]
@@ -419,40 +428,42 @@ def npm_license_texts(lock: dict, dest: Path) -> tuple[list[dict], list[dict]]:
     return records, unresolved
 
 
-def acceptable_image(image: str) -> dict:
+def acceptable_image(image: str, platform: str = "linux/amd64") -> dict:
     if not IMAGE_RE.fullmatch(image):
         raise ValueError("--image must be an immutable sha256 image ID")
     info = json.loads(run(["docker", "image", "inspect", image]))[0]
     if info.get("Id") != image:
         raise ValueError("Docker returned a different image ID")
-    if info.get("Os") != "linux" or info.get("Architecture") != "amd64":
-        raise ValueError(f"expected linux/amd64, found {info.get('Os')}/{info.get('Architecture')}")
+    if platform not in SUPPORTED_PLATFORMS or f"{info.get('Os')}/{info.get('Architecture')}" != platform:
+        raise ValueError(f"expected {platform}, found {info.get('Os')}/{info.get('Architecture')}")
     return info
 
 
-def admit_pinned_source_image(source_ref: str, source_id: str) -> dict:
+def admit_pinned_source_image(source_ref: str, source_id: str, platform: str = "linux/amd64") -> dict:
     """Resolve the pinned registry manifest to an admitted local image record."""
     if not IMAGE_RE.fullmatch(source_id) or "@" not in source_ref or source_ref.rsplit("@", 1)[1] != source_id:
         raise ValueError("source image reference does not bind the supplied immutable digest")
     repository = source_ref.rsplit("@", 1)[0].rsplit("/", 1)
     repository = repository[0] + "/" + repository[1].split(":", 1)[0]
+    if platform not in SUPPORTED_PLATFORMS:
+        raise ValueError("unsupported pinned source platform")
     inspect = ["docker", "image", "inspect", source_ref]
     try:
         raw = run(inspect)
     except subprocess.CalledProcessError:
-        run(["docker", "pull", "--platform=linux/amd64", source_ref])
+        run(["docker", "pull", f"--platform={platform}", source_ref])
         raw = run(inspect)
     rows = json.loads(raw)
     if not isinstance(rows, list) or len(rows) != 1:
         raise ValueError("Docker did not resolve exactly one pinned source image")
     info = rows[0]
-    if info.get("Os") != "linux" or info.get("Architecture") != "amd64":
-        raise ValueError(f"expected pinned source linux/amd64, found {info.get('Os')}/{info.get('Architecture')}")
+    if f"{info.get('Os')}/{info.get('Architecture')}" != platform:
+        raise ValueError(f"expected pinned source {platform}, found {info.get('Os')}/{info.get('Architecture')}")
     if f"{repository}@{source_id}" not in (info.get("RepoDigests") or []):
         raise ValueError("resolved source image RepoDigests do not contain the pinned repository digest")
     if not IMAGE_RE.fullmatch(info.get("Id", "")):
         raise ValueError("Docker returned no immutable local source image ID")
-    return {**info, "RegistryReference": source_ref, "RegistryDigest": source_id, "LocalImageId": info["Id"], "Platform": "linux/amd64"}
+    return {**info, "RegistryReference": source_ref, "RegistryDigest": source_id, "LocalImageId": info["Id"], "Platform": platform}
 
 
 def remove_owned_export_container(cid: str, mounts: list[str], cleanup_log: list[dict], record_path: Path | None = None) -> None:
@@ -491,7 +502,7 @@ def extract_notice_files(image: str, dest: Path, cleanup_log: list[dict] | None 
                 embedded_notice = str(p).startswith("usr/share/doc/volt/third-party/")
                 launcher = name.endswith(".exe") and ("pip/_vendor/distlib/" in str(p) or "site-packages/setuptools/" in str(p))
                 notice_name = launcher or name in {"copyright", "license", "licence", "notice", "notices", "copying"} or name.startswith(("license.", "licence.", "notice.", "copying.", "license-", "licence-", "notice-", "copying-")) or name.endswith((".license", ".licence"))
-                copied_runtime = str(p) in {"opt/valkey/bin/valkey-server", "opt/valkey/bin/valkey-cli", "opt/valkey/lib/ld-musl-x86_64.so.1", "opt/valkey/lib/libc.musl-x86_64.so.1", "opt/valkey/lib/libssl.so.3", "opt/valkey/lib/libcrypto.so.3"}
+                copied_runtime = str(p) in {"opt/valkey/bin/valkey-server", "opt/valkey/bin/valkey-cli", "opt/valkey/lib/ld-musl-x86_64.so.1", "opt/valkey/lib/libc.musl-x86_64.so.1", "opt/valkey/lib/ld-musl-aarch64.so.1", "opt/valkey/lib/libc.musl-aarch64.so.1", "opt/valkey/lib/ld-musl.so.1", "opt/valkey/lib/libc.musl.so.1", "opt/valkey/lib/libssl.so.3", "opt/valkey/lib/libcrypto.so.3"}
                 pygithub_source = str(p).startswith("usr/local/lib/python3.14/site-packages/github/") and p.suffix == ".py"
                 if not member.isfile() or not (dist_metadata or pip_vendor_manifest or common_license or notice_name or copied_runtime or pygithub_source or embedded_notice):
                     continue
@@ -545,7 +556,7 @@ def docker_export_file_hashes(image: str, paths: dict[str, str], cleanup_log: li
         entries = {}
         with tarfile.open(fileobj=proc.stdout, mode="r|*") as archive:
             wanted = {p.lstrip("/"): out for p, out in paths.items()}
-            source_names = ("valkey-server", "valkey-cli", "ld-musl-x86_64.so.1", "libc.musl-x86_64.so.1", "libssl.so", "libcrypto.so")
+            source_names = ("valkey-server", "valkey-cli", "ld-musl-x86_64.so.1", "libc.musl-x86_64.so.1", "ld-musl-aarch64.so.1", "libc.musl-aarch64.so.1", "libssl.so", "libcrypto.so")
             for member in archive:
                 name = member.name.removeprefix("./").rstrip("/")
                 if name in wanted or (member.isfile() and PurePosixPath(name).name.startswith(source_names)):
@@ -576,7 +587,8 @@ def docker_export_file_hashes(image: str, paths: dict[str, str], cleanup_log: li
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--image", required=True, help="immutable local Docker image ID sha256:<64 hex>; must be linux/amd64")
+    ap.add_argument("--platform", choices=tuple(SUPPORTED_PLATFORMS), default="linux/amd64")
+    ap.add_argument("--image", required=True, help="immutable local Docker image ID sha256:<64 hex>; must match --platform")
     ap.add_argument("--output", required=True, type=Path, help="new or empty output directory; binds all output to this image ID and platform")
     ap.add_argument("--syft", type=Path, help="reviewed Syft 1.55.0 binary; if omitted, resolve from PATH and verify version")
     ap.add_argument("--debian-dispositions", type=Path, help="JSON array of evidence-backed per-source-package/version disposition records")
@@ -586,15 +598,15 @@ def main() -> int:
     if out.exists() and any(out.iterdir()):
         ap.error("output directory must be empty")
     out.mkdir(parents=True, exist_ok=True)
-    image = acceptable_image(args.image)
+    image = acceptable_image(args.image, args.platform)
     syft = str(args.syft or shutil.which("syft") or "")
     if not syft:
         ap.error("Syft binary missing; download the pinned linux/amd64 release and verify tools.lock SHA256")
     version = run([syft, "version"])
     if "1.55.0" not in version:
         ap.error(f"expected Syft 1.55.0, got {version.strip()}")
-    run([syft, "scan", "--quiet", "--platform", "linux/amd64", f"docker:{args.image}", "-o", f"syft-json={out / 'sbom.syft.json'}"])
-    run([syft, "scan", "--quiet", "--platform", "linux/amd64", f"docker:{args.image}", "-o", f"spdx-json={out / 'sbom.spdx.json'}"])
+    run([syft, "scan", "--quiet", "--platform", args.platform, f"docker:{args.image}", "-o", f"syft-json={out / 'sbom.syft.json'}"])
+    run([syft, "scan", "--quiet", "--platform", args.platform, f"docker:{args.image}", "-o", f"spdx-json={out / 'sbom.spdx.json'}"])
     dockerfile_text = (ROOT / "Dockerfile.g7").read_text()
     source_match = VALKEY_SOURCE_RE.search(dockerfile_text)
     if not source_match:
@@ -603,9 +615,9 @@ def main() -> int:
     source_ref = re.search(r"^ARG VALKEY_IMAGE=([^\n]+)$", dockerfile_text, re.MULTILINE).group(1)
     # Explicitly admit the registry-pinned source into this daemon; BuildKit
     # cache presence is not treated as a Docker image record.
-    source_image = admit_pinned_source_image(source_ref, source_registry_digest)
+    source_image = admit_pinned_source_image(source_ref, source_registry_digest, args.platform)
     source_image_id = source_image["LocalImageId"]
-    run([syft, "scan", "--quiet", "--platform", "linux/amd64", f"docker:{source_image_id}", "-o", f"syft-json={out / 'sbom.valkey-source.syft.json'}"])
+    run([syft, "scan", "--quiet", "--platform", args.platform, f"docker:{source_image_id}", "-o", f"syft-json={out / 'sbom.valkey-source.syft.json'}"])
     source_packages = packages_from_sbom(out / "sbom.valkey-source.syft.json")
     source_package_rows = [p for p in source_packages if p.get("name") in {"valkey", "musl", "libssl3", "libcrypto3", "openssl"}]
     source_licence_map = {p.get("name"): {"version": p.get("version"), "licenses": license_records(p), "source_url": (p.get("metadata") or {}).get("url"), "source_commit": (p.get("metadata") or {}).get("gitCommitOfApkPort"), "package_files": (p.get("metadata") or {}).get("files", [])} for p in source_package_rows}
@@ -633,11 +645,12 @@ def main() -> int:
     source_paths = {
         "/usr/local/bin/valkey-server": "/opt/valkey/bin/valkey-server",
         "/usr/local/bin/valkey-cli": "/opt/valkey/bin/valkey-cli",
-        "/lib/ld-musl-x86_64.so.1": "/opt/valkey/lib/ld-musl-x86_64.so.1",
-        "/lib/libc.musl-x86_64.so.1": "/opt/valkey/lib/libc.musl-x86_64.so.1",
+        "/lib/ld-musl-x86_64.so.1": "/opt/valkey/lib/ld-musl.so.1",
+        "/lib/libc.musl-x86_64.so.1": "/opt/valkey/lib/libc.musl.so.1",
         "/usr/lib/libssl.so.3": "/opt/valkey/lib/libssl.so.3",
         "/usr/lib/libcrypto.so.3": "/opt/valkey/lib/libcrypto.so.3",
     }
+    source_paths = {key.replace("x86_64", SUPPORTED_PLATFORMS[args.platform]): value.replace("x86_64", SUPPORTED_PLATFORMS[args.platform]) for key, value in source_paths.items()}
     source_file_hashes = docker_export_file_hashes(source_image_id, source_paths, docker_cleanup, cleanup_record_path)
     target_file_hashes = {"/" + x["path"]: x for x in image_files if x.get("kind") == "copied-runtime-binary"}
     for target_path, source_row in source_file_hashes.items():
@@ -730,7 +743,7 @@ def main() -> int:
         if str(name).lower() == "valkey" and str(version_id) == "9.1.2" and source_licence_map.get("valkey", {}).get("version") == "9.1.2":
             notice_text = (inv / "VOLT-THIRD-PARTY-NOTICES.md").read_text()
             present_binary_paths = {"/" + x["path"] for x in image_files if x.get("kind") == "copied-runtime-binary"}
-            if all(pth in present_binary_paths for pth in EXPECTED_COPIED_ASSETS) and "Valkey contributors" in notice_text and "Redis Ltd." in notice_text:
+            if all(pth in present_binary_paths for pth in copied_assets(args.platform)) and "Valkey contributors" in notice_text and "Redis Ltd." in notice_text:
                 covered.append({**row, "resolution": "source-image version and exact copied binary hashes bound to the included Valkey 9.1.2 BSD-3-Clause notice"})
                 package_findings[evidence_key] = {**row, "license_evidence": [{"value": "BSD-3-Clause", "source_path": "THIRD-PARTY-NOTICES.md", "source_sha256": digest(ROOT / "THIRD-PARTY-NOTICES.md"), "source_image_id": source_image_id}]}
                 pygithub_disposition.append({"package": "Valkey", "version": version_id, "license_expression": "BSD-3-Clause", "copyright": ["Valkey contributors", "Redis Ltd."], "content_sha256": [{"path": x["path"], "sha256": x["sha256"]} for x in image_files if x.get("kind") == "copied-runtime-binary" and "valkey/bin/" in x["path"]], "license_texts": [{"path": "THIRD-PARTY-NOTICES.md#Valkey-9.1.2-COPYING", "inventory_file": "notices/VOLT-THIRD-PARTY-NOTICES.md", "sha256": digest(inv / "VOLT-THIRD-PARTY-NOTICES.md")}], "obligation_resolution": "The exact pinned source image SBOM identifies Valkey 9.1.2; both copied executable digests are captured; the complete BSD-3-Clause COPYING text and both copyright holders are in the image-bound notice file.", "provenance": {"source_image_id": source_image_id, "upstream_source": "https://github.com/valkey-io/valkey/tree/9.1.2", "binary_paths": [x["path"] for x in image_files if x.get("kind") == "copied-runtime-binary" and "valkey/bin/" in x["path"]]}})
@@ -758,7 +771,7 @@ def main() -> int:
     musl_disposition = None
     if musl_evidence:
         try:
-            musl_disposition = verify_musl_license(source_licence_map, copied_by_path, source_image_id, inv)
+            musl_disposition = verify_musl_license(source_licence_map, copied_by_path, source_image_id, inv, args.platform)
             pygithub_disposition.append(musl_disposition)
         except (OSError, ValueError, KeyError, urllib.error.URLError) as exc:
             unresolved.append({"name": "musl copied Alpine runtime", "version": musl_evidence.get("version"), "license_expression": "MIT", "evidence": {"source_image_id": source_image_id, "apk_metadata": musl_evidence, "copied_binary_sha256": [{"path": x["path"], "sha256": x["sha256"]} for x in copied_by_path.values() if "musl" in x["path"]]}, "reason": f"musl 1.2.6 tagged COPYRIGHT evidence could not be validated: {exc}", "action_choices": ["restore access to the version-tagged musl 1.2.6 COPYRIGHT source and rerun collection", "or include matching checksum-verified Alpine source package license text"]})
@@ -775,7 +788,7 @@ def main() -> int:
     # The copied Valkey/musl/OpenSSL files are explicitly tracked as provenance
     # even when the package manager cataloger has no ownership record.
     binary_rows = {"/" + x["path"]: x for x in image_files if x.get("kind") == "copied-runtime-binary"}
-    expected_binary_paths = EXPECTED_COPIED_ASSETS
+    expected_binary_paths = copied_assets(args.platform)
     provenance = {"dockerfile": "Dockerfile.g7", "lock": "docker/g7/versions.lock", "source_image_id": source_image_id, "source_image_platform": f"{source_image['Os']}/{source_image['Architecture']}", "source_image_sbom": "sbom.valkey-source.syft.json", "copied_assets": [{"path": p, "sha256": binary_rows[p]["sha256"], "size": binary_rows[p]["size"], "source_package": "valkey" if "valkey/bin/" in p else "musl" if "musl" in p else "openssl"} for p in expected_binary_paths if p in binary_rows], "missing_assets": [p for p in expected_binary_paths if p not in binary_rows], "source_image_package_evidence": source_licence_map, "resolved_license_dispositions": [x for x in pygithub_disposition if x["package"] in {"Valkey", "OpenSSL Alpine runtime libraries", "musl copied Alpine runtime"}], "unresolved_license_obligations": [x for x in unresolved if x.get("name") == "musl copied Alpine runtime"]}
     (inv / "copied-binary-provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
     (inv / "image-license-files.json").write_text(json.dumps(image_files, indent=2, sort_keys=True) + "\n")

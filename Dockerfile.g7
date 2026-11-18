@@ -3,8 +3,9 @@
 ARG CE_IMAGE=defectdojo/defectdojo-django@sha256:cb027c6e84adfe9cfe7de07863eeaae4a4375ff4420b7c41ea4e563631f4359e
 ARG VALKEY_IMAGE=valkey/valkey:9.1.2-alpine@sha256:a174b894902bd3367e330d47cc2054367dc4917701776aaf336f41d83b65ec7a
 FROM ${CE_IMAGE} AS uvm-build
+ARG TARGETARCH
 USER root
-RUN python -m pip install --no-cache-dir uv==0.12.18
+RUN test "$(dpkg --print-architecture)" = "$TARGETARCH" && python -m pip install --no-cache-dir uv==0.12.18
 WORKDIR /build
 ENV UV_PROJECT_ENVIRONMENT=/opt/uvm/venv
 RUN install -d -m 0755 /opt/uvm
@@ -30,8 +31,13 @@ COPY ui ./
 RUN npm run build
 
 FROM ${VALKEY_IMAGE} AS valkey-bin
+ARG TARGETARCH
+RUN set -eu; case "$TARGETARCH" in amd64) musl_arch=x86_64;; arm64) musl_arch=aarch64;; *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1;; esac; \
+    cp "/lib/ld-musl-${musl_arch}.so.1" /tmp/volt-valkey-ld-musl.so.1; \
+    cp "/lib/libc.musl-${musl_arch}.so.1" /tmp/volt-valkey-libc.musl.so.1
 
 FROM ${CE_IMAGE} AS runtime
+ARG TARGETARCH
 ARG VOLT_OIDC_DEPLOYMENT_MODES=demo,external
 ARG VOLT_SOURCE_SNAPSHOT=unspecified
 LABEL org.volt.oidc-deployment-modes=${VOLT_OIDC_DEPLOYMENT_MODES} \
@@ -73,17 +79,22 @@ PY
 COPY docker/g7/versions.lock /tmp/uvm-g7-versions.lock
 COPY third-party/notices/OAUTHLIB-4.0.1-BSD-3-Clause.txt /tmp/ce-global-oauthlib-license.txt
 RUN set -eu; \
+    test "$(dpkg --print-architecture)" = "$TARGETARCH"; \
     export DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none; \
     apt-get update -qq; \
     mkdir -p /tmp/os-packages; cd /tmp/os-packages; \
     packages=''; expected_delta=''; \
     dpkg-query -W -f='${Package}=${Version}\n' | sort > /tmp/g7-packages-before; \
     while IFS='=|' read -r key version digest; do \
+      arch=''; case "$key" in *:amd64) arch=amd64 ;; *:arm64) arch=arm64 ;; esac; \
+      if [ -n "$arch" ] && [ "$arch" != "$TARGETARCH" ]; then continue; fi; \
       case "$key" in \
-        os_delta_package_*) package=${key#os_delta_package_}; package=${package%%:*}; expected_delta+="$package=$version"$'\n' ;; \
-        os_package_*) package=${key#os_package_} ;; \
+        os_delta_package_*) package=${key#os_delta_package_}; is_delta=1 ;; \
+        os_package_*) package=${key#os_package_}; is_delta=0 ;; \
         *) continue ;; \
       esac; \
+      package=${package%%:*}; \
+      if [ "$is_delta" = 1 ]; then expected_delta+="$package=$version"$'\n'; fi; \
       apt-get download -qq "$package=$version"; \
       deb=$(find . -maxdepth 1 -type f -name "${package%%:*}_*.deb" -print -quit); \
       test -n "$deb"; \
@@ -130,8 +141,8 @@ RUN set -eu; \
     rm -f /tmp/ce-global-python-requirements.txt /tmp/ce-global-oauthlib-license.txt
 COPY --from=valkey-bin /usr/local/bin/valkey-server /opt/valkey/bin/valkey-server
 COPY --from=valkey-bin /usr/local/bin/valkey-cli /opt/valkey/bin/valkey-cli
-COPY --from=valkey-bin /lib/ld-musl-x86_64.so.1 /opt/valkey/lib/ld-musl-x86_64.so.1
-COPY --from=valkey-bin /lib/libc.musl-x86_64.so.1 /opt/valkey/lib/libc.musl-x86_64.so.1
+COPY --from=valkey-bin /tmp/volt-valkey-ld-musl.so.1 /opt/valkey/lib/ld-musl.so.1
+COPY --from=valkey-bin /tmp/volt-valkey-libc.musl.so.1 /opt/valkey/lib/libc.musl.so.1
 COPY --from=valkey-bin /usr/lib/libssl.so.3 /opt/valkey/lib/libssl.so.3
 COPY --from=valkey-bin /usr/lib/libcrypto.so.3 /opt/valkey/lib/libcrypto.so.3
 WORKDIR /opt/uvm/app
@@ -156,11 +167,13 @@ COPY --chown=uvm:uvm THIRD-PARTY-NOTICES.md LICENSE /usr/share/doc/volt/third-pa
 COPY --chown=uvm:uvm third-party/notices/ /usr/share/doc/volt/third-party/source/
 WORKDIR /app
 COPY docker/g7/entrypoint.sh /usr/local/bin/uvm-g7-entrypoint
+COPY docker/g7/identity_runtime.sh /usr/local/bin/uvm-g7-identity-runtime
 COPY docker/g7/schema-head /etc/uvm-g7-schema-head
 COPY docker/g7/healthcheck.sh /usr/local/bin/uvm-g7-healthcheck
 COPY docker/g7/valkey-server /usr/local/bin/valkey-server
 COPY docker/g7/valkey-cli /usr/local/bin/valkey-cli
-RUN chmod 0755 /usr/local/bin/uvm-g7-entrypoint /usr/local/bin/uvm-g7-healthcheck /usr/local/bin/valkey-server /usr/local/bin/valkey-cli
+RUN chmod 0755 /usr/local/bin/uvm-g7-entrypoint /usr/local/bin/uvm-g7-identity-runtime /usr/local/bin/uvm-g7-healthcheck /usr/local/bin/valkey-server /usr/local/bin/valkey-cli
+RUN valkey-server --version && valkey-cli --version
 # pip is retained in the build stage for uv installation only. The final CE
 # runtime installs no packages dynamically; remove its installer and vendored
 # wheels so they do not ship as an unused, independently vulnerable toolchain.

@@ -97,6 +97,8 @@ def load_oidc_config() -> dict[str, Any]:
         if (not isinstance(group_id, str) or not group_id or not isinstance(mapping, dict)
                 or set(mapping) != {"role_ids", "source_scopes"}
                 or not isinstance(mapping["role_ids"], list)
+                or any(not isinstance(role_id, str) or not role_id or role_id == "*"
+                    for role_id in mapping["role_ids"])
                 or not isinstance(mapping["source_scopes"], list)):
             raise RuntimeError("OIDC access-group mapping schema is invalid")
         for scope in mapping["source_scopes"]:
@@ -244,6 +246,35 @@ class OIDCAuth:
         return AuthorityContext(principal_id, "service_bearer", None, None, None, None, None, None,
             (), 0, self.config["mapping_revision"], policy_revision, scopes, roles, now)
 
+    def _native_identity_access(self, connection, principal_id: str, issuer: str,
+                                subject: str, policy_document: dict, at: datetime):
+        """Intersect current native membership grants with current provider caps."""
+        native_groups, native_roles, native_scopes, revision = effective_access(
+            policy_document, principal_id, at)
+        provider_groups = connection.execute(sa.select(oidc_subject_groups.c.group_id).where(
+            oidc_subject_groups.c.issuer == issuer,
+            oidc_subject_groups.c.subject == subject)).scalars().all()
+        configured = self.config["group_mappings"]
+        ceilings = {_scope(item) for item in self.config["source_scope_ceilings"]}
+        mapped_roles: set[str] = set()
+        mapped_scopes: set[tuple[str, str, str]] = set()
+        for provider_group in provider_groups:
+            mapping = configured.get(provider_group)
+            if mapping is None:
+                continue
+            mapped_roles.update(mapping["role_ids"])
+            mapped_scopes.update(_scope(item) for item in mapping["source_scopes"]
+                if _scope(item) in ceilings)
+        current_roles = {group: tuple(role for role in roles if role in mapped_roles)
+            for group, roles in native_roles}
+        current_scopes = {group: tuple(scope for scope in scopes if scope in mapped_scopes)
+            for group, scopes in native_scopes}
+        roles_value = tuple((group, values) for group, values in sorted(current_roles.items()))
+        scopes_value = tuple((group, values) for group, values in sorted(current_scopes.items()))
+        return (native_groups, roles_value, scopes_value, revision,
+            tuple(sorted({role for _group, values in roles_value for role in values})),
+            tuple(sorted({scope for _group, values in scopes_value for scope in values})))
+
     def linked_actor_context(self, connection, principal_id: str) -> AuthorityContext:
         """Resolve a GitHub-linked actor through current OIDC identity state."""
         now = _now()
@@ -277,13 +308,13 @@ class OIDCAuth:
             assessment_policy.c.policy_id == 1)).scalar_one_or_none() or {}
         native = native_state(policy_document)
         if native.get("mode") == NATIVE_MODE:
-            resolved = effective_access(policy_document, principal_id, now)
-            groups, group_roles, group_scopes, group_revision = resolved
+            resolved = self._native_identity_access(connection, principal_id, link["issuer"],
+                link["subject"], policy_document, now)
+            groups, group_roles, group_scopes, group_revision, roles, scopes = resolved
             return AuthorityContext(principal_id, "github_link", link["issuer"], link["subject"],
                 link["link_id"], link["revision"], None, None, groups, group_revision,
-                native.get("mapping_revision", 0), policy_revision,
-                tuple(sorted({scope for _group, scopes in group_scopes for scope in scopes})),
-                tuple(sorted({role for _group, roles in group_roles for role in roles})), now,
+                self.config["mapping_revision"], policy_revision,
+                scopes, roles, now,
                 group_roles, group_scopes)
         return AuthorityContext(principal_id, "github_link", link["issuer"], link["subject"],
             link["link_id"], link["revision"], None, None,
@@ -351,13 +382,13 @@ class OIDCAuth:
         if native.get("mode") == NATIVE_MODE:
             if policy_document.get("principals", {}).get(row["principal_id"], {}).get("enabled") is False:
                 raise HTTPException(401, {"code": "session_invalid", "message": "Authentication required"})
-            groups, group_roles, group_scopes, group_revision = effective_access(policy_document,
-                row["principal_id"], now)
+            resolved = self._native_identity_access(connection, row["principal_id"],
+                row["issuer"], row["subject"], policy_document, now)
+            groups, group_roles, group_scopes, group_revision, roles, scopes = resolved
             return AuthorityContext(row["principal_id"], "oidc_session", row["issuer"], row["subject"],
                 row["link_id"], row["current_link_revision"], row["session_id"], row["session_revision"],
-                groups, group_revision, native.get("mapping_revision", 0), policy_revision,
-                tuple(sorted({scope for _group, scopes in group_scopes for scope in scopes})),
-                tuple(sorted({role for _group, roles in group_roles for role in roles})), now,
+                groups, group_revision, self.config["mapping_revision"], policy_revision,
+                scopes, roles, now,
                 group_roles, group_scopes)
         memberships = connection.execute(sa.select(auth_group_memberships.c.group_id,
             auth_group_memberships.c.revision).where(auth_group_memberships.c.principal_id == row["principal_id"],

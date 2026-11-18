@@ -6,10 +6,13 @@ import re
 
 REPOSITORY = "https://github.com/njvenis/volt"
 WORKFLOW_REF = "njvenis/volt/.github/workflows/release.yml@refs/heads/main"
+RC3_WORKFLOW_REF = "njvenis/volt/.github/workflows/release-rc3.yml@refs/heads/main"
+ALLOWED_WORKFLOW_REFS = {WORKFLOW_REF, RC3_WORKFLOW_REF}
 BUILD_TYPE = "https://github.com/Attestations/GitHubActionsWorkflow@v1"
 
 
-def validate(predicate: object, source_commit: str, *, expected_controller_commit: str | None = None) -> None:
+def validate(predicate: object, source_commit: str, *, expected_controller_commit: str | None = None,
+             expected_workflow_ref: str = WORKFLOW_REF) -> None:
     if not isinstance(source_commit, str) or len(source_commit) != 40 or any(c not in "0123456789abcdef" for c in source_commit):
         raise ValueError("expected VOLT source commit is malformed")
     if not isinstance(predicate, dict):
@@ -22,7 +25,9 @@ def validate(predicate: object, source_commit: str, *, expected_controller_commi
         raise ValueError("provenance external parameters are missing")
     workflow = external.get("workflow")
     source = external.get("source")
-    if not isinstance(workflow, dict) or workflow.get("repository") != REPOSITORY or workflow.get("ref") != WORKFLOW_REF:
+    if (expected_workflow_ref not in ALLOWED_WORKFLOW_REFS
+            or not isinstance(workflow, dict) or workflow.get("repository") != REPOSITORY
+            or workflow.get("ref") != expected_workflow_ref):
         raise ValueError("provenance workflow repository/ref disagrees with the approved VOLT publisher")
     if not isinstance(source, dict) or source.get("uri") != REPOSITORY or source.get("ref") != source_commit:
         raise ValueError("provenance source URI/ref disagrees with the expected VOLT commit")
@@ -46,7 +51,7 @@ def validate(predicate: object, source_commit: str, *, expected_controller_commi
         if not isinstance(controller, dict) or set(controller) != required:
             raise ValueError("release controller provenance is incomplete or contains unexpected fields")
         if (not re.fullmatch(r"[0-9a-f]{40}", str(controller["commit"]))
-                or controller["workflow_ref"] != WORKFLOW_REF
+                or controller["workflow_ref"] != expected_workflow_ref
                 or controller["candidate_source_commit"] != source_commit
                 or not re.fullmatch(r"[0-9]+", str(controller["candidate_run_id"]))
                 or not re.fullmatch(r"[0-9]+", str(controller["publication_run_id"]))

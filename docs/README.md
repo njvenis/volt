@@ -4,7 +4,8 @@ Use this index to find the current runnable guidance and the detailed product co
 
 ## First steps
 
-- [RC2 Compose installation](installation.md#rc2-compose-installation): verify the release assets, use the digest-pinned Linux/amd64 image and install from the source-free bundle.
+- [Planned RC3 Compose evaluation installation](installation.md#rc3-compose-installation): after publication, choose the native Linux/arm64 Apple Silicon or Linux/amd64 archive, authenticate it, then install from the source-free bundle.
+- [Historical RC2 Compose installation](installation.md#rc2-compose-installation): reproduce the immutable Linux/amd64 release using its original image and verifier identities.
 - [Historical RC1 launcher](installation.md#historical-rc1-launcher): verify and run the older image without rebuilding, or use its signed offline bundle.
 - [Development preview](local-preview.md): build and run the synthetic loopback preview, sign in, exercise its smoke path, and stop or destroy it.
 - [Configuration inputs](configuration.md): generated preview settings, packaging example values, and required secret files.
@@ -13,11 +14,12 @@ Use this index to find the current runnable guidance and the detailed product co
 
 ## User and operator guidance
 
-Production operation remains outside the supported scope. RC2 is the current Compose-compatible evaluation release; RC1 documentation is historical and its launcher remains a separate path.
+Production operation remains outside the supported scope. RC3 is the planned Compose evaluation prerelease; RC1 and RC2 are immutable historical releases, each with its own installation procedure and verifier identities.
 
 | Topic | Start here |
 | --- | --- |
-| New Compose evaluation | [RC2 installation](installation.md#rc2-compose-installation) — bundle from the signed archive and digest-pinned image |
+| Planned Compose evaluation | [RC3 installation](installation.md#rc3-compose-installation) — target native arm64/amd64 archives and source-free bundle |
+| Historical Compose evaluation | [RC2 installation](installation.md#rc2-compose-installation) — immutable Linux/amd64 image and original verification flow |
 | Historical launcher evaluation | [RC1 installation](installation.md#historical-rc1-launcher) — fresh Linux/amd64 installations with synthetic identity |
 | Configuration and deployment | [Configuration inputs](configuration.md), [deployment boundary](deployment.md) |
 | Local operations and troubleshooting | [Operations guide](operations.md) |
@@ -42,7 +44,7 @@ Requirements, gates, ADRs and G7 contracts retain their stated verification boun
 | UI and accessibility | [UI requirements](ui-requirements.md), [`design/tokens.json`](../design/tokens.json) |
 | Development and checks | [Runbook](../RUNBOOK.md), [contributing](../CONTRIBUTING.md), [OpenSpec changes](../openspec/changes/) |
 
-A public RC1 image and signed offline bundle are available. The RC2 Compose-compatible image and signed release assets are published; the source-free bundle is available separately and inside the signed offline archive. Helm deployment and a general production backup/upgrade runbook are not provided.
+Public RC1 and RC2 images and signed offline bundles remain available as immutable historical releases. RC3 is the planned Compose evaluation prerelease; consult its [installation and verification instructions](installation.md#rc3-compose-installation) for architecture-specific release assets and the source-free bundle. Helm deployment and a general production backup/upgrade runbook are not provided.
 # Installation and operations
 
 - [Source-free Compose bundle](../deploy/compose/README.md)

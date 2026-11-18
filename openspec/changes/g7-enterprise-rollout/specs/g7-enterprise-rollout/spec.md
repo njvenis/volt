@@ -13,6 +13,13 @@ Final deployment SHALL provide one supervised, self-contained Docker image inten
 - **THEN** sign-in, subject linking, denied links, session lifecycle and current UVM permission enforcement are verified against that target with revision-bound evidence
 - **AND** local fake-provider execution is retained only as local proof, not substituted for Okta integration
 
+#### Scenario: G7-ID-04 native authority is capped by current provider mappings
+- **WHEN** a linked OIDC or GitHub-linked principal is authorized under native authority
+- **THEN** each effective native role and source-scope tuple must be present in both the principal's current native access-group grants and the current explicit provider group mappings, with source scopes also inside the configured provider ceilings
+- **AND** provider group removal revokes existing sessions and current authorization, while a fresh sign-in cannot recover the removed role or scope
+- **AND** removing a native grant denies access while provider mappings remain, and restoring a provider group cannot create a native membership or grant
+- **AND** absent, unmapped, disabled or stale provider membership state grants no native role or source scope; retained native grants and audit history are not erased
+
 #### Scenario: G7-ID-02 revocation and stale membership
 - **WHEN** a UVM access-group membership is removed while a user has an existing session or pending command
 - **THEN** the removed group's grants no longer authorise reads or commits, while unrelated current grants remain usable, and the effective membership revision is retained

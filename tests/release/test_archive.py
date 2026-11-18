@@ -18,6 +18,22 @@ sys.path.insert(0, str(Path(__file__).parents[2] / "tools" / "release"))
 import archive
 
 class OfflineArchiveTests(unittest.TestCase):
+    def test_fixed_workflow_identity_and_bundle_inventory_are_version_bound(self):
+        self.assertEqual(archive.identity_for_version("0.1.0-rc.2"), archive.EXPECTED_IDENTITY)
+        self.assertEqual(archive.identity_for_version("0.1.0-rc.3"),
+                         "https://github.com/njvenis/volt/.github/workflows/release-rc3.yml@refs/heads/main")
+        self.assertEqual(archive.compose_bundle_files("0.1.0-rc.2"), archive.RC2_COMPOSE_BUNDLE_FILES)
+        self.assertEqual(archive.compose_bundle_files("0.1.0-rc.3"), archive.RC3_COMPOSE_BUNDLE_FILES)
+        self.assertNotIn("okta-publisher.yaml", archive.compose_bundle_files("0.1.0-rc.2"))
+        self.assertIn("okta-publisher.yaml", archive.compose_bundle_files("0.1.0-rc.3"))
+        with self.assertRaises(ValueError):
+            archive.identity_for_version("0.1.0-rc.4")
+        with self.assertRaisesRegex(ValueError, "only the fixed RC3"):
+            archive.build_manifest(Path("."), "0.1.0-rc.2", "a" * 40,
+                                   "sha256:" + "b" * 64, "linux/arm64",
+                                   archive.EXPECTED_IDENTITY, archive.EXPECTED_ISSUER,
+                                   "sha256:" + "c" * 64)
+
     @classmethod
     def setUpClass(cls):
         cls.keys = Path(tempfile.mkdtemp(prefix="volt-test-signing-key-"))
@@ -102,7 +118,7 @@ class OfflineArchiveTests(unittest.TestCase):
             self.assertEqual(archive.main(), 0)
         return package, result
 
-    def build_rc2_signed(self, root):
+    def build_rc2_signed(self, root, version=archive.EXPECTED_VERSION):
         package = root / "rc2-bundle"
         (package / "notices").mkdir(parents=True)
         repo = root / "rc2-source"
@@ -110,8 +126,9 @@ class OfflineArchiveTests(unittest.TestCase):
         subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
         compose_source = Path(__file__).parents[2] / "deploy" / "compose"
         (repo / "deploy" / "compose").mkdir(parents=True)
-        for name in archive.COMPOSE_BUNDLE_FILES:
+        for name in archive.compose_bundle_files(version):
             shutil.copy2(compose_source / name, repo / "deploy" / "compose" / name)
+        (repo / "deploy" / "compose" / "VERSION").write_text(version + "\n")
         (repo / "tools").mkdir()
         shutil.copy2(Path(__file__).parents[2] / "tools" / "build_compose_bundle.py", repo / "tools" / "build_compose_bundle.py")
         env = {**os.environ, "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
@@ -123,6 +140,17 @@ class OfflineArchiveTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(repo), "archive", "--format=tar", "--output", str(package / "source.tar"), "HEAD"], check=True)
         source_snapshot = "sha256:" + archive.sha(package / "source.tar")
         registry_digest = "sha256:" + "c" * 64
+        if version == archive.RC3_VERSION:
+            amd = "sha256:" + "d" * 64
+            arm = "sha256:" + "e" * 64
+            index = {"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[
+                {"digest":amd,"platform":{"os":"linux","architecture":"amd64"}},
+                {"digest":arm,"platform":{"os":"linux","architecture":"arm64"}}]}
+            index_bytes = json.dumps(index).encode()
+            (package / "rc3-index.json").write_bytes(index_bytes)
+            registry_digest = "sha256:" + hashlib.sha256(index_bytes).hexdigest()
+            for name,value in (("amd64-digest.txt",amd),("arm64-digest.txt",arm),("platform-digest.txt",amd)):
+                (package/name).write_text(value+"\n")
         bundle = package / "volt-compose.tar.gz"
         subprocess.run([sys.executable, str(repo / "tools" / "build_compose_bundle.py"), "build",
                         "--output", str(bundle), "--image-reference", f"ghcr.io/njvenis/volt@{registry_digest}"],
@@ -135,7 +163,7 @@ class OfflineArchiveTests(unittest.TestCase):
         layer = layer_io.getvalue()
         diff = "sha256:" + hashlib.sha256(layer).hexdigest()
         config = {"os": "linux", "architecture": "amd64", "config": {"Labels": {
-            "org.opencontainers.image.revision": source_sha, "org.opencontainers.image.version": archive.EXPECTED_VERSION,
+            "org.opencontainers.image.revision": source_sha, "org.opencontainers.image.version": version,
             "org.volt.oidc-deployment-modes": "demo,external", "org.volt.compose-install.contract": "1",
             "org.volt.compose.source-snapshot": source_snapshot}}, "rootfs": {"type": "layers", "diff_ids": [diff]}}
         config_bytes = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
@@ -153,11 +181,28 @@ class OfflineArchiveTests(unittest.TestCase):
             "provenance.json": json.dumps({"buildDefinition": {"buildType": "https://github.com/Attestations/GitHubActionsWorkflow@v1", "externalParameters": {"workflow": {"ref": "njvenis/volt/.github/workflows/release.yml@refs/heads/main", "repository": "https://github.com/njvenis/volt"}, "source": {"uri": "https://github.com/njvenis/volt", "ref": source_sha}}, "internalParameters": {}, "resolvedDependencies": [{"uri": "git+https://github.com/njvenis/volt", "digest": {"gitCommit": source_sha}}]}, "runDetails": {"builder": {"id": "https://github.com/actions/runner"}, "metadata": {"invocationId": "https://github.com/njvenis/volt/actions/runs/123"}}}).encode()+b"\n",
             "registry-digest.txt": (registry_digest+"\n").encode(),
         }
+        if version == archive.RC3_VERSION:
+            child_bytes=json.dumps({"schemaVersion":2,"config":{"digest":image_id},"layers":[]}).encode()
+            (package/"platform-manifest.json").write_bytes(child_bytes)
+            amd="sha256:"+hashlib.sha256(child_bytes).hexdigest()
+            index["manifests"][0]["digest"]=amd
+            index_bytes=json.dumps(index).encode()
+            registry_digest="sha256:"+hashlib.sha256(index_bytes).hexdigest()
+            (package/"rc3-index.json").write_bytes(index_bytes)
+            (package/"amd64-digest.txt").write_text(amd+"\n")
+            (package/"platform-digest.txt").write_text(amd+"\n")
+            payload["registry-digest.txt"]=(registry_digest+"\n").encode()
+            subprocess.run([sys.executable,str(repo/"tools/build_compose_bundle.py"),"build","--output",str(bundle),
+                "--image-reference",f"ghcr.io/njvenis/volt@{registry_digest}"],check=True,capture_output=True)
+            (package/"index-provenance.json").write_text("{}")
         for name, contents in payload.items():
             (package / name).write_bytes(contents)
+        if version == archive.RC3_VERSION:
+            path = package / "provenance.json"
+            path.write_text(path.read_text().replace("/.github/workflows/release.yml", "/.github/workflows/release-rc3.yml"))
         self.source_sha, self.image_id = source_sha, image_id
         for command in (
-            ["archive.py", "prepare", "--directory", str(package), "--version", archive.EXPECTED_VERSION,
+            ["archive.py", "prepare", "--directory", str(package), "--version", version,
              "--source-sha", source_sha, "--image-id", image_id, "--registry-digest", registry_digest, "--platform", "linux/amd64"],
             ["archive.py", "sign", "--directory", str(package), "--key", str(self.key)],
         ):
@@ -168,11 +213,84 @@ class OfflineArchiveTests(unittest.TestCase):
             self.assertEqual(archive.main(), 0)
         return package, result
 
-    def build_image_with_layer(self, root: Path, version: str, layer_bytes: bytes) -> tuple[Path, dict]:
+    def test_signed_archive_round_trip_dereferences_shared_package_trust_files(self):
+        from tests.release.hardlink_fixture import retained_trust_material
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            package, _ = self.build_rc2_signed(root, version=archive.RC3_VERSION)
+            retained = retained_trust_material(root / "shared-trust", package)
+            manifest = archive.build_manifest(package, archive.RC3_VERSION, self.source_sha, self.image_id,
+                "linux/amd64", archive.identity_for_version(archive.RC3_VERSION), archive.EXPECTED_ISSUER,
+                (package / "registry-digest.txt").read_text().strip())
+            (package / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
+            with patch.object(sys, "argv", ["archive.py", "sign", "--directory", str(package), "--key", str(self.key)]):
+                self.assertEqual(archive.main(), 0)
+            packed = root / "signed-hardlinked-trust.tar"
+            with patch.object(sys, "argv", ["archive.py", "pack", "--directory", str(package),
+                "--archive", str(packed), "--test-public-key", str(self.public)]):
+                self.assertEqual(archive.main(), 0)
+            with tarfile.open(packed) as stream:
+                for name, data in retained.items():
+                    member = stream.getmember(name)
+                    self.assertTrue(member.isfile(), name)
+                    self.assertEqual(stream.extractfile(member).read(), data)
+            extracted = root / "extracted-final"
+            extracted.mkdir()
+            archive.safe_extract(packed, extracted)
+            admitted = archive.verify_directory(extracted, "unused", public_key=self.public,
+                expected_source=self.source_sha, expected_image=self.image_id)
+            self.assertEqual(admitted["files"], manifest["files"])
+            for name, data in retained.items():
+                self.assertEqual((extracted / name).read_bytes(), data)
+                self.assertEqual((extracted / name).stat().st_nlink, 1)
+
+    def test_safe_extractor_still_rejects_hardlinks_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            for kind in (tarfile.LNKTYPE, tarfile.SYMTYPE):
+                with self.subTest(kind=kind):
+                    packed = root / "unsafe.tar"
+                    with tarfile.open(packed, "w") as stream:
+                        member = tarfile.TarInfo("trust/original")
+                        member.size = 4
+                        stream.addfile(member, io.BytesIO(b"data"))
+                        link = tarfile.TarInfo("trust/package-specific-keyring.gpg")
+                        link.type = kind
+                        link.linkname = "trust/original"
+                        stream.addfile(link)
+                    with self.assertRaisesRegex(ValueError, "links and special files are prohibited"):
+                        archive.safe_extract(packed, root / "rejected")
+                    self.assertFalse((root / "rejected").exists())
+
+    def test_standalone_bundle_requires_actual_signed_embedded_bytes_before_execution(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            package, signed = self.build_rc2_signed(root, version=archive.RC3_VERSION)
+            external = root / "volt-compose.tar.gz"
+            shutil.copyfile(package / external.name, external)
+            archive.authenticate_bundle(signed, external, "unused", source=self.source_sha, public_key=self.public)
+            installer = root / "rc2-source/deploy/compose/setup.py"
+            installer.write_text(installer.read_text()+"\nraise SystemExit('attacker')\n")
+            sys.path.insert(0, str(Path(__file__).parents[2] / "tools"))
+            import build_compose_bundle
+            with contextlib.redirect_stdout(io.StringIO()):
+                build_compose_bundle.build(external, image_reference="ghcr.io/njvenis/volt@"+
+                    (package/"registry-digest.txt").read_text().strip(),source_root=root/"rc2-source")
+                build_compose_bundle.verify(external)
+            executed = unittest.mock.Mock()
+            with self.assertRaisesRegex(ValueError,"signed embedded bytes"):
+                archive.authenticate_bundle(signed, external, "unused", source=self.source_sha, public_key=self.public)
+                executed()
+            executed.assert_not_called()
+            with self.assertRaisesRegex(ValueError,"source revision"):
+                archive.authenticate_bundle(signed, external, "unused", source="f"*40, public_key=self.public)
+
+    def build_image_with_layer(self, root: Path, version: str, layer_bytes: bytes,
+                               architecture: str = "amd64") -> tuple[Path, dict]:
         revision = "a" * 40
         source_snapshot = "sha256:" + "b" * 64
         diff = "sha256:" + hashlib.sha256(layer_bytes).hexdigest()
-        config = {"os": "linux", "architecture": "amd64", "config": {"Labels": {
+        config = {"os": "linux", "architecture": architecture, "config": {"Labels": {
             "org.opencontainers.image.revision": revision, "org.opencontainers.image.version": version,
             "org.volt.oidc-deployment-modes": "demo,external", "org.volt.compose-install.contract": "1",
             "org.volt.compose.source-snapshot": source_snapshot}},
@@ -189,8 +307,19 @@ class OfflineArchiveTests(unittest.TestCase):
                 info.size = len(data)
                 image.addfile(info, io.BytesIO(data))
         manifest = {"version": version, "source_commit": revision, "source_snapshot": source_snapshot,
-                    "image_id": image_id, "platform": "linux/amd64"}
+                    "image_id": image_id, "platform": f"linux/{architecture}"}
         return image_tar, manifest
+
+    def test_docker_save_archive_admits_arm64_only_when_manifest_selects_arm64(self):
+        with tempfile.TemporaryDirectory() as temp:
+            layer_io = io.BytesIO()
+            with tarfile.open(fileobj=layer_io, mode="w"):
+                pass
+            image_tar, manifest = self.build_image_with_layer(Path(temp), "0.1.0-demo", layer_io.getvalue(), "arm64")
+            self.assertEqual(archive.validate_docker_archive(image_tar, manifest)["image_id"], manifest["image_id"])
+            wrong_platform = {**manifest, "platform": "linux/amd64"}
+            with self.assertRaisesRegex(ValueError, "platform differs"):
+                archive.validate_docker_archive(image_tar, wrong_platform)
 
     def test_rc2_rejects_generated_private_key_in_saved_layer_but_rc1_history_remains_verifiable(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -251,7 +380,7 @@ class OfflineArchiveTests(unittest.TestCase):
         self.assertIn('["registry_digest"]', verify)
         self.assertIn('["image_id"]', verify)
         self.assertIn('--image "$image_id"', verify)
-        self.assertIn("docker pull VOLT_RELEASE_IMAGE_REFERENCE", readme)
+        self.assertIn('docker pull --platform "$VOLT_PLATFORM" VOLT_RELEASE_IMAGE_REFERENCE', readme)
         self.assertIn("signed `manifest.json` `image_id` field", readme)
         with tempfile.TemporaryDirectory() as temp:
             package, _ = self.build_rc2_signed(Path(temp))
@@ -326,6 +455,18 @@ class OfflineArchiveTests(unittest.TestCase):
             (package / "image.tar").write_bytes(b"tampered")
             with self.assertRaisesRegex(ValueError, "payload missing or digest mismatch"):
                 archive.verify_directory(package, "cosign", public_key=self.public)
+
+    def test_load_rejects_requested_source_or_image_before_docker_import(self):
+        with tempfile.TemporaryDirectory(prefix="volt-load-expected-identities-") as temp:
+            root=Path(temp)
+            _, packed=self.build_signed(root)
+            for option, value in (("--source-sha", "f"*40), ("--image-id", "sha256:"+"f"*64)):
+                with self.subTest(option=option), \
+                     patch.object(sys, "argv", ["archive.py", "load", "--archive", str(packed),
+                         "--test-public-key", str(self.public), "--docker", "docker", option, value]), \
+                     patch.object(archive.subprocess, "run") as docker, contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(archive.main(), 2)
+                    docker.assert_not_called()
 
     def test_load_rejects_archive_config_mismatch_before_docker_import(self):
         with tempfile.TemporaryDirectory() as temp:

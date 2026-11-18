@@ -62,6 +62,29 @@ class CandidateIdentityTests(unittest.TestCase):
                                 "--repository", "njvenis/volt"]), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(verify_candidate_run.main(), 2)
 
+    def test_rc3_candidate_run_accepts_only_fixed_platform_artifact_names(self):
+        sha = "a" * 40
+        run = {"id": 123, "repository": {"full_name": "njvenis/volt"},
+               "path": ".github/workflows/release-rc3.yml@refs/heads/main", "event": "workflow_dispatch",
+               "head_branch": "main", "head_sha": sha, "status": "completed", "conclusion": "success"}
+        for arch in ("amd64", "arm64"):
+            name = f"volt-rc3-candidate-{sha}-linux-{arch}"
+            artifact = {"artifacts": [{"id": 44, "name": name, "expired": False,
+                                        "digest": "sha256:" + "b" * 64}]}
+            with self.subTest(arch=arch), \
+                 patch.object(verify_candidate_run, "api", side_effect=[run, artifact]), \
+                 patch.dict("os.environ", {"GH_TOKEN": "fixture-token"}), \
+                 patch("sys.argv", ["verify_candidate_run.py", "--run-id", "123", "--source", sha,
+                                    "--repository", "njvenis/volt", "--workflow", ".github/workflows/release-rc3.yml",
+                                    "--artifact-name", name]), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(verify_candidate_run.main(), 0)
+        with patch("sys.argv", ["verify_candidate_run.py", "--run-id", "123", "--source", sha,
+                                 "--repository", "njvenis/volt", "--workflow", ".github/workflows/release-rc3.yml",
+                                 "--artifact-name", f"volt-rc3-candidate-{sha}-linux-s390x"]), \
+             patch.dict("os.environ", {"GH_TOKEN": "fixture-token"}), contextlib.redirect_stderr(io.StringIO()):
+            with patch.object(verify_candidate_run, "api", return_value=run):
+                self.assertEqual(verify_candidate_run.main(), 2)
+
     def test_candidate_run_rejects_wrong_workflow_or_non_main_path_suffix(self):
         for path in (".github/workflows/other.yml@refs/heads/main",
                      ".github/workflows/release.yml@refs/heads/feature"):

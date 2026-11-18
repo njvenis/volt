@@ -20,8 +20,42 @@ class ComposeBundleTests(unittest.TestCase):
                             "--output", str(archive)), check=True, capture_output=True, text=True)
             result = subprocess.run(("python3", str(ROOT / "tools/build_compose_bundle.py"), "verify",
                                      "--archive", str(archive)), check=True, capture_output=True, text=True)
-            self.assertIn("verified_version=0.1.0-rc.2 files=8", result.stdout)
+            self.assertIn("verified_version=0.1.0-rc.3 files=10", result.stdout)
             self.assertTrue(Path(str(archive) + ".sha256").is_file())
+
+    def test_extracted_bundle_contains_okta_files_and_selects_overlay_from_extracted_setup(self):
+        import hashlib
+        import importlib.util
+        import json
+        with tempfile.TemporaryDirectory(prefix="volt-compose-source-free-") as directory:
+            outer = Path(directory); archive = outer / "installer.tar.gz"; extracted = outer / "extracted"
+            subprocess.run(("python3", str(ROOT / "tools/build_compose_bundle.py"), "build",
+                "--output", str(archive), "--source-root", str(ROOT)), check=True,
+                capture_output=True, text=True)
+            verified = subprocess.run(("python3", str(ROOT / "tools/build_compose_bundle.py"), "verify",
+                "--archive", str(archive), "--source-root", str(ROOT)), check=True,
+                capture_output=True, text=True)
+            extracted.mkdir()
+            with tarfile.open(archive, "r:gz") as bundle:
+                bundle.extractall(extracted, filter="data")
+            package = next(extracted.iterdir())
+            with tarfile.open(archive, "r:gz") as bundle:
+                files = {Path(member.name).name: bundle.extractfile(member).read()
+                    for member in bundle.getmembers() if member.isfile()}
+            manifest = json.loads(files["manifest.json"])
+            for name in ("okta-publisher.yaml", "okta-publisher.example.json"):
+                self.assertIn(name, files)
+                self.assertEqual(hashlib.sha256(files[name]).hexdigest(), manifest["files"][name])
+                self.assertEqual((package/name).read_bytes(), files[name])
+            setup_spec = importlib.util.spec_from_file_location("source_free_setup", package/"setup.py")
+            setup = importlib.util.module_from_spec(setup_spec); setup_spec.loader.exec_module(setup)
+            info = {"compose_directory":str(package),"mode":"external",
+                "okta_publisher_config_sha256":"operator-config-admitted"}
+            overlay = package/"okta-publisher.yaml"
+            self.assertIn(str(overlay), setup.compose_files(info))
+            info["okta_publisher_config_sha256"] = None
+            self.assertNotIn(str(overlay), setup.compose_files(info))
+            self.assertIn("verified_version=0.1.0-rc.3 files=10", verified.stdout)
 
     def test_release_bundle_binds_digest_pinned_image_into_manifest_and_instructions(self):
         image = "ghcr.io/njvenis/volt@sha256:" + "a" * 64
@@ -36,7 +70,7 @@ class ComposeBundleTests(unittest.TestCase):
                 files = {Path(member.name).name: bundle.extractfile(member).read()
                          for member in bundle.getmembers() if member.isfile()}
             manifest = __import__("json").loads(files["manifest.json"])
-            self.assertEqual(manifest["bundle_version"], "0.1.0-rc.2")
+            self.assertEqual(manifest["bundle_version"], "0.1.0-rc.3")
             self.assertEqual(manifest["release_image"], image)
             self.assertIn(image.encode(), files["README.md"])
 
@@ -44,7 +78,7 @@ class ComposeBundleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="volt-compose-release-bundle-") as directory:
             with self.assertRaisesRegex(SystemExit, "exact VOLT GHCR sha256 digest"):
                 from tools.build_compose_bundle import build
-                build(Path(directory) / "invalid.tar.gz", "ghcr.io/njvenis/volt:0.1.0-rc.2")
+                build(Path(directory) / "invalid.tar.gz", "ghcr.io/njvenis/volt:0.1.0-rc.3")
 
     def test_bundle_verifier_rejects_duplicate_and_traversal_members(self):
         for entries, message in (([("root/a", b"a"), ("root/a", b"b")], "duplicate"),
@@ -68,7 +102,8 @@ class ComposeRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             info = {"established": True, "project": "volt-compose-test", "owner_token": "test",
-                    "image": "sha256:test", "image_admission": {"id": "sha256:test"}, "mode": "demo",
+                    "image": "sha256:test", "image_admission": {"id": "sha256:test", "platform": "linux/arm64"},
+                    "platform": "linux/arm64", "mode": "demo",
                     "subnet": "10.240.0.0/28", "gateway": "10.240.0.1",
                     "backup_inventory": {"postgres": {"postgres_version": "18"}, "media": {}, "state": {}}}
             with patch.object(setup, "load_instance", return_value=(root, info)), \

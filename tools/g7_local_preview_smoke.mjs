@@ -2,12 +2,20 @@ import {chromium} from '../ui/node_modules/playwright/index.mjs';
 import {mkdir,readFile,writeFile} from 'node:fs/promises';
 import process from 'node:process';
 import crypto from 'node:crypto';
-import {requireAdminRendered,requireAudit,requirePersistedState,requireReceipt,requireSession} from './g7_local_preview_smoke_checks.mjs';
+import {execFileSync} from 'node:child_process';
+import path from 'node:path';
+import {policyExpectedRevisions,requireAdminRendered,requireAudit,requirePersistedState,requireReceipt,requireSession} from './g7_local_preview_smoke_checks.mjs';
 
 function arg(name){const i=process.argv.indexOf(name);if(i<0||!process.argv[i+1])throw new Error(`missing ${name}`);return process.argv[i+1];}
 const origin=arg('--origin'), issuer=arg('--issuer'), subject=arg('--subject'), principal=arg('--principal'), evidence=arg('--evidence');
 const deploymentLabel=process.argv.includes('--deployment-label')?arg('--deployment-label'):'Synthetic local demo';
 const readbackOnly=process.argv.includes('--readback');
+const verifyProviderRevocation=process.argv.includes('--verify-provider-revocation');
+const username=arg('--username');
+if(!process.argv.includes('--password-stdin'))throw new Error('missing --password-stdin');
+const passwordChunks=[];
+for await(const chunk of process.stdin)passwordChunks.push(Buffer.from(chunk));
+const password=Buffer.concat(passwordChunks).toString('utf8');
 await mkdir(evidence,{recursive:true,mode:0o700});
 const launchOptions={headless:true};
 if(process.env.CHROMIUM_EXECUTABLE_PATH)launchOptions.executablePath=process.env.CHROMIUM_EXECUTABLE_PATH;
@@ -16,6 +24,54 @@ const browser=await chromium.launch(launchOptions);
 const context=await browser.newContext({ignoreHTTPSErrors:true});
 const page=await context.newPage();
 const zero='00000000-0000-4000-8000-000000000000';
+// Temporary, opt-in diagnosis. Never retain cookies, CSRF tokens or credential headers.
+const diagnostic=verifyProviderRevocation;
+let phase='initial', requestSequence=0;
+const trace=[], pendingCaptures=new Set(), requestIds=new WeakMap();
+const digest=value=>crypto.createHash('sha256').update(value).digest('hex');
+const safeUrl=value=>{try{const u=new URL(value);return u.origin+u.pathname+(u.hash||'');}catch{return '[non-url]';}};
+const safeSession=body=>({schema_version:body?.schema_version,authenticated:body?.authenticated,
+  credential_mode:body?.credential_mode,principal_id:body?.principal_id,authority:body?.authority,
+  code:body?.detail?.code??body?.error?.code??body?.code??null});
+function track(work){pendingCaptures.add(work);work.catch(error=>trace.push({kind:'capture-error',name:error.name})).finally(()=>pendingCaptures.delete(work));}
+async function snapshot(label){
+ if(!diagnostic)return;
+ const cookies=(await context.cookies()).map(({value,...metadata})=>({...metadata,value_sha256:digest(value)}));
+ const dom=await page.evaluate(()=>({url:location.origin+location.pathname+location.hash,title:document.title,readyState:document.readyState,
+   timeOrigin:performance.timeOrigin,navigation:performance.getEntriesByType('navigation').map(n=>({type:n.type,startTime:n.startTime,domContentLoadedEventEnd:n.domContentLoadedEventEnd,transferSize:n.transferSize})),
+   root:!!document.querySelector('#root'),sessionPanel:document.querySelector('.session-panel')?.textContent??null,
+   visibleText:document.body.innerText,scripts:[...document.scripts].map(s=>s.src?new URL(s.src).pathname:'inline')}));
+ trace.push({kind:'snapshot',label,phase,at:Date.now(),cookies,dom});
+ await writeFile(evidence+'/session-trace.json',JSON.stringify(trace,null,2)+'\n',{mode:0o600});
+}
+if(diagnostic){
+ page.on('request',request=>{
+  const id=++requestSequence;requestIds.set(request,id);const at=Date.now(),requestPhase=phase;
+  track((async()=>{
+   const headers=await request.allHeaders();const cookieFingerprints=(headers.cookie??'').split(';').filter(Boolean).map(pair=>{const i=pair.indexOf('=');return {name:pair.slice(0,i).trim(),value_sha256:digest(pair.slice(i+1))};});
+   trace.push({kind:'request',id,at,phase:requestPhase,url:safeUrl(request.url()),resource:request.resourceType(),method:request.method(),cookieFingerprints,
+    accept:headers.accept,cacheControl:headers['cache-control']});
+  })());
+ });
+ page.on('response',response=>{
+  const request=response.request(),id=requestIds.get(request),at=Date.now(),responsePhase=phase;
+  track((async()=>{
+   const url=new URL(response.url()),headers=await response.allHeaders();
+   const row={kind:'response',id,at,phase:responsePhase,url:safeUrl(response.url()),status:response.status(),
+    contentType:headers['content-type'],cacheControl:headers['cache-control'],age:headers.age,etag:headers.etag,fromServiceWorker:response.fromServiceWorker()};
+   if(url.pathname==='/api/v1/auth/session'){try{row.session=safeSession(await response.json());}catch{row.sessionParseFailed=true;}}
+   if(request.resourceType()==='script'||request.resourceType()==='stylesheet'||request.resourceType()==='document'&&url.origin===origin&&url.pathname==='/'){
+    const body=await response.body();row.body_sha256=digest(body);row.bytes=body.length;
+    if(request.resourceType()==='document')row.body=body.toString().replace(/value="[^"]*"/g,'value="[redacted]"');
+   }
+   trace.push(row);
+  })());
+ });
+ page.on('requestfailed',request=>trace.push({kind:'requestfailed',id:requestIds.get(request),at:Date.now(),phase,url:safeUrl(request.url()),failure:request.failure()?.errorText}));
+ page.on('pageerror',error=>trace.push({kind:'pageerror',at:Date.now(),phase,name:error.name,message:error.message.replace(/https?:\/\/[^\s]+/g,'[url]')}));
+ page.on('console',message=>trace.push({kind:'console',at:Date.now(),phase,type:message.type(),text_sha256:digest(message.text()),location:{...message.location(),url:safeUrl(message.location().url)}}));
+}
+
 function ensure(ok,label){if(!ok)throw new Error(label);}
 async function api(path,{method='GET',body,write=false}={}){
   return page.evaluate(async({path,method,body,write})=>{
@@ -24,6 +80,24 @@ async function api(path,{method='GET',body,write=false}={}){
     let value=null;try{value=await response.json();}catch{}return{status:response.status,body:value};
   },{path,method,body,write});
 }
+// SESSION_POLL_START
+// Await each network result explicitly: an async waitForFunction predicate is
+// itself truthy before it resolves and must not establish a session transition.
+async function waitForSession(page,{status,authenticated,timeoutMs=30000,intervalMs=250}){
+ const deadline=Date.now()+timeoutMs;let last;
+ do{
+  last=await page.evaluate(async()=>{
+   const response=await fetch('/api/v1/auth/session',{credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json'},signal:AbortSignal.timeout(10000)});
+   let body=null;try{body=await response.json();}catch{}
+   return {status:response.status,authenticated:body?.authenticated===true};
+  });
+  if(last.status===status&&(authenticated===undefined||last.authenticated===authenticated))return last;
+  if(Date.now()>=deadline)break;
+  await new Promise(resolve=>setTimeout(resolve,Math.min(intervalMs,Math.max(0,deadline-Date.now()))));
+ }while(Date.now()<deadline);
+ throw new Error('session_transition_not_observed_'+JSON.stringify({expected:{status,authenticated},last}));
+}
+// SESSION_POLL_END
 async function waitAdminReady(){
   const heading=page.getByText('Access groups grant actions',{exact:true});
   const create=page.getByRole('button',{name:'Create access group',exact:true});
@@ -32,25 +106,21 @@ async function waitAdminReady(){
   requireAdminRendered({loading:false,error:null,headingVisible:await heading.isVisible(),createButtonVisible:await create.isVisible(),createButtonEnabled:!(await create.isDisabled())});
   return create;
 }
-async function cardFor(groupId){
+async function cardFor(groupId,revision){
   const card=page.locator('section[aria-label="Access group records"] article').filter({hasText:'Local preview audit smoke'});
   await card.waitFor({state:'visible',timeout:30000});
   const text=await card.innerText();
-  ensure(text.includes(groupId)&&/Revision\s+1/.test(text),'rendered_admin_object_mismatch');
+  ensure(text.includes(groupId)&&new RegExp(`Revision\\s+${revision}(?:\\D|$)`).test(text),'rendered_admin_object_mismatch');
   return card;
 }
 try{
   await page.goto(origin+'/',{waitUntil:'domcontentloaded',timeout:30000});
   await page.getByText(deploymentLabel,{exact:true}).waitFor({state:'visible',timeout:10000});
-  if(process.env.VOLT_SMOKE_FIXTURE_SUBJECT){
-    await context.route('**/authorize**',async route=>{
-      const url=new URL(route.request().url());
-      url.searchParams.set('fixture_subject',process.env.VOLT_SMOKE_FIXTURE_SUBJECT);
-      await route.continue({url:url.toString()});
-    });
-  }
   await page.getByRole('link',{name:/sign in/i}).click({timeout:10000});
-  await page.waitForFunction(async()=>{const r=await fetch('/api/v1/auth/session',{cache:'no-store'});if(!r.ok)return false;return (await r.json()).authenticated===true;},null,{timeout:30000});
+  await page.getByLabel('Username').fill(username);
+  await page.getByLabel('Password').fill(password);
+  await page.getByRole('button',{name:'Sign in'}).click();
+  await waitForSession(page,{status:200,authenticated:true});
   const session=(await api('/api/v1/auth/session')).body;
   requireSession(session,{issuer,subject,principal});
   if(process.argv.includes('--initialize-development')){
@@ -63,7 +133,7 @@ try{
       ensure(activation.status===200,`native_authority_activation_failed_${activation.status}`);
     }
   }
-  let saved,receipt;
+  let saved,createReceipt,membershipReceipt;
   if(!readbackOnly){
     await page.goto(origin+'/#administration',{waitUntil:'domcontentloaded'});
     const createButton=await waitAdminReady();
@@ -72,46 +142,118 @@ try{
     const envelope=latestCatalogue.caller?.grantable;
     ensure(latestCatalogue.authority_mode==='uvm_native_v1'&&latestCatalogue.caller?.principal_id===principal,'native_admin_catalogue_identity_or_mode_mismatch');
     ensure(envelope?.actions?.includes('access_group.read'),'local_bootstrap_action_envelope_missing');
-    const groupId=crypto.randomUUID(), commandId=crypto.randomUUID(), permissionId=crypto.randomUUID(), roleId=crypto.randomUUID();
+    const groupId=crypto.randomUUID(), commandId=crypto.randomUUID(), permissionId=crypto.randomUUID();
+    const roleId='00000000-0000-4000-8000-000000000002';
     const created=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:{command_id:commandId,target_id:zero,membership_ids:[],action:'access_group.create',expected_revisions:{target:latestCatalogue.policy_revision,policy:latestCatalogue.policy_revision,authority:latestCatalogue.authority_revision,ownership:latestCatalogue.ownership_revision,identity_membership:0,owners:0},payload:{access_group_id:groupId,display_name:'Local preview audit smoke',description:'Synthetic local administrator smoke operation',enabled:true,source_scopes:[{source_family:'local',source_account_id:'volt-local-preview',scope_key:'all'}],permissions:[{permission_id:permissionId,role_id:roleId,action:'access_group.read',target_scope:{group_ids:[groupId],source_families:['local'],environments:[],service_ids:[],membership_mode:'explicit'},limits:envelope.limits,separation_of_duties:envelope.separation_of_duties??{approval_requires_distinct_actor:true,prohibit_requester_approval:true,required_approver_count:1,prohibited_action_pairs:[]}}],rationale:'Verify a public audited administrator operation in the synthetic local preview',evidence_ref:'local-preview-smoke'}}});
     ensure(created.status===200,`public_admin_create_failed_${created.status}_${JSON.stringify(created.body)}`);
-    receipt=created.body;
-    requireReceipt(receipt,{commandId,targetId:zero,groupId});
+    createReceipt=created.body;
+    requireReceipt(createReceipt,{commandId,targetId:zero,groupId,action:'access_group.create',objectRevision:1});
+    const membershipCatalogue=(await api('/api/v1/assessment/administration/catalogue')).body;
+    const membershipCommandId=crypto.randomUUID();
+    const membership=await api('/api/v1/assessment/commands',{method:'POST',write:true,body:{command_id:membershipCommandId,target_id:zero,membership_ids:[],action:'access_group.membership.set',expected_revisions:policyExpectedRevisions(membershipCatalogue,createReceipt.result.object_revision),payload:{access_group_id:groupId,principal_id:principal,effective_from:new Date(Date.now()+1000).toISOString(),effective_until:null,enabled:true,rationale:'Bind the local administrator to the native group for provider-cap qualification',evidence_ref:'local-preview-provider-cap'}}});
+    ensure(membership.status===200,`native_membership_create_failed_${membership.status}_${JSON.stringify(membership.body)}`);
+    membershipReceipt=membership.body;
+    requireReceipt(membershipReceipt,{commandId:membershipCommandId,targetId:zero,
+      groupId,action:'access_group.membership.set'});
+    ensure(membershipReceipt.result.object_revision===createReceipt.result.object_revision+1,
+      'native_membership_receipt_did_not_advance_group_revision');
     const refresh=page.getByRole('button',{name:'Refresh administration',exact:true});
     await refresh.click();
-    await cardFor(groupId);
+    await cardFor(groupId,membershipReceipt.result.object_revision);
     await page.screenshot({path:`${evidence}/admin-operation.png`,fullPage:true});
     const readback=await api('/api/v1/assessment/access-groups');
     ensure(readback.status===200,'public_access_group_readback_failed');
     const item=readback.body.items?.find(x=>x.access_group_id===groupId);
-    const auditEvent=item?.history?.find(x=>x.event_id===receipt.audit_event_id);
-    requireAudit(item,auditEvent,{groupId,displayName:'Local preview audit smoke',objectRevision:receipt.result.object_revision,auditEventId:receipt.audit_event_id,actorId:principal});
-    ensure(item.revision===receipt.result.object_revision,'public_object_revision_does_not_match_receipt');
-    saved={schema_version:1,issuer,subject,principal_id:principal,receipt,object:{access_group_id:item.access_group_id,display_name:item.display_name,description:item.description,enabled:item.enabled,revision:item.revision},audit_after_value:auditEvent.after_value};
+    const createAudit=item?.history?.find(x=>x.event_id===createReceipt.audit_event_id);
+    const membershipAudit=item?.history?.find(x=>x.event_id===membershipReceipt.audit_event_id);
+    requireAudit(item,createAudit,{groupId,action:'access_group.create',displayName:'Local preview audit smoke',description:'Synthetic local administrator smoke operation',enabled:true,objectRevision:createReceipt.result.object_revision,auditEventId:createReceipt.audit_event_id,actorId:principal});
+    requireAudit(item,membershipAudit,{groupId,action:'access_group.membership.set',membershipPrincipal:principal,objectRevision:membershipReceipt.result.object_revision,auditEventId:membershipReceipt.audit_event_id,actorId:principal});
+    ensure(item.revision===membershipReceipt.result.object_revision,'public_object_revision_does_not_match_membership_receipt');
+    saved={schema_version:1,issuer,subject,principal_id:principal,
+      receipts:{create:createReceipt,membership:membershipReceipt},
+      object:{access_group_id:item.access_group_id,display_name:item.display_name,description:item.description,enabled:item.enabled,revision:item.revision},
+      audit_after_values:{create:createAudit.after_value,membership:membershipAudit.after_value}};
     await writeFile(`${evidence}/smoke-state.json`,JSON.stringify(saved,null,2)+'\n',{mode:0o600});
-    await writeFile(`${evidence}/public-admin-command-receipt.json`,JSON.stringify(receipt,null,2)+'\n',{mode:0o600});
+    await writeFile(`${evidence}/public-admin-command-receipts.json`,JSON.stringify(saved.receipts,null,2)+'\n',{mode:0o600});
   }else{
     saved=JSON.parse(await readFile(`${evidence}/smoke-state.json`,'utf8'));
     ensure(saved.issuer===issuer&&saved.subject===subject&&saved.principal_id===principal,'persisted_smoke_identity_binding_mismatch');
-    receipt=saved.receipt;
-    requireReceipt(receipt,{commandId:receipt.command_id,targetId:zero,groupId:saved.object.access_group_id});
+    createReceipt=saved.receipts?.create;
+    membershipReceipt=saved.receipts?.membership;
+    ensure(createReceipt&&membershipReceipt,'persisted_smoke_receipts_missing');
+    requireReceipt(createReceipt,{commandId:createReceipt?.command_id,targetId:zero,groupId:saved.object.access_group_id,action:'access_group.create'});
+    requireReceipt(membershipReceipt,{commandId:membershipReceipt?.command_id,targetId:zero,groupId:saved.object.access_group_id,action:'access_group.membership.set'});
     await page.goto(origin+'/#administration',{waitUntil:'domcontentloaded'});
     await waitAdminReady();
     const refresh=page.getByRole('button',{name:'Refresh administration',exact:true});
     await refresh.click();
-    await cardFor(saved.object.access_group_id);
+    await cardFor(saved.object.access_group_id,saved.object.revision);
     await page.screenshot({path:`${evidence}/admin-restart.png`,fullPage:true});
   }
   const readback=await api('/api/v1/assessment/access-groups');
   ensure(readback.status===200,'public_access_group_readback_failed');
   const item=readback.body.items?.find(x=>x.access_group_id===saved.object.access_group_id);
-  const auditEvent=item?.history?.find(x=>x.event_id===receipt.audit_event_id);
+  const createAudit=item?.history?.find(x=>x.event_id===createReceipt.audit_event_id);
+  const membershipAudit=item?.history?.find(x=>x.event_id===membershipReceipt.audit_event_id);
   if(readbackOnly){
-    requirePersistedState(item,auditEvent,saved);
-    await writeFile(`${evidence}/public-admin-smoke-restart.json`,JSON.stringify({environment:'local synthetic OIDC container',principal_id:principal,issuer,subject,credential_mode:'oidc_session',group_id:item.access_group_id,command_id:receipt.command_id,receipt_audit_event_id:receipt.audit_event_id,public_readback_status:readback.status,object_revision:item.revision,audit_event_id:auditEvent.event_id,audit_event:{event_id:auditEvent.event_id,action:auditEvent.action,actor_id:auditEvent.actor_id,after_value:auditEvent.after_value},restart_readback:true},null,2)+'\n',{mode:0o600});
+    requireReceipt(createReceipt,{commandId:createReceipt.command_id,targetId:zero,groupId:item.access_group_id,action:'access_group.create',objectRevision:saved.audit_after_values.create.revision});
+    requireReceipt(membershipReceipt,{commandId:membershipReceipt.command_id,targetId:zero,groupId:item.access_group_id,action:'access_group.membership.set',objectRevision:saved.object.revision});
+    requireAudit(item,createAudit,{groupId:item.access_group_id,action:'access_group.create',displayName:saved.object.display_name,description:saved.object.description,enabled:saved.object.enabled,objectRevision:createReceipt.result.object_revision,auditEventId:createReceipt.audit_event_id,actorId:principal});
+    requireAudit(item,membershipAudit,{groupId:item.access_group_id,action:'access_group.membership.set',membershipPrincipal:principal,objectRevision:membershipReceipt.result.object_revision,auditEventId:membershipReceipt.audit_event_id,actorId:principal});
+    requirePersistedState(item,createAudit,membershipAudit,saved);
+    await writeFile(`${evidence}/public-admin-smoke-restart.json`,JSON.stringify({environment:'local synthetic OIDC container',principal_id:principal,issuer,subject,credential_mode:'oidc_session',group_id:item.access_group_id,create_command_id:createReceipt.command_id,create_receipt_audit_event_id:createReceipt.audit_event_id,membership_command_id:membershipReceipt.command_id,membership_receipt_audit_event_id:membershipReceipt.audit_event_id,public_readback_status:readback.status,object_revision:item.revision,create_audit_event_id:createAudit.event_id,membership_audit_event_id:membershipAudit.event_id,restart_readback:true},null,2)+'\n',{mode:0o600});
   }else{
-    requireAudit(item,auditEvent,{groupId:saved.object.access_group_id,displayName:saved.object.display_name,objectRevision:receipt.result.object_revision,auditEventId:receipt.audit_event_id,actorId:principal});
-    await writeFile(`${evidence}/public-admin-smoke.json`,JSON.stringify({environment:'local synthetic OIDC container',principal_id:principal,issuer,subject,credential_mode:'oidc_session',group_id:item.access_group_id,command_id:receipt.command_id,receipt_audit_event_id:receipt.audit_event_id,public_readback_status:readback.status,object_revision:item.revision,audit_event_id:auditEvent.event_id,audit_event:{event_id:auditEvent.event_id,action:auditEvent.action,actor_id:auditEvent.actor_id,after_value:auditEvent.after_value},restart_readback:false},null,2)+'\n',{mode:0o600});
+    requireAudit(item,createAudit,{groupId:saved.object.access_group_id,action:'access_group.create',displayName:saved.object.display_name,description:saved.object.description,enabled:saved.object.enabled,objectRevision:createReceipt.result.object_revision,auditEventId:createReceipt.audit_event_id,actorId:principal});
+    requireAudit(item,membershipAudit,{groupId:saved.object.access_group_id,action:'access_group.membership.set',membershipPrincipal:principal,objectRevision:membershipReceipt.result.object_revision,auditEventId:membershipReceipt.audit_event_id,actorId:principal});
+    ensure(item.revision===membershipReceipt.result.object_revision,'public_object_revision_does_not_match_membership_receipt');
+    await writeFile(`${evidence}/public-admin-smoke.json`,JSON.stringify({environment:'local synthetic OIDC container',principal_id:principal,issuer,subject,credential_mode:'oidc_session',group_id:item.access_group_id,create_command_id:createReceipt.command_id,create_receipt_audit_event_id:createReceipt.audit_event_id,membership_command_id:membershipReceipt.command_id,membership_receipt_audit_event_id:membershipReceipt.audit_event_id,public_readback_status:readback.status,object_revision:item.revision,create_audit_event_id:createAudit.event_id,membership_audit_event_id:membershipAudit.event_id,restart_readback:false},null,2)+'\n',{mode:0o600});
   }
-  console.log(JSON.stringify({browser_login:'passed',issuer,subject,principal_id:principal,admin_view:'loaded',admin_control:'enabled',...(readbackOnly?{restart_readback:readback.status}:{public_admin_readback:readback.status}),audited:true,audit_event_id:auditEvent.event_id,object_revision:item.revision,group_id:item.access_group_id,command_id:receipt.command_id}));
-}finally{await context.close();await browser.close();}
+  if(verifyProviderRevocation){
+    ensure(readbackOnly,'provider revocation proof must follow the persisted readback phase');
+    phase='before-removal';await snapshot('before-provider-removal');
+    const before=(await api('/api/v1/auth/session')).body;
+    ensure(before.authority?.role_ids?.includes('00000000-0000-4000-8000-000000000002'),'native_role_not_present_before_provider_removal');
+    ensure(before.authority?.source_scopes?.some(s=>s[0]==='local'&&s[1]==='volt-local-preview'&&s[2]==='all'),'native_scope_not_present_before_provider_removal');
+    const composeDirectory=arg('--compose-directory'), envFile=arg('--env-file'), project=arg('--project');
+    const controlScript="import json,pathlib,sys,urllib.request; token=pathlib.Path('/run/uvm-g7-secrets/oidc_operator_secret').read_text().strip(); body=json.loads(sys.argv[1]); req=urllib.request.Request('http://127.0.0.1:9000/__fixture/failure',data=json.dumps(body).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'}); response=urllib.request.urlopen(req,timeout=10); print(response.status)";
+    phase='provider-removal';
+    const control=execFileSync('docker',['compose','-f',path.join(composeDirectory,'compose.yaml'),'-f',path.join(composeDirectory,'demo.yaml'),'--env-file',envFile,'-p',project,'exec','-T','volt','/opt/uvm/venv/bin/python','-c',controlScript,JSON.stringify({mode:null,identities:[{subject,groups:[]}]})],{encoding:'utf8',stdio:['ignore','pipe','pipe']});
+    ensure(control.trim().split(/\r?\n/).at(-1)==='200','synthetic_provider_fixture_update_failed');
+    phase='old-session-probe';
+    const revoked=await waitForSession(page,{status:401});
+    ensure(revoked.status===401,'old_session_revocation_not_observed');
+    // The current URL may only differ by hash from '/', so goto('/') can be
+    // same-document navigation and preserve the revoked in-memory session.
+    await snapshot('old-session-401');phase='reload';
+    const reloadResponse=await page.reload({waitUntil:'domcontentloaded'});
+    trace.push({kind:'reload-result',at:Date.now(),status:reloadResponse?.status(),url:reloadResponse?safeUrl(reloadResponse.url()):null});
+    await snapshot('after-reload');
+    try{await page.getByRole('link',{name:/sign in/i}).click({timeout:30000});}
+    catch(error){
+      await snapshot('sign-in-link-missing');
+      const observed=await page.evaluate(async()=>{
+        const response=await fetch('/api/v1/auth/session',{credentials:'same-origin',cache:'no-store'});
+        let session=null;try{session=await response.json();}catch{}
+        return {url:location.href,title:document.title,readyState:document.readyState,
+          session_status:response.status,session_authenticated:session?.authenticated??null,
+          session_code:session?.detail?.code??session?.code??null,
+          visible_text:document.body.innerText,
+          links:[...document.querySelectorAll('a')].map(a=>({text:a.innerText,href:a.getAttribute('href'),visible:!!(a.offsetWidth||a.offsetHeight||a.getClientRects().length)})),
+          buttons:[...document.querySelectorAll('button')].map(b=>({text:b.innerText,disabled:b.disabled,visible:!!(b.offsetWidth||b.offsetHeight||b.getClientRects().length)}))};
+      });
+      await page.screenshot({path:`${evidence}/provider-removal-fresh-login-state.png`,fullPage:true});
+      await writeFile(`${evidence}/provider-removal-fresh-login-state.json`,JSON.stringify(observed,null,2)+'\n',{mode:0o600});
+      throw error;
+    }
+    await page.getByLabel('Username').fill(username);
+    await page.getByLabel('Password').fill(password);
+    await page.getByRole('button',{name:'Sign in'}).click();
+    await waitForSession(page,{status:200,authenticated:true});
+    const after=(await api('/api/v1/auth/session')).body;
+    ensure(after.authority?.role_ids?.length===0,'fresh_signin_recovered_native_role_after_provider_group_removal');
+    ensure(after.authority?.source_scopes?.length===0,'fresh_signin_recovered_native_scope_after_provider_group_removal');
+    ensure(after.authority?.access_groups?.includes(saved.object.access_group_id),'provider_removal_erased_native_membership_history');
+    await writeFile(`${evidence}/provider-group-removal.json`,JSON.stringify({environment:'local synthetic OIDC Compose process',old_cookie_revoked:true,fresh_code_flow_authenticated:true,retained_native_access_group:true,effective_role_ids:after.authority.role_ids,effective_source_scopes:after.authority.source_scopes},null,2)+'\n',{mode:0o600});
+  }
+  console.log(JSON.stringify({browser_login:'passed',issuer,subject,principal_id:principal,admin_view:'loaded',admin_control:'enabled',...(readbackOnly?{restart_readback:readback.status}:{public_admin_readback:readback.status}),audited:true,create_audit_event_id:createReceipt.audit_event_id,membership_audit_event_id:membershipReceipt.audit_event_id,object_revision:item.revision,group_id:item.access_group_id,create_command_id:createReceipt.command_id,membership_command_id:membershipReceipt.command_id}));
+}finally{if(diagnostic){await Promise.allSettled([...pendingCaptures]);await snapshot('final');}await context.close();await browser.close();}

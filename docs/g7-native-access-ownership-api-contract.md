@@ -6,6 +6,14 @@ Status: backend implementation contract for labelled disposable fixtures; no pro
 
 `assessment_policy.document.native_authority` is either absent/`legacy` or `{mode: "uvm_native_v1", revision, ownership_revision, activated_at, activated_by, mapping_revision}`. Absence is legacy. Only an explicit audited `native.authority.activate` command changes mode. Native OIDC context derives action groups only from currently effective native access-group memberships and group permissions; provider group claims are provenance only. Ownership-team membership is never an action grant. Bootstrap administrator is a protected grantable-envelope capability, not an assessment action.
 
+### Approved current provider/native intersection — 2026-11-17
+
+The user's approved decision supersedes the preceding sentence that provider groups are provenance only for authorization. In native mode, effective role IDs are limited to the intersection of the roles on current native access-group memberships and role IDs supplied by the linked subject's current, explicit provider group mappings. Effective exact source-scope tuples are limited to the intersection of native access-group source scopes, the current mapped provider scopes, and configured `source_scope_ceilings`. Existing role IDs and exact tuple semantics apply; neither authority source can grant or broaden values on the other side.
+
+Provider groups remain provenance only for principal identity and native membership creation: they never create a principal, native access group, membership, role or scope. They cap permissions of already configured native memberships. Removing a mapped provider group withdraws the affected roles/scopes from current authorization and invalidates existing sessions; a fresh OIDC sign-in re-resolves the same current mapping and cannot restore withdrawn authority. Removing a native grant denies access even if the provider group remains, and restoring a provider group cannot create a missing native grant. Missing, unmapped, disabled or stale provider state fails closed. Native grants and append-only audit history remain retained when current provider caps narrow. The legacy authorization path remains in effect until explicit audited native activation, and protected bootstrap capabilities remain separate.
+
+The disposable local demo has one explicit synthetic provider-group mapping to its configured fixed fixture role ID and exact local source scope. This mapping is bounded to the demo's configured source-scope ceiling and exists so the named password account can complete bootstrap and the supported demo proof. It is not a default for external provider tenants.
+
 ## Read endpoints
 
 `GET /api/v1/assessment/administration/catalogue` returns:

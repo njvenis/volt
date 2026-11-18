@@ -122,6 +122,37 @@ class RegistryCollisionTests(unittest.TestCase):
         with patch.dict(os.environ, {"GITHUB_ACTOR": "actor", "GH_TOKEN": "secret"}), patch.object(registry, "tag_digest", return_value=expected), patch.object(sys, "argv", argv):
             self.assertEqual(registry.main(), 2)
 
+
+    def test_rc3_requires_exact_source_bound_platform_tags_and_digest_pairs(self):
+        source = "a" * 40
+        amd, arm = "sha256:" + "b" * 64, "sha256:" + "c" * 64
+        index = "sha256:" + "d" * 64
+        argv = ["registry.py", "--version-tag", "0.1.0-rc.3", "--sha-tag", "sha-" + source,
+                "--amd64-tag", f"sha-{source}-linux-amd64", "--arm64-tag", f"sha-{source}-linux-arm64"]
+        observed = []
+        def digest(tag, **kwargs):
+            observed.append(tag)
+            return {"0.1.0-rc.3": index, "sha-" + source: index,
+                    f"sha-{source}-linux-amd64": amd, f"sha-{source}-linux-arm64": arm}[tag]
+        argv += ["--expected-digest", index, "--expected-amd64-digest", amd,
+                 "--expected-arm64-digest", arm]
+        with patch.dict(os.environ, {"GITHUB_ACTOR": "actor", "GH_TOKEN": "secret"}), \
+             patch.object(registry, "tag_digest", side_effect=digest), patch.object(sys, "argv", argv):
+            self.assertEqual(registry.main(), 0)
+        self.assertEqual(observed, ["0.1.0-rc.3", "sha-" + source,
+                                    f"sha-{source}-linux-amd64", f"sha-{source}-linux-arm64"])
+        for bad in ("sha-" + source + "-linux-arm64", "sha-" + "e" * 40 + "-linux-amd64"):
+            changed = argv.copy()
+            changed[changed.index(f"sha-{source}-linux-amd64")] = bad
+            with patch.dict(os.environ, {"GITHUB_ACTOR": "actor", "GH_TOKEN": "secret"}), \
+                 patch.object(sys, "argv", changed), contextlib.redirect_stderr(io.StringIO()), \
+                 self.assertRaises(SystemExit):
+                registry.main()
+        changed = argv.copy(); changed.remove("--expected-arm64-digest"); changed.remove(arm)
+        with patch.dict(os.environ, {"GITHUB_ACTOR": "actor", "GH_TOKEN": "secret"}), \
+             patch.object(sys, "argv", changed), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(registry.main(), 2)
+
     def test_workflow_authenticates_before_registry_reads_and_keeps_public_check_explicit(self):
         workflow = (Path(__file__).parents[2] / ".github/workflows/release.yml").read_text()
         step = workflow.split("- name: Recheck exact source and immutable destination tags", 1)[1].split("\n      - name:", 1)[0]

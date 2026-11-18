@@ -1,8 +1,146 @@
-# RC2 Compose installation and historical RC1 launcher
+# VOLT installation releases
 
+## RC3 Compose installation
+
+This is the target installation procedure for the planned VOLT `0.1.0-rc.3` evaluation prerelease. Use it only after the RC3 tag, signed archives, bundle and corrected external verification guide have actually been published. It is not a claim that publication has occurred. The planned release targets Docker Engine and Docker Desktop with native Linux `amd64` and `arm64` images. Apple Silicon users should select `linux/arm64`; x86-64 users should select `linux/amd64`. These are Linux container platforms and do not establish a native macOS container runtime. RC3 is not a production deployment.
+
+After publication, the release page is expected to contain a signed offline archive for each platform, a standalone source-free Compose bundle and external release-verification instructions. Use the archive matching the Docker engine where the image will run. A checksum sidecar detects transfer damage; it does not establish who published the files. Do not extract the bundle, load an image, or run any archive-contained helper until the independent verification steps below have succeeded.
+
+### Download the matching release files
+
+Once the release is published, choose the platform explicitly. Keep the signed archive, the standalone bundle and its checksum together until verification is complete:
+
+```sh
+export VOLT_RELEASE_TAG=v0.1.0-rc.3
+export VOLT_PLATFORM=linux/arm64 # Apple Silicon; use linux/amd64 for x86-64.
+case "$VOLT_PLATFORM" in
+  linux/arm64) VOLT_ARCH=arm64 ;;
+  linux/amd64) VOLT_ARCH=amd64 ;;
+  *) echo 'Unsupported VOLT platform' >&2; exit 1 ;;
+esac
+mkdir -p "$HOME/volt-rc3-release"
+export VOLT_RELEASE_DIR="$HOME/volt-rc3-release"
+cd "$VOLT_RELEASE_DIR"
+gh release download "$VOLT_RELEASE_TAG" --repo njvenis/volt \
+  --pattern "volt-0.1.0-rc.3-linux-${VOLT_ARCH}.tar.gz" \
+  --pattern volt-compose.tar.gz \
+  --pattern volt-compose.tar.gz.sha256 \
+  --pattern VERIFY-RELEASE.md
+export VOLT_ARCHIVE="$VOLT_RELEASE_DIR/volt-0.1.0-rc.3-linux-${VOLT_ARCH}.tar.gz"
+export VOLT_BUNDLE="$VOLT_RELEASE_DIR/volt-compose.tar.gz"
+```
+
+The following are the expected permanent asset URLs after publication:
+
+- [RC3 release page](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.3)
+- [Linux/arm64 signed archive](https://github.com/njvenis/volt/releases/download/v0.1.0-rc.3/volt-0.1.0-rc.3-linux-arm64.tar.gz)
+- [Linux/amd64 signed archive](https://github.com/njvenis/volt/releases/download/v0.1.0-rc.3/volt-0.1.0-rc.3-linux-amd64.tar.gz)
+- [Source-free Compose bundle](https://github.com/njvenis/volt/releases/download/v0.1.0-rc.3/volt-compose.tar.gz)
+- [Bundle checksum](https://github.com/njvenis/volt/releases/download/v0.1.0-rc.3/volt-compose.tar.gz.sha256)
+- [External verification instructions](https://github.com/njvenis/volt/releases/download/v0.1.0-rc.3/VERIFY-RELEASE.md)
+
+### Verify before extraction or image load
+
+Begin with the independently obtained fixed `v0.1.0-rc.3` repository tag. Follow the corrected `VERIFY-RELEASE.md` to resolve the source SHA from that trusted tag, check out that exact source, provision the pinned Cosign/Sigstore trust, and verify and load the signed archive. Never let an archive field such as `source_commit` select verifier code. The signed archive binds the source, platform image, common multi-platform index, selected-child SPDX/notices and scan evidence. `registry_digest` is the published common multi-platform registry index digest. `image_index_id` is the saved archive's image index ID and may be null for a classic Docker image save; `platform_manifest_digest` identifies the saved archive's platform manifest. The published platform-specific child digest is recorded separately in `platform-digest.txt`. `image_id` and `image_config_id` identify the selected local platform image. These values describe different artifacts; do not treat a registry/index digest as a local Docker image ID. Do not trust a verifier, checksum, signature key or Sigstore root solely because it was included in the downloaded archive. Authenticate the separate bundle below before extracting or executing it.
+
+The planned signed offline archive binds the versioned source bundle and image evidence. After the signed archive verifies (and, for offline installs, after its image is loaded through the trusted helper), authenticate the downloaded standalone bundle against its signed embedded bytes. Keep the trusted `SOURCE_SHA` resolved from the fixed tag in the same shell. The helper must succeed before checksum inspection or extraction; the sidecar checksum only detects transfer damage. The bundle root is expected to be versioned as `volt-compose-0.1.0-rc.3`.
+
+```sh
+python3 trusted-source/tools/release/archive.py authenticate-bundle \
+  --archive "$VOLT_ARCHIVE" --bundle "$VOLT_BUNDLE" \
+  --cosign /tmp/volt-release-tools/cosign --source-sha "$SOURCE_SHA"
+tar -xOf "$VOLT_ARCHIVE" volt-compose.tar.gz > "$VOLT_RELEASE_DIR/volt-compose-embedded.tar.gz"
+cmp "$VOLT_BUNDLE" "$VOLT_RELEASE_DIR/volt-compose-embedded.tar.gz"
+EXPECTED_BUNDLE_SHA="$(awk '{print $1}' "$VOLT_RELEASE_DIR/volt-compose.tar.gz.sha256")"
+ACTUAL_BUNDLE_SHA="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$VOLT_BUNDLE")"
+test "$EXPECTED_BUNDLE_SHA" = "$ACTUAL_BUNDLE_SHA"
+mkdir -m 700 -p "$HOME/volt-rc3-bundle"
+tar -xzf "$VOLT_BUNDLE" -C "$HOME/volt-rc3-bundle"
+cd "$HOME/volt-rc3-bundle/volt-compose-0.1.0-rc.3"
+```
+
+For an online install, use the exact registry digest reported by authenticated release metadata, not a mutable tag or a digest copied from an older release. For an offline install, use the local image ID and platform from the verified archive manifest. Keep the registry digest, local Docker image ID, source commit and source snapshot distinct; they identify different objects.
+
+### Install the local password-admin demo
+
+The ordinary install needs Docker Engine with Compose v2, Python 3.11 or newer and OpenSSL command-line tools. The separate verification bootstrap needs Git, the pinned Cosign helper and network access for the trusted fixed source tag and Sigstore trust provisioning; `gh` is used by the download example. An offline image import is possible only after those verifier and trust materials have been provisioned and the archive and bundle authenticated. After verification and extraction, ordinary runtime setup does not require a VOLT source checkout, Git, Node.js, npm or a browser package download. Apple Silicon selects a Linux `arm64` container; macOS Docker Desktop itself has not been exercised. The local demo uses synthetic identity and does not contact Okta; external OIDC login and membership sync require connectivity to the configured issuer/API.
+
+For an online install, after the archive has been authenticated, construct the immutable registry reference from its signed digest and pull the declared platform:
+
+```sh
+VOLT_SIGNED_PLATFORM="$(tar -xOf "$VOLT_ARCHIVE" manifest.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["platform"])')"
+test "$VOLT_SIGNED_PLATFORM" = "$VOLT_PLATFORM"
+VOLT_REGISTRY_DIGEST="$(tar -xOf "$VOLT_ARCHIVE" manifest.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["registry_digest"])')"
+python3 -c 'import re,sys; assert re.fullmatch(r"sha256:[0-9a-f]{64}", sys.argv[1])' "$VOLT_REGISTRY_DIGEST"
+VOLT_IMAGE="ghcr.io/njvenis/volt@$VOLT_REGISTRY_DIGEST"
+docker pull --platform "$VOLT_PLATFORM" "$VOLT_IMAGE"
+```
+
+For an offline image import, the corrected `VERIFY-RELEASE.md` first provisions trust and verifies the archive with the pinned verifier. After the bundle-authentication command above succeeds, use the loaded platform image ID and platform from the authenticated manifest:
+
+```sh
+VOLT_IMAGE="$(tar -xOf "$VOLT_ARCHIVE" manifest.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["image_id"])')"
+VOLT_PLATFORM="$(tar -xOf "$VOLT_ARCHIVE" manifest.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["platform"])')"
+```
+
+For either install mode, initialize the local demo from the extracted bundle:
+
+```sh
+mkdir -p "$HOME/.local/share/volt"
+python3 setup.py init "$HOME/.local/share/volt/demo" --mode demo \
+  --project volt-demo --image "$VOLT_IMAGE" --platform "$VOLT_PLATFORM" \
+  --bootstrap-principal local-testing-admin \
+  --demo-subject local-testing-admin-subject \
+  --demo-admin-username local-testing-admin
+python3 setup.py start "$HOME/.local/share/volt/demo"
+python3 setup.py status "$HOME/.local/share/volt/demo"
+```
+
+`init` prompts twice for the local administrator password without echoing it. Use at least 16 characters. The installer stores only a salted scrypt verifier in the private instance directory; it has no default password and does not accept the password in a command argument or environment variable. This account exists only in the labelled demo and authenticates through the local OIDC provider.
+
+Complete the public browser flow in this order. The configured subject must be linked before sign-in; authority setup follows successful password login:
+
+```sh
+python3 setup.py link-admin "$HOME/.local/share/volt/demo"
+```
+
+Open `http://127.0.0.1:8180/`, choose **Sign in**, and enter the username and password from `init`. After sign-in, use the browser's storage inspector to copy the `uvm_session` cookie. Then initialize demo policy and native authority. The command prompts for the cookie without echoing it; do not paste the value into shell history or a command argument:
+
+```sh
+python3 setup.py initialize-authority "$HOME/.local/share/volt/demo"
+```
+
+The local provider uses the configured OIDC issuer and subject. The synthetic group mapping caps the access granted by native membership; neither a provider group nor a sign-in alone creates native roles or source scopes. Complete an audited access-group action in the browser and confirm its audit/readback before treating the install journey as exercised.
+
+The app and local provider bind to loopback. To keep the instance and data, use `status`, `stop` and `start`:
+
+```sh
+python3 setup.py status "$HOME/.local/share/volt/demo"
+python3 setup.py stop "$HOME/.local/share/volt/demo"
+python3 setup.py start "$HOME/.local/share/volt/demo"
+```
+
+Back up the image identity and all three persistent stores together, following the source-free bundle's [`backup-restore.md`](../deploy/compose/backup-restore.md). `cleanup` without destructive flags retains data. Permanent removal is explicit and verifies ownership of the project's resources:
+
+```sh
+python3 setup.py cleanup "$HOME/.local/share/volt/demo" \
+  --remove-data --confirm-project volt-demo
+```
+
+This removes the private instance secrets and its owned volumes. Never use `docker volume prune` for VOLT cleanup. If startup does not become healthy, inspect `status`, `docker logs volt-demo-volt-1`, Docker Engine health and the admitted image platform. If ports are occupied, initialize a fresh instance with unused `--http-port`, `--recovery-port` and `--oidc-port` values; do not repeat the one-time `link-admin` step on an established instance.
+
+### Optional Okta OIDC evaluation
+
+Follow [the bundle's Okta setup](../deploy/compose/README.md#optional-okta-oidc-evaluation) to configure the login Web app, separate read-only Management API service app, local private files and exact account/group mappings. Use only locally approved role UUIDs and exact source-scope tuples. Effective access is the intersection of current native grants, explicit current Okta group mappings and configured source-scope ceilings. Group removal revokes existing sessions and removes mapped permissions from a fresh sign-in; adding a group never creates native grants. The publisher fails closed when account, assignment, group or heartbeat data is missing or stale. Do not map by email or display name.
+
+These steps configure a local evaluation. They do not demonstrate live Okta compatibility, production hosting, or macOS Docker Desktop execution. The actual tenant administrator must complete and record the real Okta browser login and permission-scoped audited action in their tenant.
+
+<a id="rc2-compose-installation"></a>
 ## RC2 Compose installation
 
-VOLT `0.1.0-rc.2` is the current Linux/amd64 Compose-compatible evaluation image. Its immutable registry reference is:
+**Historical immutable release:** RC2 instructions and identities below are retained for reproducibility. For a new evaluation, use [RC3 Compose installation](#rc3-compose-installation). Do not substitute RC3 flags, assets, images or verifier identities into an RC2 procedure.
+
+VOLT `0.1.0-rc.2` was the Linux/amd64 Compose-compatible evaluation image. This historical section preserves its immutable registry reference and verification procedure:
 
 ```sh
 VOLT_RELEASE_IMAGE='ghcr.io/njvenis/volt@sha256:a7130e38b88b781d93d84c4ddd022ba45716a06b89949a2923e1dd531db2eac1'
@@ -188,7 +326,7 @@ python3 tools/g7_local_preview.py smoke rc1 --evidence "$PREVIEW_EVIDENCE"
 
 Stop and inspect errors before continuing to the next command. `wait` reports `health=healthy` on success. Run `link-admin` only once: it explicitly links the synthetic subject to `volt-local-preview-admin`; repeating it returns a conflict. The initial smoke signs in, establishes the preview policy/authority and creates an audited synthetic access group through the public UI/API.
 
-Open **http://127.0.0.1:8180/** and select **Sign in**. The synthetic provider supplies the local preview identity; no enterprise account or production password is needed. The automated smoke verifies the expected issuer, subject and principal. This provider is only for disposable local evaluation.
+RC1 uses its synthetic fixture identity; its immutable helper and image do not support a local username/password account. Open **http://127.0.0.1:8180/** and select **Sign in**. The fixture establishes the configured synthetic subject, and the automated smoke verifies the expected issuer, subject and principal. This is disposable local evaluation, not an enterprise sign-in.
 
 `init` creates private secrets and recovery TLS material under `$XDG_STATE_HOME/volt/g7-preview/rc1`. Keep this directory private. The instance owns one container, a private bridge network and three persistent volumes for PostgreSQL, DefectDojo media and VOLT state. A bare `docker run` does not perform this initialization.
 

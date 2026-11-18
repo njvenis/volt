@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import pty
 import re
+import secrets
 import select
 import shutil
 import subprocess
@@ -20,6 +21,92 @@ import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SUPPORTED_PLATFORMS = ("linux/amd64", "linux/arm64")
+SUPPORTED_RELEASE_VERSIONS = ("0.1.0-rc.2", "0.1.0-rc.3")
+SUPPORTED_IMAGE_VERSIONS = (*SUPPORTED_RELEASE_VERSIONS, "0.1.0-demo")
+
+
+def qualification_scope(*, version: str, development_fixture: bool,
+                        environment: dict[str, str] | None = None) -> str:
+    """Classify evidence from how it ran, never from the image's release label."""
+    if development_fixture:
+        if version not in SUPPORTED_IMAGE_VERSIONS:
+            raise ValueError("development fixture scope requires an explicitly supported fixture image version")
+        return "development_fixture"
+    if version not in SUPPORTED_RELEASE_VERSIONS:
+        raise ValueError("release qualification scope requires a supported RC2 or RC3 version")
+    context = os.environ if environment is None else environment
+    release = version.removeprefix("0.1.0-").replace(".", "")
+    if (context.get("GITHUB_ACTIONS", "").lower() == "true"
+            and context.get("RUNNER_ENVIRONMENT", "").lower() == "github-hosted"):
+        return f"hosted_{release}_release"
+    return f"local_synthetic_{release}"
+
+
+def verified_bundle_version(output: str) -> str:
+    """Read the version reported by the maintained, closed-inventory verifier."""
+    match = re.search(r"(?m)^verified_version=(0\.1\.0-rc\.[23])(?:\s|$)", output)
+    if match is None:
+        raise RuntimeError("verified Compose bundle did not report a supported release version")
+    return match.group(1)
+
+
+def admit_bundle_version(output: str, requested_version: str, *, development_fixture: bool = False) -> str:
+    """Accept only the exact requested RC version reported by bundle verification."""
+    if requested_version not in SUPPORTED_IMAGE_VERSIONS:
+        raise RuntimeError("qualification accepts only the fixed RC2, RC3 and explicit demo fixture versions")
+    if requested_version == "0.1.0-demo" and not development_fixture:
+        raise RuntimeError("the demo image version requires explicit development-fixture mode")
+    bundle_version = verified_bundle_version(output)
+    if requested_version in SUPPORTED_RELEASE_VERSIONS and bundle_version != requested_version:
+        raise RuntimeError(f"requested release {requested_version} does not match verified Compose bundle {bundle_version}")
+    return bundle_version
+
+
+def qualification_release_metadata(*, requested_version: str, bundle_version: str,
+                                   image_version: str, image_id: str, platform: str,
+                                   source_revision: str, source_snapshot: str,
+                                   bundle_sha256: str, scope: str) -> dict[str, str]:
+    """Keep requested release, verified bundle and admitted image identities distinct."""
+    return {
+        "qualification_scope": scope,
+        "release_version": bundle_version,
+        "requested_image_version": requested_version,
+        "bundle_version": bundle_version,
+        "image_version": image_version,
+        "image_id": image_id,
+        "platform": platform,
+        "source_revision": source_revision,
+        "source_snapshot": source_snapshot,
+        "bundle_sha256": bundle_sha256,
+    }
+
+
+def platform_from_image_inspect(output: str, declared_platform: str | None = None) -> str:
+    """Admit only an image whose Docker config matches the package platform."""
+    try:
+        rows = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Docker image inspection was not valid JSON") from exc
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        raise RuntimeError("Docker image inspection did not identify exactly one image")
+    platform = f"{rows[0].get('Os')}/{rows[0].get('Architecture')}"
+    if platform not in SUPPORTED_PLATFORMS:
+        raise RuntimeError(f"Docker image platform {platform} is not supported")
+    if declared_platform is not None and declared_platform != platform:
+        raise RuntimeError("verified package platform disagrees with Docker image inspection")
+    return platform
+
+
+def init_command(cli: list[str], state: Path, project: str, ports: list[int],
+                 image_id: str, platform: str) -> list[str]:
+    if platform not in SUPPORTED_PLATFORMS:
+        raise RuntimeError("installer platform is not supported")
+    return [*cli, "init", str(state), "--mode", "demo", "--project", project,
+        "--http-port", str(ports[0]), "--recovery-port", str(ports[0] + 1),
+        "--oidc-port", str(ports[2]), "--image", image_id, "--platform", platform,
+        "--bootstrap-principal", "volt-compose-demo-admin", "--demo-subject",
+        "volt-compose-demo-admin-subject", "--demo-admin-username", "qualification-admin"]
 
 
 def run(name: str, argv: list[str], evidence: Path, *, input_text: str | None = None,
@@ -42,13 +129,16 @@ def sha(path: Path) -> str:
     return h.hexdigest()
 
 
-def run_getpass(name: str, argv: list[str], evidence: Path, secret: str) -> subprocess.CompletedProcess:
-    """Feed the protected prompt through a PTY without retaining the secret."""
+def run_getpass(name: str, argv: list[str], evidence: Path,
+                secret: str | list[tuple[bytes, str]]) -> subprocess.CompletedProcess:
+    """Feed protected prompts through a PTY without retaining their values."""
+    prompts = ([(b"Authenticated uvm_session cookie value:", secret)]
+               if isinstance(secret, str) else secret)
     pid, fd = pty.fork()
     if pid == 0:
         os.execvp(argv[0], argv)
     output = bytearray()
-    sent = False
+    sent = 0
     deadline = time.monotonic() + 180
     while time.monotonic() < deadline:
         ready, _, _ = select.select([fd], [], [], 1)
@@ -64,13 +154,13 @@ def run_getpass(name: str, argv: list[str], evidence: Path, secret: str) -> subp
                 (evidence/f"{name}.stdout").write_text(text)
                 (evidence/f"{name}.stderr").write_text("")
                 (evidence/f"{name}.exit").write_text(f"{code}\n")
-                if not sent or code:
+                if sent != len(prompts) or code:
                     raise RuntimeError(f"{name} failed ({code}); see retained evidence")
                 return subprocess.CompletedProcess(argv, code, text, "")
             output.extend(chunk)
-            if not sent and b"Authenticated uvm_session cookie value:" in output:
-                os.write(fd, secret.encode() + b"\n")
-                sent = True
+            while sent < len(prompts) and prompts[sent][0] in output:
+                os.write(fd, prompts[sent][1].encode() + b"\n")
+                sent += 1
         waited, status = os.waitpid(pid, os.WNOHANG)
         if waited:
             code = os.waitstatus_to_exitcode(status)
@@ -78,7 +168,7 @@ def run_getpass(name: str, argv: list[str], evidence: Path, secret: str) -> subp
             (evidence/f"{name}.stdout").write_text(text)
             (evidence/f"{name}.stderr").write_text("")
             (evidence/f"{name}.exit").write_text(f"{code}\n")
-            if not sent or code:
+            if sent != len(prompts) or code:
                 raise RuntimeError(f"{name} failed ({code}); see retained evidence")
             return subprocess.CompletedProcess(argv, code, text, "")
     try:
@@ -98,9 +188,12 @@ def main() -> int:
     p.add_argument("--image-id", required=True)
     p.add_argument("--source-snapshot", required=True)
     p.add_argument("--source-commit", required=True)
-    p.add_argument("--version", default="0.1.0-rc.2")
+    p.add_argument("--platform", choices=SUPPORTED_PLATFORMS,
+                   help="optional package-manifest platform; checked against the loaded image config")
+    p.add_argument("--version", choices=SUPPORTED_IMAGE_VERSIONS, default="0.1.0-rc.2",
+                   help="expected image version (0.1.0-demo is permitted only with --development-fixture)")
     p.add_argument("--development-fixture", action="store_true",
-                   help="label evidence as development-only when testing the runner against a non-RC2 image")
+                   help="label evidence as development-only when qualifying an explicitly selected fixture image")
     p.add_argument("--bundle", type=Path, required=True)
     p.add_argument("--evidence", type=Path, required=True)
     p.add_argument("--private-tmp", type=Path, default=Path("/tmp"),
@@ -110,6 +203,8 @@ def main() -> int:
     p.add_argument("--project-prefix", default="volt-rc2-qual",
                    help="unique Compose project prefix used for owned disposable resources")
     args = p.parse_args()
+    if args.version == "0.1.0-demo" and not args.development_fixture:
+        p.error("0.1.0-demo requires --development-fixture")
     if (not re.fullmatch(r"sha256:[0-9a-f]{64}",args.image_id)
             or not re.fullmatch(r"sha256:[0-9a-f]{64}",args.source_snapshot)
             or not re.fullmatch(r"[0-9a-f]{40}",args.source_commit)):
@@ -123,20 +218,28 @@ def main() -> int:
     evidence = args.evidence.resolve()
     evidence.mkdir(parents=True, exist_ok=False, mode=0o700)
     os.chmod(evidence, 0o700)
-    private = Path(tempfile.mkdtemp(prefix=f"{args.project_prefix}-state-", dir=private_tmp))
-    os.chmod(private, 0o700)
+    private = None
+    extracted = None
+    state = None
+    cookie = None
     project = f"{args.project_prefix}-{os.getpid()}"
-    state = private / "instance"
-    extracted = Path(tempfile.mkdtemp(prefix=f"{args.project_prefix}-bundle-", dir=bundle_tmp))
-    os.chmod(extracted, 0o700)
-    cookie = private / "cookie"
+    password_value = None
     setup = None
     cleanup_result = 0
     started = False
     outcome = 0
     try:
-        run("bundle-verify", [sys.executable, str(ROOT / "tools/build_compose_bundle.py"),
+        bundle_check = run("bundle-verify", [sys.executable, str(ROOT / "tools/build_compose_bundle.py"),
             "verify", "--archive", str(args.bundle)], evidence)
+        bundle_version = admit_bundle_version(bundle_check.stdout, args.version,
+            development_fixture=args.development_fixture)
+        private = Path(tempfile.mkdtemp(prefix=f"{args.project_prefix}-state-", dir=private_tmp))
+        os.chmod(private, 0o700)
+        state = private / "instance"
+        extracted = Path(tempfile.mkdtemp(prefix=f"{args.project_prefix}-bundle-", dir=bundle_tmp))
+        os.chmod(extracted, 0o700)
+        cookie = private / "cookie"
+        password_value = secrets.token_urlsafe(32) + "A7!"
         shutil.unpack_archive(str(args.bundle), extracted, "gztar")
         candidates = list(extracted.glob("*/setup.py"))
         if len(candidates) != 1:
@@ -144,16 +247,20 @@ def main() -> int:
         setup = candidates[0]
         if ROOT in setup.parents:
             raise RuntimeError("source-free bundle extraction unexpectedly overlaps checkout")
+        image_inspect = run("image-platform-inspect", ["docker", "image", "inspect", args.image_id], evidence)
+        platform = platform_from_image_inspect(image_inspect.stdout, args.platform)
+        (evidence / "platform-admission.json").write_text(json.dumps({
+            "image_id": args.image_id, "declared_platform": args.platform,
+            "docker_config_platform": platform, "admitted_platform": platform}, sort_keys=True, indent=2) + "\n")
         ports = [int(18000 + os.getpid() % 1000), int(19000 + os.getpid() % 1000), int(20000 + os.getpid() % 1000)]
         cli = [sys.executable, str(setup)]
-        run("init", [*cli,"init",str(state),"--mode","demo","--project",project,
-             "--http-port",str(ports[0]),"--recovery-port",str(ports[0]+1),"--oidc-port",str(ports[2]),"--image",args.image_id], evidence)
+        run_getpass("init", init_command(cli, state, project, ports, args.image_id, platform), evidence,
+            [(b"New local demo admin password", password_value),
+             (b"Confirm local demo admin password", password_value)])
         info = json.loads((state / "instance.json").read_text())
         admission = info["image_admission"]
-        bundle_version = (setup.parent/"VERSION").read_text().strip()
-        if bundle_version != "0.1.0-rc.2":
-            raise RuntimeError("qualification bundle must be the versioned RC2 Compose bundle")
-        if (admission["id"] != args.image_id or admission["source_snapshot"] != args.source_snapshot
+        if (admission["id"] != args.image_id or admission["platform"] != platform
+                or admission["source_snapshot"] != args.source_snapshot
                 or admission["source_revision"] != args.source_commit):
             raise RuntimeError("installed image admission did not match the candidate image/source snapshot/revision")
         if admission["version"] != args.version and not args.development_fixture:
@@ -173,20 +280,24 @@ def main() -> int:
         run("private-peer-ingress-denial",[sys.executable,"-c",probe],evidence)
         run("link-admin", [*cli,"link-admin",str(state)], evidence)
         origin = f"http://127.0.0.1:{ports[0]}"
-        run("browser-login", ["node",str(ROOT/"tools/compose_release_login.mjs"),origin,str(cookie)], evidence)
+        run("browser-login", ["node",str(ROOT/"tools/compose_release_login.mjs"),origin,str(cookie),
+            "qualification-admin"], evidence, input_text=password_value)
         run_getpass("initialize-authority", [*cli,"initialize-authority",str(state)], evidence,
                     cookie.read_text())
         cookie.unlink(missing_ok=True)
         smoke = ["node",str(ROOT/"tools/g7_local_preview_smoke.mjs"),"--origin",origin,
                  "--issuer",f"http://127.0.0.1:{ports[2]}","--subject","volt-compose-demo-admin-subject",
-                 "--principal","volt-compose-demo-admin","--evidence",str(evidence)]
-        run("audited-operation", smoke, evidence)
+                 "--principal","volt-compose-demo-admin","--evidence",str(evidence),
+                 "--username","qualification-admin","--password-stdin"]
+        run("audited-operation", smoke, evidence, input_text=password_value)
         run("stop", [*cli,"stop",str(state)], evidence); started = False
         run("restart", [*cli,"start",str(state)], evidence); started = True
         run("restart-health", [sys.executable,"-c",f"import sys;sys.path.insert(0,{str(ROOT)!r});from deploy.compose.setup import load_instance,wait_until_ready;wait_until_ready(load_instance({str(state)!r})[1]);print('healthy')"],evidence)
         run("restart-readback", ["node",str(ROOT/"tools/g7_local_preview_smoke.mjs"),"--origin",origin,
             "--issuer",f"http://127.0.0.1:{ports[2]}","--subject","volt-compose-demo-admin-subject",
-            "--principal","volt-compose-demo-admin","--evidence",str(evidence),"--readback"], evidence)
+            "--principal","volt-compose-demo-admin","--evidence",str(evidence),"--readback",
+            "--username","qualification-admin","--password-stdin"], evidence,
+            input_text=password_value)
         run("cold-stop", [*cli,"stop",str(state)], evidence); started = False
         run("backup-record", [*cli,"backup-record",str(state)], evidence)
         inventories = json.loads((state/"instance.json").read_text())["backup_inventory"]
@@ -251,24 +362,42 @@ def main() -> int:
         run("restore-health", [sys.executable,"-c",f"import sys;sys.path.insert(0,{str(ROOT)!r});from deploy.compose.setup import load_instance,wait_until_ready;wait_until_ready(load_instance({str(state)!r})[1]);print('healthy')"],evidence)
         run("restore-readback", ["node",str(ROOT/"tools/g7_local_preview_smoke.mjs"),"--origin",origin,
             "--issuer",f"http://127.0.0.1:{ports[2]}","--subject","volt-compose-demo-admin-subject",
-            "--principal","volt-compose-demo-admin","--evidence",str(evidence),"--readback"], evidence)
+            "--principal","volt-compose-demo-admin","--evidence",str(evidence),"--readback",
+            "--username","qualification-admin","--password-stdin"], evidence,
+            input_text=password_value)
+        run("provider-group-removal-fresh-login", ["node",str(ROOT/"tools/g7_local_preview_smoke.mjs"),
+            "--origin",origin,"--issuer",f"http://127.0.0.1:{ports[2]}",
+            "--subject","volt-compose-demo-admin-subject","--principal","volt-compose-demo-admin",
+            "--evidence",str(evidence),"--readback","--verify-provider-revocation",
+            "--username","qualification-admin","--password-stdin",
+            "--compose-directory",str(info["compose_directory"]),"--env-file",str(state/".env"),
+            "--project",project], evidence, input_text=password_value)
         # The exact-owner cleanup below performs the final stop and removes only
         # this private project, avoiding a second graceful stop before cleanup.
+        execution_environment = {key: os.environ[key] for key in ("GITHUB_ACTIONS", "RUNNER_ENVIRONMENT")
+                                if key in os.environ}
+        release_metadata = qualification_release_metadata(requested_version=args.version,
+            bundle_version=bundle_version, image_version=admission["version"], image_id=args.image_id,
+            platform=platform, source_revision=admission["source_revision"],
+            source_snapshot=args.source_snapshot, bundle_sha256=sha(args.bundle),
+            scope=qualification_scope(version=args.version, development_fixture=args.development_fixture))
         (evidence/"qualification.json").write_text(json.dumps({"result":"passed",
-            "qualification_scope":"development_fixture" if args.development_fixture else "hosted_rc2_release",
-            "release_version":bundle_version,"image_id":args.image_id,
-            "source_revision":admission["source_revision"],"image_version":admission["version"],
-            "source_snapshot":args.source_snapshot,"bundle_sha256":sha(args.bundle),"bundle_version":"0.1.0-rc.2",
+            **release_metadata,
+            "execution_environment":execution_environment or {"kind": "local"},
             "project":project,"synthetic_demo":True,"health":"passed","audited_operation":"passed",
             "demo_mode":"passed","loopback_binding":"passed","private_peer_ingress_denial":"passed",
             "restart_readback":"passed","cold_backup_inventories":3,"image_binding_rejection":"passed",
-            "corrupt_inventory_rejection":"passed","restore_readback":"passed"},indent=2)+"\n")
+            "corrupt_inventory_rejection":"passed","restore_readback":"passed",
+            "provider_group_removal_old_cookie_revocation":"passed",
+            "provider_group_removal_fresh_login_no_role_or_scope_recovery":"passed"},indent=2)+"\n")
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         outcome = 1
     finally:
-        cookie.unlink(missing_ok=True)
-        if state.exists() and setup:
+        if cookie is not None:
+            cookie.unlink(missing_ok=True)
+        password_value = None
+        if state is not None and state.exists() and setup:
             try:
                 # cleanup verifies per-resource owner labels and removes only this unique project.
                 result=subprocess.run([sys.executable,str(setup),"cleanup",str(state),"--remove-data","--confirm-project",project],
@@ -279,8 +408,10 @@ def main() -> int:
                 cleanup_result=result.returncode
             except Exception:
                 cleanup_result=1
-        shutil.rmtree(private,ignore_errors=True)
-        shutil.rmtree(extracted,ignore_errors=True)
+        if private is not None:
+            shutil.rmtree(private,ignore_errors=True)
+        if extracted is not None:
+            shutil.rmtree(extracted,ignore_errors=True)
         if cleanup_result:
             print("owned Compose cleanup failed; inspect the exact project resources before retry",file=sys.stderr)
     return 1 if cleanup_result else outcome

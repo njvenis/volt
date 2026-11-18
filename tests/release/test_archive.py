@@ -118,7 +118,7 @@ class OfflineArchiveTests(unittest.TestCase):
             self.assertEqual(archive.main(), 0)
         return package, result
 
-    def build_rc2_signed(self, root):
+    def build_rc2_signed(self, root, version=archive.EXPECTED_VERSION):
         package = root / "rc2-bundle"
         (package / "notices").mkdir(parents=True)
         repo = root / "rc2-source"
@@ -126,9 +126,9 @@ class OfflineArchiveTests(unittest.TestCase):
         subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
         compose_source = Path(__file__).parents[2] / "deploy" / "compose"
         (repo / "deploy" / "compose").mkdir(parents=True)
-        for name in archive.COMPOSE_BUNDLE_FILES:
+        for name in archive.compose_bundle_files(version):
             shutil.copy2(compose_source / name, repo / "deploy" / "compose" / name)
-        (repo / "deploy" / "compose" / "VERSION").write_text(archive.EXPECTED_VERSION + "\n")
+        (repo / "deploy" / "compose" / "VERSION").write_text(version + "\n")
         (repo / "tools").mkdir()
         shutil.copy2(Path(__file__).parents[2] / "tools" / "build_compose_bundle.py", repo / "tools" / "build_compose_bundle.py")
         env = {**os.environ, "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
@@ -140,6 +140,17 @@ class OfflineArchiveTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(repo), "archive", "--format=tar", "--output", str(package / "source.tar"), "HEAD"], check=True)
         source_snapshot = "sha256:" + archive.sha(package / "source.tar")
         registry_digest = "sha256:" + "c" * 64
+        if version == archive.RC3_VERSION:
+            amd = "sha256:" + "d" * 64
+            arm = "sha256:" + "e" * 64
+            index = {"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[
+                {"digest":amd,"platform":{"os":"linux","architecture":"amd64"}},
+                {"digest":arm,"platform":{"os":"linux","architecture":"arm64"}}]}
+            index_bytes = json.dumps(index).encode()
+            (package / "rc3-index.json").write_bytes(index_bytes)
+            registry_digest = "sha256:" + hashlib.sha256(index_bytes).hexdigest()
+            for name,value in (("amd64-digest.txt",amd),("arm64-digest.txt",arm),("platform-digest.txt",amd)):
+                (package/name).write_text(value+"\n")
         bundle = package / "volt-compose.tar.gz"
         subprocess.run([sys.executable, str(repo / "tools" / "build_compose_bundle.py"), "build",
                         "--output", str(bundle), "--image-reference", f"ghcr.io/njvenis/volt@{registry_digest}"],
@@ -152,7 +163,7 @@ class OfflineArchiveTests(unittest.TestCase):
         layer = layer_io.getvalue()
         diff = "sha256:" + hashlib.sha256(layer).hexdigest()
         config = {"os": "linux", "architecture": "amd64", "config": {"Labels": {
-            "org.opencontainers.image.revision": source_sha, "org.opencontainers.image.version": archive.EXPECTED_VERSION,
+            "org.opencontainers.image.revision": source_sha, "org.opencontainers.image.version": version,
             "org.volt.oidc-deployment-modes": "demo,external", "org.volt.compose-install.contract": "1",
             "org.volt.compose.source-snapshot": source_snapshot}}, "rootfs": {"type": "layers", "diff_ids": [diff]}}
         config_bytes = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
@@ -170,11 +181,28 @@ class OfflineArchiveTests(unittest.TestCase):
             "provenance.json": json.dumps({"buildDefinition": {"buildType": "https://github.com/Attestations/GitHubActionsWorkflow@v1", "externalParameters": {"workflow": {"ref": "njvenis/volt/.github/workflows/release.yml@refs/heads/main", "repository": "https://github.com/njvenis/volt"}, "source": {"uri": "https://github.com/njvenis/volt", "ref": source_sha}}, "internalParameters": {}, "resolvedDependencies": [{"uri": "git+https://github.com/njvenis/volt", "digest": {"gitCommit": source_sha}}]}, "runDetails": {"builder": {"id": "https://github.com/actions/runner"}, "metadata": {"invocationId": "https://github.com/njvenis/volt/actions/runs/123"}}}).encode()+b"\n",
             "registry-digest.txt": (registry_digest+"\n").encode(),
         }
+        if version == archive.RC3_VERSION:
+            child_bytes=json.dumps({"schemaVersion":2,"config":{"digest":image_id},"layers":[]}).encode()
+            (package/"platform-manifest.json").write_bytes(child_bytes)
+            amd="sha256:"+hashlib.sha256(child_bytes).hexdigest()
+            index["manifests"][0]["digest"]=amd
+            index_bytes=json.dumps(index).encode()
+            registry_digest="sha256:"+hashlib.sha256(index_bytes).hexdigest()
+            (package/"rc3-index.json").write_bytes(index_bytes)
+            (package/"amd64-digest.txt").write_text(amd+"\n")
+            (package/"platform-digest.txt").write_text(amd+"\n")
+            payload["registry-digest.txt"]=(registry_digest+"\n").encode()
+            subprocess.run([sys.executable,str(repo/"tools/build_compose_bundle.py"),"build","--output",str(bundle),
+                "--image-reference",f"ghcr.io/njvenis/volt@{registry_digest}"],check=True,capture_output=True)
+            (package/"index-provenance.json").write_text("{}")
         for name, contents in payload.items():
             (package / name).write_bytes(contents)
+        if version == archive.RC3_VERSION:
+            path = package / "provenance.json"
+            path.write_text(path.read_text().replace("/.github/workflows/release.yml", "/.github/workflows/release-rc3.yml"))
         self.source_sha, self.image_id = source_sha, image_id
         for command in (
-            ["archive.py", "prepare", "--directory", str(package), "--version", archive.EXPECTED_VERSION,
+            ["archive.py", "prepare", "--directory", str(package), "--version", version,
              "--source-sha", source_sha, "--image-id", image_id, "--registry-digest", registry_digest, "--platform", "linux/amd64"],
             ["archive.py", "sign", "--directory", str(package), "--key", str(self.key)],
         ):
@@ -184,6 +212,29 @@ class OfflineArchiveTests(unittest.TestCase):
         with patch.object(sys, "argv", ["archive.py", "pack", "--directory", str(package), "--archive", str(result), "--test-public-key", str(self.public)]):
             self.assertEqual(archive.main(), 0)
         return package, result
+
+    def test_standalone_bundle_requires_actual_signed_embedded_bytes_before_execution(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            package, signed = self.build_rc2_signed(root, version=archive.RC3_VERSION)
+            external = root / "volt-compose.tar.gz"
+            shutil.copyfile(package / external.name, external)
+            archive.authenticate_bundle(signed, external, "unused", source=self.source_sha, public_key=self.public)
+            installer = root / "rc2-source/deploy/compose/setup.py"
+            installer.write_text(installer.read_text()+"\nraise SystemExit('attacker')\n")
+            sys.path.insert(0, str(Path(__file__).parents[2] / "tools"))
+            import build_compose_bundle
+            with contextlib.redirect_stdout(io.StringIO()):
+                build_compose_bundle.build(external, image_reference="ghcr.io/njvenis/volt@"+
+                    (package/"registry-digest.txt").read_text().strip(),source_root=root/"rc2-source")
+                build_compose_bundle.verify(external)
+            executed = unittest.mock.Mock()
+            with self.assertRaisesRegex(ValueError,"signed embedded bytes"):
+                archive.authenticate_bundle(signed, external, "unused", source=self.source_sha, public_key=self.public)
+                executed()
+            executed.assert_not_called()
+            with self.assertRaisesRegex(ValueError,"source revision"):
+                archive.authenticate_bundle(signed, external, "unused", source="f"*40, public_key=self.public)
 
     def build_image_with_layer(self, root: Path, version: str, layer_bytes: bytes,
                                architecture: str = "amd64") -> tuple[Path, dict]:

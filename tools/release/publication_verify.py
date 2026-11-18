@@ -66,8 +66,55 @@ def verify(cosign: str, digest: str, source: str, image_id: str, spdx: Path, pro
     if not any(provenance_matches(row) for row in prov_rows):
         raise ValueError("verified provenance attestation does not match the exact source commit and registry digest")
 
+def verify_index(cosign: str, digest: str, source: str, controller: str, index: Path, provenance: Path) -> None:
+    import registry
+    raw = index.read_bytes()
+    if "sha256:" + hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError("index content digest differs")
+    predicate = json.loads(provenance.read_text())
+    provenance_validator.validate(predicate, source, expected_controller_commit=controller,
+        expected_workflow_ref=provenance_validator.RC3_WORKFLOW_REF)
+    deps = predicate["buildDefinition"]["resolvedDependencies"]
+    children = {}
+    for arch in ("amd64", "arm64"):
+        uri = f"pkg:docker/ghcr.io/njvenis/volt?platform=linux/{arch}"
+        matching = [row for row in deps if row.get("uri") == uri]
+        if len(matching) != 1:
+            raise ValueError("index provenance must bind exactly one child per architecture")
+        children[arch] = "sha256:" + matching[0]["digest"]["sha256"]
+    registry.validate_index(json.loads(raw), children["amd64"], children["arm64"])
+    identity = "https://github.com/" + provenance_validator.RC3_WORKFLOW_REF
+    flags = ["--certificate-identity", identity, "--certificate-oidc-issuer", ISSUER]
+    subprocess.run([cosign,"verify","--output=json",*flags,f"{REPO}@{digest}"], check=True, capture_output=True, text=True)
+    rows = statement_rows(subprocess.run([cosign,"verify-attestation","--output=json","--type","slsaprovenance1",
+        *flags,f"{REPO}@{digest}"],check=True,capture_output=True,text=True).stdout)
+    if not any(row.get("predicateType") == "https://slsa.dev/provenance/v1" and row.get("predicate") == predicate
+        and any(x.get("digest",{}).get("sha256") == digest.removeprefix("sha256:") for x in row.get("subject",[])) for row in rows):
+        raise ValueError("index provenance signature/subject does not bind exact children")
+
+
 def main() -> int:
-    p=argparse.ArgumentParser(); p.add_argument("--cosign",required=True); p.add_argument("--digest",required=True); p.add_argument("--source",required=True); p.add_argument("--image-id",required=True); p.add_argument("--spdx",type=Path,required=True); p.add_argument("--provenance",type=Path,required=True); p.add_argument("--notice-manifest",type=Path,required=True); p.add_argument("--controller-commit"); p.add_argument("--version",choices=("0.1.0-rc.2","0.1.0-rc.3"),default="0.1.0-rc.2"); p.add_argument("--platform",choices=("linux/amd64","linux/arm64"),default="linux/amd64"); a=p.parse_args()
-    try: verify(a.cosign,a.digest,a.source,a.image_id,a.spdx,a.provenance,a.notice_manifest,a.controller_commit,version=a.version,platform=a.platform); print(f"verified registry signature, SPDX and provenance for {REPO}@{a.digest}"); return 0
-    except (OSError,ValueError,subprocess.CalledProcessError,json.JSONDecodeError) as exc: print(f"publication verification failed: {exc}",file=sys.stderr); return 2
+    p=argparse.ArgumentParser()
+    p.add_argument("--cosign",required=True); p.add_argument("--digest",required=True)
+    p.add_argument("--source",required=True); p.add_argument("--image-id")
+    p.add_argument("--spdx",type=Path); p.add_argument("--provenance",type=Path,required=True)
+    p.add_argument("--notice-manifest",type=Path); p.add_argument("--controller-commit")
+    p.add_argument("--verify-index",type=Path)
+    p.add_argument("--version",choices=("0.1.0-rc.2","0.1.0-rc.3"),default="0.1.0-rc.2")
+    p.add_argument("--platform",choices=("linux/amd64","linux/arm64"),default="linux/amd64")
+    a=p.parse_args()
+    try:
+        if a.verify_index:
+            verify_index(a.cosign,a.digest,a.source,a.controller_commit,a.verify_index,a.provenance)
+        else:
+            if not all((a.image_id,a.spdx,a.notice_manifest)):
+                raise ValueError("child verification requires image ID, SPDX and notice manifest")
+            verify(a.cosign,a.digest,a.source,a.image_id,a.spdx,a.provenance,a.notice_manifest,a.controller_commit,
+                   version=a.version,platform=a.platform)
+        print(f"verified registry signature and exact attestations for {REPO}@{a.digest}")
+        return 0
+    except (OSError,ValueError,KeyError,TypeError,subprocess.CalledProcessError,json.JSONDecodeError) as exc:
+        print(f"publication verification failed: {exc}",file=sys.stderr)
+        return 2
+
 if __name__ == "__main__": raise SystemExit(main())

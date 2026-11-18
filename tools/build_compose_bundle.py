@@ -9,6 +9,7 @@ import json
 from pathlib import Path, PurePosixPath
 import tarfile
 import re
+import gzip
 
 RC2_FILES = ("VERSION", "README.md", "backup-restore.md", "compose.yaml", "demo.yaml", "compose.env.example", "oidc.example.json", "setup.py")
 RC3_FILES = (*RC2_FILES, "okta-publisher.yaml", "okta-publisher.example.json")
@@ -42,7 +43,7 @@ def build(output: Path, image_reference: str | None = None, source_root: Path | 
                 "files": {name: digest(payload[name]) for name in names}}
     entries = {**payload, "manifest.json": (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode()}
     output.parent.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(output, "w:gz", format=tarfile.PAX_FORMAT) as archive:
+    with output.open("wb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed, tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as archive:
         for name, data in sorted(entries.items()):
             info = tarfile.TarInfo(name=f"volt-compose-{version}/{name}")
             info.size = len(data)

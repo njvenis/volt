@@ -596,7 +596,7 @@ def test_expired_written_offer_is_rejected(tmp_path):
     assert any("written offer is expired" in err for err in MODULE.validate_source_disposition(candidate, disposition, tmp_path))
 
 
-def test_complete_notice_inventory_verifier_fixture_passes(tmp_path, monkeypatch, capsys):
+def test_complete_notice_inventory_verifier_fixture_passes(tmp_path, monkeypatch, capsys, platform="linux/amd64"):
     import hashlib
     image_id = "sha256:" + "a" * 64
     source_id = "sha256:" + "d" * 64
@@ -609,6 +609,8 @@ def test_complete_notice_inventory_verifier_fixture_passes(tmp_path, monkeypatch
     (tmp_path / "notices").mkdir(exist_ok=True)
     (tmp_path / "notices/image-files/copyright").write_bytes(b"Sample license text\n")
     copied_paths = ["/opt/valkey/bin/valkey-server", "/opt/valkey/bin/valkey-cli", "/opt/valkey/lib/ld-musl-x86_64.so.1", "/opt/valkey/lib/libc.musl-x86_64.so.1", "/opt/valkey/lib/libssl.so.3", "/opt/valkey/lib/libcrypto.so.3"]
+    if platform == "linux/arm64":
+        copied_paths = [path.replace("-x86_64", "").replace(".musl-x86_64", ".musl") for path in copied_paths]
     copied_rows, source_files, image_files = [], {}, [{"path": location.lstrip("/"), "file": "image-files/copyright", "sha256": hashlib.sha256(b"Sample license text\n").hexdigest(), "kind": "license-or-copyright"}]
     for index, path in enumerate(copied_paths):
         data = f"runtime-{index}".encode(); digest = hashlib.sha256(data).hexdigest(); rel = path.lstrip("/")
@@ -638,13 +640,15 @@ def test_complete_notice_inventory_verifier_fixture_passes(tmp_path, monkeypatch
     (tmp_path / "notices/reference-sources").mkdir(parents=True, exist_ok=True)
     retained_dockerfile = tmp_path / "notices/reference-sources/Dockerfile.g7"
     retained_dockerfile.write_text("ARG VALKEY_IMAGE=" + source_reference + "\n")
-    provenance = {"source_image_id": source_id, "source_image_platform": "linux/amd64", "source_image_package_evidence": {}, "copied_assets": copied_rows, "missing_assets": [], "source_files": source_files,
-                  "source_distribution_admission": {"reference": source_reference, "registry_digest": source_registry_digest, "local_image_id": source_id, "platform": "linux/amd64", "repo_digests": ["valkey/valkey@" + source_registry_digest]}}
+    if platform == "linux/arm64":
+        retained_dockerfile.write_text(retained_dockerfile.read_text()+"COPY --from=valkey-bin /tmp/volt-valkey-ld-musl.so.1 /opt/valkey/lib/ld-musl.so.1\n")
+    provenance = {"source_image_id": source_id, "source_image_platform": platform, "source_image_package_evidence": {}, "copied_assets": copied_rows, "missing_assets": [], "source_files": source_files,
+                  "source_distribution_admission": {"reference": source_reference, "registry_digest": source_registry_digest, "local_image_id": source_id, "platform": platform, "repo_digests": ["valkey/valkey@" + source_registry_digest]}}
     (tmp_path / "notices/copied-binary-provenance.json").write_text(json.dumps(provenance))
     artifact_rows.append({"path": "notices/copied-binary-provenance.json", "sha256": hashlib.sha256((tmp_path / "notices/copied-binary-provenance.json").read_bytes()).hexdigest()})
     artifact_rows.append({"path": "notices/reference-sources/Dockerfile.g7", "sha256": hashlib.sha256(retained_dockerfile.read_bytes()).hexdigest()})
     package_evidence = {"identity": identity, "license_evidence": [{"value": "MIT", "locations": [{"path": location}]}], "metadata_license_texts": []}
-    manifest = {"schema": "volt-notice-inventory/v1", "image_id": image_id, "platform": "linux/amd64", "package_count": 1, "packages_with_license_metadata": 1,
+    manifest = {"schema": "volt-notice-inventory/v1", "image_id": image_id, "platform": platform, "package_count": 1, "packages_with_license_metadata": 1,
                 "runtime_ui_packages": 0, "debian_source_candidate_count": 0, "embedded_notice_asset_count": 0, "package_license_evidence": [package_evidence], "unresolved": [], "files": []}
     (tmp_path / "notice-manifest.json").write_text(json.dumps(manifest))
     artifact_rows.extend([{"path": "sbom.syft.json", "sha256": hashlib.sha256((tmp_path / "sbom.syft.json").read_bytes()).hexdigest()}, {"path": "sbom.spdx.json", "sha256": hashlib.sha256((tmp_path / "sbom.spdx.json").read_bytes()).hexdigest()}, {"path": "sbom.valkey-source.syft.json", "sha256": hashlib.sha256((tmp_path / "sbom.valkey-source.syft.json").read_bytes()).hexdigest()}])
@@ -882,3 +886,34 @@ def test_full_verifier_requires_pip_source_disposition_when_targets_exist(tmp_pa
         manifest_path.write_text(json.dumps(manifest))
         assert MODULE.main() == 1
         assert "captured pip launchers require exactly one matching versioned source disposition" in capsys.readouterr().err
+
+
+def test_complete_arm64_notice_inventory_and_negative_byte_binding(tmp_path, monkeypatch, capsys):
+    test_complete_notice_inventory_verifier_fixture_passes(tmp_path, monkeypatch, capsys, platform="linux/arm64")
+    path = tmp_path / "notices/copied-binary-provenance.json"
+    data = json.loads(path.read_text())
+    assert "/opt/valkey/lib/ld-musl.so.1" in data["source_files"]
+    data["source_files"]["/opt/valkey/lib/ld-musl.so.1"]["sha256"] = "0" * 64
+    path.write_text(json.dumps(data))
+    manifest = json.loads((tmp_path / "notice-manifest.json").read_text())
+    for row in manifest["files"]:
+        if row["path"] == "notices/copied-binary-provenance.json":
+            row["sha256"] = MODULE.sha(path)
+    (tmp_path / "notice-manifest.json").write_text(json.dumps(manifest))
+    assert MODULE.main() != 0
+    assert "copied binary differs from pinned source-image bytes" in capsys.readouterr().err
+
+
+def test_arm64_collection_admits_exact_platform_source_and_rejects_amd64(monkeypatch):
+    digest = "sha256:" + "e" * 64
+    reference = "valkey/valkey:9.1.2-alpine@" + digest
+    info = {"Id": "sha256:" + "f" * 64, "Os": "linux", "Architecture": "arm64", "RepoDigests": ["valkey/valkey@" + digest]}
+    monkeypatch.setattr(COLLECT, "run", lambda args, **kwargs: json.dumps([info]))
+    assert COLLECT.admit_pinned_source_image(reference, digest, "linux/arm64")["Platform"] == "linux/arm64"
+    assert COLLECT.acceptable_image(info["Id"], "linux/arm64") == info
+    assert "/opt/valkey/lib/libc.musl.so.1" in COLLECT.copied_assets("linux/arm64")
+    info["Architecture"] = "amd64"
+    with pytest.raises(ValueError):
+        COLLECT.admit_pinned_source_image(reference, digest, "linux/arm64")
+    with pytest.raises(ValueError):
+        COLLECT.acceptable_image(info["Id"], "linux/arm64")

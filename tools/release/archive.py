@@ -128,6 +128,8 @@ def build_manifest(directory: Path, version: str, source_sha: str, image_id: str
     required = ["image.tar", "source.tar", "sbom.syft.json", "sbom.spdx.json",
                 "release-scan.json", "VERIFY.txt", "provenance.json", "registry-digest.txt", "notice-manifest.json",
                 "source.bundle"]
+    if version == RC3_VERSION:
+        required += ["rc3-index.json", "amd64-digest.txt", "arm64-digest.txt", "platform-digest.txt", "platform-manifest.json", "index-provenance.json"]
     if version in COMPOSE_ARCHIVE_VERSIONS:
         required += ["volt-compose.tar.gz", "volt-compose.tar.gz.sha256"]
     else:
@@ -754,12 +756,42 @@ def verify_directory(directory: Path, cosign: str, *, public_key: Path | None = 
     scan_metadata = scan_report.get("Metadata") if isinstance(scan_report, dict) else None
     if not isinstance(scan_report, dict) or scan_report.get("SchemaVersion") != 2 or scan_report.get("ArtifactType") != "container_image" or not isinstance(scan_metadata, dict) or scan_metadata.get("ImageID") != manifest.get("image_id") or not isinstance(scan_report.get("Results"), list) or not scan_report["Results"]:
         raise ValueError("full Trivy report is incomplete or bound to a different image")
+    if manifest["version"] == RC3_VERSION:
+        import registry as registry_validator
+        index = directory / "rc3-index.json"
+        if "sha256:" + sha(index) != registry_digest:
+            raise ValueError("signed registry index bytes differ from release digest")
+        amd = (directory / "amd64-digest.txt").read_text().strip()
+        arm = (directory / "arm64-digest.txt").read_text().strip()
+        registry_validator.validate_index(json.loads(index.read_text()), amd, arm)
+        child = (directory / "platform-digest.txt").read_text().strip()
+        if child != {"linux/amd64": amd, "linux/arm64": arm}[manifest["platform"]]:
+            raise ValueError("signed platform child differs from index")
     identity = validate_docker_archive(directory / "image.tar", manifest)
+    if manifest["version"] == RC3_VERSION:
+        platform_manifest = directory / "platform-manifest.json"
+        if "sha256:" + sha(platform_manifest) != child:
+            raise ValueError("published child manifest bytes differ from index child digest")
+        if json.loads(platform_manifest.read_text()).get("config", {}).get("digest") != identity["image_config_id"]:
+            raise ValueError("published child config differs from signed image")
     if identity.get("image_config_id") != manifest.get("image_config_id") or identity.get("image_index_id") != manifest.get("image_index_id") or identity.get("platform_manifest_digest") != manifest.get("platform_manifest_digest"):
         raise ValueError("image config/index identity disagrees with signed archive metadata")
     if public_key:
         return manifest
     return manifest
+
+
+def authenticate_bundle(archive_path: Path, bundle: Path, cosign: str, *, source: str,
+                        public_key: Path | None = None) -> None:
+    """Authenticate standalone installer bytes before any extraction/execution."""
+    with tempfile.TemporaryDirectory(prefix="volt-authenticate-installer-") as temp:
+        root = Path(temp)
+        safe_extract(archive_path, root)
+        manifest = verify_directory(root, cosign, expected_source=source, public_key=public_key)
+        if manifest.get("version") != RC3_VERSION:
+            raise ValueError("this standalone installer contract is RC3-only")
+        if (root / "volt-compose.tar.gz").read_bytes() != bundle.read_bytes():
+            raise ValueError("standalone Compose bundle differs from signed embedded bytes")
 
 
 def create_archive(directory: Path, archive_path: Path) -> None:
@@ -804,6 +836,11 @@ def main() -> int:
     verify.add_argument("--issuer", default=EXPECTED_ISSUER)
     verify.add_argument("--source-sha")
     verify.add_argument("--image-id")
+    authenticate = commands.add_parser("authenticate-bundle")
+    authenticate.add_argument("--archive", required=True, type=Path)
+    authenticate.add_argument("--bundle", required=True, type=Path)
+    authenticate.add_argument("--cosign", default="cosign")
+    authenticate.add_argument("--source-sha", required=True)
     load = commands.add_parser("load")
     load.add_argument("--archive", required=True, type=Path)
     load.add_argument("--cosign", default="cosign")
@@ -859,6 +896,9 @@ def main() -> int:
                                             identity=args.identity, issuer=args.issuer,
                                             expected_source=args.source_sha, expected_image=args.image_id)
                 print(f"verified {manifest['version']} source {manifest['source_commit']} image {manifest['image_id']}")
+        elif args.command == "authenticate-bundle":
+            authenticate_bundle(args.archive, args.bundle, args.cosign, source=args.source_sha)
+            print("standalone Compose bundle matches authenticated signed release bytes")
         elif args.command == "load":
             with tempfile.TemporaryDirectory(prefix="volt-release-load-") as temp:
                 root = Path(temp)

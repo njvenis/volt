@@ -493,7 +493,7 @@ def validate_source_sbom_binding(root: Path, source_id: str, errors: list[str]) 
         errors.append("pinned source-image SBOM is invalid")
 
 
-def validate_source_image_admission(root: Path, provenance: dict, errors: list[str]) -> None:
+def validate_source_image_admission(root: Path, provenance: dict, errors: list[str], platform: str = "linux/amd64") -> None:
     """Bind admitted local image identity to the exact Dockerfile-pinned repository digest."""
     try:
         admission = provenance.get("source_distribution_admission", {})
@@ -505,7 +505,7 @@ def validate_source_image_admission(root: Path, provenance: dict, errors: list[s
                 or not IMAGE_RE.fullmatch(registry_digest)
                 or reference.rsplit("@", 1)[1] != registry_digest
                 or local_id != source_id
-                or admission.get("platform") != "linux/amd64"
+                or admission.get("platform") != platform
                 or not IMAGE_RE.fullmatch(local_id)):
             errors.append("pinned source-image admission identities are invalid")
             return
@@ -524,6 +524,7 @@ def validate_source_image_admission(root: Path, provenance: dict, errors: list[s
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--directory", required=True, type=Path, help="collector output directory")
+    ap.add_argument("--platform", choices=("linux/amd64", "linux/arm64"), help="expected platform; otherwise use the validated manifest platform")
     ap.add_argument("--image", help="expected immutable image ID (recommended for release binding)")
     args = ap.parse_args()
     root = args.directory.resolve()
@@ -534,7 +535,9 @@ def main() -> int:
         if m.get("schema") != "volt-notice-inventory/v1": errors.append("unsupported manifest schema")
         if not IMAGE_RE.fullmatch(m.get("image_id", "")): errors.append("manifest image ID is not immutable")
         if args.image and args.image != m.get("image_id"): errors.append("manifest image ID does not match expected image")
-        if m.get("platform") != "linux/amd64": errors.append("platform is not linux/amd64")
+        platform = m.get("platform")
+        if platform not in {"linux/amd64", "linux/arm64"} or (args.platform and args.platform != platform):
+            errors.append("platform differs or is unsupported")
         validate_sbom_pair(root, m.get("image_id", ""), errors)
         files = m.get("files")
         if not isinstance(files, list): errors.append("manifest file list missing")
@@ -561,14 +564,20 @@ def main() -> int:
         try:
             provenance = json.loads((root / "notices/copied-binary-provenance.json").read_text())
             expected_assets = {"/opt/valkey/bin/valkey-server", "/opt/valkey/bin/valkey-cli", "/opt/valkey/lib/ld-musl-x86_64.so.1", "/opt/valkey/lib/libc.musl-x86_64.so.1", "/opt/valkey/lib/libssl.so.3", "/opt/valkey/lib/libcrypto.so.3"}
+            dockerfile_path = root / "notices/reference-sources/Dockerfile.g7"
+            retained_dockerfile = dockerfile_path.read_text() if dockerfile_path.is_file() else ""
+            if re.search(r"^COPY .* /opt/valkey/lib/ld-musl\.so\.1$", retained_dockerfile, re.MULTILINE):
+                expected_assets = {path.replace("-x86_64", "").replace(".musl-x86_64", ".musl") for path in expected_assets}
+            elif platform == "linux/arm64":
+                expected_assets = {path.replace("x86_64", "aarch64") for path in expected_assets}
             copied = {x.get("path"): x for x in provenance.get("copied_assets", []) if isinstance(x, dict)}
             if set(copied) != expected_assets or provenance.get("missing_assets"): errors.append("copied-binary provenance coverage is incomplete")
             for path, row in copied.items():
                 if not re.fullmatch(r"[0-9a-f]{64}", row.get("sha256", "")) or not isinstance(row.get("size"), int) or row["size"] <= 0:
                     errors.append(f"copied-binary digest/size evidence is invalid: {path}")
             source_id = provenance.get("source_image_id", "")
-            if not IMAGE_RE.fullmatch(source_id) or provenance.get("source_image_platform") != "linux/amd64": errors.append("copied-binary source image is not bound to a linux/amd64 immutable ID")
-            validate_source_image_admission(root, provenance, errors)
+            if not IMAGE_RE.fullmatch(source_id) or provenance.get("source_image_platform") != platform: errors.append("copied-binary source image is not bound to the declared platform and immutable ID")
+            validate_source_image_admission(root, provenance, errors, platform)
             if not isinstance(provenance.get("source_image_package_evidence"), dict): errors.append("copied-binary source package evidence is missing")
             validate_source_sbom_binding(root, source_id, errors)
             source_files = provenance.get("source_files", {})

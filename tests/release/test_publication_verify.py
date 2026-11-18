@@ -120,4 +120,49 @@ class PublicationVerifierTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError,"exact source commit and registry digest"):
                         verify.verify("cosign",digest,source,"sha256:"+"b"*64,spdx_path,prov_path,notice)
 
+    def test_index_signature_and_provenance_bind_both_children_and_exact_subject(self):
+        import copy
+        import subprocess
+        from types import SimpleNamespace
+        with TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            _,source,_,predicate,_,_=self.fixture()
+            predicate["buildDefinition"]["externalParameters"]["workflow"]["ref"]=verify.provenance_validator.RC3_WORKFLOW_REF
+            amd="sha256:"+"1"*64;arm="sha256:"+"2"*64
+            predicate["buildDefinition"]["resolvedDependencies"].extend([
+                {"uri":f"pkg:docker/ghcr.io/njvenis/volt?platform=linux/{arch}","digest":{"sha256":digest[7:]}}
+                for arch,digest in (("amd64",amd),("arm64",arm))])
+            doc={"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[
+                {"platform":{"os":"linux","architecture":"amd64"},"digest":amd},
+                {"platform":{"os":"linux","architecture":"arm64"},"digest":arm}]}
+            raw=json.dumps(doc).encode();digest="sha256:"+hashlib.sha256(raw).hexdigest()
+            index=root/"index.json";index.write_bytes(raw)
+            provenance=root/"provenance.json";provenance.write_text(json.dumps(predicate))
+            def output(subject=digest):
+                row={"predicateType":"https://slsa.dev/provenance/v1","predicate":predicate,
+                    "subject":[{"digest":{"sha256":subject[7:]}}]}
+                return json.dumps({"payload":base64.b64encode(json.dumps(row).encode()).decode()})
+            calls=[]
+            def run(cmd,**kwargs):
+                calls.append(cmd)
+                return SimpleNamespace(stdout=output() if "verify-attestation" in cmd else "[]")
+            with patch.object(verify.subprocess,"run",side_effect=run):
+                verify.verify_index("cosign",digest,source,None,index,provenance)
+            self.assertEqual(len(calls),2)
+            self.assertEqual(calls[0][1],"verify")
+            self.assertIn("slsaprovenance1",calls[1])
+            self.assertTrue(all("https://github.com/"+verify.provenance_validator.RC3_WORKFLOW_REF in call for call in calls))
+            with patch.object(verify.subprocess,"run",side_effect=subprocess.CalledProcessError(1,["cosign","verify"])):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    verify.verify_index("cosign",digest,source,None,index,provenance)
+            with patch.object(verify.subprocess,"run",return_value=SimpleNamespace(stdout=output("sha256:"+"f"*64))):
+                with self.assertRaisesRegex(ValueError,"signature/subject"):
+                    verify.verify_index("cosign",digest,source,None,index,provenance)
+            predicate["buildDefinition"]["resolvedDependencies"][2]["digest"]["sha256"]="3"*64
+            provenance.write_text(json.dumps(predicate))
+            with patch.object(verify.subprocess,"run") as run:
+                with self.assertRaisesRegex(ValueError,"child bindings"):
+                    verify.verify_index("cosign",digest,source,None,index,provenance)
+                run.assert_not_called()
+
 if __name__ == "__main__": unittest.main()

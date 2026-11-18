@@ -67,6 +67,11 @@ def main() -> int:
             raise ValueError("candidate preparation run ID is malformed")
         if (root/"prepare-run-id.txt").read_text().strip() != args.prepare_run_id:
             raise ValueError("retained candidate artifact is not bound to the named preparation run")
+        if args.version == "0.1.0-rc.3":
+            sys.path.insert(0, str(Path(__file__).parent))
+            from rc3_candidate import verify
+            print(json.dumps(verify(root, args.source, args.prepare_run_id, args.platform), sort_keys=True))
+            return 0
         image_id = (root/"image-id.txt").read_text().strip()
         snapshot = (root/"source-snapshot.txt").read_text().strip()
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) or not re.fullmatch(r"sha256:[0-9a-f]{64}", snapshot):
@@ -91,7 +96,7 @@ def main() -> int:
             "image_archive":"verified","notice_manifest":"verified","scan_image_id":"verified",
             "qualification_bundle_sha256":sha(bundle)},sort_keys=True))
         return 0
-    except (OSError,ValueError,json.JSONDecodeError,KeyError,IndexError) as exc:
+    except (OSError,ValueError,json.JSONDecodeError,KeyError,IndexError,subprocess.CalledProcessError) as exc:
         print(f"candidate artifact rejected: {exc}",file=sys.stderr)
         return 2
 

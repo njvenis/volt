@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import hashlib
 import os
 import re
 import sys
@@ -101,6 +102,51 @@ def tag_digest(tag: str, opener=None, *, username=None, password=None, anonymous
     if not digest or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
         raise RuntimeError(f"registry returned no immutable digest for tag {tag}")
     return digest
+
+
+def manifest_bytes(digest: str, *, username=None, password=None) -> bytes:
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise RuntimeError("manifest digest malformed")
+    opener = _opener()
+    token = _pull_token(opener, username, password)
+    request = _manifest_request(digest, token)
+    request.method = "GET"
+    with _request(opener, request) as response:
+        raw = response.read()
+    if "sha256:" + hashlib.sha256(raw).hexdigest() != digest:
+        raise RuntimeError("registry manifest bytes differ from digest")
+    return raw
+
+
+def manifest_document(digest: str, *, username=None, password=None) -> dict:
+    return json.loads(manifest_bytes(digest, username=username, password=password))
+
+
+def verify_child(digest: str, config_id: str, *, username=None, password=None) -> None:
+    doc = manifest_document(digest, username=username, password=password)
+    if doc.get("config", {}).get("digest") != config_id or not isinstance(doc.get("layers"), list) or not doc["layers"]:
+        raise RuntimeError("published child does not bind admitted image config")
+
+
+def validate_index(doc: dict, amd64: str, arm64: str) -> None:
+    if doc.get("schemaVersion") != 2 or doc.get("mediaType") not in {
+            "application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json"}:
+        raise ValueError("published index media/schema differs")
+    if amd64 == arm64 or any(not re.fullmatch(r"sha256:[0-9a-f]{64}", value) for value in (amd64, arm64)):
+        raise ValueError("index child digests must be distinct immutable digests")
+    expected = {("linux", "amd64"): amd64, ("linux", "arm64"): arm64}
+    rows = doc.get("manifests", [])
+    found = {}
+    if len(rows) != 2:
+        raise ValueError("index requires exactly two children")
+    for row in rows:
+        platform = row.get("platform", {})
+        key = (platform.get("os"), platform.get("architecture"))
+        if key not in expected or key in found or platform.get("variant") not in (None, "v8"):
+            raise ValueError("index platform duplicate or unsupported")
+        found[key] = row.get("digest")
+    if found != expected:
+        raise ValueError("index child bindings differ")
 
 
 def main() -> int:

@@ -41,11 +41,14 @@ The following are the expected permanent asset URLs after publication:
 
 ### Verify before extraction or image load
 
-Start from the verifier version and trust-store bootstrap identified through an independently trusted release/repository channel. Follow the corrected `VERIFY-RELEASE.md` only after authenticating that guide and its verifier source; never execute verifier installation code selected by an archive field such as `source_commit`. Follow the published trust-store provisioning and archive-verification commands. Use the platform, source commit, source snapshot, image ID, registry digest and archive identity established by that signed verification. Do not trust a verifier, checksum, signature key or Sigstore root solely because it was included in the downloaded archive. Never extract or run `setup.py` before archive and bundle authentication.
+Begin with the independently obtained fixed `v0.1.0-rc.3` repository tag. Follow the corrected `VERIFY-RELEASE.md` to resolve the source SHA from that trusted tag, check out that exact source, provision the pinned Cosign/Sigstore trust, and verify and load the signed archive. Never let an archive field such as `source_commit` select verifier code. The signed archive binds the source, platform image, common multi-platform index, selected-child SPDX/notices and scan evidence. Its `registry_digest`/`image_index_id` identify the multi-platform index; `image_id`/`image_config_id` identify the selected platform image, and `platform_manifest_digest` identifies that platform manifest. Do not treat the index digest as the local Docker image ID. Do not trust a verifier, checksum, signature key or Sigstore root solely because it was included in the downloaded archive. Authenticate the separate bundle below before extracting or executing it.
 
-The planned signed offline archive binds one image to its platform and source. The standalone bundle is also included in that archive. After the signed archive verifies, compare the downloaded `volt-compose.tar.gz` byte-for-byte with the authenticated archive member and check its sidecar checksum; then extract the standalone bundle into a new private directory. The checksum is a consistency check after authentication, not a replacement for signature verification. The bundle root is expected to be versioned as `volt-compose-0.1.0-rc.3`.
+The planned signed offline archive binds the versioned source bundle and image evidence. After the signed archive verifies (and, for offline installs, after its image is loaded through the trusted helper), authenticate the downloaded standalone bundle against its signed embedded bytes. Keep the trusted `SOURCE_SHA` resolved from the fixed tag in the same shell. The helper must succeed before checksum inspection or extraction; the sidecar checksum only detects transfer damage. The bundle root is expected to be versioned as `volt-compose-0.1.0-rc.3`.
 
 ```sh
+python3 trusted-source/tools/release/archive.py authenticate-bundle \
+  --archive "$VOLT_ARCHIVE" --bundle "$VOLT_BUNDLE" \
+  --cosign /tmp/volt-release-tools/cosign --source-sha "$SOURCE_SHA"
 tar -xOf "$VOLT_ARCHIVE" volt-compose.tar.gz > "$VOLT_RELEASE_DIR/volt-compose-embedded.tar.gz"
 cmp "$VOLT_BUNDLE" "$VOLT_RELEASE_DIR/volt-compose-embedded.tar.gz"
 EXPECTED_BUNDLE_SHA="$(awk '{print $1}' "$VOLT_RELEASE_DIR/volt-compose.tar.gz.sha256")"
@@ -60,7 +63,7 @@ For an online install, use the exact registry digest reported by authenticated r
 
 ### Install the local password-admin demo
 
-The source-free bundle needs Docker Engine with Compose v2, Python 3.11 or newer and OpenSSL command-line tools. macOS users need Docker Desktop with its Linux engine running. `gh` is used for the download example. Trusted verifier and Sigstore-root provisioning are a separate bootstrap step: that step may need a trusted network/workstation or previously authenticated materials. An offline image import assumes those verifier and trust materials are already provisioned; the archive cannot authenticate its own verifier. After verification and extraction, ordinary installation does not require a VOLT checkout, Git, Node.js, npm or a browser package download. The local demo uses synthetic identity and does not contact Okta.
+The ordinary install needs Docker Engine with Compose v2, Python 3.11 or newer and OpenSSL command-line tools. The separate verification bootstrap needs Git, the pinned Cosign helper and network access for the trusted fixed source tag and Sigstore trust provisioning; `gh` is used by the download example. An offline image import is possible only after those verifier and trust materials have been provisioned and the archive and bundle authenticated. After verification and extraction, ordinary runtime setup does not require a VOLT source checkout, Git, Node.js, npm or a browser package download. Apple Silicon selects a Linux `arm64` container; macOS Docker Desktop itself has not been exercised. The local demo uses synthetic identity and does not contact Okta; external OIDC login and membership sync require connectivity to the configured issuer/API.
 
 For an online install, after the archive has been authenticated, construct the immutable registry reference from its signed digest and pull the declared platform:
 
@@ -73,7 +76,7 @@ VOLT_IMAGE="ghcr.io/njvenis/volt@$VOLT_REGISTRY_DIGEST"
 docker pull --platform "$VOLT_PLATFORM" "$VOLT_IMAGE"
 ```
 
-For an offline image import, first provision and authenticate the verifier and trust materials through the trusted bootstrap channel, then follow the corrected `VERIFY-RELEASE.md` image-load steps. Then bind the installer to the image ID and platform from the authenticated manifest:
+For an offline image import, the corrected `VERIFY-RELEASE.md` first provisions trust and verifies the archive with the pinned verifier. After the bundle-authentication command above succeeds, use the loaded platform image ID and platform from the authenticated manifest:
 
 ```sh
 VOLT_IMAGE="$(tar -xOf "$VOLT_ARCHIVE" manifest.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["image_id"])')"

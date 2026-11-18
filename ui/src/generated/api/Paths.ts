@@ -303,6 +303,10 @@ export type OverallDeadlineSeconds = number;
 export type RequestTimeoutSeconds = number;
 export type PlatformId = string;
 export type Product = "qualys_vm";
+export type ClearanceState = "missing" | "available" | "applied" | "expired" | "invalidated";
+export type FreshCredentialsRequired = boolean;
+export type FreshVersionReady = boolean;
+export type State3 = "clear" | "quarantined" | "awaiting_activation";
 export type ScheduleSupported = false;
 export type SchemaVersion4 = 1;
 export type Kind = "account_visible";
@@ -525,46 +529,306 @@ export type OperationId4 = string;
 export type RunId4 = string | null;
 export type SchemaVersion16 = 1;
 export type ConnectorId17 = string;
-export type OperationId5 = string;
-export type SourceId16 = string;
 export type CommandId17 = string;
-export type ConfigurationRevision12 = number;
-export type CredentialVersionId6 = string | null;
-export type ErrorCode5 = string | null;
-export type Kind4 = "test" | "collect";
-export type OperationId6 = string;
-export type RunId5 = string | null;
-export type SchemaVersion17 = 1;
+export type Command = SaveCommand1 | TestCommand1 | ActivateCommand1 | CollectCommand1 | DisableCommand1;
+export type Action10 = "scanner.configuration.save";
 export type CommandId18 = string;
+export type Authority8 = number;
+export type Connector6 = number;
+export type IdentityMembership6 = number;
+export type Owners6 = number;
+export type Policy6 = number;
+export type Secret5 = null;
+export type SecretSource6 = number;
+export type Source7 = number;
+export type Target6 = number;
+/**
+ * @maxItems 0
+ */
+export type MembershipIds5 = [];
+export type EvidenceRef5 = string;
+export type Rationale5 = string;
+export type ApiVersion1 = "2.0";
+export type CollectionMode2 = "manual";
+export type PlatformId2 = "us1" | "us2" | "us3" | "eu1" | "eu2" | "in1";
+export type Product2 = "qualys_vm";
+export type Kind4 = "account_visible";
+export type SourceId16 = string;
+export type SchemaVersion17 = number;
+export type TargetId10 = string;
+export type Action11 = "scanner.connection.test";
+export type CommandId19 = string;
+export type Authority9 = number;
+export type Connector7 = number;
+export type IdentityMembership7 = number;
+export type Owners7 = number;
+export type Policy7 = number;
+export type Secret6 = null;
+export type SecretSource7 = number;
+export type Source8 = number;
+export type Target7 = number;
+/**
+ * @maxItems 0
+ */
+export type MembershipIds6 = [];
+export type ConfigurationRevision12 = number;
+export type CredentialVersionId6 = string;
+export type EvidenceRef6 = string;
+export type Rationale6 = string;
+export type SourceId17 = string;
+export type SchemaVersion18 = number;
+export type TargetId11 = string;
+export type Action12 = "scanner.configuration.activate";
+export type CommandId20 = string;
+export type Authority10 = number;
+export type Connector8 = number;
+export type IdentityMembership8 = number;
+export type Owners8 = number;
+export type Policy8 = number;
+export type Secret7 = null;
+export type SecretSource8 = number;
+export type Source9 = number;
+export type Target8 = number;
+/**
+ * @maxItems 0
+ */
+export type MembershipIds7 = [];
 export type ConfigurationRevision13 = number;
-export type CredentialVersionId7 = string | null;
+export type CredentialVersionId7 = string;
+export type EvidenceRef7 = string;
+export type Rationale7 = string;
+export type SourceId18 = string;
+export type ValidationOperationId1 = string;
+export type SchemaVersion19 = number;
+export type TargetId12 = string;
+export type Action13 = "scanner.collection.start";
+export type CommandId21 = string;
+export type Authority11 = number;
+export type Connector9 = number;
+export type IdentityMembership9 = number;
+export type Owners9 = number;
+export type Policy9 = number;
+export type Secret8 = null;
+export type SecretSource9 = number;
+export type Source10 = number;
+export type Target9 = number;
+/**
+ * @maxItems 0
+ */
+export type MembershipIds8 = [];
+export type ConfigurationRevision14 = number;
+export type CredentialVersionId8 = string;
+export type EvidenceRef8 = string;
+export type Rationale8 = string;
+export type SourceId19 = string;
+export type SchemaVersion20 = number;
+export type TargetId13 = string;
+export type Action14 = "scanner.configuration.disable";
+export type CommandId22 = string;
+export type Authority12 = number;
+export type Connector10 = number;
+export type IdentityMembership10 = number;
+export type Owners10 = number;
+export type Policy10 = number;
+export type Secret9 = null;
+export type SecretSource10 = number;
+export type Source11 = number;
+export type Target10 = number;
+/**
+ * @maxItems 0
+ */
+export type MembershipIds9 = [];
+export type EvidenceRef9 = string;
+export type Rationale9 = string;
+export type SourceId20 = string;
+export type SchemaVersion21 = number;
+export type TargetId14 = string;
+export type EvidenceRef10 = string;
+export type Rationale10 = string;
+export type SchemaVersion22 = number;
+export type Action15 =
+  | "scanner.configuration.save"
+  | "scanner.connection.test"
+  | "scanner.configuration.activate"
+  | "scanner.collection.start"
+  | "scanner.configuration.disable";
+export type ActorId = string;
+export type AuditEventId5 = string;
+export type CommandId23 = string;
+export type ConnectorId18 = string;
+export type Disposition = "not_committed";
+export type OccurredAt5 = string;
+export type RequestDigest = string;
+export type SchemaVersion23 = 1;
+export type SourceId21 = string;
+export type Action16 =
+  | "scanner.configuration.save"
+  | "scanner.connection.test"
+  | "scanner.configuration.activate"
+  | "scanner.collection.start"
+  | "scanner.configuration.disable";
+export type ActorId1 = string;
+export type CommandId24 = string;
+export type ConnectorId19 = string;
+export type Disposition1 = "committed";
+export type Receipt =
+  | SaveConfigurationReceipt1
+  | TestConnectionReceipt1
+  | ActivateConfigurationReceipt1
+  | CollectReceipt1
+  | DisableConfigurationReceipt1;
+export type Action17 = "scanner.configuration.save";
+export type AuditEventId6 = string;
+export type CommandId25 = string;
+export type CommittedRevision5 = number;
+export type DecisionId5 = string;
+export type IntentId8 = string;
+export type Intents5 = {
+  [k: string]: unknown;
+}[];
+export type OccurredAt6 = string;
+export type PolicyRevision6 = number;
+export type ConfigurationRevision15 = number;
+export type Lifecycle5 = "disabled" | "staged" | "active";
+export type SchemaVersion24 = 1;
+export type TargetId15 = string;
+export type Action18 = "scanner.connection.test";
+export type AuditEventId7 = string;
+export type CommandId26 = string;
+export type CommittedRevision6 = number;
+export type DecisionId6 = string;
+export type IntentId9 = string;
+export type Intents6 = {
+  [k: string]: unknown;
+}[];
+export type OccurredAt7 = string;
+export type PolicyRevision7 = number;
+export type ErrorCode5 = string | null;
+export type OperationId5 = string;
+export type Status4 = "succeeded" | "failed" | "interrupted";
+export type SchemaVersion25 = 1;
+export type TargetId16 = string;
+export type Action19 = "scanner.configuration.activate";
+export type AuditEventId8 = string;
+export type CommandId27 = string;
+export type CommittedRevision7 = number;
+export type DecisionId7 = string;
+export type IntentId10 = string;
+export type Intents7 = {
+  [k: string]: unknown;
+}[];
+export type OccurredAt8 = string;
+export type PolicyRevision8 = number;
+export type ActiveConfigurationRevision2 = number;
+export type ConfigurationRevision16 = number;
+export type Lifecycle6 = "active";
+export type SchemaVersion26 = 1;
+export type TargetId17 = string;
+export type Action20 = "scanner.collection.start";
+export type AuditEventId9 = string;
+export type CommandId28 = string;
+export type CommittedRevision8 = number;
+export type DecisionId8 = string;
+export type IntentId11 = string;
+export type Intents8 = {
+  [k: string]: unknown;
+}[];
+export type OccurredAt9 = string;
+export type PolicyRevision9 = number;
 export type ErrorCode6 = string | null;
+export type OperationId6 = string;
+export type RunId5 = string;
+export type Status5 = "succeeded" | "partial" | "failed" | "interrupted";
+export type SchemaVersion27 = 1;
+export type TargetId18 = string;
+export type Action21 = "scanner.configuration.disable";
+export type AuditEventId10 = string;
+export type CommandId29 = string;
+export type CommittedRevision9 = number;
+export type DecisionId9 = string;
+export type IntentId12 = string;
+export type Intents9 = {
+  [k: string]: unknown;
+}[];
+export type OccurredAt10 = string;
+export type PolicyRevision10 = number;
+export type ConfigurationRevision17 = number;
+export type Lifecycle7 = "disabled";
+export type SchemaVersion28 = 1;
+export type TargetId19 = string;
+export type RequestDigest1 = string;
+export type SchemaVersion29 = 1;
+export type SourceId22 = string;
+export type Action22 =
+  | "scanner.configuration.save"
+  | "scanner.connection.test"
+  | "scanner.configuration.activate"
+  | "scanner.collection.start"
+  | "scanner.configuration.disable";
+export type ActorId2 = string;
+export type CommandId30 = string;
+export type ConnectorId20 = string;
+export type Disposition2 = "admitted";
+export type CommandId31 = string;
+export type ConfigurationRevision18 = number;
+export type CredentialVersionId9 = string | null;
+export type ErrorCode7 = string | null;
 export type Kind5 = "test" | "collect";
 export type OperationId7 = string;
 export type RunId6 = string | null;
-export type SchemaVersion18 = 1;
-export type CommandId19 = string;
-export type ConfigurationRevision14 = number;
-export type CredentialVersionId8 = string | null;
-export type ErrorCode7 = string | null;
+export type SchemaVersion30 = 1;
+export type CommandId32 = string;
+export type ConfigurationRevision19 = number;
+export type CredentialVersionId10 = string | null;
+export type ErrorCode8 = string | null;
 export type Kind6 = "test" | "collect";
 export type OperationId8 = string;
 export type RunId7 = string | null;
-export type SchemaVersion19 = 1;
-export type ConnectorId18 = string;
-export type RunId8 = string;
-export type SourceId17 = string;
+export type SchemaVersion31 = 1;
+export type RequestDigest2 = string;
+export type SchemaVersion32 = 1;
+export type SourceId23 = string;
+export type ConnectorId21 = string;
+export type OperationId9 = string;
+export type SourceId24 = string;
+export type CommandId33 = string;
+export type ConfigurationRevision20 = number;
+export type CredentialVersionId11 = string | null;
+export type ErrorCode9 = string | null;
+export type Kind7 = "test" | "collect";
+export type OperationId10 = string;
+export type RunId8 = string | null;
+export type SchemaVersion33 = 1;
+export type CommandId34 = string;
+export type ConfigurationRevision21 = number;
+export type CredentialVersionId12 = string | null;
+export type ErrorCode10 = string | null;
+export type Kind8 = "test" | "collect";
+export type OperationId11 = string;
+export type RunId9 = string | null;
+export type SchemaVersion34 = 1;
+export type CommandId35 = string;
+export type ConfigurationRevision22 = number;
+export type CredentialVersionId13 = string | null;
+export type ErrorCode11 = string | null;
+export type Kind9 = "test" | "collect";
+export type OperationId12 = string;
+export type RunId10 = string | null;
+export type SchemaVersion35 = 1;
+export type ConnectorId22 = string;
+export type RunId11 = string;
+export type SourceId25 = string;
 export type Limit10 = number;
 export type Cursor10 = string | null;
 export type AsOf1 = string;
 export type AsOf2 = string;
 export type LastCompleteAt1 = string | null;
-export type Status4 = "never" | "recent" | "stale";
+export type Status6 = "never" | "recent" | "stale";
 export type ReasonCodes = string[];
-export type Status5 = "unknown";
+export type Status7 = "unknown";
 export type CollectedAt = string;
 export type DetectionType = string | null;
-export type EvidenceRef5 = string;
+export type EvidenceRef11 = string;
 export type EvidenceSha256 = string;
 export type GroupId12 = string | null;
 export type HostId = string | null;
@@ -581,11 +845,11 @@ export type VendorStatus = string | null;
 export type Items = DetectionView[];
 export type NextCursor = string | null;
 export type ReasonCodes1 = string[];
-export type Status6 = "complete" | "partial" | "failed";
-export type RunId9 = string;
-export type SchemaVersion20 = 1;
+export type Status8 = "complete" | "partial" | "failed";
+export type RunId12 = string;
+export type SchemaVersion36 = 1;
 export type ReasonCodes2 = string[];
-export type Status7 = "unknown";
+export type Status9 = "unknown";
 export type Authorization61 = string | null;
 export type Limit11 = number;
 export type Cursor11 = string | null;
@@ -914,7 +1178,46 @@ export interface Paths {
               "Content-Type": "application/json";
               [k: string]: unknown;
             };
-            body: unknown;
+            body:
+              | {
+                  action: "connector.recovery.clearance.apply";
+                  actor_id: string;
+                  command_id: string;
+                  disposition: "committed";
+                  receipt: {
+                    [k: string]: unknown;
+                  };
+                  request_digest: string;
+                  schema_version: 1;
+                }
+              | {
+                  action: "connector.recovery.clearance.apply";
+                  actor_id: string;
+                  audit_event_id: string;
+                  command_id: string;
+                  committed_at: string;
+                  disposition: "not_committed";
+                  request_digest: string;
+                  schema_version: 1;
+                }
+              | {
+                  command_id: string;
+                  disposition: "committed";
+                  receipt: {
+                    [k: string]: unknown;
+                  };
+                  request_digest: string;
+                  schema_version: 1;
+                }
+              | {
+                  actor_id: string;
+                  audit_event_id: string;
+                  command_id: string;
+                  committed_at: string;
+                  disposition: "not_committed";
+                  request_digest: string;
+                  schema_version: 1;
+                };
           }
         | {
             status: "422";
@@ -3841,12 +4144,50 @@ export interface Paths {
           };
     };
   };
+  "/api/v1/scanners/{connector_id}/commands/{command_id}/abandon": {
+    post: {
+      request: {
+        path: {
+          connector_id: ConnectorId17;
+          command_id: CommandId17;
+        };
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+        body: AbandonCommand;
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: ScannerNotCommittedDisposition | ScannerCommittedDisposition | ScannerAdmittedDisposition;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
   "/api/v1/scanners/{connector_id}/operations/{operation_id}": {
     get: {
       request: {
         path: {
-          connector_id: ConnectorId17;
-          operation_id: OperationId5;
+          connector_id: ConnectorId21;
+          operation_id: OperationId9;
         };
         headers?: {
           [k: string]: unknown;
@@ -3855,7 +4196,7 @@ export interface Paths {
           [k: string]: unknown;
         };
         query: {
-          source_id: SourceId16;
+          source_id: SourceId24;
           [k: string]: unknown;
         };
       };
@@ -3866,7 +4207,7 @@ export interface Paths {
               "Content-Type": "application/json";
               [k: string]: unknown;
             };
-            body: OperationView2 | OperationView3 | OperationView4;
+            body: OperationView4 | OperationView5 | OperationView6;
           }
         | {
             status: "422";
@@ -3882,8 +4223,8 @@ export interface Paths {
     get: {
       request: {
         path: {
-          connector_id: ConnectorId18;
-          run_id: RunId8;
+          connector_id: ConnectorId22;
+          run_id: RunId11;
         };
         headers?: {
           [k: string]: unknown;
@@ -3892,7 +4233,7 @@ export interface Paths {
           [k: string]: unknown;
         };
         query: {
-          source_id: SourceId17;
+          source_id: SourceId25;
           limit?: Limit10;
           cursor?: Cursor10;
           [k: string]: unknown;
@@ -4236,33 +4577,64 @@ export interface Body2 {
   [k: string]: unknown;
 }
 export interface Body3 {
-  command: {
-    action: "connector.binding.register";
-    command_id: string;
-    expected_authority_revision: number;
-    expected_connector_registry_revision: number;
-    expected_policy_revision: number;
-    /**
-     * @maxItems 0
-     */
-    membership_ids: [];
-    payload: {
-      account_label: string;
-      display_name: string;
-      environment_label: string;
-      evidence_ref: string;
-      grant_initial_read: boolean;
-      platform_id: "us1" | "us2" | "us3" | "eu1" | "eu2" | "in1";
-      product: "qualys_vm";
-      rationale: string;
-      scope: {
-        kind: "account_visible";
+  command:
+    | {
+        action: "connector.binding.register";
+        command_id: string;
+        expected_authority_revision: number;
+        expected_connector_registry_revision: number;
+        expected_policy_revision: number;
+        /**
+         * @maxItems 0
+         */
+        membership_ids: [];
+        payload: {
+          account_label: string;
+          display_name: string;
+          environment_label: string;
+          evidence_ref: string;
+          grant_initial_read: boolean;
+          platform_id: "us1" | "us2" | "us3" | "eu1" | "eu2" | "in1";
+          product: "qualys_vm";
+          rationale: string;
+          scope: {
+            kind: "account_visible";
+          };
+          source_family: "qualys";
+        };
+        schema_version: 1;
+        target_id: "00000000-0000-0000-0000-000000000000";
+      }
+    | {
+        action: "connector.recovery.clearance.apply";
+        command_id: string;
+        expected_revisions: {
+          authority: number;
+          connector: number;
+          identity_membership: number;
+          owners: number;
+          policy: number;
+          secret: number;
+          secret_source: number;
+          source: number;
+          target: number;
+        };
+        /**
+         * @maxItems 0
+         */
+        membership_ids: [];
+        payload: {
+          connector_id: string;
+          evidence_ref: string;
+          rationale: string;
+          recovery_epoch_id: string;
+          secret_id: string;
+          source_id: string;
+          version_id: string;
+        };
+        schema_version: 1;
+        target_id: "00000000-0000-4000-8000-000000000000";
       };
-      source_family: "qualys";
-    };
-    schema_version: 1;
-    target_id: "00000000-0000-0000-0000-000000000000";
-  };
   evidence_ref: string;
   rationale: string;
   schema_version: 1;
@@ -4425,6 +4797,7 @@ export interface ScannerView {
   limits: ScannerLimitsView;
   platform_id: PlatformId;
   product: Product;
+  recovery: RecoveryView;
   schedule_supported: ScheduleSupported;
   schema_version: SchemaVersion4;
   scope: ScannerScopeView;
@@ -4462,6 +4835,22 @@ export interface ScannerLimitsView {
   max_pages: MaxPages;
   overall_deadline_seconds: OverallDeadlineSeconds;
   request_timeout_seconds: RequestTimeoutSeconds;
+}
+/**
+ * Safe current backend recovery metadata, never proof or lease authority.
+ *
+ * All values are required from the current authorized metadata read. Initial
+ * clear/null/false values describe verified initial state, never a fallback
+ * for absent configuration or missing recovery state.
+ */
+export interface RecoveryView {
+  approval_expires_at: string | null;
+  approval_id: string | null;
+  clearance_state: ClearanceState;
+  epoch_id: string | null;
+  fresh_credentials_required: FreshCredentialsRequired;
+  fresh_version_ready: FreshVersionReady;
+  state: State3;
 }
 export interface ScannerScopeView {
   kind: Kind;
@@ -4764,45 +5153,370 @@ export interface OperationView1 {
   started_at: string;
   status: "running";
 }
-export interface OperationView2 {
-  command_id: CommandId17;
+export interface AbandonCommand {
+  command: Command;
+  evidence_ref: EvidenceRef10;
+  rationale: Rationale10;
+  schema_version: SchemaVersion22;
+}
+export interface SaveCommand1 {
+  action: Action10;
+  command_id: CommandId18;
+  expected_revisions: RevisionVector5;
+  membership_ids: MembershipIds5;
+  payload: SavePayload1;
+  schema_version: SchemaVersion17;
+  target_id: TargetId10;
+}
+export interface RevisionVector5 {
+  authority: Authority8;
+  connector: Connector6;
+  identity_membership: IdentityMembership6;
+  owners: Owners6;
+  policy: Policy6;
+  secret: Secret5;
+  secret_source: SecretSource6;
+  source: Source7;
+  target: Target6;
+}
+export interface SavePayload1 {
+  evidence_ref: EvidenceRef5;
+  rationale: Rationale5;
+  settings: QualysSettings1;
+  source_id: SourceId16;
+}
+export interface QualysSettings1 {
+  api_version: ApiVersion1;
+  collection_mode: CollectionMode2;
+  platform_id: PlatformId2;
+  product: Product2;
+  scope: AccountVisibleScope1;
+}
+export interface AccountVisibleScope1 {
+  kind: Kind4;
+}
+export interface TestCommand1 {
+  action: Action11;
+  command_id: CommandId19;
+  expected_revisions: RevisionVector6;
+  membership_ids: MembershipIds6;
+  payload: OperationPayload2;
+  schema_version: SchemaVersion18;
+  target_id: TargetId11;
+}
+export interface RevisionVector6 {
+  authority: Authority9;
+  connector: Connector7;
+  identity_membership: IdentityMembership7;
+  owners: Owners7;
+  policy: Policy7;
+  secret: Secret6;
+  secret_source: SecretSource7;
+  source: Source8;
+  target: Target7;
+}
+export interface OperationPayload2 {
   configuration_revision: ConfigurationRevision12;
   credential_version_id: CredentialVersionId6;
+  evidence_ref: EvidenceRef6;
+  rationale: Rationale6;
+  source_id: SourceId17;
+}
+export interface ActivateCommand1 {
+  action: Action12;
+  command_id: CommandId20;
+  expected_revisions: RevisionVector7;
+  membership_ids: MembershipIds7;
+  payload: ActivatePayload1;
+  schema_version: SchemaVersion19;
+  target_id: TargetId12;
+}
+export interface RevisionVector7 {
+  authority: Authority10;
+  connector: Connector8;
+  identity_membership: IdentityMembership8;
+  owners: Owners8;
+  policy: Policy8;
+  secret: Secret7;
+  secret_source: SecretSource8;
+  source: Source9;
+  target: Target8;
+}
+export interface ActivatePayload1 {
+  configuration_revision: ConfigurationRevision13;
+  credential_version_id: CredentialVersionId7;
+  evidence_ref: EvidenceRef7;
+  rationale: Rationale7;
+  source_id: SourceId18;
+  validation_operation_id: ValidationOperationId1;
+}
+export interface CollectCommand1 {
+  action: Action13;
+  command_id: CommandId21;
+  expected_revisions: RevisionVector8;
+  membership_ids: MembershipIds8;
+  payload: OperationPayload3;
+  schema_version: SchemaVersion20;
+  target_id: TargetId13;
+}
+export interface RevisionVector8 {
+  authority: Authority11;
+  connector: Connector9;
+  identity_membership: IdentityMembership9;
+  owners: Owners9;
+  policy: Policy9;
+  secret: Secret8;
+  secret_source: SecretSource9;
+  source: Source10;
+  target: Target9;
+}
+export interface OperationPayload3 {
+  configuration_revision: ConfigurationRevision14;
+  credential_version_id: CredentialVersionId8;
+  evidence_ref: EvidenceRef8;
+  rationale: Rationale8;
+  source_id: SourceId19;
+}
+export interface DisableCommand1 {
+  action: Action14;
+  command_id: CommandId22;
+  expected_revisions: RevisionVector9;
+  membership_ids: MembershipIds9;
+  payload: SourcePayload1;
+  schema_version: SchemaVersion21;
+  target_id: TargetId14;
+}
+export interface RevisionVector9 {
+  authority: Authority12;
+  connector: Connector10;
+  identity_membership: IdentityMembership10;
+  owners: Owners10;
+  policy: Policy10;
+  secret: Secret9;
+  secret_source: SecretSource10;
+  source: Source11;
+  target: Target10;
+}
+export interface SourcePayload1 {
+  evidence_ref: EvidenceRef9;
+  rationale: Rationale9;
+  source_id: SourceId20;
+}
+export interface ScannerNotCommittedDisposition {
+  action: Action15;
+  actor_id: ActorId;
+  audit_event_id: AuditEventId5;
+  command_id: CommandId23;
+  connector_id: ConnectorId18;
+  disposition: Disposition;
+  occurred_at: OccurredAt5;
+  request_digest: RequestDigest;
+  schema_version: SchemaVersion23;
+  source_id: SourceId21;
+}
+export interface ScannerCommittedDisposition {
+  action: Action16;
+  actor_id: ActorId1;
+  command_id: CommandId24;
+  connector_id: ConnectorId19;
+  disposition: Disposition1;
+  receipt: Receipt;
+  request_digest: RequestDigest1;
+  schema_version: SchemaVersion29;
+  source_id: SourceId22;
+}
+export interface SaveConfigurationReceipt1 {
+  action: Action17;
+  audit_event_id: AuditEventId6;
+  command_id: CommandId25;
+  committed_revision: CommittedRevision5;
+  decision_id: DecisionId5;
+  intent_id: IntentId8;
+  intents: Intents5;
+  occurred_at: OccurredAt6;
+  policy_revision: PolicyRevision6;
+  projection: Projection5;
+  result: SaveConfigurationResult1;
+  schema_version: SchemaVersion24;
+  target_id: TargetId15;
+}
+export interface Projection5 {
+  [k: string]: unknown;
+}
+export interface SaveConfigurationResult1 {
+  configuration_revision: ConfigurationRevision15;
+  lifecycle: Lifecycle5;
+}
+export interface TestConnectionReceipt1 {
+  action: Action18;
+  audit_event_id: AuditEventId7;
+  command_id: CommandId26;
+  committed_revision: CommittedRevision6;
+  decision_id: DecisionId6;
+  intent_id: IntentId9;
+  intents: Intents6;
+  occurred_at: OccurredAt7;
+  policy_revision: PolicyRevision7;
+  projection: Projection6;
+  result: TestConnectionResult1;
+  schema_version: SchemaVersion25;
+  target_id: TargetId16;
+}
+export interface Projection6 {
+  [k: string]: unknown;
+}
+export interface TestConnectionResult1 {
   error_code: ErrorCode5;
-  finished_at: null;
-  kind: Kind4;
+  operation_id: OperationId5;
+  status: Status4;
+}
+export interface ActivateConfigurationReceipt1 {
+  action: Action19;
+  audit_event_id: AuditEventId8;
+  command_id: CommandId27;
+  committed_revision: CommittedRevision7;
+  decision_id: DecisionId7;
+  intent_id: IntentId10;
+  intents: Intents7;
+  occurred_at: OccurredAt8;
+  policy_revision: PolicyRevision8;
+  projection: Projection7;
+  result: ActivateConfigurationResult1;
+  schema_version: SchemaVersion26;
+  target_id: TargetId17;
+}
+export interface Projection7 {
+  [k: string]: unknown;
+}
+export interface ActivateConfigurationResult1 {
+  active_configuration_revision: ActiveConfigurationRevision2;
+  configuration_revision: ConfigurationRevision16;
+  lifecycle: Lifecycle6;
+}
+export interface CollectReceipt1 {
+  action: Action20;
+  audit_event_id: AuditEventId9;
+  command_id: CommandId28;
+  committed_revision: CommittedRevision8;
+  decision_id: DecisionId8;
+  intent_id: IntentId11;
+  intents: Intents8;
+  occurred_at: OccurredAt9;
+  policy_revision: PolicyRevision9;
+  projection: Projection8;
+  result: CollectResult1;
+  schema_version: SchemaVersion27;
+  target_id: TargetId18;
+}
+export interface Projection8 {
+  [k: string]: unknown;
+}
+export interface CollectResult1 {
+  error_code: ErrorCode6;
   operation_id: OperationId6;
-  receipt_id: null;
   run_id: RunId5;
-  schema_version: SchemaVersion17;
+  status: Status5;
+}
+export interface DisableConfigurationReceipt1 {
+  action: Action21;
+  audit_event_id: AuditEventId10;
+  command_id: CommandId29;
+  committed_revision: CommittedRevision9;
+  decision_id: DecisionId9;
+  intent_id: IntentId12;
+  intents: Intents9;
+  occurred_at: OccurredAt10;
+  policy_revision: PolicyRevision10;
+  projection: Projection9;
+  result: DisableConfigurationResult1;
+  schema_version: SchemaVersion28;
+  target_id: TargetId19;
+}
+export interface Projection9 {
+  [k: string]: unknown;
+}
+export interface DisableConfigurationResult1 {
+  configuration_revision: ConfigurationRevision17;
+  lifecycle: Lifecycle7;
+}
+export interface ScannerAdmittedDisposition {
+  action: Action22;
+  actor_id: ActorId2;
+  command_id: CommandId30;
+  connector_id: ConnectorId20;
+  disposition: Disposition2;
+  operation: OperationView2 | OperationView3;
+  request_digest: RequestDigest2;
+  schema_version: SchemaVersion32;
+  source_id: SourceId23;
+}
+export interface OperationView2 {
+  command_id: CommandId31;
+  configuration_revision: ConfigurationRevision18;
+  credential_version_id: CredentialVersionId9;
+  error_code: ErrorCode7;
+  finished_at: null;
+  kind: Kind5;
+  operation_id: OperationId7;
+  receipt_id: null;
+  run_id: RunId6;
+  schema_version: SchemaVersion30;
   started_at: string;
   status: "running";
 }
 export interface OperationView3 {
-  command_id: CommandId18;
-  configuration_revision: ConfigurationRevision13;
-  credential_version_id: CredentialVersionId7;
-  error_code: ErrorCode6;
-  finished_at: string;
-  kind: Kind5;
-  operation_id: OperationId7;
-  receipt_id: string;
-  run_id: RunId6;
-  schema_version: SchemaVersion18;
-  started_at: string;
-  status: "succeeded";
-}
-export interface OperationView4 {
-  command_id: CommandId19;
-  configuration_revision: ConfigurationRevision14;
-  credential_version_id: CredentialVersionId8;
-  error_code: ErrorCode7;
+  command_id: CommandId32;
+  configuration_revision: ConfigurationRevision19;
+  credential_version_id: CredentialVersionId10;
+  error_code: ErrorCode8;
   finished_at: string;
   kind: Kind6;
   operation_id: OperationId8;
-  receipt_id: null | string;
+  receipt_id: null;
   run_id: RunId7;
-  schema_version: SchemaVersion19;
+  schema_version: SchemaVersion31;
+  started_at: string;
+  status: "failed" | "partial" | "interrupted";
+}
+export interface OperationView4 {
+  command_id: CommandId33;
+  configuration_revision: ConfigurationRevision20;
+  credential_version_id: CredentialVersionId11;
+  error_code: ErrorCode9;
+  finished_at: null;
+  kind: Kind7;
+  operation_id: OperationId10;
+  receipt_id: null;
+  run_id: RunId8;
+  schema_version: SchemaVersion33;
+  started_at: string;
+  status: "running";
+}
+export interface OperationView5 {
+  command_id: CommandId34;
+  configuration_revision: ConfigurationRevision21;
+  credential_version_id: CredentialVersionId12;
+  error_code: ErrorCode10;
+  finished_at: string;
+  kind: Kind8;
+  operation_id: OperationId11;
+  receipt_id: string;
+  run_id: RunId9;
+  schema_version: SchemaVersion34;
+  started_at: string;
+  status: "succeeded";
+}
+export interface OperationView6 {
+  command_id: CommandId35;
+  configuration_revision: ConfigurationRevision22;
+  credential_version_id: CredentialVersionId13;
+  error_code: ErrorCode11;
+  finished_at: string;
+  kind: Kind9;
+  operation_id: OperationId12;
+  receipt_id: null | string;
+  run_id: RunId10;
+  schema_version: SchemaVersion35;
   started_at: string;
   status: "failed" | "partial" | "interrupted";
 }
@@ -4813,23 +5527,23 @@ export interface DetectionPage {
   items: Items;
   next_cursor: NextCursor;
   retrieval: RetrievalView;
-  run_id: RunId9;
-  schema_version: SchemaVersion20;
+  run_id: RunId12;
+  schema_version: SchemaVersion36;
   source_freshness: SourceFreshnessView;
 }
 export interface CollectionRecencyView1 {
   as_of: AsOf2;
   last_complete_at: LastCompleteAt1;
-  status: Status4;
+  status: Status6;
 }
 export interface CoverageView {
   reason_codes: ReasonCodes;
-  status: Status5;
+  status: Status7;
 }
 export interface DetectionView {
   collected_at: CollectedAt;
   detection_type: DetectionType;
-  evidence_ref: EvidenceRef5;
+  evidence_ref: EvidenceRef11;
   evidence_sha256: EvidenceSha256;
   group_id: GroupId12;
   host_id: HostId;
@@ -4850,11 +5564,11 @@ export interface VendorTimestamps {
 }
 export interface RetrievalView {
   reason_codes: ReasonCodes1;
-  status: Status6;
+  status: Status8;
 }
 export interface SourceFreshnessView {
   reason_codes: ReasonCodes2;
-  status: Status7;
+  status: Status9;
 }
 export interface Body27 {
   [k: string]: unknown;

@@ -38,7 +38,8 @@ def valid_image_reference(value: str, *, local_fixture: bool = False) -> bool:
 
 
 def build(output: Path, image_reference: str | None = None, source_root: Path | None = None,
-          *, local_admission_fixture: bool = False, verifier_reference: str | None = None) -> None:
+          *, local_admission_fixture: bool = False, verifier_reference: str | None = None,
+          local_demo_compatibility: bool = False) -> None:
     source = (source_root or Path(__file__).resolve().parents[1]) / "deploy" / "compose"
     version = (source / "VERSION").read_text().strip()
     names = files_for_version(version)
@@ -46,6 +47,10 @@ def build(output: Path, image_reference: str | None = None, source_root: Path | 
         raise SystemExit("future RC4 installer bundles require an exact immutable runtime image reference")
     if version == "0.1.0-rc.4" and verifier_reference is None:
         raise SystemExit("future RC4 installer bundles require an exact independent verifier image digest")
+    if verifier_reference is not None and version != "0.1.0-rc.4":
+        raise SystemExit("an RC4 verifier reference can only be packaged with the RC4 file inventory")
+    if local_demo_compatibility and (version != "0.1.0-rc.3" or image_reference or verifier_reference):
+        raise SystemExit("local demo compatibility packaging is only for unpinned RC3 installer assets")
     payload = {name: (source / ("README.rc4.md" if version == "0.1.0-rc.4" and name == "README.md" else name)).read_bytes()
                for name in names}
     if image_reference is not None and not valid_image_reference(image_reference,
@@ -68,6 +73,8 @@ def build(output: Path, image_reference: str | None = None, source_root: Path | 
     manifest = {"format_version": 1, "bundle_version": version,
                 "release_image": image_reference,
                 "files": {name: digest(payload[name]) for name in names}}
+    if local_demo_compatibility:
+        manifest["distribution_scope"] = "local_demo_compatibility"
     if verifier_reference and local_admission_fixture:
         manifest["verifier_reference"] = verifier_reference
     entries = {**payload, "manifest.json": (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode()}
@@ -87,7 +94,8 @@ def build(output: Path, image_reference: str | None = None, source_root: Path | 
 
 
 def verify(archive_path: Path, source_root: Path | None = None,
-           *, local_admission_fixture: bool = False, verifier_reference: str | None = None) -> None:
+           *, local_admission_fixture: bool = False, verifier_reference: str | None = None,
+           allow_local_demo_compatibility: bool = False) -> None:
     with tarfile.open(archive_path, "r:gz") as archive:
         members = archive.getmembers()
         names = [member.name for member in members]
@@ -109,6 +117,14 @@ def verify(archive_path: Path, source_root: Path | None = None,
     if not isinstance(manifest, dict):
         raise SystemExit("bundle file manifest is malformed")
     version = manifest.get("bundle_version")
+    demo_compatibility = manifest.get("distribution_scope") == "local_demo_compatibility"
+    if demo_compatibility and (not allow_local_demo_compatibility or version != "0.1.0-rc.3"):
+        raise SystemExit("local demo compatibility bundle is not a release installer")
+    if set(manifest) != ({"format_version", "bundle_version", "release_image", "files",
+                          "distribution_scope"} if demo_compatibility else
+                         {"format_version", "bundle_version", "release_image", "files"} |
+                         ({"verifier_reference"} if local_admission_fixture and version == "0.1.0-rc.4" else set())):
+        raise SystemExit("bundle manifest contains unsupported fields")
     names_expected = files_for_version(version)
     if set(files) != {*names_expected, "manifest.json"}:
         raise SystemExit("bundle file inventory does not match the maintained source-free manifest")
@@ -162,16 +178,22 @@ def main() -> None:
                            help="allow only the owned loopback registry runtime reference for local qualification")
     build_cmd.add_argument("--verifier-reference",
                            help="independently provisioned local fixture verifier digest (local fixture only)")
+    build_cmd.add_argument("--local-demo-compatibility", action="store_true",
+                           help="build the explicitly non-release RC3 installer nested in the local demo package")
     build_cmd.set_defaults(func=lambda args: build(args.output, args.image_reference, args.source_root,
-        local_admission_fixture=args.local_admission_fixture, verifier_reference=args.verifier_reference))
+        local_admission_fixture=args.local_admission_fixture, verifier_reference=args.verifier_reference,
+        local_demo_compatibility=args.local_demo_compatibility))
     verify_cmd = sub.add_parser("verify"); verify_cmd.add_argument("--archive", type=Path, required=True)
     verify_cmd.add_argument("--source-root", type=Path)
     verify_cmd.add_argument("--local-admission-fixture", action="store_true",
                             help="allow only the owned loopback registry runtime reference for local qualification")
     verify_cmd.add_argument("--verifier-reference",
                             help="exact official verifier digest used to render production bundle source")
+    verify_cmd.add_argument("--allow-local-demo-compatibility", action="store_true",
+                            help="accept only the nested non-release RC3 installer in local demo packages")
     verify_cmd.set_defaults(func=lambda args: verify(args.archive, args.source_root,
-        local_admission_fixture=args.local_admission_fixture, verifier_reference=args.verifier_reference))
+        local_admission_fixture=args.local_admission_fixture, verifier_reference=args.verifier_reference,
+        allow_local_demo_compatibility=args.allow_local_demo_compatibility))
     args = parser.parse_args(); args.func(args)
 
 

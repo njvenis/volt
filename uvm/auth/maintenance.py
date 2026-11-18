@@ -39,7 +39,7 @@ def _private_write(path: str, document: dict):
 
 
 def run(operation: str, username: str | None = None, display_name: str | None = None,
-        config_path: str | None = None):
+        config_path: str | None = None, *, input_document=None):
     if config_path:
         os.environ["UVM_LOCAL_AUTH_CONFIG_FILE"] = config_path
     config = load_local_config()
@@ -47,6 +47,26 @@ def run(operation: str, username: str | None = None, display_name: str | None = 
     if not database_url:
         raise RuntimeError("UVM_DB_URL is required for local account maintenance")
     engine = sa.create_engine(database_url, pool_pre_ping=True)
+    if operation in {'scanner-recovery-targets','scanner-recovery-request','scanner-recovery-import'}:
+        try:
+            if username is not None or display_name is not None or input_document is None:
+                raise RuntimeError('closed recovery maintenance input required')
+            from uvm.connectors.local_recovery import maintenance_request,maintenance_import
+            result=(maintenance_import(engine,input_document,config) if operation=='scanner-recovery-import'
+                else maintenance_request(engine,operation,input_document,config))
+            print(json.dumps(result,sort_keys=True,separators=(',',':')))
+        finally:
+            engine.dispose()
+        return
+    if operation in {'validate-local-recovery','apply-local-restore-fence'}:
+        try:
+            if username is not None or display_name is not None:
+                raise RuntimeError('recovery fence maintenance accepts no account input')
+            from uvm.connectors.local_recovery import maintenance_fence
+            print(json.dumps(maintenance_fence(engine,operation,config),sort_keys=True,separators=(',',':')))
+        finally:
+            engine.dispose()
+        return
     if operation == "initialize-scanner-rule":
         try:
             if username is not None or display_name is not None:
@@ -185,13 +205,24 @@ def _valid_username(value):
 
 def main():
     parser = argparse.ArgumentParser(prog="uvm-local-auth")
-    parser.add_argument("operation", choices=("initialize-scanner-rule", "prepare-setup", "rotate-setup", "create-account", "issue-enrolment", "issue-recovery", "revoke-capabilities", "disable-account"))
+    parser.add_argument("operation", choices=("scanner-recovery-targets", "scanner-recovery-request", "scanner-recovery-import", "validate-local-recovery", "apply-local-restore-fence", "initialize-scanner-rule", "prepare-setup", "rotate-setup", "create-account", "issue-enrolment", "issue-recovery", "revoke-capabilities", "disable-account"))
     parser.add_argument("--config", default=None)
     parser.add_argument("--username")
     parser.add_argument("--display-name")
+    inputs=parser.add_mutually_exclusive_group()
+    inputs.add_argument('--input',choices=('-',))
+    inputs.add_argument('--input-file')
     args = parser.parse_args()
     try:
-        run(args.operation, args.username, args.display_name, args.config)
+        document=None
+        if args.input or args.input_file:
+            if not args.operation.startswith('scanner-recovery-'):
+                raise RuntimeError('operation accepts no JSON input')
+            from uvm.connectors.local_recovery import private_read,parse_document
+            raw=private_read(args.input_file) if args.input_file else sys.stdin.buffer.read(1_000_001)
+            if len(raw)>1_000_000:raise RuntimeError('recovery input too large')
+            document=parse_document(raw)
+        run(args.operation, args.username, args.display_name, args.config,input_document=document)
     except Exception as exc:
         # Never print database URLs, submitted capabilities or verifier material.
         print(f"maintenance failed: {type(exc).__name__}", file=sys.stderr)

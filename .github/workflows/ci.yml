@@ -21,9 +21,33 @@ jobs:
       NODE_VERSION: "24.21.0"
       UV_VERSION: "0.12.18"
       OPENSPEC_VERSION: "1.11.0"
+      SELECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Enforce selected source revision
+        run: test "$(git rev-parse HEAD)" = "$SELECTED_SOURCE_SHA"
+
+      - name: Record selected source identity
+        run: |
+          set -eu
+          CHECKED_OUT_SHA=$(git rev-parse HEAD)
+          SOURCE_SNAPSHOT="sha256:$(git archive --format=tar "$CHECKED_OUT_SHA" | sha256sum | cut -d' ' -f1)"
+          mkdir -p "$RUNNER_TEMP/source-selection"
+          printf '{"event_name":"%s","event_sha":"%s","selected_source_sha":"%s","checked_out_sha":"%s","source_snapshot":"%s"}\n' \
+            "$GITHUB_EVENT_NAME" "$GITHUB_SHA" "$SELECTED_SOURCE_SHA" "$CHECKED_OUT_SHA" "$SOURCE_SNAPSHOT" \
+            > "$RUNNER_TEMP/source-selection/source-selection.json"
+
+      - name: Retain general check source identity
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: volt-easy-portable-source-selection
+          path: ${{ runner.temp }}/source-selection/source-selection.json
+          if-no-files-found: error
+          retention-days: 2
 
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -47,12 +71,18 @@ jobs:
           uv run python -m unittest discover -s tests/identity -v
           uv run python -m unittest tests.ingestion.test_run -v
           uv run python -m unittest tests.operations.test_compose_bundle -v
+          uv run python -m unittest tests.operations.test_portable_ci_source_binding -v
           uv run python -m unittest tests.operations.test_compose_oidc_mode -v
           uv run python -m unittest tests.operations.test_installer_verifier tests.operations.test_easy_installer_launcher -v
           uv run python -m unittest discover -s tests/release -v
           mkdir -p "$RUNNER_TEMP/volt-compose-bundle"
-          uv run python tools/build_compose_bundle.py build --output "$RUNNER_TEMP/volt-compose-bundle/volt-compose.tar.gz"
-          uv run python tools/build_compose_bundle.py verify --archive "$RUNNER_TEMP/volt-compose-bundle/volt-compose.tar.gz"
+          uv run python tools/build_compose_bundle.py build \
+            --output "$RUNNER_TEMP/volt-compose-bundle/volt-compose.tar.gz" \
+            --image-reference "127.0.0.1:46150/volt@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+            --verifier-reference "127.0.0.1:46150/volt-installer-verifier@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" \
+            --local-admission-fixture
+          uv run python tools/build_compose_bundle.py verify \
+            --archive "$RUNNER_TEMP/volt-compose-bundle/volt-compose.tar.gz" --local-admission-fixture
 
       - name: Verify generated UI API and build
         run: |
@@ -89,24 +119,29 @@ jobs:
             machine: aarch64
     permissions:
       contents: read
+    env:
+      SELECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Require native runner and build verifier without publishing
         env:
           ARCH: ${{ matrix.arch }}
           MACHINE: ${{ matrix.machine }}
         run: |
+          test "$(git rev-parse HEAD)" = "$SELECTED_SOURCE_SHA"
           test "$(uname -m)" = "$MACHINE"
           SOURCE_SNAPSHOT="sha256:$(git archive --format=tar HEAD | sha256sum | cut -d' ' -f1)"
           docker build --platform "linux/$ARCH" -f tools/release/verifier.Dockerfile \
-            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.revision=$SELECTED_SOURCE_SHA" \
             --label "org.volt.compose.source-snapshot=$SOURCE_SNAPSHOT" \
             -t "volt-installer-verifier:$ARCH" .
           docker image inspect "volt-installer-verifier:$ARCH" --format '{{.Os}}/{{.Architecture}} {{.Id}} {{.Size}} {{json .Config.Labels}}' | tee "$RUNNER_TEMP/verifier-image.txt"
           test "$(docker image inspect "volt-installer-verifier:$ARCH" --format '{{.Os}}/{{.Architecture}}')" = "linux/$ARCH"
-          test "$(docker image inspect "volt-installer-verifier:$ARCH" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
+          test "$(docker image inspect "volt-installer-verifier:$ARCH" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SELECTED_SOURCE_SHA"
           test "$(docker image inspect "volt-installer-verifier:$ARCH" --format '{{index .Config.Labels "org.volt.compose.source-snapshot"}}')" = "$SOURCE_SNAPSHOT"
           docker run --rm --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
             --tmpfs /tmp:rw,noexec,nosuid,size=16m "volt-installer-verifier:$ARCH" --help
@@ -117,7 +152,11 @@ jobs:
           docker image save --output "$RUNNER_TEMP/verifier-artifact/verifier.tar" "volt-installer-verifier:$ARCH"
           (cd "$RUNNER_TEMP/verifier-artifact" && sha256sum verifier.tar > verifier.tar.sha256)
           printf '%s\n' "$SOURCE_SNAPSHOT" > "$RUNNER_TEMP/verifier-artifact/source-snapshot.txt"
-          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/verifier-artifact/source-revision.txt"
+          printf '%s\n' "$SELECTED_SOURCE_SHA" > "$RUNNER_TEMP/verifier-artifact/source-revision.txt"
+          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/verifier-artifact/source-event-revision.txt"
+          printf '{"event_name":"%s","event_sha":"%s","selected_source_sha":"%s","checked_out_sha":"%s","source_snapshot":"%s"}\n' \
+            "$GITHUB_EVENT_NAME" "$GITHUB_SHA" "$SELECTED_SOURCE_SHA" "$(git rev-parse HEAD)" "$SOURCE_SNAPSHOT" \
+            > "$RUNNER_TEMP/verifier-artifact/source-selection.json"
           cp "$RUNNER_TEMP/verifier-image.txt" "$RUNNER_TEMP/verifier-artifact/"
 
       - name: Transfer verifier platform image to read-only index qualification
@@ -144,9 +183,13 @@ jobs:
             machine: aarch64
     permissions:
       contents: read
+    env:
+      SELECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Build exact source natively without registry publication
         id: build
@@ -155,6 +198,7 @@ jobs:
           MACHINE: ${{ matrix.machine }}
         run: |
           set -eu
+          test "$(git rev-parse HEAD)" = "$SELECTED_SOURCE_SHA"
           test "$(uname -m)" = "$MACHINE"
           SOURCE_SNAPSHOT="sha256:$(git archive --format=tar HEAD | sha256sum | cut -d' ' -f1)"
           CE_IMAGE="$(python3 tools/release/portable_demo.py ce-image --platform "linux/$ARCH")"
@@ -163,7 +207,7 @@ jobs:
             --build-arg "CE_IMAGE=$CE_IMAGE" \
             --build-arg "VOLT_SOURCE_SNAPSHOT=$SOURCE_SNAPSHOT" \
             --label org.opencontainers.image.version=0.1.0-rc.4 \
-            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.revision=$SELECTED_SOURCE_SHA" \
             --label org.opencontainers.image.source=https://github.com/njvenis/volt \
             --label org.volt.oidc-deployment-modes=demo,external,local \
             --label org.volt.compose-install.contract=1 \
@@ -171,7 +215,7 @@ jobs:
           docker image inspect "$IMAGE" --format '{{.Os}}/{{.Architecture}} {{.Id}} {{.Size}} {{json .Config.Labels}}' \
             | tee "$RUNNER_TEMP/runtime-image.txt"
           test "$(docker image inspect "$IMAGE" --format '{{.Os}}/{{.Architecture}}')" = "linux/$ARCH"
-          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
+          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SELECTED_SOURCE_SHA"
           test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.volt.compose.source-snapshot"}}')" = "$SOURCE_SNAPSHOT"
           test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "0.1.0-rc.4"
           case ",$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.volt.oidc-deployment-modes"}}')," in
@@ -182,7 +226,11 @@ jobs:
           docker image save --output "$RUNNER_TEMP/runtime-artifact/runtime.tar" "$IMAGE"
           (cd "$RUNNER_TEMP/runtime-artifact" && sha256sum runtime.tar > runtime.tar.sha256)
           printf '%s\n' "$SOURCE_SNAPSHOT" > "$RUNNER_TEMP/runtime-artifact/source-snapshot.txt"
-          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/runtime-artifact/source-revision.txt"
+          printf '%s\n' "$SELECTED_SOURCE_SHA" > "$RUNNER_TEMP/runtime-artifact/source-revision.txt"
+          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/runtime-artifact/source-event-revision.txt"
+          printf '{"event_name":"%s","event_sha":"%s","selected_source_sha":"%s","checked_out_sha":"%s","source_snapshot":"%s"}\n' \
+            "$GITHUB_EVENT_NAME" "$GITHUB_SHA" "$SELECTED_SOURCE_SHA" "$(git rev-parse HEAD)" "$SOURCE_SNAPSHOT" \
+            > "$RUNNER_TEMP/runtime-artifact/source-selection.json"
           cp "$RUNNER_TEMP/runtime-image.txt" "$RUNNER_TEMP/runtime-artifact/"
 
       - name: Transfer platform image to read-only index qualification
@@ -200,9 +248,13 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    env:
+      SELECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Download native runtime and verifier platform artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -214,6 +266,7 @@ jobs:
       - name: Create only a loopback registry and inspect the real multi-platform index
         run: |
           set -eu
+          test "$(git rev-parse HEAD)" = "$SELECTED_SOURCE_SHA"
           REGISTRY=volt-easy-runtime-ci-registry
           cleanup() {
             if docker container inspect "$REGISTRY" >/dev/null 2>&1; then
@@ -240,9 +293,23 @@ jobs:
             runtime_snapshot=$(cat "$runtime_dir/source-snapshot.txt")
             verifier_snapshot=$(cat "$verifier_dir/source-snapshot.txt")
             test "$runtime_snapshot" = "$verifier_snapshot"
-            test "$runtime_snapshot" = "sha256:$(git archive --format=tar HEAD | sha256sum | cut -d' ' -f1)"
-            test "$(cat "$runtime_dir/source-revision.txt")" = "$GITHUB_SHA"
-            test "$(cat "$verifier_dir/source-revision.txt")" = "$GITHUB_SHA"
+            test "$runtime_snapshot" = "sha256:$(git archive --format=tar "$SELECTED_SOURCE_SHA" | sha256sum | cut -d' ' -f1)"
+            test "$(cat "$runtime_dir/source-revision.txt")" = "$SELECTED_SOURCE_SHA"
+            test "$(cat "$verifier_dir/source-revision.txt")" = "$SELECTED_SOURCE_SHA"
+            test "$(cat "$runtime_dir/source-event-revision.txt")" = "$GITHUB_SHA"
+            test "$(cat "$verifier_dir/source-event-revision.txt")" = "$GITHUB_SHA"
+            for artifact_dir in "$runtime_dir" "$verifier_dir"; do
+              python3 - "$artifact_dir/source-selection.json" <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          record = json.loads(Path(sys.argv[1]).read_text())
+          assert record["event_sha"] == os.environ["GITHUB_SHA"]
+          assert record["selected_source_sha"] == os.environ["SELECTED_SOURCE_SHA"]
+          assert record["checked_out_sha"] == os.environ["SELECTED_SOURCE_SHA"]
+          assert record["source_snapshot"] == "sha256:" + __import__("hashlib").sha256(
+              __import__("subprocess").check_output(["git", "archive", "--format=tar", os.environ["SELECTED_SOURCE_SHA"]])).hexdigest()
+          PY
+            done
             (cd "$runtime_dir" && sha256sum --check runtime.tar.sha256)
             (cd "$verifier_dir" && sha256sum --check verifier.tar.sha256)
             docker load --input "$runtime_dir/runtime.tar"
@@ -251,8 +318,8 @@ jobs:
             docker tag "volt-installer-verifier:$arch" "127.0.0.1:46150/verifier:$arch"
             test "$(docker image inspect "127.0.0.1:46150/volt:$arch" --format '{{.Os}}/{{.Architecture}}')" = "linux/$arch"
             test "$(docker image inspect "127.0.0.1:46150/verifier:$arch" --format '{{.Os}}/{{.Architecture}}')" = "linux/$arch"
-            test "$(docker image inspect "127.0.0.1:46150/volt:$arch" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
-            test "$(docker image inspect "127.0.0.1:46150/verifier:$arch" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
+            test "$(docker image inspect "127.0.0.1:46150/volt:$arch" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SELECTED_SOURCE_SHA"
+            test "$(docker image inspect "127.0.0.1:46150/verifier:$arch" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SELECTED_SOURCE_SHA"
             test "$(docker image inspect "127.0.0.1:46150/volt:$arch" --format '{{index .Config.Labels "org.volt.compose.source-snapshot"}}')" = "$runtime_snapshot"
             test "$(docker image inspect "127.0.0.1:46150/verifier:$arch" --format '{{index .Config.Labels "org.volt.compose.source-snapshot"}}')" = "$verifier_snapshot"
             docker push "127.0.0.1:46150/volt:$arch"

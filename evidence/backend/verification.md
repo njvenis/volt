@@ -47,4 +47,9 @@ The demo-password attempt-limit regression did not complete: a minimal plain Fas
 
 ## Scope limits
 
-No packaged Compose acceptance, external deployment, public registry publication, merge, release, live tenant access, or live Qualys API behavior was performed. The separate scanner owner retains `uvm/scanners/**`, `tests/scanners/**`, and migration `0066`; this repair does not claim scanner registration is configurable or activatable.
+No packaged Compose acceptance, external deployment, public registry publication, merge, release, live tenant access, or live Qualys API behavior was performed. The separate scanner owner retains `uvm/scanners/`, `tests/scanners/`, and migration `0066`; this repair does not claim scanner registration is configurable or activatable.
+
+
+## Original source archive retention
+
+The original b31 backend repair archive is retained outside the public source tree at `/tmp/volt-easy-install-20261118/evidence/backend-senior/pre-pr-public-check/b31-original-source.tar.gz`. Its SHA-256 is `af8c05f848e4d314b031503e0a1f92ba353fa65a3bd78d3ad91284cec6be5fba`. The complete original bytes were copied and their hash verified before removing the tracked archive. This private task-evidence path is not a public download or a portable repository artifact. Prior verification outcomes above are unchanged.

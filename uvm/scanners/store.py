@@ -399,3 +399,11 @@ def scoped_operation(connection, connector_id, source_id, operation_id):
     if row is None:
         raise OperationError('not_found')
     return dict(row)
+
+
+def command_operation(connection, connector_id, command_id):
+    """Provider admission evidence, used only inside current-authorized lookup."""
+    row = connection.execute(sa.select(operations).where(
+        operations.c.connector_id == connector_id,
+        operations.c.command_id == command_id)).mappings().first()
+    return dict(row) if row else None

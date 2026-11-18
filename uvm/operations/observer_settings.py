@@ -1,6 +1,8 @@
 """Pure validation for deployment-scoped observer timing revisions."""
 from __future__ import annotations
 
+from uvm.assessment.command_occupancy import guard_assessment
+
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -231,6 +233,7 @@ def commit_desired_revision(connection, *, deployment_id: str, command_id: str,
             g7_observer_settings_revisions.c.deployment_id == deployment_id)).scalar_one()
     target_id = deployment_audit_id(deployment_id)
 
+    guard_assessment(connection, canonical_command_id, actor_id, action, request_digest)
     prior = connection.execute(sa.select(assessment_command_receipts).where(
         assessment_command_receipts.c.command_id == canonical_command_id).with_for_update()).mappings().first()
     if prior is not None:
@@ -350,6 +353,7 @@ def commit_desired_revision(connection, *, deployment_id: str, command_id: str,
         "audit_id": event_id, "intent_id": intent_id,
         "committed_at": now.isoformat().replace("+00:00", "Z")}
     fail_fixture_stage("receipt")
+    guard_assessment(connection, canonical_command_id, actor_id, action, request_digest)
     connection.execute(assessment_command_receipts.insert().values(
         command_id=canonical_command_id, principal_id=actor_id, action=action,
         target_id=target_id, request_digest=request_digest, decision_id=decision_id,

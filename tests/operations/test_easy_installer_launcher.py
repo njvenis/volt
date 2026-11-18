@@ -21,7 +21,8 @@ class EasyInstallerLauncherTests(unittest.TestCase):
         self.assertLess(source.index("--bundle-only"), source.index('tar -xzf "$BUNDLE"'))
         self.assertNotIn('"$IMAGE_REF" -m uvm.installer.admission', source)
         self.assertLess(source.index("graph-admission.json"), source.index('tar -xzf "$BUNDLE"'))
-        self.assertLess(source.index("--runtime-prepare"), source.index('locked_compose up -d'))
+        self.assertLess(source.index("--runtime-prepare"), source.index('locked_compose create'))
+        self.assertLess(source.index("verify_actual_mounts"), source.index('locked_compose start'))
         self.assertIn("--network none --read-only --cap-drop=ALL", source)
         self.assertLess(source.index("remote Docker contexts are unsupported"), source.index('docker pull "$VERIFIER_IMAGE"'))
         self.assertIn('unix://*)', source)
@@ -59,12 +60,41 @@ class EasyInstallerLauncherTests(unittest.TestCase):
     def test_launcher_restore_fence_fails_before_start_and_uses_closed_ingress_overlay(self):
         source = (ROOT / "deploy/compose/launcher.sh").read_text()
         start = source.split('elif [ "$ACTION" = start ]; then', 1)[1].split('elif [ "$ACTION" = stop ]; then', 1)[0]
-        self.assertLess(start.index('RESTORE_IMPORTED'), start.index('locked_compose up -d'))
+        self.assertLess(start.index('RESTORE_IMPORTED'), start.index('locked_compose create'))
+        self.assertLess(start.index('verify_actual_mounts'), start.index('locked_compose start'))
         self.assertIn('RESTORE_CAPABILITIES_REVOKED', start)
         self.assertIn('RESTORE_SESSIONS_REVOKED', start)
         self.assertIn('local-restore.yaml', source.split('locked_compose() {', 1)[1].split('\n}', 1)[0])
         for field in ("restore_pending", "restore_imported", "restore_capabilities_revoked", "restore_sessions_revoked"):
             self.assertIn(f"{field})", source)
+
+    def test_local_custody_helper_uses_data_only_networkless_mounts_and_actual_mount_audit(self):
+        source = (ROOT / "deploy/compose/launcher.sh").read_text()
+        helper = source.split("recovery_helper() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("--network none --read-only --cap-drop=ALL", helper)
+        self.assertIn("prepare|validate", helper)
+        self.assertIn("mount_access=',readonly'", helper)
+        self.assertNotIn(",rw\"", helper)
+        self.assertIn('verify_actual_mounts()', source)
+        self.assertIn("*/operator.key|*/host.json", source)
+        install = source.split('if [ "$ACTION" = install ]; then', 1)[1].split('elif [ "$ACTION" = start ]; then', 1)[0]
+        start = source.split('elif [ "$ACTION" = start ]; then', 1)[1].split('elif [ "$ACTION" = stop ]; then', 1)[0]
+        for action in (install, start):
+            self.assertLess(action.index("verify_actual_mounts"), action.index("locked_compose start"))
+
+    def test_operator_approval_wrapper_streams_proofs_through_networkless_isolated_helper(self):
+        source = (ROOT / "deploy/compose/launcher.sh").read_text()
+        approval = source.split("run_scanner_recovery_approval() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("scanner-recovery-targets", approval)
+        self.assertIn("scanner-recovery-request", approval)
+        self.assertIn("scanner-recovery-import", approval)
+        self.assertIn("approve --request-stdin --authority-config /authority/host.json", approval)
+        self.assertIn("--network none --read-only --cap-drop=ALL", approval)
+        self.assertIn("dst=/authority/operator.key,readonly", approval)
+        self.assertNotIn("dst=/authority,dst", approval)
+        self.assertNotIn("docker.sock", approval)
+        self.assertIn('RECOVERY_COMMAND=$1', source)
+        self.assertIn('run_scanner_recovery_approval', source.split('elif [ "$ACTION" = recovery ]', 1)[1])
 
 
 if __name__ == "__main__":

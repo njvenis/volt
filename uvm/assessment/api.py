@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from uvm.assessment.command_occupancy import guard_assessment, guard_command
+
 from contextlib import contextmanager, nullcontext
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
@@ -516,11 +518,25 @@ def _commands_request_schema() -> dict:
 
 
 def _abandon_request_schema() -> dict:
+    from uvm.connectors.clearance_disposition import command_schema
     return {"type": "object", "properties": {
-        "schema_version": {"const": 1}, "command": _registration_command_schema(),
+        "schema_version": {"const": 1}, "command": {"oneOf":[_registration_command_schema(),command_schema()]},
         "rationale": {"type": "string"}, "evidence_ref": {"type": "string"}},
         "required": ["schema_version", "command", "rationale", "evidence_ref"],
         "additionalProperties": False}
+
+
+def _abandon_response_schema() -> dict:
+    from uvm.connectors.clearance_disposition import response_schemas
+    values=response_schemas()
+    common={'schema_version':{'const':1},'command_id':{'type':'string','format':'uuid'},
+        'request_digest':{'type':'string','pattern':'^[0-9a-f]{64}$'}}
+    for disposition,extra in (('committed',{'receipt':{'type':'object'}}),('not_committed',{
+            'actor_id':{'type':'string'},'audit_event_id':{'type':'string','format':'uuid'},
+            'committed_at':{'type':'string','format':'date-time'}})):
+        properties={**common,'disposition':{'const':disposition},**extra}
+        values.append({'type':'object','properties':properties,'required':list(properties),'additionalProperties':False})
+    return {'oneOf':values}
 
 
 def _sla_policy_scope_matches_member(document: dict, stable_attrs: dict) -> bool:
@@ -1314,6 +1330,7 @@ def _payload_rationale(action: str, payload: dict) -> tuple[str, str]:
         "connector.configuration.rollback": ({"connector_id", "source_id", "rationale", "evidence_ref", "configuration_revision", "validation_intent_id"}, set()),
         "connector.secret.version.revoke": ({"connector_id", "source_id", "rationale", "evidence_ref", "secret_id", "version_id"}, set()),
         "connector.secret.submission.reconcile": ({"connector_id", "source_id", "rationale", "evidence_ref", "submission_id", "secret_id", "version_id"}, set()),
+        "connector.recovery.clearance.apply": ({"connector_id", "source_id", "secret_id", "version_id", "recovery_epoch_id", "rationale", "evidence_ref"}, set()),
         "owners.assign": ({"owners"}, {"routing_override", "rationale"}),
         "portion.define": ({"portion_id", "owner_ids", "membership_ids"}, {"rationale"}),
         "portion.transfer": ({"portion_id", "owner_ids", "membership_ids", "rationale"}, set()),
@@ -1804,7 +1821,7 @@ def _apply_group_action(document: dict, action: str, payload: dict, membership_i
 _CONNECTOR_COMMAND_ACTIONS = {"connector.configuration.stage", "connector.configuration.validate",
     "connector.configuration.activate", "connector.configuration.disable",
     "connector.configuration.rollback", "connector.secret.version.revoke",
-    "connector.secret.submission.reconcile"}
+    "connector.secret.submission.reconcile", "connector.recovery.clearance.apply"}
 _POLICY_ACTIONS = {"policy.role.create", "policy.role.assign", "policy.role.update", "principal.update", "policy.sla.publish"} | NATIVE_ACTIONS | _CONNECTOR_COMMAND_ACTIONS
 _NO_INTENT_POLICY_ACTIONS = {"policy.role.create", "policy.role.assign", "policy.role.update", "principal.update"}
 _SCOPE_KEYS = {"group_ids", "source_families", "environments", "service_ids", "membership_mode"}
@@ -2478,6 +2495,7 @@ def install_assessment_routes(app: FastAPI) -> None:
                 policy_revision=next_policy_revision, context=context, now=now)
             result = {"schema_version": 1, "route_id": route_id, "revision": revision,
                 "policy_revision": next_policy_revision, "audit": "committed"}
+            guard_assessment(connection, command_id, principal, 'warning.route.manage', hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
             connection.execute(assessment_command_receipts.insert().values(
                 command_id=command_id, principal_id=principal, action="warning.route.manage",
                 target_id=route_id, request_digest=hashlib.sha256(json.dumps(body,
@@ -2566,6 +2584,7 @@ def install_assessment_routes(app: FastAPI) -> None:
                 policy_revision=next_policy_revision, context=context, now=now)
             result = {"schema_version": 1, "link_id": link_id, "revision": revision,
                 "policy_revision": next_policy_revision, "audit": "committed"}
+            guard_assessment(connection, command_id, principal, 'warning.actor_link.manage', hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
             connection.execute(assessment_command_receipts.insert().values(
                 command_id=command_id, principal_id=principal, action="warning.actor_link.manage",
                 target_id=link_id, request_digest=hashlib.sha256(json.dumps(body,
@@ -2919,7 +2938,9 @@ def install_assessment_routes(app: FastAPI) -> None:
 
     @app.post("/api/v1/assessment/commands/{command_id}/abandon", openapi_extra={
         "requestBody": {"required": True, "content": {"application/json": {
-            "schema": _abandon_request_schema()}}}})
+            "schema": _abandon_request_schema()}}},
+        "responses":{"200":{"description":"Committed original command or audited terminal noncommit",
+            "content":{"application/json":{"schema":_abandon_response_schema()}}}}})
     def abandon_command(command_id: str, body: dict, request: Request,
                         principal: str = Depends(authenticate)):
         parsed_id = _uuid(command_id, "command_id")
@@ -2929,6 +2950,12 @@ def install_assessment_routes(app: FastAPI) -> None:
                     for key in ("rationale", "evidence_ref"))):
             _error(422, "invalid_command", "Command disposition request is invalid")
         command = body["command"]
+        if command.get('action')=='connector.recovery.clearance.apply':
+            from uvm.connectors.clearance_disposition import abandon_clearance
+            try:
+                return abandon_clearance(app,parsed_id,body,request,principal)
+            except sa.exc.DBAPIError:
+                _error(503,'dependency_unavailable','Clearance disposition could not commit')
         command_fields = {"schema_version", "command_id", "action", "target_id",
             "membership_ids", "expected_policy_revision", "expected_authority_revision",
             "expected_connector_registry_revision", "payload"}
@@ -2959,6 +2986,8 @@ def install_assessment_routes(app: FastAPI) -> None:
                     or state.get("mode") not in NATIVE_MODES
                     or principal not in set(state.get("bootstrap_admins", []))):
                 _error(403, "forbidden", "Protected local command disposition is required")
+            guard_command(connection, parsed_id, family='assessment', principal_id=principal,
+                action=command['action'], request_digest=digest, allow_terminal=True)
             prior = connection.execute(sa.select(assessment_command_receipts).where(
                 assessment_command_receipts.c.command_id == parsed_id).with_for_update()).mappings().first()
             if prior is not None:
@@ -3054,10 +3083,6 @@ def install_assessment_routes(app: FastAPI) -> None:
                 # A terminal not-committed result can therefore fence even a
                 # delayed retry carrying the same ID with altered action bytes.
                 lock_policy(connection)
-                terminal = connection.execute(sa.select(assessment_command_abandonments.c.command_id).where(
-                    assessment_command_abandonments.c.command_id == command_id).with_for_update()).first()
-                if terminal is not None:
-                    _error(409, "command_terminal", "This command ID has a definitive not-committed disposition")
                 barrier_command_id = request.headers.get("x-uvm-g7-barrier-command")
                 if (os.environ.get("UVM_G7_DISPOSABLE_MODE") == "1" and
                         barrier_command_id == str(body.get("command_id", ""))):
@@ -3142,6 +3167,7 @@ def install_assessment_routes(app: FastAPI) -> None:
                     assessment_command_receipts.c.command_id == command_id).with_for_update()).mappings().first()
                 if protected_native and principal not in set(native_state(policy).get("bootstrap_admins", [])):
                     _error(403, "forbidden", "Protected bootstrap administration is required")
+                guard_assessment(connection, command_id, principal, action, digest)
                 if prior is not None:
                     if prior["request_digest"] != digest:
                         _error(409, "command_id_reused", "Command ID is bound to different content")
@@ -4338,6 +4364,7 @@ def install_assessment_routes(app: FastAPI) -> None:
                     **({"result": administration_result} if native_action else {}),
                     **({"inventory_revision": inventory_revision} if action == "policy.sla.publish"
                         and inventory_revision is not None else {})}
+                guard_assessment(connection, command_id, principal, action, digest)
                 connection.execute(assessment_command_receipts.insert().values(
                     command_id=command_id, principal_id=principal, action=action,
                     target_id=target_id, request_digest=digest, decision_id=decision_id,

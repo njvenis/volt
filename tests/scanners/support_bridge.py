@@ -127,7 +127,8 @@ class Bridge:
             dto.ScannerScopeView('account_visible'), current.lifecycle,
             current.configuration_revision, current.active_configuration_revision,
             dto.CredentialView(current.credential_slot_id, current.credential_version_id, 'active',
-                transaction.document['credential_revision']))
+                transaction.document['credential_revision']),
+            dto.RecoveryView('clear', None, False, False, 'missing', None, None))
 
 
 class Transaction:

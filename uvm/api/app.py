@@ -485,7 +485,7 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
             code = aliases.get(code, code)
             allowed = {"authentication_required", "csrf_failed", "forbidden", "source_scope_forbidden",
                 "not_found", "invalid_request", "revision_conflict", "command_conflict",
-                "submission_conflict", "credential_revoked", "restore_quarantined",
+                "submission_conflict", "credential_revoked", "credential_material_reused", "restore_quarantined",
                 "callback_invalid", "validation_required", "dependency_unavailable", "outcome_unknown",
                 "report_expired", "report_superseded", "host_policy_unavailable",
                 "command_terminal", "command_id_reused", "source_binding_exists",
@@ -499,7 +499,7 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
                 "revision_conflict":409, "command_conflict":409, "submission_conflict":409,
                 "command_terminal":409, "command_id_reused":409, "source_binding_exists":409,
                 "authority_version_conflict":409,
-                "credential_revoked":409, "restore_quarantined":409, "callback_invalid":400,
+                "credential_revoked":409, "credential_material_reused":409, "restore_quarantined":409, "callback_invalid":400,
                 "validation_required":409, "dependency_unavailable":503, "outcome_unknown":503,
                 "host_policy_unavailable":503,
                 "report_expired":400, "report_superseded":409}

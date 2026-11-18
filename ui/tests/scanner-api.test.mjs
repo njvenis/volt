@@ -3,7 +3,8 @@ import {test,after} from 'node:test';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
 import {createRequire} from 'node:module';
-import {mkdtemp,rm} from 'node:fs/promises';
+import {spawnSync} from 'node:child_process';
+import {mkdtemp,rm,readFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {scannerView,sid} from './scanner-fixture.mjs';
@@ -45,3 +46,30 @@ for(const [label,path,method,status,code,globalFailure] of [
  ['unscoped permissions','/api/v1/connectors/'+sid(2)+'/permissions','GET',403,'forbidden',true],
  ['other connector endpoint','/api/v1/connectors/'+sid(2)+'/secrets?source_id='+sid(3),'GET',403,'forbidden',true],
 ])test(`session failure boundary: ${label}`,async t=>{mock(t,{error:{code}},status);const previous=globalThis.dispatchEvent;t.after(()=>{if(previous)globalThis.dispatchEvent=previous;else delete globalThis.dispatchEvent;});const events=[];globalThis.dispatchEvent=e=>{events.push(e);return true;};const r=await api.sessionFetch(path,{method});assert.equal(r.status,status);assert.equal(events.length,globalFailure?1:0);if(events.length)assert.equal(events[0].type,api.SESSION_EVENT);});
+
+const abandonment={schema_version:1,command,rationale:'Review Café 🔒 cancellation',evidence_ref:'synthetic:review'};
+async function dispositionBase(actor='operator-ä'){return {schema_version:1,command_id:command.command_id,connector_id:command.target_id,source_id:command.payload.source_id,action:command.action,actor_id:actor,request_digest:await api.scannerDigest(command,actor)};}
+async function terminalProof(){return {...await dispositionBase(),disposition:'not_committed',audit_event_id:sid(90),occurred_at:'2026-11-18T12:00:00Z'};}
+test('actual abandonment transport and generated request/response schema match provider parsing and canonical digest',async t=>{
+ const proof=await terminalProof(),outgoing=[];const previous=globalThis.fetch;t.after(()=>{globalThis.fetch=previous;});
+ globalThis.fetch=async(path,init)=>{const req=new Request(new URL(path,'https://synthetic.example.invalid'),init);outgoing.push({path:new URL(req.url).pathname,body:await req.json()});return Response.json(proof);};
+ const original=JSON.stringify(abandonment);await api.abandonScanner(abandonment,'operator-ä');await api.abandonScanner(abandonment,'operator-ä');assert.equal(JSON.stringify(abandonment),original);assert.deepEqual(outgoing[0],outgoing[1]);assert.deepEqual(outgoing[0].body,abandonment);assert.equal(outgoing[0].path,'/api/v1/scanners/'+command.target_id+'/commands/'+command.command_id+'/abandon');
+ const script=`import json,sys
+from uvm.scanners.wire import ABANDON_ADAPTER
+from uvm.scanners.store import command_digest
+v=json.load(sys.stdin)
+parsed=ABANDON_ADAPTER.validate_python(v['body']).model_dump()
+print(json.dumps({'body':parsed,'digest':command_digest(v['actor'],parsed['command'])}))`;
+ const parsed=spawnSync('uv',['run','--locked','python','-c',script],{cwd:resolve(import.meta.dirname,'../..'),input:JSON.stringify({body:outgoing[0].body,actor:'operator-ä'}),encoding:'utf8',timeout:30000});assert.equal(parsed.status,0,parsed.stderr);assert.deepEqual(JSON.parse(parsed.stdout),{body:abandonment,digest:proof.request_digest});
+ const schema=JSON.parse(await readFile(new URL('../openapi.json',import.meta.url),'utf8')).paths['/api/v1/scanners/{connector_id}/commands/{command_id}/abandon'].post;
+ const cases=[{schema:schema.requestBody.content['application/json'].schema,value:outgoing[0].body},{schema:schema.responses['200'].content['application/json'].schema,value:proof},{schema:schema.responses['200'].content['application/json'].schema,value:{...await dispositionBase(),disposition:'admitted',operation:operation('interrupted')}}];
+ const validate=`import json,sys
+from jsonschema import Draft202012Validator,FormatChecker
+values=json.load(sys.stdin)
+print(json.dumps([not list(Draft202012Validator(v['schema'],format_checker=FormatChecker()).iter_errors(v['value'])) for v in values]))`;
+ const result=spawnSync('/usr/bin/python3',['-c',validate],{input:JSON.stringify(cases),encoding:'utf8',timeout:30000});assert.equal(result.status,0,result.stderr);assert.deepEqual(JSON.parse(result.stdout),[true,true,true]);
+});
+for(const [field,value] of [['actor_id','another'],['request_digest','0'.repeat(64)],['source_id',sid(91)],['connector_id',sid(91)],['command_id',sid(91)],['action','scanner.collection.start'],['audit_event_id','invalid'],['occurred_at','invalid'],['disposition','admitted']])test(`abandonment rejects mismatched or incomplete ${field} proof`,async t=>{const proof={...await terminalProof(),[field]:value};mock(t,proof,200);await assert.rejects(api.abandonScanner(abandonment,'operator-ä'),e=>e instanceof api.ScannerError&&e.uncertain);});
+for(const status of [401,403,404,409,429,503])test(`abandonment HTTP ${status} is never definitive noncommit`,async t=>{mock(t,{error:{code:'command_conflict'}},status);const previous=globalThis.dispatchEvent;globalThis.dispatchEvent=()=>true;t.after(()=>{if(previous)globalThis.dispatchEvent=previous;else delete globalThis.dispatchEvent;});const original=JSON.stringify(abandonment);await assert.rejects(api.abandonScanner(abandonment,'operator-ä'));assert.equal(JSON.stringify(abandonment),original);});
+test('retained abandonment requires identical original command and does not repair changed content',()=>{assert.equal(api.validScannerAbandonment(abandonment,command),true);for(const v of [{...abandonment,command:{...command,expected_revisions:{...command.expected_revisions,policy:99}}},{...abandonment,extra:true},{...abandonment,rationale:' '},{...abandonment,evidence_ref:'x'.repeat(2049)}]){const original=JSON.stringify(v);assert.equal(api.validScannerAbandonment(v,command),false);assert.equal(JSON.stringify(v),original);}});
+test('admitted proof preserves exact operation binding and never accepts receipt-less succeeded',async t=>{mock(t,{...await dispositionBase(),disposition:'admitted',operation:operation('succeeded')},200);await assert.rejects(api.abandonScanner(abandonment,'operator-ä'),e=>e.uncertain);});

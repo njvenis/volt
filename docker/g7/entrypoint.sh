@@ -223,9 +223,33 @@ fi
 if [[ ${UVM_AUTH_MODE:-} == local ]]; then
   [[ $UVM_OIDC_DEPLOYMENT_MODE == local ]] || { echo 'G7_LOCAL_AUTH=deployment-mode-mismatch' >&2; exit 70; }
   [[ ${UVM_LOCAL_AUTH_CONFIG_FILE:-} == /etc/volt/local-auth.json ]] || { echo 'G7_LOCAL_AUTH=config-path-invalid' >&2; exit 70; }
+  [[ ${UVM_LOCAL_RECOVERY_CONFIG_FILE:-} == /etc/volt/local-recovery.json ]] || { echo 'G7_LOCAL_AUTH=recovery-config-path-invalid' >&2; exit 70; }
   [[ -s /run/secrets/local-auth.json && ! -L /run/secrets/local-auth.json ]] || { echo 'G7_LOCAL_AUTH=config-missing-or-unsafe' >&2; exit 70; }
+  [[ -s /run/secrets/local-recovery.json && ! -L /run/secrets/local-recovery.json ]] || { echo 'G7_LOCAL_AUTH=recovery-config-missing-or-unsafe' >&2; exit 70; }
+  for file in local-recovery-issuer.key local-recovery-issuer.pub local-recovery-operator.pub \
+      local-recovery-material.key; do
+    [[ -s "/run/secrets/$file" && ! -L "/run/secrets/$file" ]] || {
+      echo 'G7_LOCAL_AUTH=recovery-custody-file-missing-or-unsafe' >&2; exit 70;
+    }
+  done
+  [[ -d /run/secrets/local-recovery-fence && ! -L /run/secrets/local-recovery-fence \
+      && -s /run/secrets/local-recovery-fence/fence.json \
+      && ! -L /run/secrets/local-recovery-fence/fence.json ]] || {
+    echo 'G7_LOCAL_AUTH=recovery-fence-missing-or-unsafe' >&2; exit 70;
+  }
   install -d -o root -g uvm -m 0750 /etc/volt
   install -o uvm -g uvm -m 0600 /run/secrets/local-auth.json "$UVM_LOCAL_AUTH_CONFIG_FILE"
+  install -o root -g uvm -m 0600 /run/secrets/local-recovery.json "$UVM_LOCAL_RECOVERY_CONFIG_FILE"
+  install -d -o root -g uvm -m 0750 /run/uvm-local-recovery /run/volt-restore-fence
+  install -o uvm -g uvm -m 0600 /run/secrets/local-recovery-issuer.key /run/uvm-local-recovery/issuer.key
+  install -o uvm -g uvm -m 0600 /run/secrets/local-recovery-issuer.pub /run/uvm-local-recovery/issuer.pub
+  install -o uvm -g uvm -m 0600 /run/secrets/local-recovery-operator.pub /run/uvm-local-recovery/operator.pub
+  install -o uvm -g uvm -m 0600 /run/secrets/local-recovery-material.key /run/uvm-local-recovery/material.key
+  install -o uvm -g uvm -m 0600 /run/secrets/local-recovery-fence/fence.json /run/volt-restore-fence/fence.json
+  install -d -o uvm -g uvm -m 0700 /opt/uvm/state/scanner-evidence
+  [[ ${UVM_SCANNER_EVIDENCE_DIR:-} == /opt/uvm/state/scanner-evidence ]] || {
+    echo 'G7_LOCAL_AUTH=scanner-evidence-path-invalid' >&2; exit 70;
+  }
   [[ -d /run/volt-bootstrap && ! -L /run/volt-bootstrap ]] || { echo 'G7_LOCAL_AUTH=bootstrap-delivery-missing' >&2; exit 70; }
   chown uvm:uvm /run/volt-bootstrap
   chmod 0700 /run/volt-bootstrap
@@ -437,6 +461,24 @@ setpriv --reuid=uvm --regid=uvm --init-groups env -i PATH="$PATH" HOME=/opt/uvm 
   PYTHONPATH=/opt/uvm/app UVM_DB_URL="$UVM_DB_URL" \
   sh -c 'cd /opt/uvm/app && exec python -m alembic -c alembic.ini upgrade head'
 abort_if_shutdown
+fi
+if [[ ${UVM_AUTH_MODE:-} == local && ${UVM_G7_VERIFICATION_ONLY:-0} != 1 ]]; then
+  recovery_maintenance() {
+    local operation=$1
+    setpriv --reuid=uvm --regid=uvm --init-groups env -i PATH="$PATH" HOME=/opt/uvm \
+      PYTHONPATH=/opt/uvm/app UVM_AUTH_MODE=local UVM_DB_URL="$UVM_DB_URL" \
+      UVM_LOCAL_AUTH_CONFIG_FILE=/etc/volt/local-auth.json \
+      UVM_LOCAL_RECOVERY_CONFIG_FILE=/etc/volt/local-recovery.json \
+      UVM_CONNECTOR_LOCAL_KEY_FILE=/run/uvm-connector/local-key \
+      UVM_CONNECTOR_LOCAL_KEY_ID="${UVM_CONNECTOR_LOCAL_KEY_ID:?local secret-source ID is required}" \
+      UVM_SCANNER_EVIDENCE_DIR=/opt/uvm/state/scanner-evidence \
+      python -m uvm.auth.maintenance "$operation" --config /etc/volt/local-auth.json \
+      >/dev/null || { echo "G7_LOCAL_RECOVERY=startup-$operation-failed" >&2; exit 70; }
+  }
+  recovery_maintenance validate-local-recovery
+  recovery_maintenance apply-local-restore-fence
+  recovery_maintenance initialize-scanner-rule
+  abort_if_shutdown
 fi
 
 start_child() {
@@ -670,6 +712,8 @@ start_child api 1800 1800 env -i PATH="$PATH" HOME=/opt/uvm \
   UVM_G7_PRESERVATION_MAX_FUTURE_SKEW_SECONDS="${UVM_G7_PRESERVATION_MAX_FUTURE_SKEW_SECONDS-}" \
   UVM_AUTH_MODE="${UVM_AUTH_MODE-bearer}" UVM_OIDC_CONFIG="${UVM_OIDC_CONFIG-}" \
   UVM_LOCAL_AUTH_CONFIG_FILE="${UVM_LOCAL_AUTH_CONFIG_FILE-}" \
+  UVM_LOCAL_RECOVERY_CONFIG_FILE="${UVM_LOCAL_RECOVERY_CONFIG_FILE-}" \
+  UVM_SCANNER_EVIDENCE_DIR="${UVM_SCANNER_EVIDENCE_DIR-}" \
   UVM_OIDC_DEPLOYMENT_MODE="$UVM_OIDC_DEPLOYMENT_MODE" \
   SSL_CERT_FILE="${SSL_CERT_FILE-}" \
   UVM_GITHUB_API_BASE_URL="${UVM_GITHUB_API_BASE_URL-}" \

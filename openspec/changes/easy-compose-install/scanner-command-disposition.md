@@ -65,3 +65,13 @@ Backend derives principal/action/source from the live handle, rechecks there is 
 ## Decisive tests after adoption
 
 Actual serialized disposition schemas; stale-vector409 preserves frozen content; matching audited tombstone permits NEW ID only; delayed original command after tombstone causes zero HTTP; changed actor/content/source conflicts; admission-vs-abandon race yields one truthful outcome; committed receipt and running/interrupted operation recovery cause no HTTP; audit failure rolls back tombstone and leaves uncertainty; current source revocation denies disposition/readback. Use real shared bridge + committed owned PG and local HTTPS, and keep injected-only tests labelled. Backend/UI changes remain with their owners.
+
+## Required amendment: shared command-ID occupancy
+
+The initial proposal's assumption of uniform global command-ID exclusion was not established. This amendment supersedes that assumption before executable disposition acceptance.
+
+Every writer sharing the command-ID ledger namespace SHALL check current occupancy and terminal tombstones under the same policy lock, including assessment command and abandonment writers, connector command receipts/intents, scanner command receipts/intents/abandonment, and pending secret submissions and their reconciliation/settlement writers. A command ID occupied by another family, actor, action or request digest SHALL conflict without changing either command. A tombstone SHALL fence every delayed admission or completion that could otherwise resurrect that ID. Exact current-authorised replay returns only the original family's retained result. An inconsistent pre-existing mixed state SHALL fail closed and SHALL NOT become definitive non-commit proof.
+
+Use the existing tables and shared lock; no new permission, duplicate ledger, synthetic operation or table is authorised by this amendment. Backend owns shared occupancy/admission/settlement enforcement. Provider consumes the typed lookup/write contract and must not query shared audit tables directly.
+
+Acceptance SHALL include cross-family ID collision and concurrent admission/abandonment cases involving assessment registration, ordinary connector commands, scanner operations, and pending secret submissions. Verify both race orders, audit rollback, delayed secret completion/reconciliation fencing and no scanner HTTP after a winning tombstone. Current authorisation and exact original-body binding remain required before recovery. Family-specific terminal/replay semantics remain explicit; identifier occupancy alone is never an authorisation grant or proof of non-commit.

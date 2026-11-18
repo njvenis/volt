@@ -27,7 +27,7 @@ from uvm.persistence.ingestion_store import IngestionStore
 from uvm.persistence.observation_store import ObservationRepository
 from uvm.persistence.identity_repository import IdentityRepository
 from uvm.scanners import contracts as dto, store
-from uvm.scanners.wire import COMMAND_ADAPTER
+from uvm.scanners.wire import COMMAND_ADAPTER, ABANDON_ADAPTER
 from pydantic import ValidationError
 from uvm.scanners.evidence import PrivateEvidenceStore
 from uvm.scanners.qualys_vm import (QualysError, QualysVMClient,
@@ -108,6 +108,19 @@ def parse_command(connector_id, command):
     if 'validation_operation_id' in payload:
         canonical_uuid(payload['validation_operation_id'])
     return expected
+
+
+def parse_abandonment(connector_id, command_id, body):
+    try:
+        ABANDON_ADAPTER.validate_python(body)
+    except ValidationError:
+        raise store.OperationError('invalid_request') from None
+    canonical_uuid(command_id)
+    command = body['command']
+    parse_command(connector_id, command)
+    if command['command_id'] != command_id:
+        raise store.OperationError('invalid_request')
+    return command
 
 
 class ScannerService:
@@ -268,6 +281,11 @@ class ScannerService:
         state = tx.read_command(command_id=command['command_id'], request_digest=request_digest)
         if state is None:
             return None
+        if isinstance(state, dto.ScannerCommandAbandonment):
+            self._check_abandonment(tx, command, request_digest, state)
+            if store.command_operation(tx.connection, tx.snapshot.connector_id, command['command_id']):
+                raise store.OperationError('inconsistent_operation')
+            raise store.OperationError('command_terminal')
         if state.receipt is not None:
             return asdict(state.receipt), 200
         operation_id = state.intent.operation_id
@@ -278,6 +296,77 @@ class ScannerService:
         if row['receipt_id'] is not None or row['status'] not in {'running', 'failed', 'partial', 'interrupted'}:
             raise store.OperationError('inconsistent_operation')
         return self._operation_view(row), 202 if row['status'] == 'running' else 200
+
+    @staticmethod
+    def _check_abandonment(tx, command, request_digest, fact):
+        if (fact.command_id, fact.principal_id, fact.action, fact.request_digest) != (
+                command['command_id'], tx.snapshot.principal_id,
+                command['action'], request_digest):
+            raise store.OperationError('command_conflict')
+
+    def _disposition(self, tx, command, request_digest, state):
+        common = dict(schema_version=1, command_id=command['command_id'],
+            connector_id=tx.snapshot.connector_id, source_id=tx.snapshot.source_id,
+            action=command['action'], actor_id=tx.snapshot.principal_id,
+            request_digest=request_digest)
+        if isinstance(state, dto.ScannerCommandAbandonment):
+            self._check_abandonment(tx, command, request_digest, state)
+            if store.command_operation(tx.connection, tx.snapshot.connector_id, command['command_id']):
+                raise store.OperationError('inconsistent_operation')
+            return asdict(dto.ScannerNotCommittedDisposition(**common,
+                disposition='not_committed', audit_event_id=state.audit_event_id,
+                occurred_at=state.occurred_at))
+        if not isinstance(state, dto.ScannerCommandState):
+            raise store.OperationError('outcome_unknown')
+        retained = state.intent
+        if (retained.command_id, retained.connector_id, retained.source_id,
+                retained.principal_id, retained.action, retained.request_digest) != (
+                    command['command_id'], tx.snapshot.connector_id, tx.snapshot.source_id,
+                    tx.snapshot.principal_id, command['action'], request_digest):
+            raise store.OperationError('command_conflict')
+        if state.receipt is not None:
+            if (state.receipt.command_id, state.receipt.action, state.receipt.target_id) != (
+                    command['command_id'], command['action'], tx.snapshot.connector_id):
+                raise store.OperationError('inconsistent_operation')
+            return asdict(dto.ScannerCommittedDisposition(**common,
+                disposition='committed', receipt=state.receipt))
+        if retained.operation_id is None:
+            raise store.OperationError('outcome_unknown')
+        operation = store.scoped_operation(tx.connection, tx.snapshot.connector_id,
+            tx.snapshot.source_id, retained.operation_id)
+        if (operation['command_id'], operation['principal_id'], operation['request_digest'],
+                operation['intent_id']) != (command['command_id'], tx.snapshot.principal_id,
+                    request_digest, retained.intent_id):
+            raise store.OperationError('inconsistent_operation')
+        if operation['receipt_id'] is not None or operation['status'] not in {
+                'running', 'failed', 'partial', 'interrupted'}:
+            raise store.OperationError('inconsistent_operation')
+        return asdict(dto.ScannerAdmittedDisposition(**common, disposition='admitted',
+            operation=dto.OperationView(**self._operation_view(operation))))
+
+    def abandon(self, request, connector_id, command_id, body):
+        """Current-authorized disposition, never admission/network/revised content.
+
+        Shared audit/tombstone mechanics belong exclusively to the real backend.
+        The returned proof is rendered only after commit and current readback.
+        """
+        command = parse_abandonment(connector_id, command_id, body)
+        source_id, action = command['payload']['source_id'], command['action']
+        with self._transaction(request, action, connector_id, source_id) as tx:
+            request_digest = store.command_digest(tx.snapshot.principal_id, command)
+            state = tx.read_command(command_id=command_id, request_digest=request_digest)
+            if state is None:
+                if store.command_operation(tx.connection, connector_id, command_id):
+                    raise store.OperationError('inconsistent_operation')
+                fact = tx.record_audited_abandonment(command_id=command_id,
+                    request_digest=request_digest, rationale=body['rationale'],
+                    evidence_ref=body['evidence_ref'])
+                self._check_abandonment(tx, command, request_digest, fact)
+        # Fresh authorization and durable committed ledger lookup, including
+        # first-audit rationale/evidence/time. Never synthesize a local proof.
+        with self._transaction(request, action, connector_id, source_id) as tx:
+            state = tx.read_command(command_id=command_id, request_digest=request_digest)
+            return self._disposition(tx, command, request_digest, state)
 
     def command(self, request, connector_id, command):
         expected = parse_command(connector_id, command)
@@ -665,7 +754,7 @@ class ScannerService:
                 tx.snapshot.expected_revisions, proof, dto.ScannerLimitsView(),
                 'manual', False, config['latest_attempt_run_id'] if config else None,
                 config['latest_complete_run_id'] if config else None,
-                self._recency(tx.connection, config)))
+                self._recency(tx.connection, config), metadata.recovery))
 
     def detection_page(self, request, connector_id, source_id, run_id, *, limit=50, cursor=None):
         for value in (connector_id, source_id, run_id):

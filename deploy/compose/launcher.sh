@@ -185,6 +185,46 @@ helper() {
     --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" /package/setup.py "$@"
 }
 
+# Recovery preparation/validation runs in the admitted image with no network,
+# Docker socket, or operator key exposed to the API container. JSON crosses the
+# boundary as data on stdin/stdout; it is never evaluated as shell.
+recovery_helper() {
+  operation=$1
+  case "$operation" in request|targets-request|prepare|validate) ;; *) fail 'invalid local recovery helper operation' ;; esac
+  if [ "$operation" = request ] || [ "$operation" = targets-request ]; then
+    docker run --rm --network none --read-only --cap-drop=ALL \
+      --security-opt=no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+      --user "$(id -u):$(id -g)" --mount "type=bind,src=$STATE,dst=/instance,readonly" \
+      --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -m uvm.installer.recovery_authority \
+      "$operation" --instance-root /instance
+    return
+  fi
+  [ -s "$WORK/recovery-request.json" ] || fail 'closed local recovery request is missing'
+  case "$operation" in prepare) mount_access='' ;; validate) mount_access=',readonly' ;; esac
+  docker run --rm -i --network none --read-only --cap-drop=ALL \
+    --security-opt=no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+    --user "$(id -u):$(id -g)" --mount "type=bind,src=$STATE,dst=/instance$mount_access" \
+    --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -m uvm.installer.recovery_authority \
+    "$operation" --request-stdin --instance-root /instance
+}
+
+prepare_local_custody() {
+  [ "$MODE" = local ] || return 0
+  recovery_helper request >"$WORK/recovery-request.json" || fail 'could not create closed local recovery request'
+  chmod 600 "$WORK/recovery-request.json"
+  recovery_helper prepare <"$WORK/recovery-request.json" >"$WORK/recovery-prepare.json" \
+    || fail 'local recovery custody preparation failed'
+  chmod 600 "$WORK/recovery-prepare.json"
+}
+
+validate_local_custody() {
+  [ "$MODE" = local ] || return 0
+  recovery_helper request >"$WORK/recovery-request.json" || fail 'local recovery identity request failed'
+  chmod 600 "$WORK/recovery-request.json"
+  recovery_helper validate <"$WORK/recovery-request.json" >"$WORK/recovery-validation.json" \
+    || fail 'local recovery custody validation failed'
+}
+
 locked_compose() {
   clean_path="PATH=$PATH" clean_home="HOME=$HOME" clean_config="DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}"
   clean_host="DOCKER_HOST=${DOCKER_HOST-}" clean_context="DOCKER_CONTEXT=${DOCKER_CONTEXT-}"
@@ -202,12 +242,13 @@ locked_compose() {
 
 read_instance() {
   INFO=$(helper "$STATE" host-validate /state --image "$IMAGE_REF") || fail 'private instance state failed runtime validation'
-  PROJECT=''; OWNER_TOKEN=''; INSTANCE_PLATFORM=''; HTTP_PORT=''
+  PROJECT=''; OWNER_TOKEN=''; MODE=''; INSTANCE_PLATFORM=''; HTTP_PORT=''
   RESTORE_PENDING=0; RESTORE_IMPORTED=0; RESTORE_CAPABILITIES_REVOKED=0; RESTORE_SESSIONS_REVOKED=0
   while IFS='=' read -r key value; do
     case "$key" in
       project) PROJECT=$value ;;
       owner_token) OWNER_TOKEN=$value ;;
+      mode) MODE=$value ;;
       platform) INSTANCE_PLATFORM=$value ;;
       http_port) HTTP_PORT=$value ;;
       restore_pending) RESTORE_PENDING=$value ;;
@@ -220,6 +261,7 @@ read_instance() {
 $INFO
 EOF_INFO
   case "$PROJECT" in [a-z][a-z0-9-]*) ;; *) fail 'instance project name is malformed' ;; esac
+  [ "$MODE" = local ] || fail 'instance mode differs from this launcher contract'
   case "$OWNER_TOKEN" in *[!0-9a-f]*|'') fail 'instance ownership token is malformed' ;; esac
   [ "${#OWNER_TOKEN}" -eq 64 ] || fail 'instance ownership token is malformed'
   [ "$INSTANCE_PLATFORM" = "$PLATFORM" ] || fail 'instance platform differs from admitted runtime'
@@ -241,7 +283,75 @@ check_owned_resources() {
   fi
 }
 
+verify_actual_mounts() {
+  container="${PROJECT}-volt-1"
+  mounts=$(docker container inspect "$container" --format \
+    '{{range .Mounts}}{{printf "%s|%s|%s|%s|%t\n" .Type .Name .Source .Destination .RW}}{{end}}') \
+    || fail 'could not inspect the created VOLT container mount inventory'
+  seen_postgres=0 seen_media=0 seen_state=0 seen_oidc=0 seen_fence=0
+  while IFS='|' read -r type name source target writable; do
+    [ -n "$target" ] || continue
+    case "$target" in
+      /var/lib/postgresql/data)
+        [ "$type" = volume ] && [ "$name" = "${PROJECT}_postgres" ] && [ "$writable" = true ] \
+          || fail 'actual PostgreSQL mount differs from its owned named volume'
+        seen_postgres=1 ;;
+      /app/media)
+        [ "$type" = volume ] && [ "$name" = "${PROJECT}_media" ] && [ "$writable" = true ] \
+          || fail 'actual media mount differs from its owned named volume'
+        seen_media=1 ;;
+      /opt/uvm/state)
+        [ "$type" = volume ] && [ "$name" = "${PROJECT}_state" ] && [ "$writable" = true ] \
+          || fail 'actual application state mount differs from its owned named volume'
+        seen_state=1 ;;
+      /etc/volt/oidc.json)
+        [ "$type" = bind ] && [ "$source" = "$STATE/oidc.json" ] && [ "$writable" = false ] \
+          || fail 'actual OIDC configuration mount is not the admitted read-only file'
+        seen_oidc=1 ;;
+      /run/volt-bootstrap)
+        [ "$type" = bind ] && [ "$source" = "$STATE/secrets/bootstrap-delivery" ] && [ "$writable" = true ] \
+          || fail 'actual capability delivery mount is not the admitted private directory' ;;
+      /run/secrets/local-recovery-fence)
+        [ "$type" = bind ] && [ "$source" = "$STATE/secrets/local-restore-fence" ] \
+          && [ "$writable" = false ] || fail 'actual restore fence mount is not its narrow read-only directory'
+        seen_fence=1 ;;
+      /run/secrets/*)
+        case "$target" in
+          /run/secrets/uvm_db_password) rel=secrets/uvm_db_password ;;
+          /run/secrets/ce_db_password) rel=secrets/ce_db_password ;;
+          /run/secrets/ce_admin_password) rel=secrets/ce_admin_password ;;
+          /run/secrets/ce_secret_key) rel=secrets/ce_secret_key ;;
+          /run/secrets/ce_credential_key) rel=secrets/ce_credential_key ;;
+          /run/secrets/uvm_cursor_secret) rel=secrets/uvm_cursor_secret ;;
+          /run/secrets/oidc_client_secret) rel=secrets/oidc_client_secret ;;
+          /run/secrets/oidc_sync_secret) rel=secrets/oidc_sync_secret ;;
+          /run/secrets/oidc_operator_secret) rel=secrets/oidc_operator_secret ;;
+          /run/secrets/recovery-server.crt) rel=secrets/recovery-server.crt ;;
+          /run/secrets/recovery-server.key) rel=secrets/recovery-server.key ;;
+          /run/secrets/recovery-ca.crt) rel=secrets/recovery-ca.crt ;;
+          /run/secrets/local-auth.json) rel=local-auth.json ;;
+          /run/secrets/local-auth-key) rel=secrets/local-auth-key ;;
+          /run/secrets/local-recovery.json) rel=local-recovery.json ;;
+          /run/secrets/local-recovery-issuer.key) rel=secrets/local-recovery-runtime/issuer.key ;;
+          /run/secrets/local-recovery-issuer.pub) rel=secrets/local-recovery-runtime/issuer.pub ;;
+          /run/secrets/local-recovery-operator.pub) rel=secrets/local-recovery-runtime/operator.pub ;;
+          /run/secrets/local-recovery-material.key) rel=secrets/local-recovery-runtime/material.key ;;
+          *) fail 'actual VOLT container has an unapproved API secret mount' ;;
+        esac
+        [ "$type" = bind ] && [ "$source" = "$STATE/$rel" ] && [ "$writable" = false ] \
+          || fail 'actual API secret mount differs from the admitted read-only file'
+        case "$source" in *local-recovery-authority*|*/operator.key|*/host.json) fail 'host operator authority is mounted into the API' ;; esac ;;
+      *) fail "actual VOLT container has an unapproved mount target: $target" ;;
+    esac
+  done <<EOF_MOUNTS
+$mounts
+EOF_MOUNTS
+  [ "$seen_postgres$seen_media$seen_state$seen_oidc$seen_fence" = 11111 ] \
+    || fail 'actual VOLT container mount inventory is incomplete'
+}
+
 take_lock() {
+  [ -z "$LOCK_NAME" ] || return 0
   LOCK_NAME="volt-lock-${PROJECT}-$$"
   docker run -d --name "$LOCK_NAME" --restart=no --network none --read-only \
     --label "volt.compose.owner-token=$OWNER_TOKEN" --label "volt.compose.project=$PROJECT" \
@@ -287,6 +397,60 @@ show_capability() {
   fi
 }
 
+run_scanner_recovery_approval() {
+  [ "$MODE" = local ] || fail 'scanner recovery approval is available only for local-auth instances'
+  [ -n "$RECOVERY_SOURCE" ] && [ -n "$RECOVERY_RATIONALE" ] && [ -n "$RECOVERY_EVIDENCE_REF" ] \
+    || fail 'recovery approval requires --source, --rationale and --evidence-ref'
+  running=$(docker container inspect "${PROJECT}-volt-1" --format '{{.State.Running}}' 2>/dev/null) \
+    || fail 'VOLT must be running before scanner recovery approval'
+  [ "$running" = true ] || fail 'VOLT must be running before scanner recovery approval'
+  recovery_helper targets-request --instance-root /instance >"$WORK/targets-request.json" \
+    || fail 'could not construct the private scanner-target request'
+  chmod 600 "$WORK/targets-request.json"
+  locked_compose exec -T --user 1800:1800 volt /opt/uvm/venv/bin/python -m uvm.auth.maintenance \
+    scanner-recovery-targets --config /etc/volt/local-auth.json --input - \
+    <"$WORK/targets-request.json" >"$WORK/targets-response.json" \
+    || fail 'local API did not return current scanner recovery targets'
+  chmod 600 "$WORK/targets-response.json"
+  docker run --rm -i --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+    --tmpfs /tmp:rw,noexec,nosuid,size=16m --user "$(id -u):$(id -g)" \
+    --mount "type=bind,src=$PACKAGE,dst=/package,readonly" \
+    --mount "type=bind,src=$STATE,dst=/instance,readonly" \
+    --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -m uvm.installer.recovery_authority \
+    select-target --request-stdin --source "$RECOVERY_SOURCE" --rationale "$RECOVERY_RATIONALE" \
+    --evidence-ref "$RECOVERY_EVIDENCE_REF" <"$WORK/targets-response.json" >"$WORK/recovery-request.json" \
+    || fail 'source label did not identify exactly one scanner'
+  chmod 600 "$WORK/recovery-request.json"
+  locked_compose exec -T --user 1800:1800 volt /opt/uvm/venv/bin/python -m uvm.auth.maintenance \
+    scanner-recovery-request --config /etc/volt/local-auth.json --input - \
+    <"$WORK/recovery-request.json" >"$WORK/approval-request.json" \
+    || fail 'local API refused the fresh scanner recovery request'
+  chmod 600 "$WORK/approval-request.json"
+  docker run --rm -i --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+    --tmpfs /tmp:rw,noexec,nosuid,size=16m --user "$(id -u):$(id -g)" \
+    --mount "type=bind,src=$STATE/secrets/local-recovery-authority/operator.key,dst=/authority/operator.key,readonly" \
+    --mount "type=bind,src=$STATE/secrets/local-recovery-authority/operator.pub,dst=/authority/operator.pub,readonly" \
+    --mount "type=bind,src=$STATE/secrets/local-recovery-authority/issuer.pub,dst=/authority/issuer.pub,readonly" \
+    --mount "type=bind,src=$STATE/secrets/local-recovery-authority/host.json,dst=/authority/host.json,readonly" \
+    --mount "type=bind,src=$STATE/secrets/local-restore-fence,dst=/authority/fence,readonly" \
+    --mount "type=bind,src=$STATE/instance.json,dst=/authority/instance.json,readonly" \
+    --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -m uvm.installer.recovery_authority \
+    approve --request-stdin --authority-config /authority/host.json \
+    <"$WORK/approval-request.json" >"$WORK/approval.json" \
+    || fail 'offline host recovery authority rejected the request'
+  chmod 600 "$WORK/approval.json"
+  locked_compose exec -T --user 1800:1800 volt /opt/uvm/venv/bin/python -m uvm.auth.maintenance \
+    scanner-recovery-import --config /etc/volt/local-auth.json --input - \
+    <"$WORK/approval.json" >"$WORK/import-receipt.json" \
+    || fail 'local API rejected the signed operator approval'
+  chmod 600 "$WORK/import-receipt.json"
+  docker run --rm -i --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+    --tmpfs /tmp:rw,noexec,nosuid,size=16m --user "$(id -u):$(id -g)" \
+    --mount "type=bind,src=$PACKAGE,dst=/package,readonly" \
+    --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -m uvm.installer.recovery_authority \
+    summarize-import --request-stdin --source "$RECOVERY_SOURCE" <"$WORK/import-receipt.json"
+}
+
 run_maintenance() {
   operation=$1; shift
   locked_compose exec -T --user 0:0 volt /opt/uvm/venv/bin/python \
@@ -302,6 +466,13 @@ run_maintenance() {
 if [ "$#" -lt 1 ]; then fail 'usage: launcher.sh install|start|stop|status|setup|account [arguments]'; fi
 ACTION=$1
 shift
+RECOVERY_COMMAND=''
+if [ "$ACTION" = recovery ]; then
+  [ "$#" -ge 1 ] && [ "$1" = approve-scanner ] \
+    || fail 'usage: recovery approve-scanner --source LABEL --rationale TEXT --evidence-ref TEXT'
+  RECOVERY_COMMAND=$1
+  shift
+fi
 STATE=''
 HTTP_PORT=8180
 USERNAME=''
@@ -310,6 +481,9 @@ OPERATION=''
 PROJECT_PREFIX='volt-easy'
 CONFIRM_PROJECT=''
 REMOVE_STATE=0
+RECOVERY_SOURCE=''
+RECOVERY_RATIONALE=''
+RECOVERY_EVIDENCE_REF=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --directory) [ "$#" -ge 2 ] || fail '--directory needs a path'; STATE=$2; shift 2 ;;
@@ -318,6 +492,9 @@ while [ "$#" -gt 0 ]; do
     --display-name) [ "$#" -ge 2 ] || fail '--display-name needs a value'; DISPLAY_NAME=$2; shift 2 ;;
     --project-prefix) [ "$#" -ge 2 ] || fail '--project-prefix needs a value'; PROJECT_PREFIX=$2; shift 2 ;;
     --confirm-project) [ "$#" -ge 2 ] || fail '--confirm-project needs a value'; CONFIRM_PROJECT=$2; shift 2 ;;
+    --source) [ "$#" -ge 2 ] || fail '--source needs a value'; RECOVERY_SOURCE=$2; shift 2 ;;
+    --rationale) [ "$#" -ge 2 ] || fail '--rationale needs a value'; RECOVERY_RATIONALE=$2; shift 2 ;;
+    --evidence-ref) [ "$#" -ge 2 ] || fail '--evidence-ref needs a value'; RECOVERY_EVIDENCE_REF=$2; shift 2 ;;
     --remove-state) REMOVE_STATE=1; shift ;;
     prepare-setup|rotate-setup|create-account|issue-enrolment|issue-recovery|disable-account|revoke-capabilities)
       [ -z "$OPERATION" ] || fail 'only one maintenance operation is allowed'; OPERATION=$1; shift ;;
@@ -332,12 +509,17 @@ else
   [ -n "${HOME:-}" ] || fail 'HOME is not set; pass --directory explicitly'
   STATE="$HOME/.local/share/volt/instance"
 fi
+while [ "$STATE" != / ] && [ "${STATE%/}" != "$STATE" ]; do STATE=${STATE%/}; done
 case "$STATE" in *,*|*:* ) fail 'instance path cannot contain commas or colons for Docker bind mounts' ;; esac
 
 if [ "$ACTION" = install ]; then
-  [ ! -e "$STATE" ] && [ ! -L "$STATE" ] || fail 'refusing an existing instance directory'
   parent=$(dirname -- "$STATE")
   mkdir -p "$parent"
+  parent=$(cd -P -- "$parent" && pwd -P) || fail 'could not resolve the private instance parent directory'
+  state_name=${STATE##*/}
+  case "$state_name" in ''|.|..) fail 'instance directory name is unsafe' ;; esac
+  STATE="$parent/$state_name"
+  [ ! -e "$STATE" ] && [ ! -L "$STATE" ] || fail 'refusing an existing instance directory'
   mkdir -m 700 "$STATE"
   INSTALLING=1
   mkdir -m 700 "$STATE/compose"
@@ -364,6 +546,7 @@ if [ "$ACTION" = install ]; then
       --label "com.docker.compose.project=$PROJECT" --label "com.docker.compose.volume=$volume" \
       "${PROJECT}_$volume" >/dev/null || fail "could not create privately owned $volume volume"
   done
+  take_lock
   SUBNET=$(docker network inspect "$NETWORK" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}')
   GATEWAY=$(docker network inspect "$NETWORK" --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}')
   case "$SUBNET" in *[!0-9./]*|'') fail 'Docker returned an invalid private network subnet' ;; esac
@@ -380,17 +563,26 @@ if [ "$ACTION" = install ]; then
     --network-subnet "$SUBNET" --network-gateway "$GATEWAY" \
     --runtime-compose-directory "$STATE/compose" --host-instance-directory "$STATE" \
     >/dev/null || fail 'private runtime preparation failed'
+  MODE=local
+  prepare_local_custody
 else
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || fail 'instance directory is missing or unsafe'
+  parent=$(cd -P -- "$(dirname -- "$STATE")" && pwd -P) || fail 'could not resolve the private instance parent directory'
+  state_name=${STATE##*/}
+  case "$state_name" in ''|.|..) fail 'instance directory name is unsafe' ;; esac
+  STATE="$parent/$state_name"
   read_instance
 fi
 
 read_instance
 take_lock
+validate_local_custody
 check_owned_resources
 if [ "$ACTION" = install ]; then
   locked_compose config --quiet || fail 'resolved local Compose configuration failed validation'
-  locked_compose up -d || fail 'VOLT Compose startup failed'
+  locked_compose create || fail 'VOLT Compose container creation failed'
+  verify_actual_mounts
+  locked_compose start || fail 'VOLT Compose startup failed'
   tries=0
   while [ "$tries" -lt 180 ]; do
     health=$(docker container inspect "${PROJECT}-volt-1" --format '{{.State.Health.Status}}' 2>/dev/null || :)
@@ -407,10 +599,14 @@ elif [ "$ACTION" = start ]; then
     [ "$RESTORE_CAPABILITIES_REVOKED" -eq 1 ] && [ "$RESTORE_SESSIONS_REVOKED" -eq 1 ] \
       || fail 'restored capabilities and sessions have not both been revoked; ingress remains unpublished'
   fi
-  locked_compose up -d
+  locked_compose create --force-recreate || fail 'VOLT Compose container preparation failed'
+  verify_actual_mounts
+  locked_compose start
 elif [ "$ACTION" = stop ]; then
+  verify_actual_mounts
   locked_compose stop --timeout 600
 elif [ "$ACTION" = status ]; then
+  verify_actual_mounts
   locked_compose ps
 elif [ "$ACTION" = setup ]; then
   [ "$RESTORE_PENDING" -eq 0 ] || fail 'local setup is unavailable until restored credentials and sessions are revoked'
@@ -422,6 +618,8 @@ elif [ "$ACTION" = account ]; then
   if [ -n "$USERNAME" ]; then set -- "$@" --username "$USERNAME"; fi
   if [ -n "$DISPLAY_NAME" ]; then set -- "$@" --display-name "$DISPLAY_NAME"; fi
   run_maintenance "$OPERATION" "$@"
+elif [ "$ACTION" = recovery ] && [ "$RECOVERY_COMMAND" = approve-scanner ]; then
+  run_scanner_recovery_approval
 elif [ "$ACTION" = destroy ]; then
   [ "$CONFIRM_PROJECT" = "$PROJECT" ] || fail 'destroy requires --confirm-project with the exact owned project name'
   locked_compose down --timeout 600 --volumes
@@ -431,5 +629,5 @@ elif [ "$ACTION" = destroy ]; then
     rm -rf "$STATE"
   fi
 else
-  fail 'supported commands are install, start, stop, status, setup, account, and explicit destroy'
+  fail 'supported commands are install, start, stop, status, setup, account, recovery, and explicit destroy'
 fi

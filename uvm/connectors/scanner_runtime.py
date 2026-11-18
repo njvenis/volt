@@ -9,13 +9,16 @@ import re
 import uuid
 
 import sqlalchemy as sa
+from uvm.assessment.command_occupancy import guard_command
+from uvm.connectors.local_recovery import recovery_view, assert_profile_state, require_recovery_lease, invalidate_workflow
 
 from uvm.assessment.policy_lock import lock_policy
 from uvm.auth.local import COOKIE_NAME, LocalAuth
 from uvm.auth.schema import AUTHORITY_CONTEXT
 from uvm.connectors.api import _fail, _require, _revisions, _uuid
 from uvm.connectors.crypto import decrypt, SecretUnavailable
-from uvm.persistence.assessment_schema import assessment_audit_events, assessment_command_receipts, assessment_policy
+from uvm.persistence.assessment_schema import (assessment_audit_events, assessment_command_receipts,
+    assessment_command_abandonments, assessment_policy)
 from uvm.persistence.connector_binding_schema import connector_bindings
 from uvm.persistence.connector_schema import (connectors, connector_intents,
     connector_receipts, connector_secret_heads, connector_secrets)
@@ -100,6 +103,10 @@ class SharedScannerRuntime:
                 if row["source_id"] != source_id or row["source_family"] != "qualys":
                     _fail(403, "source_scope_forbidden", "Source scope does not match")
                 _require(policy["document"], context.principal_id, grant, row)
+                assert_profile_state(c,row)
+                if (action=='scanner.configuration.save' and expected_revisions is not None
+                        and row['recovery'].get('state')!='clear'):
+                    _fail(409,'restore_quarantined','Finish recovery before editing scanner configuration')
                 handle = _ScannerTransaction(self, c, action, row, registration, policy, context,
                     expected_revisions, snapshot)
                 if expected_revisions is not None and expected_revisions != handle.snapshot.expected_revisions:
@@ -142,8 +149,12 @@ class SharedScannerRuntime:
                 secret = tx._secret
                 if (snapshot.credential_version_id is None or secret is None
                         or secret["purpose"] != "qualys_vm_basic" or secret["state"] != "active"
-                        or secret["quarantine"] != "clear" or tx._row["recovery"].get("state") != "clear"):
+                        or secret["quarantine"] != "clear"):
                     _fail(409, "credential_revoked", "Scanner credential is unavailable")
+                if tx._row['recovery'].get('state')!='clear':
+                    if action!='test':
+                        _fail(409,'restore_quarantined','Scanner is quarantined after restore')
+                    require_recovery_lease(tx.connection,tx._row,secret)
                 try:
                     plaintext = decrypt(secret, snapshot.connector_id,
                         snapshot.credential_slot_id, snapshot.credential_version_id)
@@ -212,7 +223,8 @@ class _ScannerTransaction:
             self._registration["display_name"], value["account_label"], row["environment_label"],
             "qualys_vm", value["platform_id"], dto.ScannerScopeView("account_visible"),
             row["lifecycle"], row["configuration_revision"], row["active_configuration_revision"],
-            dto.CredentialView(self._slot, secret["version_id"] if secret else None, state, self._head_revision))
+            dto.CredentialView(self._slot, secret["version_id"] if secret else None, state, self._head_revision),
+            recovery_view(self.connection,row,secret))
 
     def _intent_row(self, command_id):
         return self.connection.execute(sa.select(connector_intents).where(
@@ -221,27 +233,77 @@ class _ScannerTransaction:
 
     def read_command(self, *, command_id, request_digest):
         _uuid(command_id, "command_id")
+        if not isinstance(request_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", request_digest):
+            _fail(400, "invalid_request", "Request digest is invalid")
+        current = self.snapshot
+        guard_command(self.connection, command_id, family='scanner',
+            principal_id=current.principal_id, action=self._action,
+            request_digest=request_digest, connector_id=current.connector_id,
+            source_id=current.source_id, allow_terminal=True)
         row = self._intent_row(command_id)
         prior = self.connection.execute(sa.select(connector_receipts).where(
             connector_receipts.c.command_id == command_id).with_for_update()).mappings().first()
-        if row is None:
-            used = self.connection.execute(sa.select(assessment_command_receipts.c.command_id).where(
-                assessment_command_receipts.c.command_id == command_id)).first()
-            if prior is not None or used is not None:
-                _fail(409, "command_id_reused", "Command ID is already bound")
-            return None
-        value = row["payload"]
+        used = self.connection.execute(sa.select(assessment_command_receipts.c.command_id).where(
+            assessment_command_receipts.c.command_id == command_id).with_for_update()).first()
+        terminal = self.connection.execute(sa.select(assessment_command_abandonments).where(
+            assessment_command_abandonments.c.command_id == command_id).with_for_update()).mappings().first()
         current = self.snapshot
+        if terminal is not None:
+            if row is not None or prior is not None or used is not None:
+                _fail(503, "inconsistent_operation", "Command disposition is inconsistent")
+            if (terminal["principal_id"] != current.principal_id or terminal["action"] != self._action
+                    or terminal["request_digest"] != request_digest):
+                _fail(409, "command_conflict", "Command ID is bound to different content")
+            event = self.connection.execute(sa.select(assessment_audit_events).where(
+                assessment_audit_events.c.event_id == terminal["audit_event_id"])).mappings().first()
+            after = event["after_value"] if event else None
+            if (event is None or not isinstance(after, dict) or event["origin"] != "scanner_api"
+                    or event["command_id"] != command_id or event["actor_id"] != terminal["principal_id"]
+                    or event["action"] != terminal["action"] or after.get("stage") != "abandoned"
+                    or after.get("disposition") != "not_committed"
+                    or after.get("request_digest") != request_digest):
+                _fail(503, "inconsistent_operation", "Command disposition audit is inconsistent")
+            if event["target_id"] != current.connector_id or after.get("source_id") != current.source_id:
+                _fail(409, "command_conflict", "Command ID is bound to a different source")
+            return dto.ScannerCommandAbandonment(command_id, current.principal_id, self._action,
+                request_digest, terminal["audit_event_id"], _instant(terminal["created_at"]))
+        if row is None:
+            if prior is not None or used is not None:
+                _fail(409, "command_conflict", "Command ID is already bound")
+            return None
+        if used is not None:
+            _fail(503, "inconsistent_operation", "Command admission is inconsistent")
+        value = row["payload"]
         if (row["connector_id"] != current.connector_id or row["actor_id"] != current.principal_id
                 or value["source_id"] != current.source_id or value["action"] != self._action
                 or value["request_digest"] != request_digest):
-            _fail(409, "command_id_reused", "Command ID is bound to different content")
+            _fail(409, "command_conflict", "Command ID is bound to different content")
         intent = dto.ScannerCommandIntent(**{**value["intent"], "snapshot": _snapshot(value["intent"]["snapshot"])})
         if prior is not None and (prior["connector_id"] != current.connector_id
                 or prior["actor_id"] != current.principal_id or prior["action"] != self._action
                 or prior["request_digest"] != request_digest):
-            _fail(409, "command_id_reused", "Command receipt binding changed")
+            _fail(409, "command_conflict", "Command receipt binding changed")
         return dto.ScannerCommandState(intent, _receipt(prior["receipt"]) if prior else None)
+
+    def record_audited_abandonment(self, *, command_id, request_digest, rationale, evidence_ref):
+        if self._action not in _RESULTS or self._expected is not None or self._retained is not None:
+            _fail(409, "command_conflict", "Disposition requires current authority without admission fences")
+        if any(not isinstance(value, str) or not value.strip() or len(value) > 2048
+                for value in (rationale, evidence_ref)):
+            _fail(400, "invalid_request", "Disposition audit evidence is required")
+        state = self.read_command(command_id=command_id, request_digest=request_digest)
+        if isinstance(state, dto.ScannerCommandAbandonment):
+            return state
+        if state is not None:
+            _fail(409, "command_conflict", "Command already has retained admission or receipt")
+        event_id, now = self._audit(command_id, "abandoned", rationale, evidence_ref, {}, {
+            "source_id": self._row["source_id"], "request_digest": request_digest,
+            "disposition": "not_committed"})
+        self.connection.execute(assessment_command_abandonments.insert().values(
+            command_id=command_id, principal_id=self._context.principal_id, action=self._action,
+            request_digest=request_digest, audit_event_id=event_id, created_at=now))
+        return dto.ScannerCommandAbandonment(command_id, self._context.principal_id,
+            self._action, request_digest, event_id, _instant(now))
 
     def _audit(self, command_id, stage, rationale, evidence_ref, before, after):
         now = datetime.now(UTC)
@@ -270,8 +332,11 @@ class _ScannerTransaction:
             _fail(409, "revision_conflict", "Collection admission binding is invalid")
         if operation_id is not None: _uuid(operation_id, "operation_id")
         if run_id is not None: _uuid(run_id, "run_id")
-        if self.read_command(command_id=command_id, request_digest=request_digest) is not None:
-            _fail(409, "command_id_reused", "Command already admitted")
+        state = self.read_command(command_id=command_id, request_digest=request_digest)
+        if isinstance(state, dto.ScannerCommandAbandonment):
+            _fail(409, "command_terminal", "Command has a definitive noncommit disposition")
+        if state is not None:
+            _fail(409, "command_conflict", "Command already admitted")
         event_id, now = self._audit(command_id, "admitted", rationale, evidence_ref, {}, {"source_id": self._row["source_id"]})
         intent = dto.ScannerCommandIntent(str(uuid.uuid4()), command_id, self._row["connector_id"],
             self._row["source_id"], self._context.principal_id, self._action, request_digest,
@@ -331,9 +396,16 @@ class _ScannerTransaction:
                     or (self._action == "scanner.configuration.activate" and
                         result.active_configuration_revision != shared_state.active_configuration_revision)):
                 _fail(409, "revision_conflict", "Scanner projection transition is invalid")
-            if self._action == "scanner.configuration.activate" and self._row["recovery"].get("state") != "clear":
-                _fail(409, "restore_quarantined", "Scanner is quarantined after restore")
-            updates = {**asdict(shared_state), "connector_revision": self._row["connector_revision"] + 1,
+            recovery=self._row['recovery']
+            if self._action=='scanner.configuration.activate' and recovery.get('state')!='clear':
+                if self._secret is None:
+                    _fail(409,'credential_revoked','Scanner credential is unavailable')
+                record=require_recovery_lease(self.connection,self._row,self._secret,activation=True)
+                recovery={**recovery,'state':'clear','requires_fresh_credentials':False,
+                    'operator_clearance_present':True,'approval_id':record['approval_id'],'reason':None}
+            elif self._action=='scanner.configuration.save':
+                recovery=invalidate_workflow(self.connection,self._row)
+            updates = {**asdict(shared_state), "recovery":recovery,"connector_revision": self._row["connector_revision"] + 1,
                 "updated_at": datetime.now(UTC)}
             self.connection.execute(connectors.update().where(connectors.c.connector_id == self._row["connector_id"]).values(**updates))
             self._row.update(updates)

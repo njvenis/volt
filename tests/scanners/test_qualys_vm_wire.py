@@ -11,7 +11,9 @@ from fastapi.testclient import TestClient
 
 from uvm.scanners import contracts as dto
 from uvm.scanners.api import install_scanner_routes
-from uvm.scanners.service import parse_command
+from uvm.scanners.service import parse_command, parse_abandonment
+from uvm.scanners.store import command_digest
+from uvm.scanners.wire import RECOVERY_VIEW_SCHEMA
 from wire_validation import schema_accepts, assert_response
 
 PATH = '/api/v1/scanners/{connector_id}/commands'
@@ -21,6 +23,8 @@ NOW = datetime.now(timezone.utc).isoformat()
 class WireService:
     def __init__(self):
         self.mode = 'receipt'
+        self.disposition_mode = 'not_committed'
+        self.admitted_status = 'running'
         self.terminal = 'interrupted'
         self.connector, self.source, self.operation_id, self.version = [str(uuid.uuid4()) for _ in range(4)]
         self.revisions = dto.ExpectedRevisions(0, 1, 0, 0, 1, 1, 1, 0, None)
@@ -32,7 +36,8 @@ class WireService:
             dto.ScannerScopeView('account_visible'), 'disabled', 0, None,
             dto.CredentialView(str(uuid.uuid4()), None, 'unconfigured', 0),
             self.revisions, None, dto.ScannerLimitsView(), 'manual', False,
-            None, None, dto.CollectionRecencyView('never', NOW, None)))
+            None, None, dto.CollectionRecencyView('never', NOW, None),
+            dto.RecoveryView('clear', None, False, False, 'missing', None, None)))
 
     def command(self, request, connector_id, command):
         parse_command(connector_id, command)
@@ -53,6 +58,25 @@ class WireService:
             decision_id=str(uuid.uuid4()), audit_event_id=str(uuid.uuid4()),
             intent_id=str(uuid.uuid4()), committed_revision=1, projection={}, action=action,
             target_id=connector_id, policy_revision=1, intents=(), occurred_at=NOW, result=result)), 200
+
+
+    def abandon(self, request, connector_id, command_id, body):
+        # Serialized examples ONLY: no state, audit, authority or ledger fake.
+        command = parse_abandonment(connector_id, command_id, body)
+        self.last_abandon = deepcopy(body)
+        common = dict(schema_version=1, command_id=command_id, connector_id=connector_id,
+            source_id=command['payload']['source_id'], action=command['action'],
+            actor_id='wire-example-actor', request_digest=command_digest('wire-example-actor', command))
+        if self.disposition_mode == 'not_committed':
+            return asdict(dto.ScannerNotCommittedDisposition(**common,
+                disposition='not_committed', audit_event_id=str(uuid.uuid4()), occurred_at=NOW))
+        if self.disposition_mode == 'committed':
+            receipt, _status = self.command(request, connector_id, command)
+            return {**common, 'disposition': 'committed', 'receipt': receipt}
+        return asdict(dto.ScannerAdmittedDisposition(**common, disposition='admitted',
+            operation=dto.OperationView(1, self.operation_id, command_id, 'collect',
+                self.admitted_status, 1, self.version, NOW,
+                None if self.admitted_status == 'running' else NOW, str(uuid.uuid4()), None, None)))
 
 
 class ScannerWireTests(unittest.TestCase):
@@ -165,3 +189,95 @@ class ScannerWireTests(unittest.TestCase):
             dto.CredentialView(str(uuid.uuid4()), None, 'unconfigured')
         with self.assertRaises(ValueError):
             dto.CredentialView(str(uuid.uuid4()), None, 'unconfigured', -1)
+
+    def test_recovery_view_is_required_closed_and_has_no_inferred_freshness(self):
+        # Wire examples only; the backend must derive real recovery state.
+        response = self.client.get(f'/api/v1/scanners/{self.service.connector}',
+            params={'source_id': self.service.source})
+        self.assertEqual(response.status_code, 200, response.text)
+        assert_response(self, self.app, '/api/v1/scanners/{connector_id}', response, 'get')
+        initial = {'state': 'clear', 'epoch_id': None, 'fresh_credentials_required': False,
+            'fresh_version_ready': False, 'clearance_state': 'missing',
+            'approval_id': None, 'approval_expires_at': None}
+        self.assertEqual(response.json()['recovery'], initial)
+        self.assertEqual(set(RECOVERY_VIEW_SCHEMA['required']), set(initial))
+        self.assertFalse(RECOVERY_VIEW_SCHEMA['additionalProperties'])
+        self.assertNotIn('schema_version', initial)
+        for field in initial:
+            missing = dict(initial)
+            del missing[field]
+            with self.subTest(missing=field):
+                self.assertFalse(schema_accepts(RECOVERY_VIEW_SCHEMA, missing))
+                with self.assertRaises(TypeError):
+                    dto.RecoveryView(**missing)
+        schema = self.app.openapi()['paths']['/api/v1/scanners/{connector_id}']['get'][
+            'responses']['200']['content']['application/json']['schema']
+        missing = response.json()
+        del missing['recovery']
+        self.assertFalse(schema_accepts(schema, missing))
+        for field, value in [('schema_version', 1), ('proof', 'private'), ('digest', 'private'),
+                ('key', 'private'), ('path', '/private'), ('state', 'unknown'),
+                ('clearance_state', 'clear'), ('fresh_version_ready', 1),
+                ('fresh_credentials_required', 'false'), ('epoch_id', 'not-a-uuid'),
+                ('approval_id', 'not-a-uuid'), ('approval_expires_at', 'yesterday')]:
+            with self.subTest(field=field, value=value):
+                self.assertFalse(schema_accepts(RECOVERY_VIEW_SCHEMA, dict(initial, **{field: value})))
+        restored = dict(initial, state='awaiting_activation', epoch_id=str(uuid.uuid4()),
+            fresh_credentials_required=True, fresh_version_ready=True, clearance_state='applied',
+            approval_id=str(uuid.uuid4()), approval_expires_at=NOW)
+        self.assertTrue(schema_accepts(RECOVERY_VIEW_SCHEMA, restored))
+        # Historical expiry may remain after clearance; the read schema must not
+        # invent a quarantine transition or a credential lease decision.
+        self.assertTrue(schema_accepts(RECOVERY_VIEW_SCHEMA,
+            dict(restored, state='clear', fresh_credentials_required=False, clearance_state='expired')))
+
+
+    def test_disposition_serialized_variants_match_exact_openapi(self):
+        path = '/api/v1/scanners/{connector_id}/commands/{command_id}/abandon'
+        original = self.command('scanner.collection.start')
+        original['expected_revisions']['connector'] = 0  # stale value stays frozen
+        body = {'schema_version': 1, 'command': original, 'rationale': 'Resolve held request',
+            'evidence_ref': 'fixture:wire-disposition'}
+        schema = self.app.openapi()['paths'][path]['post']
+        self.assertTrue(schema_accepts(schema['requestBody']['content']['application/json']['schema'], body))
+        for mode in ('not_committed', 'committed', 'admitted'):
+            self.service.disposition_mode = mode
+            response = self.client.post(f'/api/v1/scanners/{self.service.connector}/commands/{original["command_id"]}/abandon',
+                json=body, headers=self.headers)
+            self.assertEqual(response.status_code, 200, response.text)
+            assert_response(self, self.app, path, response)
+            self.assertEqual(self.service.last_abandon, body)
+            self.assertEqual(response.json()['disposition'], mode)
+            malformed = dict(response.json(), unexpected='REDACT-ME-FIXTURE')
+            self.assertFalse(schema_accepts(schema['responses']['200']['content']['application/json']['schema'], malformed))
+        self.service.admitted_status = 'interrupted'
+        terminal = self.client.post(f'/api/v1/scanners/{self.service.connector}/commands/{original["command_id"]}/abandon',
+            json=body, headers=self.headers)
+        self.assertEqual(terminal.status_code, 200)
+        assert_response(self, self.app, path, terminal)
+        self.service.admitted_status = 'succeeded'
+        inconsistent = self.client.post(f'/api/v1/scanners/{self.service.connector}/commands/{original["command_id"]}/abandon',
+            json=body, headers=self.headers)
+        self.assertEqual(inconsistent.status_code, 503)
+        self.assertEqual(inconsistent.json()['error']['code'], 'inconsistent_operation')
+
+    def test_disposition_rejects_mutated_shape_path_and_unsafe_json_without_echo(self):
+        original = self.command()
+        body = {'schema_version': 1, 'command': original, 'rationale': 'Resolve held request', 'evidence_ref': 'fixture:wire'}
+        url = f'/api/v1/scanners/{self.service.connector}/commands/{original["command_id"]}/abandon'
+        for mutate in (lambda b: b.update(extra='REDACT-ME-FIXTURE'),
+                       lambda b: b.update(rationale='  '),
+                       lambda b: b.update(schema_version=True),
+                       lambda b: b['command'].update(extra='REDACT-ME-FIXTURE')):
+            malformed = deepcopy(body)
+            mutate(malformed)
+            response = self.client.post(url, json=malformed, headers=self.headers)
+            self.assertEqual(response.status_code, 422, response.text)
+            self.assertNotIn('REDACT-ME-FIXTURE', response.text)
+            self.assertEqual(response.headers['cache-control'], 'no-store')
+        response = self.client.post(url.replace(original['command_id'], str(uuid.uuid4())),
+            json=body, headers=self.headers)
+        self.assertEqual(response.status_code, 422)
+        duplicate = json.dumps(body)[:-1] + ',"schema_version":1}'
+        self.assertEqual(self.client.post(url, content=duplicate,
+            headers={**self.headers, 'Content-Type': 'application/json'}).status_code, 422)

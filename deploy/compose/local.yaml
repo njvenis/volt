@@ -10,9 +10,17 @@ services:
       UVM_LOCAL_AUTH_CONFIG_FILE: /etc/volt/local-auth.json
       UVM_CONNECTOR_LOCAL_KEY_FILE: /run/secrets/local-auth-key
       UVM_CONNECTOR_LOCAL_KEY_ID: ${VOLT_LOCAL_SECRET_SOURCE_ID:?run setup first}
+      UVM_LOCAL_RECOVERY_CONFIG_FILE: /etc/volt/local-recovery.json
+      UVM_SCANNER_EVIDENCE_DIR: /opt/uvm/state/scanner-evidence
     volumes:
       - ${VOLT_INSTANCE_DIR:?run setup first}/local-auth.json:/run/secrets/local-auth.json:ro
       - ${VOLT_INSTANCE_DIR:?run setup first}/secrets/local-auth-key:/run/secrets/local-auth-key:ro
       - ${VOLT_INSTANCE_DIR:?run setup first}/secrets/bootstrap-delivery:/run/volt-bootstrap:rw
+      - ${VOLT_INSTANCE_DIR:?run setup first}/local-recovery.json:/run/secrets/local-recovery.json:ro
+      - ${VOLT_INSTANCE_DIR:?run setup first}/secrets/local-recovery-runtime/issuer.key:/run/secrets/local-recovery-issuer.key:ro
+      - ${VOLT_INSTANCE_DIR:?run setup first}/secrets/local-recovery-runtime/issuer.pub:/run/secrets/local-recovery-issuer.pub:ro
+      - ${VOLT_INSTANCE_DIR:?run setup first}/secrets/local-recovery-runtime/operator.pub:/run/secrets/local-recovery-operator.pub:ro
+      - ${VOLT_INSTANCE_DIR:?run setup first}/secrets/local-recovery-runtime/material.key:/run/secrets/local-recovery-material.key:ro
+      - ${VOLT_INSTANCE_DIR:?run setup first}/secrets/local-restore-fence:/run/secrets/local-recovery-fence:ro
     labels:
       volt.installation.mode: local-auth

@@ -1,6 +1,8 @@
 """Persistent Argon2id local authentication for explicitly configured installs."""
 from __future__ import annotations
 
+from uvm.assessment.command_occupancy import guard_assessment
+
 import hashlib
 import hmac
 import ipaddress
@@ -610,6 +612,9 @@ class LocalAuth:
         from uvm.persistence.assessment_schema import assessment_command_receipts
         from uvm.persistence.native_authority_schema import administration_reconciliation_intents
         event = str(uuid.uuid4()); command = command_id or str(uuid.uuid4())
+        digest = hashlib.sha256(json.dumps({"actor": actor, "action": action, "target": target},
+            sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        guard_assessment(c, command, actor, action, digest)
         seq = (c.execute(sa.select(sa.func.max(assessment_audit_events.c.event_sequence))).scalar_one_or_none() or 0) + 1
         context = {"credential_mode": "local_session" if actor != "host-maintenance" else "host_maintenance"}
         policy_revision = c.execute(sa.select(assessment_policy.c.revision).where(
@@ -627,12 +632,11 @@ class LocalAuth:
                 audit_event_id=event, kind=intent_kind, target_id=intent_target or target,
                 authority_revision=authority_revision, status="pending", attempts=0,
                 last_error=None, created_at=now, updated_at=now))
-        digest = hashlib.sha256(json.dumps({"actor": actor, "action": action, "target": target},
-            sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         decision_id = str(uuid.uuid4())
         result = {"schema_version": 1, "command_id": command, "decision_id": decision_id,
             "audit_event_id": event, "intent_id": intent_id,
             "action": action, "target_id": target}
+        guard_assessment(c, command, actor, action, digest)
         c.execute(assessment_command_receipts.insert().values(command_id=command,
             principal_id=actor, action=action, target_id=target, request_digest=digest,
             decision_id=decision_id, audit_event_id=event, intent_id=intent_id,

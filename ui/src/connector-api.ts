@@ -1,4 +1,5 @@
 import {sessionFetch} from './session';
+import type {Paths} from './generated/api';
 import type {ConnectorView, PermissionView, Revisions, Settings, Receipt, MetadataAction, Command, SubmitSecret, SubmissionLookup, FlowView, StartFlow, StartFlowResponse, IntentView, CandidateAudienceRequest, CandidateAudienceResponse, App, Secret} from './connector-types';
 export const POLICY_TARGET='00000000-0000-4000-8000-000000000000' as const;
 type Check=(value:unknown)=>boolean;
@@ -24,7 +25,8 @@ const app=shape({app_id:decimal,client_id:text,slug:text});
 const installation=shape({flow_id:uuid,installation_id:decimal,account_id:decimal});
 const settings=shape({environment_label:text,authentication_mode:one('legacy_token_file','github_app_v1'),secret_source:provider,credentials:shape({private_key:nullable(reference),oauth_client_secret:nullable(reference),webhook_secret:nullable(reference),preview_secret:nullable(reference),rest_token:nullable(reference)}),github:shape({host:one('github.com'),api_version:one('2022-11-28'),app:nullable(app),installation:nullable(installation),repository_ids:array(decimal),audience_revisions:dict(decimal,rev)})});
 const failure=one('credentials_unavailable','provider_unavailable','decryption_failed','permission_missing','scope_changed','audience_incomplete','audience_unapproved','installation_invalid','installation_suspended','callback_invalid','flow_expired','credential_revoked','restore_quarantined','reconciliation_failed','outcome_unknown');
-const recovery=shape({state:one('clear','quarantined','awaiting_activation'),recovery_epoch_id:nullable(uuid),operator_clearance_present:bool,requires_fresh_credentials:bool,reason:nullable(one('restore_quarantined'))});
+const recoveryFields={state:one('clear','quarantined','awaiting_activation'),recovery_epoch_id:nullable(uuid),operator_clearance_present:bool,requires_fresh_credentials:bool,reason:nullable(one('restore_quarantined'))};
+const recovery:Check=v=>shape(recoveryFields)(v)||shape({...recoveryFields,approval_id:uuid,approval_expires_at:utc})(v);
 const remote=shape({status:one('not_requested','pending','confirmed','failed','unknown'),intent_id:nullable(uuid),observed_at:nullable(utc),expires_at:nullable(utc),reason:nullable(failure)});
 const version:Check=v=>shape({version_id:uuid,state:one('inactive','active','revoked'),present:bool,created_at:utc,revoked_at:nullable(utc),quarantine:one('clear','restored_version'),usable:bool,validation_eligible:bool,remote_revocation:remote})(v)&&object(v)&&(!(v.state==='revoked'||v.quarantine==='restored_version')||v.usable===false&&v.validation_eligible===false)&&(!(v.state==='inactive')||v.usable===false);
 const secret=shape({secret_id:uuid,revision:rev,purpose:one('private_key','oauth_client_secret','webhook_secret','preview_secret','rest_token'),versions:array(version)});
@@ -32,10 +34,10 @@ const status=one('pending','complete','failed','outcome_unknown');
 const lifecycle=one('staged','active','disabled');
 const validation=shape({status:one('unverified','valid','stale','failed'),checked_at:nullable(utc),intent_id:nullable(uuid),configuration_revision:nullable(rev),reason:nullable(failure)});
 export const validConnector:Check=v=>shape({schema_version:schema,connector_id:uuid,source,revisions,configuration_revision:rev,active_configuration_revision:nullable(rev),lifecycle,settings,validation,recovery,reconciliation:shape({status,intent_id:nullable(uuid),reason:nullable(failure)}),secrets:array(secret),updated_at:utc})(v);
-const kind=one('connector.validate','connector.reconcile','connector.remote_revoke','connector.installation.verify');
-const action=one('connector.configuration.stage','connector.configuration.validate','connector.configuration.activate','connector.configuration.disable','connector.configuration.rollback','connector.secret.version.revoke','connector.secret.submission.reconcile','connector.secret.submit','connector.installation.start','connector.installation.verify');
+const kind=one('connector.recovery.clearance.apply','connector.validate','connector.reconcile','connector.remote_revoke','connector.installation.verify');
+const action=one('connector.recovery.clearance.apply','connector.configuration.stage','connector.configuration.validate','connector.configuration.activate','connector.configuration.disable','connector.configuration.rollback','connector.secret.version.revoke','connector.secret.submission.reconcile','connector.secret.submit','connector.installation.start','connector.installation.verify');
 const outcome=one('committed','not_committed','unknown');
-const effect=one('connector_configuration_committed','connector_validation_requested','connector_secret_submitted','connector_secret_revoked','connector_secret_submission_reconciled','connector_installation_started','connector_installation_verified');
+const effect=one('connector_recovery_clearance_applied','connector_configuration_committed','connector_validation_requested','connector_secret_submitted','connector_secret_revoked','connector_secret_submission_reconciled','connector_installation_started','connector_installation_verified');
 const receipt=shape({schema_version:schema,command_id:uuid,action,target_id:one(POLICY_TARGET),policy_revision:rev,decision_id:uuid,audit_event_id:uuid,intents:array(shape({intent_id:uuid,kind,target_id:uuid,authority_revision:rev,status})),result:shape({effect,connector_id:uuid,source_id:uuid,revisions,configuration_revision:rev,active_configuration_revision:nullable(rev),lifecycle,secret_id:nullable(uuid),version_id:nullable(uuid),version_state:nullable(one('inactive','active','revoked')),submission_id:nullable(uuid),submission_outcome:nullable(outcome),flow_id:nullable(uuid),recovery})});
 function installationReceipt(v:unknown,verb:'start'|'verify',cid:unknown,sid:unknown,fid:unknown,configuration:unknown):boolean {
  return receipt(v)&&object(v)&&v.action==='connector.installation.'+verb&&object(v.result)&&
@@ -49,24 +51,39 @@ const flow:Check=v=>shape({schema_version:schema,flow_id:uuid,connector_id:uuid,
  (v.status!=='verified'||v.repositories_complete===true&&v.installation!==null&&v.verification_receipt!==null);
 const result=shape({configuration_revision:rev,source_revision:rev,secret_source_revision:rev,credentials:array(reference),installation:nullable(installation),repository_ids:array(decimal),audience_revisions:dict(decimal,rev),checked_at:utc,valid:bool,reason:nullable(failure)});
 const intent=shape({schema_version:schema,connector_id:uuid,source_id:uuid,intent_id:uuid,kind,status,attempts:rev,last_error:nullable(failure),next_attempt_at:nullable(utc),completed_at:nullable(utc),validation_result:nullable(result),observed_remote_revocation:nullable(remote)});
-const safeErrors=['authentication_required','csrf_failed','forbidden','source_scope_forbidden','not_found','invalid_request','revision_conflict','command_conflict','submission_conflict','credential_revoked','restore_quarantined','callback_invalid','validation_required','dependency_unavailable','outcome_unknown'];
+const safeErrors=['authentication_required','csrf_failed','forbidden','source_scope_forbidden','not_found','invalid_request','revision_conflict','command_conflict','submission_conflict','credential_revoked','credential_material_reused','restore_quarantined','callback_invalid','validation_required','dependency_unavailable','outcome_unknown'];
 const errorEnvelope=shape({schema_version:schema,error:shape({code:one(...safeErrors),message:text,correlation_id:uuid,details:shape({outcome:one('not_committed','unknown'),expected_revisions:nullable(revisions),current_revisions:nullable(revisions),lookup_url:nullable(v=>typeof v==='string')})})});
-const errorStatuses:Record<string,number>={authentication_required:401,csrf_failed:403,forbidden:403,source_scope_forbidden:403,not_found:404,invalid_request:400,callback_invalid:400,revision_conflict:409,command_conflict:409,submission_conflict:409,credential_revoked:409,restore_quarantined:409,validation_required:409,dependency_unavailable:503,outcome_unknown:503};
+const errorStatuses:Record<string,number>={authentication_required:401,csrf_failed:403,forbidden:403,source_scope_forbidden:403,not_found:404,invalid_request:400,callback_invalid:400,revision_conflict:409,command_conflict:409,submission_conflict:409,credential_revoked:409,credential_material_reused:409,restore_quarantined:409,validation_required:409,dependency_unavailable:503,outcome_unknown:503};
 export class ConnectorError extends Error {
-  constructor(public code:string,public uncertain=false){super(code==='revision_conflict'?'These settings or permissions have changed. Refresh and review before saving again.':code==='restore_quarantined'?'Recovery quarantine prevents use. An independent recovery operator must verify fresh issuance.':code==='credential_revoked'?'This credential version is revoked and cannot be used again.':code==='forbidden'||code==='source_scope_forbidden'||code==='csrf_failed'?'Current access does not permit this operation.':code==='authentication_required'?'Sign in again to continue.':uncertain?'The save outcome is unknown. Check the retained operation before making another change.':code==='unsupported_response'?'The server response is incomplete or unsupported. No success has been assumed.':'Connector information is unavailable. Refresh or check the required fields.');}
+  constructor(public code:string,public uncertain=false){super(code==='credential_material_reused'?'This password was previously retained. Enter a different password; changing the username does not establish fresh credentials.':code==='revision_conflict'?'These settings or permissions have changed. Refresh and review before saving again.':code==='restore_quarantined'?'Recovery quarantine prevents use. An independent recovery operator must verify fresh issuance.':code==='credential_revoked'?'This credential version is revoked and cannot be used again.':code==='forbidden'||code==='source_scope_forbidden'||code==='csrf_failed'?'Current access does not permit this operation.':code==='authentication_required'?'Sign in again to continue.':uncertain?'The save outcome is unknown. Check the retained operation before making another change.':code==='unsupported_response'?'The server response is incomplete or unsupported. No success has been assumed.':'Connector information is unavailable. Refresh or check the required fields.');}
 }
-async function request(path:string,check:Check,body?:unknown,method='POST'):Promise<unknown>{
+// The adopted abandonment route uses the shared generic error envelope. Its
+// exact empty details object is accepted only here; connector errors stay strict.
+const clearanceErrorStatuses:Record<string,number>={authentication_required:401,csrf_failed:403,forbidden:403,source_scope_forbidden:403,not_found:404,invalid_request:400,invalid_command:422,command_conflict:409,command_id_reused:409,command_terminal:409,restore_quarantined:409,recovery_authority_unavailable:503,inconsistent_operation:503,dependency_unavailable:503};
+const clearanceErrorEnvelope=shape({schema_version:schema,error:shape({code:one(...Object.keys(clearanceErrorStatuses)),message:text,correlation_id:uuid,details:shape({})})});
+class ClearanceDispositionError extends ConnectorError{
+ constructor(code:string){super(code,true);if(['command_conflict','command_id_reused','command_terminal'].includes(code))this.message='The retained clearance command conflicts with current records. Keep both requests; no replacement is authorised.';
+ else if(code==='inconsistent_operation')this.message='The clearance record is incomplete or inconsistent. Keep both requests for operator reconciliation.';
+ else if(code==='not_found')this.message='The original clearance disposition is unavailable. Keep both requests and check again.';
+ else if(['invalid_request','invalid_command'].includes(code))this.message='The retained clearance request is unsupported. Its original bytes have not been changed.';
+ else if(['restore_quarantined','recovery_authority_unavailable','dependency_unavailable'].includes(code))this.message='Clearance disposition is unavailable. Keep both requests and refresh source access before checking again.';}
+}
+async function request(path:string,check:(value:unknown,status:number)=>boolean,body?:unknown,method='POST',clearanceErrors=false):Promise<unknown>{
   const write=body!==undefined;let response:Response;
   try{response=await sessionFetch(path,{method:write?method:'GET',headers:{Accept:'application/json',...(write?{'Content-Type':'application/json'}:{})},...(write?{body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(15000)});}catch{throw new ConnectorError(write?'outcome_unknown':'dependency_unavailable',write);}
   let value:unknown;try{value=await response.json();}catch{throw new ConnectorError('unsupported_response',write);}
   if(!response.ok){
+    if(clearanceErrors){
+      if(!clearanceErrorEnvelope(value)||!object(value)||!object(value.error)||clearanceErrorStatuses[String(value.error.code)]!==response.status)throw new ConnectorError('unsupported_response',true);
+      throw new ClearanceDispositionError(String(value.error.code));
+    }
     if(!errorEnvelope(value)||!object(value)||!object(value.error)||!object(value.error.details)||
       errorStatuses[String(value.error.code)]!==response.status)throw new ConnectorError('unsupported_response',write);
     const code=String(value.error.code);
     const known=value.error.details.outcome==='not_committed'&&code!=='outcome_unknown';
     throw new ConnectorError(code,write&&(!known||code==='submission_conflict'));
   }
-  if(!check(value))throw new ConnectorError('unsupported_response',write);
+  if(!check(value,response.status))throw new ConnectorError('unsupported_response',write);
   return value;
 }
 const root=(id:string)=>'/api/v1/connectors/'+encodeURIComponent(id);
@@ -76,12 +93,14 @@ export async function readConnector(id:string,sid:string):Promise<ConnectorView>
 export async function readPermissions(id:string,sid:string,actor:string):Promise<PermissionView>{return await request(root(id)+'/permissions'+scope(sid),v=>shape({schema_version:schema,connector_id:one(id),source,revisions,principal_id:one(actor),allowed:permissions})(v)&&object(v)&&object(v.source)&&v.source.source_id===sid) as PermissionView;}
 export function command(view:ConnectorView,verb:MetadataAction,rationale:string,evidence_ref:string,fields:Record<string,unknown>={},secretRevision:number|null=null):Command<Record<string,unknown>>{return {schema_version:1,command_id:crypto.randomUUID(),action:verb,target_id:POLICY_TARGET,membership_ids:[],expected_revisions:{...view.revisions,secret:secretRevision},payload:{connector_id:view.connector_id,source_id:view.source.source_id,rationale,evidence_ref,...fields}};}
 function matchesReceipt(v:unknown,id:string,cid:string,sid:string,verb:string):boolean{return receipt(v)&&object(v)&&v.command_id===id&&v.action===verb&&object(v.result)&&v.result.connector_id===cid&&v.result.source_id===sid&&Array.isArray(v.intents)&&v.intents.every(i=>object(i)&&i.target_id===cid);}
-export async function saveCommand(cmd:Command<Record<string,unknown>>):Promise<Receipt>{
- const expectedEffect=cmd.action==='connector.configuration.validate'?'connector_validation_requested':cmd.action==='connector.secret.version.revoke'?'connector_secret_revoked':cmd.action==='connector.secret.submission.reconcile'?'connector_secret_submission_reconciled':'connector_configuration_committed';
- return await request('/api/v1/assessment/commands',v=>matchesReceipt(v,cmd.command_id,cmd.payload.connector_id,cmd.payload.source_id,cmd.action)&&object(v)&&object(v.result)&&v.result.effect===expectedEffect&&
+function validCommandReceipt(v:unknown,cmd:Command<Record<string,unknown>>|ClearanceCommand):boolean{
+ const expectedEffect=cmd.action==='connector.recovery.clearance.apply'?'connector_recovery_clearance_applied':cmd.action==='connector.configuration.validate'?'connector_validation_requested':cmd.action==='connector.secret.version.revoke'?'connector_secret_revoked':cmd.action==='connector.secret.submission.reconcile'?'connector_secret_submission_reconciled':'connector_configuration_committed';
+ return matchesReceipt(v,cmd.command_id,cmd.payload.connector_id,cmd.payload.source_id,cmd.action)&&object(v)&&object(v.result)&&v.result.effect===expectedEffect&&
+  (cmd.action!=='connector.recovery.clearance.apply'||v.result.secret_id===cmd.payload.secret_id&&v.result.version_id===cmd.payload.version_id&&v.result.lifecycle==='disabled'&&v.result.active_configuration_revision===null&&object(v.result.recovery)&&v.result.recovery.state==='awaiting_activation'&&v.result.recovery.recovery_epoch_id===cmd.payload.recovery_epoch_id&&v.result.recovery.operator_clearance_present===true&&v.result.recovery.requires_fresh_credentials===true&&uuid(v.result.recovery.approval_id)&&utc(v.result.recovery.approval_expires_at)&&Array.isArray(v.intents)&&v.intents.length===1&&object(v.intents[0])&&v.intents[0].kind===cmd.action&&v.intents[0].status==='complete')&&
   (cmd.action!=='connector.secret.version.revoke'||v.result.secret_id===cmd.payload.secret_id&&v.result.version_id===cmd.payload.version_id&&v.result.version_state==='revoked')&&
-  (cmd.action!=='connector.secret.submission.reconcile'||v.result.submission_id===cmd.payload.submission_id&&v.result.secret_id===cmd.payload.secret_id&&v.result.version_id===cmd.payload.version_id&&outcome(v.result.submission_outcome)),cmd) as Receipt;
+  (cmd.action!=='connector.secret.submission.reconcile'||v.result.submission_id===cmd.payload.submission_id&&v.result.secret_id===cmd.payload.secret_id&&v.result.version_id===cmd.payload.version_id&&outcome(v.result.submission_outcome));
 }
+export async function saveCommand(cmd:Command<Record<string,unknown>>|ClearanceCommand):Promise<Receipt>{return await request('/api/v1/assessment/commands',v=>validCommandReceipt(v,cmd),cmd) as Receipt;}
 export type PendingSecret={submission_id:string;connector_id:string;source_id:string;secret_id:string;version_id:string};
 export async function submitSecret(pending:PendingSecret,body:SubmitSecret):Promise<Receipt>{return await request(root(pending.connector_id)+'/secrets/'+pending.secret_id+'/versions',v=>matchesReceipt(v,pending.submission_id,pending.connector_id,pending.source_id,'connector.secret.submit')&&object(v)&&object(v.result)&&v.result.secret_id===pending.secret_id&&v.result.version_id===pending.version_id&&v.result.submission_id===pending.submission_id&&v.result.submission_outcome==='committed'&&v.result.version_state===(body.purpose==='qualys_vm_basic'?'active':'inactive')&&v.result.effect==='connector_secret_submitted',body) as Receipt;}
 export async function lookupSecret(p:PendingSecret):Promise<SubmissionLookup>{return await request(root(p.connector_id)+'/secret-submissions/'+p.submission_id+scope(p.source_id)+'&secret_id='+p.secret_id+'&version_id='+p.version_id,v=>shape({schema_version:schema,submission_id:one(p.submission_id),connector_id:one(p.connector_id),source_id:one(p.source_id),secret_id:one(p.secret_id),version_id:one(p.version_id),outcome,receipt:nullable(receipt),retry_allowed:bool,poll_after_ms:nullable(one(1000))})(v)&&object(v)&&(v.outcome==='committed'?v.retry_allowed===false&&v.poll_after_ms===null&&matchesReceipt(v.receipt,p.submission_id,p.connector_id,p.source_id,'connector.secret.submit')&&object(v.receipt)&&object(v.receipt.result)&&v.receipt.result.secret_id===p.secret_id&&v.receipt.result.version_id===p.version_id&&v.receipt.result.submission_id===p.submission_id&&v.receipt.result.submission_outcome==='committed'&&v.receipt.result.effect==='connector_secret_submitted':v.receipt===null&&(v.outcome==='unknown'?v.retry_allowed===false&&v.poll_after_ms===1000:v.retry_allowed===true&&v.poll_after_ms===null))) as SubmissionLookup;}
@@ -122,4 +141,49 @@ export async function listConnectorChoices(cursor?:string):Promise<{items:Connec
  const response=await request('/api/v1/connectors?limit=25'+(cursor?'&cursor='+encodeURIComponent(cursor):''),shape({schema_version:schema,items:array(v=>validConnector(v)||scanner(v)),next_cursor:nullable(text)}));
  const parsed=response as {items:(ConnectorView|{connector_id:string;source:ConnectorView['source'];lifecycle:ConnectorView['lifecycle'];configuration_revision:number;settings:{environment_label:string}})[];next_cursor:string|null};
  return {next_cursor:parsed.next_cursor,items:parsed.items.map(v=>({connector_id:v.connector_id,source:v.source,lifecycle:v.lifecycle,configuration_revision:v.configuration_revision,environment_label:v.settings.environment_label,github:v.source.source_family==='qualys'?null:v as ConnectorView}))};
+}
+
+// Exact public secret-slot metadata supplies the complete clearance fence.
+export type RecoverySlot={schema_version:1;connector_id:string;source:PermissionView['source'];revisions:Revisions;secret:{secret_id:string;revision:number;purpose:'qualys_vm_basic';versions:import('./connector-types').SecretVersion[]};recovery:import('./connector-types').Recovery};
+export async function readRecoverySlot(cid:string,sid:string,secretId:string):Promise<RecoverySlot>{
+ return await request(root(cid)+'/secrets/'+encodeURIComponent(secretId)+scope(sid),v=>shape({schema_version:schema,connector_id:one(cid),source,revisions,secret:shape({secret_id:one(secretId),revision:rev,purpose:one('qualys_vm_basic'),versions:array(version)}),recovery})(v)&&object(v)&&object(v.source)&&v.source.source_id===sid&&object(v.revisions)&&object(v.secret)&&v.revisions.secret===v.secret.revision) as RecoverySlot;
+}
+type ClearanceRoute=Paths['/api/v1/assessment/commands/{command_id}/abandon']['post'];
+type DispositionWireBody=ClearanceRoute['request']['body'];
+export type ClearanceCommand=Extract<DispositionWireBody['command'],{action:'connector.recovery.clearance.apply'}>;
+export function validClearanceCommand(v:unknown,cid:string,sid:string):v is ClearanceCommand{
+ return shape({schema_version:schema,command_id:uuid,action:one('connector.recovery.clearance.apply'),target_id:one(POLICY_TARGET),membership_ids:x=>Array.isArray(x)&&x.length===0,expected_revisions:shape({target:rev,policy:rev,identity_membership:rev,owners:rev,authority:rev,connector:rev,source:rev,secret_source:rev,secret:rev}),payload:shape({connector_id:one(cid),source_id:one(sid),secret_id:uuid,version_id:uuid,recovery_epoch_id:uuid,rationale:text,evidence_ref:text})})(v);
+}
+export function assertClearanceBinding(slot:RecoverySlot,view:import('./scanner-api').ScannerView): {epoch_id:string;version_id:string;expected_revisions:ClearanceCommand['expected_revisions']}{
+ const r=view.recovery;
+ if(slot.revisions.secret===null||slot.revisions.secret!==slot.secret.revision||slot.connector_id!==view.connector_id||slot.source.source_id!==view.source_id||slot.source.source_family!==view.source_tuple.source_family||slot.source.source_account_id!==view.source_tuple.source_account_id||slot.source.scope_key!==view.source_tuple.scope_key||slot.secret.secret_id!==view.credential.secret_id||slot.secret.revision!==view.credential.revision||!slot.secret.versions.some(v=>v.version_id===view.credential.version_id&&v.state==='active'&&v.quarantine==='clear')||Object.entries(view.expected_revisions).some(([key,value])=>key!=='secret'&&slot.revisions[key as keyof Revisions]!==value)||slot.recovery.state!=='quarantined'||slot.recovery.recovery_epoch_id!==r.epoch_id||r.state!=='quarantined'||!r.fresh_version_ready||!r.fresh_credentials_required||r.clearance_state!=='available'||!r.epoch_id||!r.approval_id||!r.approval_expires_at||Date.parse(r.approval_expires_at)<=Date.now()||!view.credential.version_id)throw new ConnectorError('revision_conflict');
+ return {epoch_id:r.epoch_id,version_id:view.credential.version_id,expected_revisions:{...slot.revisions,secret:slot.revisions.secret}};
+}
+export function clearanceCommand(slot:RecoverySlot,view:import('./scanner-api').ScannerView,rationale:string,evidence_ref:string):ClearanceCommand{
+ const binding=assertClearanceBinding(slot,view);
+ const cmd:ClearanceCommand={schema_version:1,command_id:crypto.randomUUID(),action:'connector.recovery.clearance.apply',target_id:POLICY_TARGET,membership_ids:[],expected_revisions:binding.expected_revisions,payload:{connector_id:view.connector_id,source_id:view.source_id,secret_id:slot.secret.secret_id,version_id:binding.version_id,recovery_epoch_id:binding.epoch_id,rationale,evidence_ref}};
+ if(!validClearanceCommand(cmd,view.connector_id,view.source_id))throw new ConnectorError('unsupported_response');return cmd;
+}
+
+// Generated route types; committed receipts retain the stricter runtime guard above.
+export type ClearanceAbandonment=Omit<DispositionWireBody,'command'> & {command:ClearanceCommand};
+type ClearanceWireProof=Extract<Extract<ClearanceRoute['responses'],{status:'200'}>['body'],{action:'connector.recovery.clearance.apply'}>;
+export type ClearanceDisposition=Extract<ClearanceWireProof,{disposition:'not_committed'}>|(Omit<Extract<ClearanceWireProof,{disposition:'committed'}>,'receipt'>&{receipt:Receipt});
+function canonicalClearance(v:unknown):string{
+ if(Array.isArray(v))return '['+v.map(canonicalClearance).join(',')+']';
+ if(object(v))return '{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canonicalClearance(v[k])).join(',')+'}';
+ const encoded=JSON.stringify(v);if(encoded===undefined)throw new ConnectorError('unsupported_response',true);return encoded;
+}
+export function validClearanceAbandonment(v:unknown,original:ClearanceCommand):v is ClearanceAbandonment{
+ return shape({schema_version:schema,command:x=>validClearanceCommand(x,original.payload.connector_id,original.payload.source_id)&&canonicalClearance(x)===canonicalClearance(original),rationale:x=>text(x)&&String(x).length<=2048,evidence_ref:x=>text(x)&&String(x).length<=2048})(v);
+}
+export async function clearanceDigest(command:ClearanceCommand,actorId:string):Promise<string>{
+ const raw=canonicalClearance({principal_id:actorId,...command}).replace(/[\u007f-\uffff]/g,c=>'\\u'+c.charCodeAt(0).toString(16).padStart(4,'0'));
+ return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(raw))),b=>b.toString(16).padStart(2,'0')).join('');
+}
+export async function abandonClearance(body:ClearanceAbandonment,actorId:string):Promise<ClearanceDisposition>{
+ const cmd=body.command;if(!validClearanceAbandonment(body,cmd))throw new ConnectorError('unsupported_response',true);
+ const digest=await clearanceDigest(cmd,actorId);
+ const common={schema_version:schema,command_id:one(cmd.command_id),action:one('connector.recovery.clearance.apply'),actor_id:one(actorId),request_digest:one(digest)};
+ return await request('/api/v1/assessment/commands/'+encodeURIComponent(cmd.command_id)+'/abandon',(v,status)=>status===200&&(shape({...common,disposition:one('committed'),receipt:r=>validCommandReceipt(r,cmd)})(v)||shape({...common,disposition:one('not_committed'),audit_event_id:uuid,committed_at:utc})(v)),body,'POST',true) as ClearanceDisposition;
 }

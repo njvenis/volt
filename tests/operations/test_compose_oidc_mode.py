@@ -219,6 +219,19 @@ class ExternalOIDCModeTests(unittest.TestCase):
             (root/"secrets"/"local-auth-key").write_bytes(b"k"*32)
             (root/"secrets"/"local-auth-key").chmod(0o600)
             (root/"secrets"/"bootstrap-delivery").mkdir(mode=0o700)
+            journal_id=str(uuid.uuid4())
+            recovery={"schema_version":1,"profile":"volt_local_recovery_v1",
+                "installation_id":installation,"journal_id":journal_id,
+                "restore_generation":0,"recovery_epoch_id":None}
+            (root/"local-recovery.json").write_text("{}\n"); (root/"local-recovery.json").chmod(0o600)
+            for name in ("local-recovery-runtime","local-recovery-authority","local-restore-fence"):
+                (root/"secrets"/name).mkdir(mode=0o700)
+            for relative in ("local-recovery-runtime/issuer.key","local-recovery-runtime/issuer.pub",
+                    "local-recovery-runtime/operator.pub","local-recovery-runtime/material.key",
+                    "local-recovery-authority/operator.key","local-recovery-authority/operator.pub",
+                    "local-recovery-authority/issuer.pub","local-recovery-authority/host.json",
+                    "local-restore-fence/fence.json"):
+                path=root/"secrets"/relative; path.write_bytes(b"fixture\n"); path.chmod(0o600)
             (root/"oidc.json").write_text("{}\n"); (root/"oidc.json").chmod(0o600)
             env=root/".env"; env.write_text("private\n"); env.chmod(0o600)
             metadata={"format_version":1,"initialized":True,"mode":"local","project":"volt-local-test",
@@ -227,6 +240,7 @@ class ExternalOIDCModeTests(unittest.TestCase):
                 "oidc_config_sha256":hashlib.sha256((root/"oidc.json").read_bytes()).hexdigest(),
                 "installation_id":installation,
                 "local_auth_config_sha256":hashlib.sha256(config_file.read_bytes()).hexdigest(),
+                "local_recovery_journal_id":journal_id,"local_recovery_custody":recovery,
                 "ports":[46180,46181,46190],"gateway":"10.240.0.1",
                 "env_sha256":hashlib.sha256(env.read_bytes()).hexdigest()}
             (root/"instance.json").write_text(json.dumps(metadata)); (root/"instance.json").chmod(0o600)

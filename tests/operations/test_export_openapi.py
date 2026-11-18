@@ -79,7 +79,10 @@ class OpenAPIModeExportTests(unittest.TestCase):
         abandon_schema = paths["/api/v1/assessment/commands/{command_id}/abandon"]["post"][
             "requestBody"]["content"]["application/json"]["schema"]
         self.assertFalse(abandon_schema["additionalProperties"])
-        self.assertFalse(abandon_schema["properties"]["command"]["additionalProperties"])
+        variants=abandon_schema["properties"]["command"]["oneOf"]
+        self.assertEqual({item["properties"]["action"]["const"] for item in variants},
+            {"connector.binding.register","connector.recovery.clearance.apply"})
+        self.assertTrue(all(item["additionalProperties"] is False for item in variants))
 
 
 if __name__ == "__main__":

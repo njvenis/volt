@@ -6,7 +6,7 @@ fixture, injected at constructor composition. Restore recovery is deliberately n
 exercised until the backend's recovery contract is reviewed.
 """
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import base64
 import os
@@ -15,6 +15,9 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 import unittest
 import uuid
 from unittest.mock import patch
@@ -31,6 +34,7 @@ from wire_validation import assert_response
 from test_qualys_vm_protocol import PAGE, LAST_PAGE, local_https_server
 
 DSN = os.environ.get('UVM_QUALYS_SHARED_TEST_DSN')
+DISPOSITION_TESTS = os.environ.get('UVM_QUALYS_DISPOSITION_TESTS') == '1'
 
 
 @unittest.skipUnless(DSN, 'explicit owned Qualys shared-backend development database required')
@@ -137,6 +141,7 @@ class ActualSharedBridgePostgresTests(unittest.TestCase):
         self.headers = {'Origin': 'http://127.0.0.1', 'X-CSRF-Token': claim.json()['csrf_token']}
 
     def register(self, *, initial_read=True):
+        calls_before = list(self.calls)
         deployment = self.client.get('/api/v1/deployment').json()
         command = {'schema_version': 1, 'command_id': str(uuid.uuid4()),
             'action': 'connector.binding.register', 'target_id': '00000000-0000-0000-0000-000000000000',
@@ -150,10 +155,11 @@ class ActualSharedBridgePostgresTests(unittest.TestCase):
                 'grant_initial_read': initial_read}}
         response = self.client.post('/api/v1/assessment/commands', json=command, headers=self.headers)
         self.assertEqual(response.status_code, 200, response.text)
+        self.registration_command = command
         self.registration = response.json()['result']
         self.connector = self.registration['allocated_ids']['connector_id']
         self.source = self.registration['allocated_ids']['source_id']
-        self.assertEqual(self.calls, [])
+        self.assertEqual(self.calls, calls_before)
 
     def view(self):
         response = self.client.get(f'/api/v1/scanners/{self.connector}', params={'source_id': self.source})
@@ -198,6 +204,7 @@ class ActualSharedBridgePostgresTests(unittest.TestCase):
         submitted = self.client.post(f'/api/v1/connectors/{self.connector}/secrets/{slot}/versions',
             json=body, headers=self.headers)
         self.assertEqual(submitted.status_code, 201, submitted.text)
+        self.secret_submission = body
         self.assertEqual(self.calls, [])
         return body['version_id']
 
@@ -348,3 +355,280 @@ class ActualSharedBridgePostgresTests(unittest.TestCase):
         self.assertEqual(self.client.get(f'/api/v1/scanners/{self.connector}/runs/{run_id}/detections',
             params={'source_id': self.source}).status_code, 404)
         self.assertEqual(self.client.get(f'/api/v1/ingestion/runs/{run_id}').status_code, 404)
+        if DISPOSITION_TESTS:
+            disposition = self.disposition(command)
+            self.assertEqual(disposition.status_code, 200, disposition.text)
+            self.assertEqual(disposition.json()['disposition'], 'admitted')
+            self.assertEqual(disposition.json()['operation'], recovered.json())
+            self.assertEqual(len(self.calls), before)
+
+
+    def disposition(self, command, *, rationale='Resolve frozen source request', evidence_ref='fixture:disposition'):
+        body = {'schema_version': 1, 'command': command,
+            'rationale': rationale, 'evidence_ref': evidence_ref}
+        response = self.client.post(
+            f'/api/v1/scanners/{command["target_id"]}/commands/{command["command_id"]}/abandon',
+            json=body, headers=self.headers)
+        if response.status_code == 200:
+            assert_response(self, self.app,
+                '/api/v1/scanners/{connector_id}/commands/{command_id}/abandon', response)
+        return response
+
+    @unittest.skipUnless(DISPOSITION_TESTS, 'requires real amended shared occupancy/tombstone bridge')
+    def test_disposition_stale_request_terminal_replay_and_first_audit_metadata(self):
+        self.activate()
+        command = self.command('scanner.collection.start', **self.version())
+        command['expected_revisions']['connector'] -= 1
+        original = json.loads(json.dumps(command))
+        self.assertEqual(self.post(command).status_code, 409)
+        before = len(self.calls)
+        proof = self.disposition(command)
+        self.assertEqual(proof.status_code, 200, proof.text)
+        self.assertEqual(proof.json()['disposition'], 'not_committed')
+        again = self.disposition(command, rationale='Changed retry metadata', evidence_ref='fixture:changed')
+        self.assertEqual(again.json(), proof.json())
+        self.assertEqual(command, original)
+        delayed = self.post(command)
+        self.assertEqual(delayed.status_code, 409)
+        self.assertEqual(delayed.json()['error']['code'], 'command_terminal')
+        self.assertEqual(len(self.calls), before)
+        with self.engine.connect() as connection:
+            row = connection.execute(sa.text('select rationale,evidence_ref from assessment_audit_events where event_id=:id'),
+                {'id': proof.json()['audit_event_id']}).one()
+            self.assertEqual((row.rationale, row.evidence_ref), ('Resolve frozen source request', 'fixture:disposition'))
+        changed = json.loads(json.dumps(command))
+        changed['payload']['rationale'] = 'Different original command content'
+        self.assertEqual(self.disposition(changed).status_code, 409)
+        self.rejected = True
+        replacement = self.command('scanner.collection.start', **self.version())
+        self.assertNotEqual(replacement['command_id'], command['command_id'])
+        self.assertEqual(self.post(replacement).status_code, 200)
+
+    @unittest.skipUnless(DISPOSITION_TESTS, 'requires real amended shared occupancy/tombstone bridge')
+    def test_disposition_admitted_and_committed_recovery_never_issues_http(self):
+        self.initialize_rule()
+        self.activate()
+        command = self.command('scanner.collection.start', **self.version())
+        entered, release = threading.Event(), threading.Event()
+        def checkpoint(stage, operation):
+            if stage == 'admitted' and operation['action'] == 'collect':
+                entered.set()
+                if not release.wait(8):
+                    raise RuntimeError('fixture admission gate timed out')
+        self.service._checkpoint_hook = checkpoint
+        responses = []
+        worker = threading.Thread(target=lambda: responses.append(self.post(command)))
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            before = len(self.calls)
+            admitted = self.disposition(command)
+            self.assertEqual(admitted.status_code, 200, admitted.text)
+            self.assertEqual(admitted.json()['disposition'], 'admitted')
+            self.assertEqual(admitted.json()['operation']['status'], 'running')
+            self.assertEqual(len(self.calls), before)
+        finally:
+            release.set()
+            worker.join(12)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(responses[0].status_code, 200, responses[0].text)
+        before = len(self.calls)
+        committed = self.disposition(command)
+        self.assertEqual(committed.status_code, 200, committed.text)
+        self.assertEqual(committed.json()['disposition'], 'committed')
+        self.assertEqual(committed.json()['receipt'], responses[0].json())
+        self.assertEqual(len(self.calls), before)
+
+    @unittest.skipUnless(DISPOSITION_TESTS, 'requires real amended shared occupancy/tombstone bridge')
+    def test_disposition_audit_failure_is_not_noncommit_proof_and_rolls_back(self):
+        self.activate()
+        command = self.command('scanner.collection.start', **self.version())
+        with self.engine.begin() as connection:
+            before = connection.exec_driver_sql('select count(*) from assessment_audit_events').scalar_one()
+            connection.exec_driver_sql('create sequence qualys_disposition_fault_seen')
+            connection.exec_driver_sql("""CREATE FUNCTION qualys_disposition_reject_audit() RETURNS trigger
+                LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('qualys_disposition_fault_seen');
+                RAISE EXCEPTION 'synthetic private disposition audit fault'; END $$""")
+            connection.exec_driver_sql('create trigger qualys_disposition_reject_audit before insert on assessment_audit_events for each row execute function qualys_disposition_reject_audit()')
+        failed = self.disposition(command)
+        self.assertEqual(failed.status_code, 503, failed.text)
+        self.assertNotIn('synthetic private disposition audit fault', failed.text)
+        with self.engine.begin() as connection:
+            self.assertTrue(connection.exec_driver_sql('select is_called from qualys_disposition_fault_seen').scalar_one())
+            self.assertEqual(connection.exec_driver_sql('select count(*) from assessment_audit_events').scalar_one(), before)
+            self.assertEqual(connection.execute(sa.text('select count(*) from assessment_command_abandonments where command_id=:id'),
+                {'id': command['command_id']}).scalar_one(), 0)
+            connection.exec_driver_sql('drop trigger qualys_disposition_reject_audit on assessment_audit_events')
+            connection.exec_driver_sql('drop function qualys_disposition_reject_audit()')
+        proof = self.disposition(command)
+        self.assertEqual(proof.status_code, 200, proof.text)
+        self.assertEqual(proof.json()['disposition'], 'not_committed')
+
+    @unittest.skipUnless(DISPOSITION_TESTS, 'requires real amended shared occupancy/tombstone bridge')
+    def test_disposition_concurrent_admission_has_one_truthful_winner(self):
+        self.initialize_rule()
+        self.activate()
+        command = self.command('scanner.collection.start', **self.version())
+        gate = threading.Barrier(2)
+        def admission():
+            gate.wait(timeout=5)
+            return self.post(command)
+        def abandonment():
+            gate.wait(timeout=5)
+            return self.disposition(command)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            a, b = pool.submit(admission), pool.submit(abandonment)
+            admitted, disposed = a.result(timeout=15), b.result(timeout=15)
+        self.assertEqual(disposed.status_code, 200, disposed.text)
+        if disposed.json()['disposition'] == 'not_committed':
+            self.assertEqual(admitted.status_code, 409, admitted.text)
+            self.assertEqual(len(self.calls), 1)
+        else:
+            self.assertIn(disposed.json()['disposition'], ('admitted', 'committed'))
+            self.assertEqual(admitted.status_code, 200, admitted.text)
+            self.assertEqual(len(self.calls), 3)
+        with self.engine.connect() as connection:
+            tombstones = connection.execute(sa.text('select count(*) from assessment_command_abandonments where command_id=:id'),
+                {'id': command['command_id']}).scalar_one()
+            intents = connection.execute(sa.text("select count(*) from g7_connector_intents where kind='scanner.command' and payload->>'command_id'=:id"),
+                {'id': command['command_id']}).scalar_one()
+            self.assertEqual(tombstones + intents, 1)
+
+    @unittest.skipUnless(DISPOSITION_TESTS, 'requires real amended shared occupancy/tombstone bridge')
+    def test_disposition_foreign_assessment_and_secret_ids_never_prove_noncommit(self):
+        self.activate()
+        before = len(self.calls)
+        with self.engine.connect() as connection:
+            audit_before = connection.exec_driver_sql('select count(*) from assessment_audit_events').scalar_one()
+        for occupied in (self.registration_command['command_id'], self.secret_submission['submission_id']):
+            with self.subTest(occupied=occupied):
+                command = self.command('scanner.collection.start', **self.version())
+                command['command_id'] = occupied
+                conflict = self.disposition(command)
+                self.assertEqual(conflict.status_code, 409, conflict.text)
+                self.assertEqual(conflict.json()['error']['code'], 'command_conflict')
+                self.assertNotIn('disposition', conflict.json())
+                self.assertEqual(self.post(command).status_code, 409)
+        with self.engine.connect() as connection:
+            self.assertEqual(connection.exec_driver_sql('select count(*) from assessment_audit_events').scalar_one(), audit_before)
+        self.assertEqual(len(self.calls), before)
+
+    @unittest.skipUnless(DISPOSITION_TESTS, 'requires real amended shared occupancy/tombstone bridge')
+    def test_disposition_tombstone_fences_later_secret_submission(self):
+        self.activate()
+        command = self.command('scanner.collection.start', **self.version())
+        proof = self.disposition(command)
+        self.assertEqual(proof.status_code, 200, proof.text)
+        self.assertEqual(proof.json()['disposition'], 'not_committed')
+        slot = self.registration['credential_slots']['qualys_vm_basic']['secret_id']
+        metadata = self.client.get(f'/api/v1/connectors/{self.connector}/secrets/{slot}',
+            params={'source_id': self.source})
+        self.assertEqual(metadata.status_code, 200, metadata.text)
+        submission = dict(self.secret_submission, submission_id=command['command_id'],
+            version_id=str(uuid.uuid4()), expected_revisions=metadata.json()['revisions'])
+        before = len(self.calls)
+        conflict = self.client.post(f'/api/v1/connectors/{self.connector}/secrets/{slot}/versions',
+            json=submission, headers=self.headers)
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+        self.assertEqual(self.disposition(command).json(), proof.json())
+        self.assertEqual(len(self.calls), before)
+
+    @unittest.skipUnless(DISPOSITION_TESTS, 'requires real amended shared occupancy/tombstone bridge')
+    def test_disposition_ordinary_connector_command_collision_both_orders(self):
+        self.activate()
+        command = self.command('scanner.collection.start', **self.version())
+        slot = self.registration['credential_slots']['qualys_vm_basic']['secret_id']
+        def connector_command(action, **extra):
+            metadata = self.client.get(f'/api/v1/connectors/{self.connector}/secrets/{slot}',
+                params={'source_id': self.source})
+            self.assertEqual(metadata.status_code, 200, metadata.text)
+            return {'schema_version': 1, 'command_id': str(uuid.uuid4()), 'action': action,
+                'target_id': '00000000-0000-4000-8000-000000000000', 'membership_ids': [],
+                'expected_revisions': metadata.json()['revisions'], 'payload': {
+                    'connector_id': self.connector, 'source_id': self.source, 'secret_id': slot,
+                    'rationale': 'Explicit local lifecycle collision', 'evidence_ref': 'fixture:connector-collision', **extra}}
+        revoke = connector_command('connector.secret.version.revoke', version_id=self.secret_submission['version_id'])
+        revoked = self.client.post('/api/v1/assessment/commands', json=revoke, headers=self.headers)
+        self.assertEqual(revoked.status_code, 200, revoked.text)
+        command['command_id'] = revoke['command_id']
+        before = len(self.calls)
+        occupied = self.disposition(command)
+        self.assertEqual(occupied.status_code, 409, occupied.text)
+        self.assertEqual(occupied.json()['error']['code'], 'command_conflict')
+        command['command_id'] = str(uuid.uuid4())
+        proof = self.disposition(command)
+        self.assertEqual(proof.status_code, 200, proof.text)
+        reconcile = connector_command('connector.secret.submission.reconcile',
+            submission_id=str(uuid.uuid4()), version_id=str(uuid.uuid4()))
+        reconcile['command_id'] = command['command_id']
+        fenced = self.client.post('/api/v1/assessment/commands', json=reconcile, headers=self.headers)
+        self.assertEqual(fenced.status_code, 409, fenced.text)
+        self.assertEqual(self.disposition(command).json(), proof.json())
+        self.assertEqual(len(self.calls), before)
+
+    @unittest.skipUnless(DISPOSITION_TESTS, 'requires real amended shared occupancy/tombstone bridge')
+    def test_disposition_changed_source_is_conflict_without_replacement_proof(self):
+        self.activate()
+        command = self.command('scanner.collection.start', **self.version())
+        proof = self.disposition(command)
+        self.assertEqual(proof.status_code, 200, proof.text)
+        self.register()
+        changed = json.loads(json.dumps(command))
+        changed['target_id'] = self.connector
+        changed['payload']['source_id'] = self.source
+        before = len(self.calls)
+        conflict = self.disposition(changed)
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+        self.assertEqual(conflict.json()['error']['code'], 'command_conflict')
+        self.assertEqual(self.disposition(command).json(), proof.json())
+        self.assertEqual(len(self.calls), before)
+
+    @unittest.skipUnless(DISPOSITION_TESTS, 'requires real amended shared occupancy/tombstone bridge')
+    def test_disposition_changed_actor_conflicts_and_current_revocation_denies_proof(self):
+        self.activate()
+        command = self.command('scanner.collection.start', **self.version())
+        proof = self.disposition(command)
+        self.assertEqual(proof.status_code, 200, proof.text)
+        original_principal = self.client.get('/api/v1/auth/session').json()['principal_id']
+        from uvm.auth.maintenance import run as maintain
+        maintain('create-account', 'disposition-operator', 'Disposition Operator', str(self.config))
+        capability = json.loads(self.delivery.read_text())['capability']
+        operator = TestClient(self.app, base_url='http://127.0.0.1', client=('127.0.0.1', 52141))
+        self.addCleanup(operator.close)
+        origin = {'Origin': 'http://127.0.0.1'}
+        enrolled = operator.post('/api/v1/auth/local/enrol', json={'capability': capability,
+            'new_password': 'Synthetic disposition operator 7!'}, headers=origin)
+        self.assertEqual(enrolled.status_code, 204, enrolled.text)
+        login = operator.post('/api/v1/auth/local/login', json={'username': 'disposition-operator',
+            'password': 'Synthetic disposition operator 7!'}, headers=origin)
+        self.assertEqual(login.status_code, 200, login.text)
+        def membership(principal, enabled, group_revision):
+            deployment = self.client.get('/api/v1/deployment').json()
+            revision = deployment['policy_revision']
+            response = self.client.post('/api/v1/assessment/commands', json={
+                'command_id': str(uuid.uuid4()), 'action': 'access_group.membership.set',
+                'target_id': '00000000-0000-4000-8000-000000000000', 'membership_ids': [],
+                'expected_revisions': {'target': revision, 'policy': revision,
+                    'identity_membership': 0, 'owners': 0,
+                    'authority': deployment['authority_revision'], 'access_group': group_revision},
+                'payload': {'access_group_id': self.registration['allocated_ids']['access_group_id'],
+                    'principal_id': principal, 'enabled': enabled,
+                    'effective_from': (datetime.now(timezone.utc) + timedelta(seconds=1 if enabled else 0)).isoformat(), 'effective_until': None,
+                    'rationale': 'Disposition current-authority test', 'evidence_ref': 'fixture:disposition-grant'}},
+                headers=self.headers)
+            self.assertEqual(response.status_code, 200, response.text)
+            if enabled:
+                time.sleep(1.1)  # Real clock: wait until the newly granted membership is effective.
+        membership(login.json()['principal_id'], True, 1)
+        before = len(self.calls)
+        conflict = operator.post(f'/api/v1/scanners/{self.connector}/commands/{command["command_id"]}/abandon',
+            json={'schema_version': 1, 'command': command, 'rationale': 'Recover original request',
+                'evidence_ref': 'fixture:other-actor'},
+            headers={**origin, 'X-CSRF-Token': login.json()['csrf_token']})
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+        self.assertEqual(conflict.json()['error']['code'], 'command_conflict')
+        membership(original_principal, False, 2)
+        denied = self.disposition(command)
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertNotIn('disposition', denied.json())
+        self.assertEqual(len(self.calls), before)

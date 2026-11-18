@@ -14,7 +14,12 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY uvm ./uvm
 COPY migrations ./migrations
 COPY alembic.ini ./
+COPY docker/g7/schema-head /tmp/uvm-g7-schema-head
 RUN uv sync --frozen --no-dev
+RUN set -eu; \
+    declared=$(cat /tmp/uvm-g7-schema-head); \
+    actual=$(/opt/uvm/venv/bin/python -c 'from alembic.config import Config; from alembic.script import ScriptDirectory; heads=ScriptDirectory.from_config(Config("/build/alembic.ini")).get_heads(); print(heads[0] if len(heads) == 1 else "multiple:" + ",".join(heads))'); \
+    test "$actual" = "$declared" || { echo "declared runtime schema head $declared differs from the sole migration graph head $actual" >&2; exit 1; }
 # uv uses a symlink to the builder interpreter by default. After the venv is
 # copied into the runtime image, that symlink resolves outside the venv and
 # CPython skips pyvenv.cfg. Keep a venv-local executable so pinned runtime
@@ -117,6 +122,7 @@ RUN set -eu; \
     && useradd --system --uid 1800 --gid uvm --home-dir /opt/uvm --create-home uvm \
     && groupadd --system --gid 1801 valkey \
     && useradd --system --uid 1801 --gid valkey --home-dir /var/lib/valkey --create-home valkey \
+    && chmod 0755 /opt/uvm \
     && pg_dropcluster --stop 18 main \
     && rm -rf /var/lib/postgresql/18/main /etc/postgresql/18/main /var/log/postgresql \
     && install -d -o 1001 -g 1337 /app/media \

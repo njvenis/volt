@@ -85,3 +85,8 @@ Exact nested serialization follows dataclasses in contracts.py: validation has s
 ## Scanner command disposition amendment
 
 The adopted [scanner disposition contract](../openspec/changes/easy-compose-install/scanner-command-disposition.md) defines the strict abandon endpoint, current-authorised receipt/operation recovery and audited terminal non-commit proof. Generic conflict or absence is never proof that a held command can be replaced. Implementation and executable acceptance remain pending.
+
+
+## Clearance command disposition
+
+The [clearance-specific disposition amendment](../openspec/changes/easy-compose-install/clearance-command-disposition.md) extends the existing assessment abandon route for the original strict clearance command only. Frozen requests may be replaced only after validated audited terminal non-commit; ordinary conflicts and receipt absence remain uncertain.

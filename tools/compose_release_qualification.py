@@ -19,10 +19,13 @@ import tempfile
 import time
 import uuid
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from tools.release.easy_bootstrap import COSIGN_IMAGE, ISSUER, SIGNER
 
 
-ROOT = Path(__file__).resolve().parents[1]
 SUPPORTED_PLATFORMS = ("linux/amd64", "linux/arm64")
 SUPPORTED_RELEASE_VERSIONS = ("0.1.0-rc.2", "0.1.0-rc.3")
 SUPPORTED_IMAGE_VERSIONS = (*SUPPORTED_RELEASE_VERSIONS, "0.1.0-rc.4", "0.1.0-demo")
@@ -64,9 +67,23 @@ def admit_bundle_version(output: str, requested_version: str, *, development_fix
     if requested_version == "0.1.0-rc.4" and not local_auth_fixture:
         raise RuntimeError("the future RC4 candidate is accepted only in local-auth fixture qualification")
     bundle_version = verified_bundle_version(output)
+    if requested_version == "0.1.0-demo" and bundle_version != "0.1.0-rc.3":
+        raise RuntimeError("the local demo must use the marked RC3 compatibility installer")
     if requested_version in SUPPORTED_RELEASE_VERSIONS and bundle_version != requested_version:
         raise RuntimeError(f"requested release {requested_version} does not match verified Compose bundle {bundle_version}")
     return bundle_version
+
+
+def compose_bundle_verify_command(bundle: Path, *, version: str, development_fixture: bool,
+                                  local_auth_fixture: bool) -> list[str]:
+    """Return the fixed verifier argv, enabling demo compatibility only for its explicit fixture."""
+    command = [sys.executable, str(ROOT / "tools/build_compose_bundle.py"),
+               "verify", "--archive", str(bundle)]
+    if local_auth_fixture:
+        command.append("--local-admission-fixture")
+    if version == "0.1.0-demo" and development_fixture and not local_auth_fixture:
+        command.append("--allow-local-demo-compatibility")
+    return command
 
 
 def qualification_release_metadata(*, requested_version: str, bundle_version: str,
@@ -547,10 +564,8 @@ def main() -> int:
     started = False
     outcome = 0
     try:
-        bundle_command = [sys.executable, str(ROOT / "tools/build_compose_bundle.py"),
-            "verify", "--archive", str(args.bundle)]
-        if args.auth_mode == "local":
-            bundle_command.append("--local-admission-fixture")
+        bundle_command = compose_bundle_verify_command(args.bundle, version=args.version,
+            development_fixture=args.development_fixture, local_auth_fixture=args.auth_mode == "local")
         bundle_check = run("bundle-verify", bundle_command, evidence)
         bundle_version = admit_bundle_version(bundle_check.stdout, args.version,
             development_fixture=args.development_fixture, local_auth_fixture=args.auth_mode == "local")

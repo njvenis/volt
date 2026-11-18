@@ -10,7 +10,7 @@ from pathlib import Path
 def validate_heads(*, declared_head: str, heads: list[str], mode: str,
         empty_cluster: bool = False, compatibility_admitted: bool = False) -> None:
     """Accept the exact runtime head or a signed, bounded migration path."""
-    if declared_head not in {"0058", "0059", "0061", "0062"}:
+    if declared_head not in {"0058", "0059", "0061", "0062", "0067"}:
         raise ValueError("image schema declaration is invalid")
     if empty_cluster:
         if heads or mode != "normal":

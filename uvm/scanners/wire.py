@@ -124,7 +124,19 @@ def schema_for(value):
 
 
 COMMAND_SCHEMA = _inline(COMMAND_ADAPTER.json_schema())
+RECOVERY_VIEW_SCHEMA = schema_for(dto.RecoveryView)
+for _field in ('epoch_id', 'approval_id'):
+    RECOVERY_VIEW_SCHEMA['properties'][_field] = {
+        'anyOf': [{'type': 'string', 'format': 'uuid',
+            'pattern': r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'},
+            {'type': 'null'}]}
+RECOVERY_VIEW_SCHEMA['properties']['approval_expires_at'] = {
+    'anyOf': [{'type': 'string', 'format': 'date-time',
+        'pattern': (r'^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T'
+            r'(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?'
+            r'(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$')}, {'type': 'null'}]}
 SCANNER_VIEW_SCHEMA = schema_for(dto.ScannerView)
+SCANNER_VIEW_SCHEMA['properties']['recovery'] = deepcopy(RECOVERY_VIEW_SCHEMA)
 SCANNER_VIEW_SCHEMA['properties']['expected_revisions']['properties']['secret'] = {'type': 'null'}
 DETECTION_PAGE_SCHEMA = schema_for(dto.DetectionPage)
 _BASE_OPERATION = schema_for(dto.OperationView)
@@ -157,3 +169,22 @@ COMMAND_200_SCHEMA = {'oneOf': [schema_for(receipt) for receipt in (
 def response(schema, description):
     return {'description': description,
         'content': {'application/json': {'schema': deepcopy(schema)}}}
+
+
+class AbandonCommand(_Strict):
+    schema_version: Annotated[int, Field(strict=True, ge=1, le=1)]
+    command: ScannerCommand
+    rationale: Text
+    evidence_ref: Text
+
+
+ABANDON_ADAPTER = TypeAdapter(AbandonCommand)
+ABANDON_SCHEMA = _inline(ABANDON_ADAPTER.json_schema())
+_NOT_COMMITTED = schema_for(dto.ScannerNotCommittedDisposition)
+_COMMITTED = schema_for(dto.ScannerCommittedDisposition)
+_ADMITTED = schema_for(dto.ScannerAdmittedDisposition)
+# A missing receipt cannot describe succeeded. Running admission and terminal
+# metadata recovery are explicitly separate from definitive noncommit.
+_ADMITTED['properties']['operation'] = {'oneOf': [RUNNING_OPERATION_SCHEMA,
+    TERMINAL_RECEIPTLESS_SCHEMA]}
+DISPOSITION_SCHEMA = {'oneOf': [_NOT_COMMITTED, _COMMITTED, _ADMITTED]}

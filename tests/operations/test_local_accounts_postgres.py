@@ -14,7 +14,7 @@ import threading
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -89,6 +89,9 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
         capability_doc = json.loads(self.delivery_path.read_text())
         self.assertEqual(stat.S_IMODE(self.delivery_path.stat().st_mode), 0o600)
         self.capability = capability_doc["capability"]
+        # Supported new-install sequence: local identity/setup preparation,
+        # profile binding, then the first public account/authority claim.
+        self._isolated_recovery_authority()
         from uvm.api.app import create_app
         self.app = create_app(self.engine, principals={}, cursor_secret=secrets.token_bytes(32))
         self.client = TestClient(self.app, base_url="http://127.0.0.1",
@@ -101,6 +104,7 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
 
     def _local_admin(self):
         password = secrets.token_urlsafe(20) + "A7!"
+        self.admin_password=password
         claim = self.client.post("/api/v1/auth/setup/claim",
             json={"capability": self.capability, "username": "first-admin",
                 "display_name": "First Admin", "password": password}, headers=self.origin)
@@ -938,6 +942,299 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
         self.assertEqual(rejected.status_code, 403, rejected.text)
 
 
+    def test_missing_initial_profile_cannot_be_recreated_after_public_claim(self):
+        from contextlib import asynccontextmanager
+        from fastapi import HTTPException
+        from uvm.persistence.local_recovery_schema import local_recovery_installation
+        from uvm.persistence.auth_schema import local_auth_installation
+        with self.engine.connect() as c:
+            self.assertEqual(c.execute(sa.select(sa.func.count()).select_from(local_recovery_installation)).scalar_one(),1)
+            self.assertIsNone(c.execute(sa.select(local_auth_installation.c.claimed_at)).scalar_one())
+        _,csrf=self._local_admin()
+        with self.engine.begin() as c:c.execute(local_recovery_installation.delete())
+        result=subprocess.run([sys.executable,'-m','uvm.auth.maintenance','validate-local-recovery',
+            '--config',str(self.config_path)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20)
+        self.assertNotEqual(result.returncode,0,'claimed installation was silently re-enrolled')
+        called=[]
+        @asynccontextmanager
+        async def worker(_):
+            called.append(True)
+            yield
+        with patch('uvm.connectors.scanner_install.scanner_worker_lifespan',worker):
+            with self.assertRaises(HTTPException) as rejected:
+                with TestClient(self.app,base_url='http://127.0.0.1'):
+                    self.fail('missing committed binding became ready')
+        self.assertEqual(rejected.exception.status_code,503);self.assertEqual(called,[])
+        command=self._registration_command(str(uuid.uuid4()),self.client.get('/api/v1/deployment').json(),'missing-profile')
+        denied=self.client.post('/api/v1/assessment/commands',json=command,
+            headers={**self.origin,'X-CSRF-Token':csrf})
+        self.assertEqual(denied.status_code,503,denied.text)
+        with self.engine.connect() as c:
+            self.assertEqual(c.execute(sa.select(sa.func.count()).select_from(local_recovery_installation)).scalar_one(),0)
+            self.assertEqual(c.exec_driver_sql('select count(*) from g7_connectors').scalar_one(),0)
+
+    def test_actual_public_new_source_after_restore_uses_current_epoch_and_normal_flow(self):
+        self._actual_scanner_pipeline(post_restore_registration=True)
+
+    def _clearance_disposition(self,csrf,command,**metadata):
+        return self.client.post(f"/api/v1/assessment/commands/{command['command_id']}/abandon",
+            json={'schema_version':1,'command':command,'rationale':metadata.get('rationale','Resolve held clearance'),
+                'evidence_ref':metadata.get('evidence_ref','test:held-clearance')},
+            headers={**self.origin,'X-CSRF-Token':csrf})
+
+    def _check_clearance_proof(self,response,command,disposition):
+        import hashlib
+        from tests.operations.test_export_openapi import schema_accepts
+        self.assertEqual(response.status_code,200,response.text)
+        value=response.json()
+        actor=self.client.get('/api/v1/auth/session').json()['principal_id']
+        digest=hashlib.sha256(json.dumps({'principal_id':actor,**command},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        self.assertEqual(value['command_id'],command['command_id'])
+        self.assertEqual(value['action'],'connector.recovery.clearance.apply')
+        self.assertEqual(value['actor_id'],actor);self.assertEqual(value['request_digest'],digest)
+        self.assertEqual(value['disposition'],disposition)
+        schema=self.app.openapi()['paths']['/api/v1/assessment/commands/{command_id}/abandon']['post']['responses']['200']['content']['application/json']['schema']
+        self.assertTrue(schema_accepts(schema,value))
+        return value
+
+    def test_public_clearance_disposition_stale_vector_terminal_and_cross_family(self):
+        from tests.operations.test_export_openapi import schema_accepts
+        _,csrf=self._local_admin()
+        registration,receipt=self._registered_scanner(csrf,'held-clearance')
+        command=self._secret_command_body(receipt,'connector.recovery.clearance.apply',
+            version_id=str(uuid.uuid4()),recovery_epoch_id=str(uuid.uuid4()))
+        command['expected_revisions']['connector']=0
+        headers={**self.origin,'X-CSRF-Token':csrf}
+        stale=self.client.post('/api/v1/assessment/commands',json=command,headers=headers)
+        self.assertEqual(stale.status_code,409,stale.text)
+        self.assertEqual(stale.json()['error']['code'],'revision_conflict')
+        abandoned=self._clearance_disposition(csrf,command)
+        proof=self._check_clearance_proof(abandoned,command,'not_committed')
+        replay=self._clearance_disposition(csrf,command,rationale='Replay metadata',evidence_ref='test:again')
+        self.assertEqual(replay.json(),proof)
+        delayed=self.client.post('/api/v1/assessment/commands',json=command,headers=headers)
+        self.assertEqual(delayed.status_code,409,delayed.text)
+        self.assertEqual(delayed.json()['error']['code'],'command_terminal')
+        reverse=self._registration_command(command['command_id'],self.client.get('/api/v1/deployment').json(),'after-clearance-terminal')
+        collision=self.client.post('/api/v1/assessment/commands',json=reverse,headers=headers)
+        self.assertEqual(collision.status_code,409,collision.text)
+        changed={**command,'payload':{**command['payload'],'evidence_ref':'changed-original'}}
+        conflict=self._clearance_disposition(csrf,changed)
+        self.assertEqual(conflict.status_code,409,conflict.text)
+        foreign={**command,'command_id':registration['command_id']}
+        conflict=self._clearance_disposition(csrf,foreign)
+        self.assertEqual(conflict.status_code,409,conflict.text)
+        _,other=self._registered_scanner(csrf,'other-held-source')
+        altered=self._secret_command_body(other,'connector.recovery.clearance.apply',
+            version_id=command['payload']['version_id'],recovery_epoch_id=command['payload']['recovery_epoch_id'])
+        altered['command_id']=command['command_id']
+        self.assertEqual(self._clearance_disposition(csrf,altered).status_code,409)
+        malformed={**command,'payload':{**command['payload'],'unexpected':True}}
+        invalid=self._clearance_disposition(csrf,malformed)
+        self.assertEqual(invalid.status_code,400,invalid.text)
+        self.assertEqual(invalid.json()['error']['code'],'invalid_request')
+        schema=self.app.openapi()['paths']['/api/v1/assessment/commands/{command_id}/abandon']['post']['requestBody']['content']['application/json']['schema']
+        self.assertFalse(schema_accepts(schema,{'schema_version':1,'command':malformed,
+            'rationale':'Invalid original','evidence_ref':'test:invalid'}))
+        missing={**command,'command_id':str(uuid.uuid4()),'payload':{**command['payload'],'connector_id':str(uuid.uuid4())}}
+        missing_response=self._clearance_disposition(csrf,missing)
+        self.assertEqual(missing_response.status_code,404,missing_response.text)
+        self.assertNotIn('disposition',missing_response.json())
+
+    def test_public_clearance_disposition_rejects_different_current_authorized_actor(self):
+        from datetime import datetime,timedelta,timezone
+        from uvm.auth.maintenance import run as maintain
+        _,csrf=self._local_admin()
+        _,receipt=self._registered_scanner(csrf,'clearance-actor')
+        command=self._secret_command_body(receipt,'connector.recovery.clearance.apply',
+            version_id=str(uuid.uuid4()),recovery_epoch_id=str(uuid.uuid4()))
+        self._check_clearance_proof(self._clearance_disposition(csrf,command),command,'not_committed')
+        maintain('create-account','clearance-operator','Clearance Operator',str(self.config_path))
+        capability=json.loads(self.delivery_path.read_text())['capability'];password=secrets.token_urlsafe(24)+'A7!'
+        with closing(TestClient(self.app,base_url='http://127.0.0.1',client=('127.0.0.1',52183))) as operator:
+            enrolled=operator.post('/api/v1/auth/local/enrol',json={'capability':capability,'new_password':password},headers=self.origin)
+            self.assertEqual(enrolled.status_code,204,enrolled.text)
+            login=operator.post('/api/v1/auth/local/login',json={'username':'clearance-operator','password':password},headers=self.origin)
+            self.assertEqual(login.status_code,200,login.text)
+            start=datetime.now(timezone.utc)+timedelta(seconds=1)
+            member=self._admin_command(csrf,'access_group.membership.set',{
+                'access_group_id':receipt['result']['allocated_ids']['access_group_id'],
+                'principal_id':login.json()['principal_id'],'enabled':True,
+                'effective_from':start.isoformat(),'effective_until':None},access_group=1)
+            self.assertEqual(member.status_code,200,member.text)
+            future=start+timedelta(seconds=2)
+            class MembershipClock(datetime):
+                @classmethod
+                def now(cls,tz=None):return future.astimezone(tz)
+            with patch('uvm.auth.local._now',return_value=future),patch('uvm.auth.native_authority.datetime',MembershipClock):
+                source=operator.get(f"/api/v1/scanners/{command['payload']['connector_id']}",
+                    params={'source_id':command['payload']['source_id']})
+                self.assertEqual(source.status_code,200,source.text)
+                conflict=operator.post(f"/api/v1/assessment/commands/{command['command_id']}/abandon",json={
+                    'schema_version':1,'command':command,'rationale':'Different authorized actor',
+                    'evidence_ref':'test:actor-bound-proof'},headers={**self.origin,'X-CSRF-Token':login.json()['csrf_token']})
+                self.assertEqual(conflict.status_code,409,conflict.text)
+                self.assertEqual(conflict.json()['error']['code'],'command_conflict')
+
+    def test_public_clearance_disposition_audit_tombstone_rollback_and_partial_intent(self):
+        from uvm.persistence.connector_schema import connector_intents
+        from datetime import datetime,timezone
+        _,csrf=self._local_admin()
+        _,receipt=self._registered_scanner(csrf,'clearance-rollback')
+        command=self._secret_command_body(receipt,'connector.recovery.clearance.apply',
+            version_id=str(uuid.uuid4()),recovery_epoch_id=str(uuid.uuid4()))
+        for table in ('assessment_audit_events','assessment_command_abandonments'):
+            with self.engine.begin() as c:
+                c.exec_driver_sql("CREATE FUNCTION reject_clearance_disposition() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected disposition failure'; END $$")
+                c.exec_driver_sql(f'CREATE TRIGGER reject_clearance_disposition BEFORE INSERT ON {table} FOR EACH ROW EXECUTE FUNCTION reject_clearance_disposition()')
+            try:
+                failed=self._clearance_disposition(csrf,command)
+                self.assertEqual(failed.status_code,503,failed.text)
+                self.assertEqual(failed.json()['error']['code'],'dependency_unavailable')
+                self.assertNotIn('disposition',failed.json())
+                with self.engine.connect() as c:
+                    for name in ('assessment_command_abandonments','assessment_audit_events'):
+                        self.assertEqual(c.execute(sa.text(f'select count(*) from {name} where command_id=:id'),
+                            {'id':command['command_id']}).scalar_one(),0)
+            finally:
+                with self.engine.begin() as c:
+                    c.exec_driver_sql(f'DROP TRIGGER reject_clearance_disposition ON {table}')
+                    c.exec_driver_sql('DROP FUNCTION reject_clearance_disposition()')
+        principal=self.client.get('/api/v1/auth/session').json()['principal_id']
+        for indexed in (False,True):
+            intent_id=str(uuid.uuid4());now=datetime.now(timezone.utc)
+            payload={'source_id':command['payload']['source_id'],'approval_id':str(uuid.uuid4()),
+                'configuration_revision':0,'recovery_epoch_id':command['payload']['recovery_epoch_id']}
+            if indexed:payload.update(command_id=command['command_id'],action=command['action'],request_digest='a'*64)
+            with self.engine.begin() as c:
+                c.execute(connector_intents.insert().values(intent_id=intent_id,
+                    connector_id=command['payload']['connector_id'],kind=command['action'],actor_id=principal,
+                    status='pending',attempts=0,payload=payload,result=None,created_at=now,updated_at=now))
+            try:
+                failed=self._clearance_disposition(csrf,command)
+                self.assertEqual(failed.status_code,503,failed.text)
+                self.assertNotIn('disposition',failed.json())
+            finally:
+                with self.engine.begin() as c:c.execute(connector_intents.delete().where(connector_intents.c.intent_id==intent_id))
+        self._check_clearance_proof(self._clearance_disposition(csrf,command),command,'not_committed')
+
+    def _expired_recovery_clock(self):
+        from datetime import datetime,timedelta,timezone
+        future=datetime.now(timezone.utc)+timedelta(minutes=16)
+        class FutureClock(datetime):
+            @classmethod
+            def now(cls,tz=None):return future.astimezone(tz)
+        return patch('uvm.connectors.local_recovery.datetime',FutureClock)
+
+    def test_local_recovery_missing_or_replaced_storage_key_stops_configured_startup(self):
+        from contextlib import asynccontextmanager
+        from fastapi import HTTPException
+        _,csrf=self._local_admin()
+        self._registered_scanner(csrf,'lost-storage-key')
+        key=Path(json.loads(self.config_path.read_text())['secret_source']['key_path'])
+        original=key.read_bytes();called=[]
+        @asynccontextmanager
+        async def worker(_):
+            called.append(True)
+            yield
+        for replacement in (None,secrets.token_bytes(32)):
+            if replacement is None:key.unlink()
+            else:key.write_bytes(replacement);key.chmod(0o600)
+            try:
+                with patch('uvm.connectors.scanner_install.scanner_worker_lifespan',worker):
+                    with self.assertRaises(HTTPException) as rejected:
+                        with TestClient(self.app,base_url='http://127.0.0.1'):
+                            self.fail('missing or replaced committed storage key became ready')
+                self.assertEqual(rejected.exception.status_code,503)
+                self.assertEqual(called,[])
+            finally:
+                key.write_bytes(original);key.chmod(0o600)
+
+    def _isolated_recovery_authority(self):
+        """Isolated backend fixture only: not delivery key custody/helper proof."""
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import Encoding,PrivateFormat,PublicFormat,NoEncryption
+        from uvm.auth.maintenance import run as maintain
+        root=Path(self.temp.name)/'isolated-recovery';root.mkdir(mode=0o700)
+        issuer,operator=Ed25519PrivateKey.generate(),Ed25519PrivateKey.generate()
+        self.recovery_operator=operator
+        def write(name,data):
+            path=root/name;path.write_bytes(data);path.chmod(0o600);return str(path)
+        local=json.loads(self.config_path.read_text());installation=local['installation_id']
+        fence={'schema_version':1,'profile':'volt_local_recovery_v1','installation_id':installation,
+            'journal_id':str(uuid.uuid4()),'restore_generation':0,'recovery_epoch_id':None}
+        self.recovery_fence_path=Path(write('fence.json',json.dumps(fence).encode()))
+        config={'schema_version':1,'profile':'volt_local_recovery_v1','installation_id':installation,
+            'issuer_key_id':str(uuid.uuid4()),'operator_key_id':str(uuid.uuid4()),'operator_id':'local-host:'+installation,
+            'issuer_public_key_file':write('issuer.pub',issuer.public_key().public_bytes(Encoding.Raw,PublicFormat.Raw)),
+            'issuer_private_key_file':write('issuer.key',issuer.private_bytes(Encoding.Raw,PrivateFormat.Raw,NoEncryption())),
+            'operator_public_key_file':write('operator.pub',operator.public_key().public_bytes(Encoding.Raw,PublicFormat.Raw)),
+            'material_key_file':write('material.key',secrets.token_bytes(32)),
+            'restore_fence_file':str(self.recovery_fence_path),'proof_store':{'kind':'postgresql','schema_revision':'0067'}}
+        self.recovery_config_path=Path(write('config.json',json.dumps(config).encode()))
+        os.environ['UVM_LOCAL_RECOVERY_CONFIG_FILE']=str(self.recovery_config_path)
+        maintain('validate-local-recovery',config_path=str(self.config_path))
+        maintain('apply-local-restore-fence',config_path=str(self.config_path))
+        return config,fence
+
+    def test_local_recovery_restore_revokes_public_session_and_applies_epoch_once(self):
+        from uvm.connectors.local_recovery import maintenance_fence,load_authority
+        from uvm.persistence.connector_schema import connectors
+        from datetime import datetime,timezone
+        _,csrf=self._local_admin()
+        _,receipt=self._registered_scanner(csrf,'restore-core')
+        config=json.loads(self.recovery_config_path.read_text());fence=json.loads(self.recovery_fence_path.read_text())
+        self.assertEqual(self.client.get('/api/v1/auth/session').status_code,200)
+        fence.update(restore_generation=1,recovery_epoch_id=str(uuid.uuid4()))
+        self.recovery_fence_path.write_text(json.dumps(fence))
+        ack=maintenance_fence(self.engine,'apply-local-restore-fence',json.loads(self.config_path.read_text()))
+        self.assertEqual(ack['status'],'applied');self.assertEqual(ack['revoked_sessions'],1)
+        self.assertEqual(self.client.get('/api/v1/auth/session').status_code,401)
+        ids=receipt['result']['allocated_ids']
+        with self.engine.connect() as c:
+            before=c.execute(sa.select(connectors).where(connectors.c.connector_id==ids['connector_id'])).mappings().one()
+        self.assertEqual(before['recovery']['state'],'quarantined')
+        again=maintenance_fence(self.engine,'apply-local-restore-fence',json.loads(self.config_path.read_text()))
+        self.assertEqual(again['status'],'already_applied');self.assertEqual(again['quarantined_connectors'],0)
+        # Seed only the persisted post-activation projection for this bounded
+        # restart assertion; actual signed clearance/test/activation follows.
+        with self.engine.begin() as c:
+            c.execute(connectors.update().where(connectors.c.connector_id==ids['connector_id']).values(
+                recovery={**before['recovery'],'state':'clear','requires_fresh_credentials':False},
+                lifecycle='active',active_configuration_revision=1))
+        self.app.router.on_startup[0]()
+        with self.engine.connect() as c:
+            after=c.execute(sa.select(connectors).where(connectors.c.connector_id==ids['connector_id'])).mappings().one()
+        self.assertEqual(after['lifecycle'],'active')
+        self.assertEqual(after['recovery']['state'],'clear')
+        self.assertEqual(after['connector_revision'],before['connector_revision'])
+        self.assertEqual(load_authority().fence['recovery_epoch_id'],fence['recovery_epoch_id'])
+
+    def test_local_recovery_missing_or_mismatched_fence_stops_startup_before_scanner_worker(self):
+        from contextlib import asynccontextmanager
+        from fastapi import HTTPException
+        _,csrf=self._local_admin()
+        self._registered_scanner(csrf,'missing-custody')
+        called=[]
+        @asynccontextmanager
+        async def worker(_):
+            called.append(True)
+            yield
+        original=self.recovery_fence_path.read_bytes()
+        for replacement in (None,{**json.loads(original),'installation_id':str(uuid.uuid4())}):
+            if replacement is None:self.recovery_fence_path.unlink()
+            else:
+                self.recovery_fence_path.write_text(json.dumps(replacement));self.recovery_fence_path.chmod(0o600)
+            try:
+                with patch('uvm.connectors.scanner_install.scanner_worker_lifespan',worker):
+                    with self.assertRaises(HTTPException) as rejected:
+                        with TestClient(self.app,base_url='http://127.0.0.1'):
+                            self.fail('unsafe custody became ready')
+                self.assertEqual(rejected.exception.status_code,503)
+                self.assertEqual(called,[])
+            finally:
+                self.recovery_fence_path.write_bytes(original);self.recovery_fence_path.chmod(0o600)
+
     def _registered_scanner(self, csrf, suffix='bridge'):
         import uuid
         command = self._registration_command(str(uuid.uuid4()), self.client.get('/api/v1/deployment').json(), suffix)
@@ -968,6 +1265,273 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
         response = self.client.post(f'/api/v1/connectors/{connector_id}/secrets/{secret_id or slot}/versions',
             json=body, headers={**self.origin, 'X-CSRF-Token':csrf})
         return response
+
+    def _abandon_scanner(self, csrf, receipt, command_id, digest='d'*64, **metadata):
+        ids = receipt['result']['allocated_ids']
+        with self.app.state.scanner_runtime.transaction(request=self._scanner_request(csrf),
+                action='scanner.configuration.save', connector_id=ids['connector_id'],
+                source_id=ids['source_id']) as tx:
+            return tx.record_audited_abandonment(command_id=command_id, request_digest=digest,
+                rationale=metadata.get('rationale','Cancel retained request'),
+                evidence_ref=metadata.get('evidence_ref','test:disposition'))
+
+    def test_scanner_disposition_exact_actor_source_and_current_grant(self):
+        from fastapi import HTTPException
+        from datetime import datetime,timedelta,timezone
+        from uvm.auth.maintenance import run as maintain
+        from starlette.requests import Request
+        _,csrf=self._local_admin()
+        _,receipt=self._registered_scanner(csrf,'actor-fence')
+        _,other=self._registered_scanner(csrf,'source-fence')
+        ids=receipt['result']['allocated_ids'];command_id=str(uuid.uuid4())
+        self._abandon_scanner(csrf,receipt,command_id)
+        with self.assertRaises(HTTPException) as source:
+            self._abandon_scanner(csrf,other,command_id)
+        self.assertEqual(source.exception.status_code,409)
+        maintain('create-account','disposition-user','Disposition User',str(self.config_path))
+        token=json.loads(self.delivery_path.read_text())['capability'];password=secrets.token_urlsafe(24)+'A7!'
+        with closing(TestClient(self.app,base_url='http://127.0.0.1',client=('127.0.0.1',52151))) as operator:
+            enrolled=operator.post('/api/v1/auth/local/enrol',json={'capability':token,'new_password':password},headers=self.origin)
+            self.assertEqual(enrolled.status_code,204,enrolled.text)
+            login=operator.post('/api/v1/auth/local/login',json={'username':'disposition-user','password':password},headers=self.origin)
+            self.assertEqual(login.status_code,200,login.text)
+            now=datetime.now(timezone.utc)+timedelta(seconds=1)
+            member=self._admin_command(csrf,'access_group.membership.set',{'access_group_id':ids['access_group_id'],
+                'principal_id':login.json()['principal_id'],'enabled':True,
+                'effective_from':now.isoformat(),'effective_until':None},access_group=1)
+            self.assertEqual(member.status_code,200,member.text)
+            request=Request({'type':'http','method':'POST','path':'/api/v1/scanners',
+                'headers':[(b'cookie',('uvm_session='+operator.cookies.get('uvm_session')).encode()),
+                    (b'origin',b'http://127.0.0.1'),(b'x-csrf-token',login.json()['csrf_token'].encode())]})
+            future=now+timedelta(seconds=2)
+            class MembershipClock(datetime):
+                @classmethod
+                def now(cls,tz=None):return future.astimezone(tz)
+            with patch('uvm.auth.local._now',return_value=future), \
+                    patch('uvm.auth.native_authority.datetime',MembershipClock), \
+                    self.assertRaises(HTTPException) as actor:
+                with self.app.state.scanner_runtime.transaction(request=request,action='scanner.configuration.save',
+                        connector_id=ids['connector_id'],source_id=ids['source_id']) as tx:
+                    tx.record_audited_abandonment(command_id=command_id,request_digest='d'*64,
+                        rationale='Different real actor',evidence_ref='test:actor')
+            self.assertEqual(actor.exception.status_code,409)
+        principal=self.client.get('/api/v1/auth/session').json()['principal_id']
+        disabled=self._admin_command(csrf,'access_group.membership.set',{'access_group_id':ids['access_group_id'],
+            'principal_id':principal,'enabled':False,'effective_from':datetime.now(timezone.utc).isoformat(),
+            'effective_until':None},access_group=2)
+        self.assertEqual(disabled.status_code,200,disabled.text)
+        with self.assertRaises(HTTPException) as revoked:
+            self._abandon_scanner(csrf,receipt,command_id)
+        self.assertEqual(revoked.exception.status_code,403)
+
+    def test_scanner_admission_and_abandonment_serialize_to_one_durable_winner(self):
+        from fastapi import HTTPException
+        _,csrf=self._local_admin()
+        _,receipt=self._registered_scanner(csrf,'admission-race')
+        ids=receipt['result']['allocated_ids'];runtime=self.app.state.scanner_runtime
+        request=self._scanner_request(csrf)
+        snapshot=runtime.authorize(request=request,action='scanner.configuration.save',
+            connector_id=ids['connector_id'],source_id=ids['source_id'])
+        command_id=str(uuid.uuid4());barrier=threading.Barrier(2)
+        def admit():
+            barrier.wait(timeout=5)
+            try:
+                with runtime.transaction(request=request,action='scanner.configuration.save',
+                        connector_id=ids['connector_id'],source_id=ids['source_id'],
+                        expected_revisions=snapshot.expected_revisions) as tx:
+                    tx.record_audited_intent(command_id=command_id,request_digest='d'*64,
+                        rationale='Race real admission',evidence_ref='test:race',operation_id=None,run_id=None)
+                return 'admitted'
+            except HTTPException as exc:
+                self.assertEqual(exc.status_code,409)
+                return exc.detail['code']
+        def abandon():
+            barrier.wait(timeout=5)
+            try:
+                self._abandon_scanner(csrf,receipt,command_id)
+                return 'abandoned'
+            except HTTPException as exc:
+                self.assertEqual(exc.status_code,409)
+                return exc.detail['code']
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            admission=pool.submit(admit);disposition=pool.submit(abandon)
+            results=(admission.result(timeout=10),disposition.result(timeout=10))
+        self.assertIn(results,{('admitted','command_conflict'),('command_terminal','abandoned')})
+        with self.engine.connect() as c:
+            intents=c.execute(sa.text("select count(*) from g7_connector_intents where payload->>'command_id'=:id"),{'id':command_id}).scalar_one()
+            tombstones=c.execute(sa.text('select count(*) from assessment_command_abandonments where command_id=:id'),{'id':command_id}).scalar_one()
+            self.assertEqual(intents+tombstones,1)
+        # Whichever won also excludes its delayed losing writer.
+        if results[0]=='admitted':
+            with self.assertRaises(HTTPException):self._abandon_scanner(csrf,receipt,command_id)
+        else:
+            with self.assertRaises(HTTPException) as terminal:
+                with runtime.transaction(request=request,action='scanner.configuration.save',
+                        connector_id=ids['connector_id'],source_id=ids['source_id'],
+                        expected_revisions=snapshot.expected_revisions) as tx:
+                    tx.record_audited_intent(command_id=command_id,request_digest='d'*64,
+                        rationale='Delayed admission',evidence_ref='test:late',operation_id=None,run_id=None)
+            self.assertEqual(terminal.exception.detail['code'],'command_terminal')
+
+    def test_public_registration_races_scanner_disposition_in_shared_namespace(self):
+        from fastapi import HTTPException
+        cookie,csrf=self._local_admin()
+        _,receipt=self._registered_scanner(csrf,'cross-race')
+        command_id=str(uuid.uuid4())
+        registration=self._registration_command(command_id,self.client.get('/api/v1/deployment').json(),'race-loser')
+        barrier=threading.Barrier(2)
+        def register():
+            barrier.wait(timeout=5)
+            with closing(self._protected_client(cookie)) as client:
+                return client.post('/api/v1/assessment/commands',json=registration,
+                    headers={**self.origin,'X-CSRF-Token':csrf}).status_code
+        def abandon():
+            barrier.wait(timeout=5)
+            try:
+                self._abandon_scanner(csrf,receipt,command_id)
+                return 200
+            except HTTPException as exc:return exc.status_code
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            registered=pool.submit(register);abandoned=pool.submit(abandon)
+            results=(registered.result(timeout=10),abandoned.result(timeout=10))
+        self.assertIn(results,{(200,409),(409,200)})
+        with self.engine.connect() as c:
+            receipts=c.execute(sa.text('select count(*) from assessment_command_receipts where command_id=:id'),{'id':command_id}).scalar_one()
+            tombstones=c.execute(sa.text('select count(*) from assessment_command_abandonments where command_id=:id'),{'id':command_id}).scalar_one()
+            self.assertEqual(receipts+tombstones,1)
+
+    def test_shared_occupancy_registration_connector_and_scanner_both_orders(self):
+        from fastapi import HTTPException
+        _, csrf = self._local_admin()
+        registration, receipt = self._registered_scanner(csrf, 'occupancy')
+        headers = {**self.origin, 'X-CSRF-Token':csrf}
+        with self.assertRaises(HTTPException) as occupied:
+            self._abandon_scanner(csrf, receipt, registration['command_id'])
+        self.assertEqual(occupied.exception.status_code,409)
+        uploaded = self._submit_qualys(csrf, receipt)
+        self.assertEqual(uploaded.status_code,201,uploaded.text)
+        revoke = self._secret_command_body(receipt,'connector.secret.version.revoke',
+            version_id=uploaded.json()['result']['version_id'])
+        accepted = self.client.post('/api/v1/assessment/commands',json=revoke,headers=headers)
+        self.assertEqual(accepted.status_code,200,accepted.text)
+        with self.assertRaises(HTTPException) as occupied:
+            self._abandon_scanner(csrf,receipt,revoke['command_id'])
+        self.assertEqual(occupied.exception.status_code,409)
+        command_id=str(uuid.uuid4())
+        proof=self._abandon_scanner(csrf,receipt,command_id)
+        self.assertEqual(self._abandon_scanner(csrf,receipt,command_id,
+            rationale='Different replay metadata',evidence_ref='test:second'),proof)
+        with self.assertRaises(HTTPException) as changed:
+            self._abandon_scanner(csrf,receipt,command_id,digest='e'*64)
+        self.assertEqual(changed.exception.status_code,409)
+        other_registration=self._registration_command(command_id,self.client.get('/api/v1/deployment').json(),'collision')
+        denied=self.client.post('/api/v1/assessment/commands',json=other_registration,headers=headers)
+        self.assertEqual(denied.status_code,409,denied.text)
+        reconcile=self._secret_command_body(receipt,'connector.secret.submission.reconcile',
+            submission_id=str(uuid.uuid4()),version_id=str(uuid.uuid4()))
+        reconcile['command_id']=command_id
+        denied=self.client.post('/api/v1/assessment/commands',json=reconcile,headers=headers)
+        self.assertEqual(denied.status_code,409,denied.text)
+        with self.engine.connect() as c:
+            self.assertEqual(c.exec_driver_sql('select count(*) from g7_connector_submissions').scalar_one(),1)
+            self.assertEqual(c.exec_driver_sql('select count(*) from assessment_command_abandonments').scalar_one(),1)
+
+    def test_scanner_abandonment_audit_and_tombstone_failures_roll_back_same_connection(self):
+        from uvm.persistence.connector_schema import connector_configurations
+        from datetime import datetime, timezone
+        _,csrf=self._local_admin()
+        _,receipt=self._registered_scanner(csrf,'atomic-abandon')
+        ids=receipt['result']['allocated_ids']
+        for table in ('assessment_audit_events','assessment_command_abandonments'):
+            with self.subTest(table=table):
+                command_id=str(uuid.uuid4())
+                with self.engine.begin() as c:
+                    c.exec_driver_sql("CREATE FUNCTION reject_disposition() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected disposition failure'; END $$")
+                    c.exec_driver_sql(f'CREATE TRIGGER reject_disposition BEFORE INSERT ON {table} FOR EACH ROW EXECUTE FUNCTION reject_disposition()')
+                try:
+                    with self.assertRaises(sa.exc.DBAPIError):
+                        with self.app.state.scanner_runtime.transaction(request=self._scanner_request(csrf),
+                                action='scanner.configuration.save',connector_id=ids['connector_id'],source_id=ids['source_id']) as tx:
+                            tx.connection.execute(connector_configurations.insert().values(
+                                connector_id=ids['connector_id'],configuration_revision=1,
+                                settings={'rollback_marker':True},actor_id=tx.snapshot.principal_id,
+                                created_at=datetime.now(timezone.utc)))
+                            tx.record_audited_abandonment(command_id=command_id,request_digest='f'*64,
+                                rationale='Test full rollback',evidence_ref='test:atomic')
+                    with self.engine.connect() as c:
+                        self.assertEqual(c.exec_driver_sql('select count(*) from g7_connector_configurations').scalar_one(),0)
+                        self.assertEqual(c.execute(sa.text('select count(*) from assessment_command_abandonments where command_id=:id'),{'id':command_id}).scalar_one(),0)
+                        self.assertEqual(c.execute(sa.text('select count(*) from assessment_audit_events where command_id=:id'),{'id':command_id}).scalar_one(),0)
+                finally:
+                    with self.engine.begin() as c:
+                        c.exec_driver_sql(f'DROP TRIGGER reject_disposition ON {table}')
+                        c.exec_driver_sql('DROP FUNCTION reject_disposition()')
+
+    def test_scanner_tombstone_fences_public_secret_admission_and_reconciliation(self):
+        _,csrf=self._local_admin()
+        _,receipt=self._registered_scanner(csrf,'secret-fence')
+        ids=receipt['result']['allocated_ids'];slot=receipt['result']['credential_slots']['qualys_vm_basic']['secret_id']
+        command_id=str(uuid.uuid4());version_id=str(uuid.uuid4())
+        self._abandon_scanner(csrf,receipt,command_id)
+        reconcile=self._secret_command_body(receipt,'connector.secret.submission.reconcile',
+            submission_id=command_id,version_id=version_id)
+        body={'schema_version':1,'submission_id':command_id,'version_id':version_id,
+            'source_id':ids['source_id'],'purpose':'qualys_vm_basic','expected_revisions':reconcile['expected_revisions'],
+            'rationale':'Test occupied admission','evidence_ref':'test:occupied',
+            'input':{'kind':'value','value':json.dumps({'username':'reader','password':secrets.token_urlsafe(24)})}}
+        headers={**self.origin,'X-CSRF-Token':csrf}
+        submitted=self.client.post(f"/api/v1/connectors/{ids['connector_id']}/secrets/{slot}/versions",json=body,headers=headers)
+        self.assertEqual(submitted.status_code,409,submitted.text)
+        denied=self.client.post('/api/v1/assessment/commands',json=reconcile,headers=headers)
+        self.assertEqual(denied.status_code,409,denied.text)
+        with self.engine.connect() as c:
+            self.assertEqual(c.exec_driver_sql('select count(*) from g7_connector_submissions').scalar_one(),0)
+            self.assertEqual(c.exec_driver_sql('select count(*) from g7_connector_secrets').scalar_one(),0)
+
+    def test_pending_secret_occupancy_fences_scanner_and_delayed_mixed_settlement(self):
+        import time
+        from fastapi import HTTPException
+        from uvm.persistence.assessment_schema import assessment_command_abandonments
+        from datetime import datetime,timezone
+        cookie,csrf=self._local_admin()
+        _,receipt=self._registered_scanner(csrf,'pending-fence')
+        ids=receipt['result']['allocated_ids'];slot=receipt['result']['credential_slots']['qualys_vm_basic']['secret_id']
+        submission_id,version_id=str(uuid.uuid4()),str(uuid.uuid4())
+        revisions=self._secret_command_body(receipt,'connector.secret.submission.reconcile',
+            submission_id=submission_id,version_id=version_id)['expected_revisions']
+        body={'schema_version':1,'submission_id':submission_id,'version_id':version_id,
+            'source_id':ids['source_id'],'purpose':'qualys_vm_basic','expected_revisions':revisions,
+            'rationale':'Test pending namespace','evidence_ref':'test:pending',
+            'input':{'kind':'value','value':json.dumps({'username':'reader','password':secrets.token_urlsafe(24)})}}
+        directory=Path(self.temp.name)/'occupancy-pause';directory.mkdir(mode=0o700)
+        pause=directory/'pause';pause.write_text('paused');marker=directory/('admitted-'+submission_id)
+        def submit():
+            with closing(self._protected_client(cookie)) as client:
+                return client.post(f"/api/v1/connectors/{ids['connector_id']}/secrets/{slot}/versions",json=body,
+                    headers={**self.origin,'X-CSRF-Token':csrf})
+        with patch.dict(os.environ,{'UVM_G7_DISPOSABLE_MODE':'1','UVM_CONNECTOR_TEST_SUBMISSION_PAUSE_DIR':str(directory)}):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future=pool.submit(submit)
+                try:
+                    deadline=time.monotonic()+10
+                    while not marker.exists() and time.monotonic()<deadline:time.sleep(.02)
+                    self.assertTrue(marker.exists(),'durable admission was not reached')
+                    with self.assertRaises(HTTPException) as conflict:
+                        self._abandon_scanner(csrf,receipt,submission_id)
+                    self.assertEqual(conflict.exception.status_code,409)
+                    # Simulate pre-existing inconsistent data. Neither completion
+                    # nor its error settlement may claim definitive noncommit.
+                    principal=self.client.get('/api/v1/auth/session').json()['principal_id']
+                    with self.engine.begin() as c:
+                        c.execute(assessment_command_abandonments.insert().values(command_id=submission_id,
+                            principal_id=principal,action='scanner.configuration.save',request_digest='a'*64,
+                            audit_event_id=receipt['audit_event_id'],created_at=datetime.now(timezone.utc)))
+                finally:pause.unlink(missing_ok=True)
+                delayed=future.result(timeout=10)
+                self.assertEqual(delayed.status_code,503,delayed.text)
+        with self.engine.connect() as c:
+            self.assertEqual(c.execute(sa.text('select outcome from g7_connector_submissions where submission_id=:id'),{'id':submission_id}).scalar_one(),'unknown')
+            self.assertEqual(c.exec_driver_sql('select count(*) from g7_connector_secrets').scalar_one(),0)
 
     def test_qualys_registration_generates_identity_and_enforces_purpose_slot(self):
         import uuid
@@ -1337,7 +1901,269 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
             self.assertTrue(c.execute(sa.text('select pg_try_advisory_lock(:key)'), {'key':key}).scalar_one())
             c.execute(sa.text('select pg_advisory_unlock(:key)'), {'key':key})
 
-    def _actual_scanner_pipeline(self, *, fail_publication=False):
+    def _exercise_recovery_approval_fixture(self,csrf,receipt,view,command,post,calls):
+        """Real backend/public flow; operator signing is an isolated fixture ONLY."""
+        from datetime import datetime,timedelta,timezone
+        from uvm.connectors.local_recovery import canonical,stamp,maintenance_fence
+        import base64,hashlib
+        ids=receipt['result']['allocated_ids'];connector,source=ids['connector_id'],ids['source_id']
+        slot=receipt['result']['credential_slots']['qualys_vm_basic']['secret_id']
+        current=view();old_version=current['credential']['version_id']
+        revoke=self._secret_command_body(receipt,'connector.secret.version.revoke',version_id=old_version)
+        revoked=self.client.post('/api/v1/assessment/commands',json=revoke,
+            headers={**self.origin,'X-CSRF-Token':csrf})
+        self.assertEqual(revoked.status_code,200,revoked.text)
+        fence=json.loads(self.recovery_fence_path.read_text());fence.update(
+            restore_generation=1,recovery_epoch_id=str(uuid.uuid4()))
+        self.recovery_fence_path.write_text(json.dumps(fence))
+        maintenance_fence(self.engine,'apply-local-restore-fence',json.loads(self.config_path.read_text()))
+        self.assertEqual(self.client.get('/api/v1/auth/session').status_code,401)
+        login=self.client.post('/api/v1/auth/local/login',json={'username':'first-admin','password':self.admin_password},headers=self.origin)
+        self.assertEqual(login.status_code,200,login.text);csrf=login.json()['csrf_token']
+        headers={**self.origin,'X-CSRF-Token':csrf}
+        def upload(password,username='synthetic-reader',**options):
+            read=self.client.get(f'/api/v1/connectors/{connector}/secrets/{slot}',params={'source_id':source})
+            self.assertEqual(read.status_code,200,read.text)
+            value=json.dumps({'password':password,'username':username},indent=2)
+            return self.client.post(f'/api/v1/connectors/{connector}/secrets/{slot}/versions',json={
+                'schema_version':1,'submission_id':str(uuid.uuid4()),'version_id':str(uuid.uuid4()),
+                'source_id':source,'purpose':'qualys_vm_basic','expected_revisions':read.json()['revisions'],
+                'rationale':'Explicit recovery upload','evidence_ref':'test:isolated-recovery',
+                'input':{'kind':'value','value':value}},headers=headers)
+        # Revoked retained material must still reject reuse with new IDs,
+        # changed username and a different JSON representation.
+        reused=upload(self.fixture_password,username='different-reader')
+        self.assertEqual(reused.status_code,409,reused.text)
+        self.assertEqual(reused.json()['error']['code'],'credential_material_reused')
+        with self.engine.connect() as c:
+            self.assertEqual(c.exec_driver_sql('select count(*) from local_recovery_attestations').scalar_one(),0)
+            self.assertEqual(c.exec_driver_sql("select count(*) from g7_connector_secrets where state='active'").scalar_one(),0)
+        self.fixture_password=secrets.token_urlsafe(24)+'F7!'
+        fresh=upload(self.fixture_password)
+        self.assertEqual(fresh.status_code,201,fresh.text)
+        def assert_save_closed():
+            before=view()
+            with self.engine.connect() as c:
+                counts={name:c.exec_driver_sql(f'select count(*) from {name}').scalar_one()
+                    for name in ('assessment_audit_events','g7_connector_intents','g7_connector_receipts')}
+            body=command('scanner.configuration.save',settings={'product':'qualys_vm','api_version':'2.0',
+                'platform_id':'us1','scope':{'kind':'account_visible'},'collection_mode':'manual'})
+            denied=self.client.post(f'/api/v1/scanners/{connector}/commands',json=body,headers=headers)
+            self.assertEqual(denied.status_code,409,denied.text)
+            after=view()
+            self.assertEqual(after['lifecycle'],'disabled')
+            self.assertEqual(after['configuration_revision'],before['configuration_revision'])
+            self.assertEqual(after['recovery'],before['recovery'])
+            with self.engine.connect() as c:
+                for name,count in counts.items():
+                    self.assertEqual(c.exec_driver_sql(f'select count(*) from {name}').scalar_one(),count)
+        assert_save_closed()
+        metadata=view();self.assertTrue(metadata['recovery']['fresh_version_ready'])
+        self.assertEqual(metadata['recovery']['state'],'quarantined')
+        self.assertEqual(metadata['recovery']['clearance_state'],'missing')
+        probe=command('scanner.connection.test',configuration_revision=metadata['configuration_revision'],
+            credential_version_id=metadata['credential']['version_id'])
+        denied=self.client.post(f'/api/v1/scanners/{connector}/commands',json=probe,headers=headers)
+        self.assertEqual(denied.status_code,409,denied.text)
+        self.assertEqual(calls,[])
+        config=json.loads(self.recovery_config_path.read_text())
+        request={'schema_version':1,'profile':'volt_local_recovery_v1','installation_id':config['installation_id'],
+            'connector_id':connector,'source_id':source,'configuration_revision':metadata['configuration_revision'],
+            'rationale':'Explicit isolated host approval','evidence_ref':'test:isolated-host-signer'}
+        def maintain(operation,document):
+            result=subprocess.run([sys.executable,'-m','uvm.auth.maintenance',operation,
+                '--config',str(self.config_path),'--input','-'],input=canonical(document),
+                stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=20)
+            return result
+        requested=maintain('scanner-recovery-request',request)
+        self.assertEqual(requested.returncode,0,requested.stderr.decode())
+        private=json.loads(requested.stdout);attestation=private['attestation']
+        self.assertEqual(private['attestation_sha256'],hashlib.sha256(canonical(attestation)).hexdigest())
+        now=datetime.now(timezone.utc)
+        target=private['target']
+        approval={'schema_version':2,'profile':'volt_local_recovery_v1','document_type':'operator_clearance',
+            'approval_id':str(uuid.uuid4()),'installation_id':config['installation_id'],
+            'operator_key_id':config['operator_key_id'],'operator_id':config['operator_id'],
+            **{k:target[k] for k in ('connector_id','source_id','source_tuple','secret_id','version_id','purpose','configuration_revision')},
+            'recovery_epoch_id':private['recovery_epoch_id'],'attestation_sha256':private['attestation_sha256'],
+            'rationale':request['rationale'],'evidence_ref':request['evidence_ref'],
+            'issued_at':stamp(now),'expires_at':stamp(now+timedelta(minutes=15))}
+        approval['signature']=base64.b64encode(self.recovery_operator.sign(canonical(approval))).decode()
+        # Valid operator signatures do not override any contextual binding.
+        for changed in ({'installation_id':str(uuid.uuid4())},{'source_id':str(uuid.uuid4())},
+                {'secret_id':str(uuid.uuid4())},{'version_id':str(uuid.uuid4())},
+                {'recovery_epoch_id':str(uuid.uuid4())},{'configuration_revision':target['configuration_revision']+1},
+                {'purpose':'rest_token'},{'attestation_sha256':'0'*64},{'profile':'external'},
+                {'operator_key_id':str(uuid.uuid4())},{'operator_id':'another-host'},
+                {'issued_at':stamp(now+timedelta(minutes=1))},
+                {'expires_at':stamp(now-timedelta(seconds=1))},{'unknown_field':True}):
+            wrong={k:v for k,v in {**approval,**changed}.items() if k!='signature'}
+            wrong['signature']=base64.b64encode(self.recovery_operator.sign(canonical(wrong))).decode()
+            rejected=maintain('scanner-recovery-import',wrong)
+            self.assertNotEqual(rejected.returncode,0,'mismatched signed context was accepted')
+        invalid_signature={**approval,'signature':base64.b64encode(secrets.token_bytes(64)).decode()}
+        self.assertNotEqual(maintain('scanner-recovery-import',invalid_signature).returncode,0)
+        with self.engine.connect() as c:
+            self.assertEqual(c.exec_driver_sql('select count(*) from local_recovery_approvals').scalar_one(),0)
+        # Each durable import ledger failure independently rolls back proof,
+        # projection, intent, receipt and audit on the real PostgreSQL service.
+        def install_failure(table):
+            with self.engine.begin() as c:
+                c.exec_driver_sql("CREATE FUNCTION reject_recovery_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected recovery transaction failure'; END $$")
+                c.exec_driver_sql(f'CREATE TRIGGER reject_recovery_write BEFORE INSERT ON {table} FOR EACH ROW EXECUTE FUNCTION reject_recovery_write()')
+        def clear_failure(table):
+            with self.engine.begin() as c:
+                c.exec_driver_sql(f'DROP TRIGGER reject_recovery_write ON {table}')
+                c.exec_driver_sql('DROP FUNCTION reject_recovery_write()')
+        for table in ('assessment_audit_events','g7_connector_intents','g7_connector_receipts'):
+            install_failure(table)
+            try:
+                failed=maintain('scanner-recovery-import',approval)
+                self.assertNotEqual(failed.returncode,0)
+                with self.engine.connect() as c:
+                    self.assertEqual(c.exec_driver_sql('select count(*) from local_recovery_approvals').scalar_one(),0)
+            finally:clear_failure(table)
+        imported=maintain('scanner-recovery-import',approval)
+        self.assertEqual(imported.returncode,0,imported.stderr.decode())
+        self.assertEqual(json.loads(imported.stdout)['approval_id'],approval['approval_id'])
+        replay=maintain('scanner-recovery-import',approval)
+        self.assertEqual(replay.returncode,0,replay.stderr.decode());self.assertEqual(replay.stdout,imported.stdout)
+        metadata=view();self.assertEqual(metadata['recovery']['clearance_state'],'available')
+        clearance=self._secret_command_body(receipt,'connector.recovery.clearance.apply',
+            version_id=target['version_id'],recovery_epoch_id=fence['recovery_epoch_id'])
+        with self._expired_recovery_clock():
+            expired=self.client.post('/api/v1/assessment/commands',json=clearance,headers=headers)
+            self.assertEqual(expired.status_code,409,expired.text)
+            self.assertEqual(view()['recovery']['clearance_state'],'expired')
+            self._check_clearance_proof(self._clearance_disposition(csrf,clearance),clearance,'not_committed')
+        terminal=self.client.post('/api/v1/assessment/commands',json=clearance,headers=headers)
+        self.assertEqual(terminal.status_code,409,terminal.text)
+        self.assertEqual(terminal.json()['error']['code'],'command_terminal')
+        # A NEW explicit host approval changes connector revision. Its retained
+        # predecessor request can still obtain proof without rebasing bytes.
+        replaced_request={**clearance,'command_id':str(uuid.uuid4())}
+        replacement={k:v for k,v in approval.items() if k!='signature'}
+        replacement_now=datetime.now(timezone.utc)
+        replacement.update(approval_id=str(uuid.uuid4()),issued_at=stamp(replacement_now),
+            expires_at=stamp(replacement_now+timedelta(minutes=15)))
+        replacement['signature']=base64.b64encode(self.recovery_operator.sign(canonical(replacement))).decode()
+        imported_replacement=maintain('scanner-recovery-import',replacement)
+        self.assertEqual(imported_replacement.returncode,0,imported_replacement.stderr.decode())
+        rejected=self.client.post('/api/v1/assessment/commands',json=replaced_request,headers=headers)
+        self.assertEqual(rejected.status_code,409,rejected.text)
+        self.assertEqual(rejected.json()['error']['code'],'revision_conflict')
+        self._check_clearance_proof(self._clearance_disposition(csrf,replaced_request),replaced_request,'not_committed')
+        clearance=self._secret_command_body(receipt,'connector.recovery.clearance.apply',
+            version_id=target['version_id'],recovery_epoch_id=fence['recovery_epoch_id'])
+        self._check_clearance_proof(self._clearance_disposition(csrf,clearance),clearance,'not_committed')
+        delayed=self.client.post('/api/v1/assessment/commands',json=clearance,headers=headers)
+        self.assertEqual(delayed.status_code,409,delayed.text)
+        self.assertEqual(delayed.json()['error']['code'],'command_terminal')
+        clearance={**clearance,'command_id':str(uuid.uuid4())}
+        with self.engine.connect() as c:
+            self.assertIsNone(c.exec_driver_sql('select consumed_command_id from local_recovery_approvals where superseded_at is null').scalar_one())
+        for table in ('assessment_audit_events','g7_connector_intents','g7_connector_receipts'):
+            install_failure(table)
+            try:
+                failed=self.client.post('/api/v1/assessment/commands',json=clearance,headers=headers)
+                self.assertEqual(failed.status_code,503,failed.text)
+                with self.engine.connect() as c:
+                    self.assertIsNone(c.exec_driver_sql('select consumed_command_id from local_recovery_approvals where superseded_at is null').scalar_one())
+                self.assertEqual(view()['recovery']['state'],'quarantined')
+            finally:clear_failure(table)
+        barrier=threading.Barrier(2);cookie=self.client.cookies.get('uvm_session')
+        def race_apply():
+            barrier.wait(timeout=5)
+            with closing(self._protected_client(cookie)) as client:
+                return client.post('/api/v1/assessment/commands',json=clearance,headers=headers)
+        def race_abandon():
+            barrier.wait(timeout=5)
+            with closing(self._protected_client(cookie)) as client:
+                return client.post(f"/api/v1/assessment/commands/{clearance['command_id']}/abandon",json={
+                    'schema_version':1,'command':clearance,'rationale':'Race original admission',
+                    'evidence_ref':'test:clearance-race'},headers=headers)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            submitted=pool.submit(race_apply);resolved=pool.submit(race_abandon)
+            applied,disposition=submitted.result(timeout=10),resolved.result(timeout=10)
+        self.assertEqual(disposition.status_code,200,disposition.text)
+        if disposition.json()['disposition']=='not_committed':
+            self._check_clearance_proof(disposition,clearance,'not_committed')
+            self.assertEqual(applied.status_code,409,applied.text)
+            self.assertEqual(applied.json()['error']['code'],'command_terminal')
+            clearance={**clearance,'command_id':str(uuid.uuid4())}
+            applied=self.client.post('/api/v1/assessment/commands',json=clearance,headers=headers)
+        else:
+            self._check_clearance_proof(disposition,clearance,'committed')
+            self.assertEqual(disposition.json()['receipt'],applied.json())
+        self.assertEqual(applied.status_code,200,applied.text)
+        committed=self._check_clearance_proof(self._clearance_disposition(csrf,clearance),clearance,'committed')
+        self.assertEqual(committed['receipt'],applied.json())
+        # Existing516 complete footprints are readable without invented pointers.
+        from uvm.persistence.connector_schema import connector_intents
+        intent_id=applied.json()['intents'][0]['intent_id']
+        with self.engine.begin() as c:
+            indexed_payload=c.execute(sa.select(connector_intents.c.payload).where(connector_intents.c.intent_id==intent_id)).scalar_one()
+            legacy_payload={k:v for k,v in indexed_payload.items() if k not in {'command_id','action','request_digest'}}
+            c.execute(connector_intents.update().where(connector_intents.c.intent_id==intent_id).values(payload=legacy_payload))
+        try:
+            self.assertEqual(self._clearance_disposition(csrf,clearance).json(),committed)
+        finally:
+            with self.engine.begin() as c:c.execute(connector_intents.update().where(connector_intents.c.intent_id==intent_id).values(payload=indexed_payload))
+        # Torn mixed state cannot be presented as either definitive union.
+        from uvm.persistence.assessment_schema import assessment_command_abandonments
+        with self.engine.begin() as c:
+            c.execute(assessment_command_abandonments.insert().values(command_id=clearance['command_id'],
+                principal_id=committed['actor_id'],action=clearance['action'],request_digest=committed['request_digest'],
+                audit_event_id=applied.json()['audit_event_id'],created_at=datetime.now(timezone.utc)))
+        try:
+            inconsistent=self._clearance_disposition(csrf,clearance)
+            self.assertEqual(inconsistent.status_code,503,inconsistent.text)
+            self.assertNotIn('disposition',inconsistent.json())
+        finally:
+            with self.engine.begin() as c:c.execute(assessment_command_abandonments.delete().where(
+                assessment_command_abandonments.c.command_id==clearance['command_id']))
+        again=self.client.post('/api/v1/assessment/commands',json=clearance,headers=headers)
+        self.assertEqual(again.status_code,200,again.text);self.assertEqual(again.json(),applied.json())
+        self.assertEqual(view()['recovery']['state'],'awaiting_activation')
+        self.assertEqual(view()['recovery']['clearance_state'],'applied')
+        assert_save_closed()
+        self.assertEqual(calls,[])
+        self.recovery_csrf=csrf
+        self.recovery_clearance=clearance
+        self.recovery_access_group=ids['access_group_id']
+        return csrf
+
+    def test_actual_public_recovery_with_isolated_signer_test_activation_collection_and_restart(self):
+        self._actual_scanner_pipeline(recovery=True)
+        cookie=self.client.cookies.get('uvm_session')
+        with TestClient(self.app,base_url='http://127.0.0.1',client=('127.0.0.1',52179)) as client:
+            client.cookies.set('uvm_session',cookie,domain='127.0.0.1',path='/')
+            deployment=client.get('/api/v1/deployment')
+            self.assertEqual(deployment.status_code,200,deployment.text)
+            item=deployment.json()['connectors'][0]
+            response=client.get(f"/api/v1/scanners/{item['connector_id']}",params={'source_id':item['source']['source_id']})
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertEqual(response.json()['recovery']['state'],'clear')
+            self.assertEqual(response.json()['lifecycle'],'active')
+            self.client=client
+            principal=client.get('/api/v1/auth/session').json()['principal_id']
+            from datetime import datetime,timezone
+            # Source group identity came from the actual registration receipt.
+            group=self.recovery_access_group
+            disabled=self._admin_command(self.recovery_csrf,'access_group.membership.set',{
+                'access_group_id':group,'principal_id':principal,'enabled':False,
+                'effective_from':datetime.now(timezone.utc).isoformat(),'effective_until':None},access_group=1)
+            self.assertEqual(disabled.status_code,200,disabled.text)
+            with patch.object(self.app.state.scanner_service,'_client_factory',side_effect=AssertionError('revoked grant reached HTTP')):
+                denied=client.get(f"/api/v1/scanners/{item['connector_id']}",params={'source_id':item['source']['source_id']})
+                self.assertEqual(denied.status_code,403,denied.text)
+                replay=client.post('/api/v1/assessment/commands',json=self.recovery_clearance,
+                    headers={**self.origin,'X-CSRF-Token':self.recovery_csrf})
+                self.assertEqual(replay.status_code,403,replay.text)
+                rejected=self._clearance_disposition(self.recovery_csrf,self.recovery_clearance)
+                self.assertEqual(rejected.status_code,403,rejected.text)
+
+    def _actual_scanner_pipeline(self, *, fail_publication=False, recovery=False, post_restore_registration=False):
         import base64
         import uuid
         from http.server import BaseHTTPRequestHandler
@@ -1346,10 +2172,11 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
         self._initialize_scanner_rule_cli()
         case = self
         calls = []
+        self.fixture_password='Synthetic scanner secret 7!'
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 correct = self.headers.get('Authorization') == 'Basic '+base64.b64encode(
-                    b'synthetic-reader:Synthetic scanner secret 7!').decode()
+                    ('synthetic-reader:'+case.fixture_password).encode()).decode()
                 calls.append((self.path, correct))
                 body = (LAST_PAGE if 'id_min=' in self.path else PAGE).replace(
                     b'https://qualysapi.qualys.com', case.fixture_origin.encode())
@@ -1371,6 +2198,17 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
                 with TestClient(self.app, base_url='http://127.0.0.1', client=('127.0.0.1',52171)) as client:
                     self.client = client
                     _, csrf = self._local_admin()
+                    if post_restore_registration:
+                        from uvm.connectors.local_recovery import maintenance_fence
+                        fence=json.loads(self.recovery_fence_path.read_text())
+                        fence.update(restore_generation=1,recovery_epoch_id=str(uuid.uuid4()))
+                        self.recovery_fence_path.write_text(json.dumps(fence))
+                        maintenance_fence(self.engine,'apply-local-restore-fence',json.loads(self.config_path.read_text()))
+                        self.assertEqual(client.get('/api/v1/auth/session').status_code,401)
+                        login=client.post('/api/v1/auth/local/login',json={'username':'first-admin',
+                            'password':self.admin_password},headers=self.origin)
+                        self.assertEqual(login.status_code,200,login.text)
+                        csrf=login.json()['csrf_token']
                     _, receipt = self._registered_scanner(csrf, 'actual-pipeline')
                     ids = receipt['result']['allocated_ids']
                     connector, source = ids['connector_id'], ids['source_id']
@@ -1387,6 +2225,12 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
                     def post(body):
                         return client.post(f'/api/v1/scanners/{connector}/commands', json=body, headers=headers)
                     initial = view()
+                    if post_restore_registration:
+                        self.assertEqual(initial['recovery']['epoch_id'],fence['recovery_epoch_id'])
+                        self.assertEqual(initial['recovery']['state'],'clear')
+                        self.assertFalse(initial['recovery']['fresh_credentials_required'])
+                        self.assertFalse(initial['recovery']['fresh_version_ready'])
+                        self.assertIsNone(initial['recovery']['approval_id'])
                     self.assertEqual(initial['credential']['revision'],0)
                     self.assertIsNone(initial['expected_revisions']['secret'])
                     saved = post(command('scanner.configuration.save', settings={'product':'qualys_vm',
@@ -1405,6 +2249,9 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
                     self.assertEqual(uploaded.status_code,201,uploaded.text)
                     self.assertEqual(view()['credential']['revision'],metadata['credential']['revision']+1)
                     self.assertEqual(calls,[])
+                    if recovery:
+                        csrf=self._exercise_recovery_approval_fixture(csrf,receipt,view,command,post,calls)
+                        headers={**self.origin,'X-CSRF-Token':csrf}
                     def version():
                         metadata = view()
                         return {'configuration_revision':metadata['configuration_revision'],
@@ -1413,10 +2260,22 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
                     self.assertEqual(probed.status_code,200,probed.text)
                     self.assertEqual(probed.json()['result']['status'],'succeeded')
                     self.assertEqual(len(calls),1)
-                    activated = post(command('scanner.configuration.activate',**version(),
-                        validation_operation_id=probed.json()['result']['operation_id']))
+                    activation=command('scanner.configuration.activate',**version(),
+                        validation_operation_id=probed.json()['result']['operation_id'])
+                    if recovery:
+                        with self._expired_recovery_clock():
+                            expired=post(activation)
+                            self.assertEqual(expired.status_code,409,expired.text)
+                            self.assertEqual(view()['recovery']['state'],'awaiting_activation')
+                            self.assertIsNone(view()['active_configuration_revision'])
+                    activated = post(activation)
                     self.assertEqual(activated.status_code,200,activated.text)
                     self.assertEqual(len(calls),1)
+                    if recovery:
+                        self.assertEqual(view()['recovery']['state'],'clear')
+                        self.assertFalse(view()['recovery']['fresh_credentials_required'])
+                        self.app.router.on_startup[0]()
+                        self.assertEqual(view()['lifecycle'],'active')
                     if fail_publication:
                         with self.engine.begin() as c:
                             c.exec_driver_sql("""CREATE FUNCTION reject_final_publication_audit() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -1424,7 +2283,11 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
                                 AND NEW.after_value->>'stage'='committed' THEN RAISE EXCEPTION 'injected final publication failure'; END IF; RETURN NEW; END $$""")
                             c.exec_driver_sql('CREATE TRIGGER reject_final_publication_audit BEFORE INSERT ON assessment_audit_events FOR EACH ROW EXECUTE FUNCTION reject_final_publication_audit()')
                     collected_command = command('scanner.collection.start',**version())
-                    collected = post(collected_command)
+                    with self._expired_recovery_clock() if recovery else nullcontext():
+                        if recovery:
+                            self.assertEqual(view()['recovery']['clearance_state'],'expired')
+                            self.assertEqual(view()['lifecycle'],'active')
+                        collected = post(collected_command)
                     self.assertEqual(len(calls),3)
                     self.assertTrue(all(correct for _,correct in calls))
                     replay = post(collected_command)

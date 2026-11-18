@@ -17,8 +17,10 @@ const exportedAbandonment=openapi.paths['/api/v1/assessment/commands/{command_id
 // Evaluate precisely the keywords used by this exported registration shape;
 // unsupported constraints fail the test rather than silently being ignored.
 function matchesExport(value,schema){
- const supported=new Set(['type','properties','required','additionalProperties','const','enum','minimum','maxItems','format','title']);
+ const supported=new Set(['type','properties','required','additionalProperties','const','enum','minimum','maxItems','format','title','oneOf','minLength']);
  assert.equal(Object.keys(schema).every(k=>supported.has(k)),true,'new schema keyword requires validator support');
+ if(schema.oneOf&&schema.oneOf.filter(candidate=>matchesExport(value,candidate)).length!==1)return false;
+ if(schema.minLength!==undefined&&(typeof value!=='string'||Array.from(value).length<schema.minLength))return false;
  if('const' in schema&&JSON.stringify(value)!==JSON.stringify(schema.const))return false;
  if(schema.enum&&!schema.enum.includes(value))return false;
  if(schema.type==='object'){
@@ -94,4 +96,8 @@ test('retained incompatible commands are rejected without changing their exact b
  const unversioned=structuredClone(command);delete unversioned.schema_version;
  for(const value of [unversioned,{...command,schema_version:2},{...command,unexpected:true}]){const before=JSON.stringify(value);assert.equal(api.isRegistration(value),false);assert.equal(JSON.stringify(value),before);}
  assert.equal(api.isRegistration(command),true);
+});
+
+test('export evaluator enforces exactly one union branch and Unicode string minimum length',()=>{
+ assert.equal(matchesExport(1,{oneOf:[{type:'integer'},{type:'string'}]}),true);assert.equal(matchesExport(null,{oneOf:[{type:'integer'},{type:'string'}]}),false);assert.equal(matchesExport(1,{oneOf:[{type:'integer'},{type:'integer'}]}),false);assert.equal(matchesExport('',{type:'string',minLength:1}),false);assert.equal(matchesExport('🔒',{type:'string',minLength:1}),true);assert.equal(matchesExport('🔒',{type:'string',minLength:2}),false);assert.throws(()=>matchesExport('x',{unrecognisedConstraint:true}),/new schema keyword requires validator support/);
 });

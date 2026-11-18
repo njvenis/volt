@@ -38,7 +38,7 @@ def _error(status, code):
         'correlation_id': str(uuid.uuid4()), 'details': {}}}, headers={'Cache-Control': 'no-store'})
 
 
-async def _invoke(function, *args, _command_response=False, **kwargs):
+async def _invoke(function, *args, _command_response=False, _disposition_response=False, **kwargs):
     try:
         value = await run_in_threadpool(function, *args, **kwargs)
         content, status = value if isinstance(value, tuple) else (value, 200)
@@ -50,6 +50,16 @@ async def _invoke(function, *args, _command_response=False, **kwargs):
             else:
                 valid = status == 200 and all(key in content for key in
                     ('action', 'audit_event_id', 'intent_id', 'result'))
+            if not valid:
+                raise OperationError('inconsistent_operation')
+        if _disposition_response:
+            mode = content.get('disposition')
+            valid = status == 200 and mode in {'not_committed', 'committed', 'admitted'}
+            valid = valid and (('audit_event_id' in content and 'occurred_at' in content) if mode == 'not_committed'
+                else 'receipt' in content if mode == 'committed' else 'operation' in content)
+            if mode == 'admitted' and valid:
+                operation = content['operation']
+                valid = operation.get('status') in {'running', 'failed', 'partial', 'interrupted'} and operation.get('receipt_id') is None
             if not valid:
                 raise OperationError('inconsistent_operation')
         return JSONResponse(status_code=status, content=content, headers={'Cache-Control': 'no-store'})
@@ -65,11 +75,40 @@ async def _invoke(function, *args, _command_response=False, **kwargs):
         # Preserve denial/status while preventing backend/provider text disclosure.
         code = {401: 'authentication_required', 403: 'forbidden', 404: 'not_found',
             409: 'revision_conflict'}.get(exc.status_code, 'request_failed')
+        if _disposition_response and exc.status_code == 409:
+            code = 'command_conflict'
         return _error(exc.status_code, code)
     except (SQLAlchemyError, OSError, ValueError):
         return _error(503, 'persistence_unavailable')
     except Exception:
         return _error(503, 'outcome_unknown')
+
+
+async def _read_write_json(request: Request, public_origin: str):
+    # CSRF token validation and fresh session checks belong to backend's
+    # transaction/local-auth service; no duplicate auth policy here.
+    if request.headers.get('origin') != public_origin or not request.headers.get('x-csrf-token'):
+        return None, _error(403, 'csrf_failed')
+    if request.headers.get('content-type', '').lower().split(';')[0].strip() != 'application/json':
+        return None, _error(422, 'invalid_request')
+    declared = request.headers.get('content-length')
+    if declared is not None:
+        try:
+            if not 0 <= int(declared) <= 65536:
+                return None, _error(422, 'invalid_request')
+        except ValueError:
+            return None, _error(422, 'invalid_request')
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > 65536:
+            return None, _error(422, 'invalid_request')
+    try:
+        parsed = json.loads(bytes(body), object_pairs_hook=_object,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+    except (ValueError, UnicodeDecodeError):
+        return None, _error(422, 'invalid_request')
+    return parsed, None
 
 
 class _SafeScannerRoute(APIRoute):
@@ -100,30 +139,22 @@ def scanner_router(service: ScannerService, *, public_origin: str) -> APIRouter:
         openapi_extra={'requestBody': {'required': True, 'content': {
             'application/json': {'schema': wire.COMMAND_SCHEMA}}}})
     async def command(connector_id: str, request: Request):
-        # CSRF token validation and fresh session checks belong to backend's
-        # transaction/local-auth service; no duplicate auth policy here.
-        if request.headers.get('origin') != public_origin or not request.headers.get('x-csrf-token'):
-            return _error(403, 'csrf_failed')
-        if request.headers.get('content-type', '').lower().split(';')[0].strip() != 'application/json':
-            return _error(422, 'invalid_request')
-        declared = request.headers.get('content-length')
-        if declared is not None:
-            try:
-                if not 0 <= int(declared) <= 65536:
-                    return _error(422, 'invalid_request')
-            except ValueError:
-                return _error(422, 'invalid_request')
-        body = bytearray()
-        async for chunk in request.stream():
-            body.extend(chunk)
-            if len(body) > 65536:
-                return _error(422, 'invalid_request')
-        try:
-            parsed = json.loads(bytes(body), object_pairs_hook=_object,
-                parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
-        except (ValueError, UnicodeDecodeError):
-            return _error(422, 'invalid_request')
+        parsed, error = await _read_write_json(request, public_origin)
+        if error is not None:
+            return error
         return await _invoke(service.command, request, connector_id, parsed, _command_response=True)
+
+    @router.post('/{connector_id}/commands/{command_id}/abandon',
+        responses={200: wire.response(wire.DISPOSITION_SCHEMA,
+            'Audited noncommit proof or original committed/admitted recovery')},
+        openapi_extra={'requestBody': {'required': True, 'content': {
+            'application/json': {'schema': wire.ABANDON_SCHEMA}}}})
+    async def abandon(connector_id: str, command_id: str, request: Request):
+        parsed, error = await _read_write_json(request, public_origin)
+        if error is not None:
+            return error
+        return await _invoke(service.abandon, request, connector_id, command_id, parsed,
+            _disposition_response=True)
 
     @router.get('/{connector_id}/operations/{operation_id}', responses={200: wire.response(wire.OPERATION_SCHEMA, 'Safe operation metadata')})
     async def operation(connector_id: str, operation_id: str, request: Request, source_id: str):

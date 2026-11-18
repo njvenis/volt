@@ -584,6 +584,7 @@ def init(args) -> None:
                 "subnet": subnet, "gateway": gateway, "established": False, "initialized": True}
     if local_auth is not None:
         metadata["installation_id"] = local_auth["installation_id"]
+        metadata["local_recovery_journal_id"] = str(uuid.uuid4())
         metadata["local_auth_config_sha256"] = hashlib.sha256((root / "local-auth.json").read_bytes()).hexdigest()
     metadata["env_sha256"] = hashlib.sha256((root / ".env").read_bytes()).hexdigest()
     private_write(root / "instance.json", json.dumps(metadata, indent=2) + "\n")
@@ -639,12 +640,58 @@ def load_instance(path: str) -> tuple[Path, dict]:
         delivery = root / "secrets" / "bootstrap-delivery"
         if (config_path.is_symlink() or not config_path.is_file()
                 or stat.S_IMODE(config_path.stat().st_mode) != 0o600
+                or config_path.stat().st_uid != os.getuid()
                 or local_key.is_symlink() or not local_key.is_file()
                 or stat.S_IMODE(local_key.stat().st_mode) != 0o600
+                or local_key.stat().st_uid != os.getuid()
                 or len(local_key.read_bytes()) != 32
                 or delivery.is_symlink() or not delivery.is_dir()
-                or stat.S_IMODE(delivery.stat().st_mode) != 0o700):
+                or stat.S_IMODE(delivery.stat().st_mode) != 0o700
+                or delivery.stat().st_uid != os.getuid()):
             raise SystemExit("local auth configuration, encryption key or bootstrap delivery directory is missing or unsafe")
+        recovery = metadata.get("local_recovery_custody")
+        journal_id = metadata.get("local_recovery_journal_id")
+        try:
+            recovery_valid = (isinstance(recovery, dict)
+                and set(recovery) == {"schema_version", "profile", "installation_id", "journal_id",
+                                     "restore_generation", "recovery_epoch_id"}
+                and type(recovery["schema_version"]) is int and recovery["schema_version"] == 1
+                and recovery["profile"] == "volt_local_recovery_v1"
+                and recovery["installation_id"] == metadata["installation_id"]
+                and recovery["journal_id"] == journal_id
+                and str(uuid.UUID(journal_id)) == journal_id
+                and type(recovery["restore_generation"]) is int
+                and recovery["restore_generation"] >= 0
+                and ((recovery["restore_generation"] == 0 and recovery["recovery_epoch_id"] is None)
+                     or (recovery["restore_generation"] > 0
+                         and str(uuid.UUID(recovery["recovery_epoch_id"])) == recovery["recovery_epoch_id"])))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            recovery_valid = False
+        if not recovery_valid:
+            raise SystemExit("local recovery custody journal is missing or inconsistent")
+        recovery_inventory = {
+            "local-recovery.json": 0o600,
+            "secrets/local-recovery-runtime/issuer.key": 0o600,
+            "secrets/local-recovery-runtime/issuer.pub": 0o600,
+            "secrets/local-recovery-runtime/operator.pub": 0o600,
+            "secrets/local-recovery-runtime/material.key": 0o600,
+            "secrets/local-recovery-authority/operator.key": 0o600,
+            "secrets/local-recovery-authority/operator.pub": 0o600,
+            "secrets/local-recovery-authority/issuer.pub": 0o600,
+            "secrets/local-recovery-authority/host.json": 0o600,
+            "secrets/local-restore-fence/fence.json": 0o600,
+        }
+        for relative, mode in recovery_inventory.items():
+            path = root / relative
+            if (path.is_symlink() or not path.is_file() or stat.S_IMODE(path.stat().st_mode) != mode
+                    or path.stat().st_uid != os.getuid()):
+                raise SystemExit(f"local recovery custody file is missing or unsafe: {relative}")
+        for relative in ("secrets/local-recovery-runtime", "secrets/local-recovery-authority",
+                         "secrets/local-restore-fence"):
+            path = root / relative
+            if (path.is_symlink() or not path.is_dir() or stat.S_IMODE(path.stat().st_mode) != 0o700
+                    or path.stat().st_uid != os.getuid()):
+                raise SystemExit(f"local recovery custody directory is missing or unsafe: {relative}")
         try:
             local = json.loads(config_path.read_text())
             source = local["secret_source"]
@@ -728,6 +775,12 @@ def resolved_compose(root: Path, info: dict):
             "/run/secrets/local-auth.json": str(root / "local-auth.json"),
             "/run/secrets/local-auth-key": str(root / "secrets" / "local-auth-key"),
             "/run/volt-bootstrap": str(root / "secrets" / "bootstrap-delivery"),
+            "/run/secrets/local-recovery.json": str(root / "local-recovery.json"),
+            "/run/secrets/local-recovery-issuer.key": str(root / "secrets/local-recovery-runtime/issuer.key"),
+            "/run/secrets/local-recovery-issuer.pub": str(root / "secrets/local-recovery-runtime/issuer.pub"),
+            "/run/secrets/local-recovery-operator.pub": str(root / "secrets/local-recovery-runtime/operator.pub"),
+            "/run/secrets/local-recovery-material.key": str(root / "secrets/local-recovery-runtime/material.key"),
+            "/run/secrets/local-recovery-fence": str(root / "secrets/local-restore-fence"),
         })
     volume_names = resolved.get("volumes", {})
     validate_identity_secret_mounts(resolved, service, identity_secrets, info)
@@ -738,7 +791,13 @@ def resolved_compose(root: Path, info: dict):
         mounts_by_target = {item.get("target"): item for item in service.get("volumes", [])}
         expected_access = {"/run/secrets/local-auth.json": True,
             "/run/secrets/local-auth-key": True,
-            "/run/volt-bootstrap": False}
+            "/run/volt-bootstrap": False,
+            "/run/secrets/local-recovery.json": True,
+            "/run/secrets/local-recovery-issuer.key": True,
+            "/run/secrets/local-recovery-issuer.pub": True,
+            "/run/secrets/local-recovery-operator.pub": True,
+            "/run/secrets/local-recovery-material.key": True,
+            "/run/secrets/local-recovery-fence": True}
         environment = service.get("environment", {})
         local_source = json.loads((root / "local-auth.json").read_text())["secret_source"]["secret_source_id"]
         if (any(bool(mounts_by_target.get(target, {}).get("read_only")) != read_only
@@ -748,7 +807,9 @@ def resolved_compose(root: Path, info: dict):
                 or environment.get("UVM_LOCAL_AUTH_CONFIG_FILE") != "/etc/volt/local-auth.json"
                 or environment.get("UVM_OIDC_CONFIG_FILE") != ""
                 or environment.get("UVM_CONNECTOR_LOCAL_KEY_ID") != local_source
-                or environment.get("UVM_CONNECTOR_LOCAL_KEY_FILE") != "/run/secrets/local-auth-key"):
+                or environment.get("UVM_CONNECTOR_LOCAL_KEY_FILE") != "/run/secrets/local-auth-key"
+                or environment.get("UVM_LOCAL_RECOVERY_CONFIG_FILE") != "/etc/volt/local-recovery.json"
+                or environment.get("UVM_SCANNER_EVIDENCE_DIR") != "/opt/uvm/state/scanner-evidence"):
             raise SystemExit("local Compose auth mode or private-file access differs from its admitted config")
     labels = service.get("labels", {})
     if (service.get("image") != info["image"] or service.get("platform") != info["platform"]
@@ -976,6 +1037,8 @@ def cleanup(args) -> None:
 
 def provision_restore(args) -> None:
     root, info = load_instance(args.directory)
+    if info.get("restore_pending"):
+        raise SystemExit("this instance already has a restore fence; refusing to create another epoch")
     if check_any_resource(info):
         raise SystemExit("restore provisioning requires absent project resources on the fresh host")
     inventory = info.get("backup_inventory", {})
@@ -990,7 +1053,15 @@ def provision_restore(args) -> None:
     info["restore_imported"] = False
     info["restore_capabilities_revoked"] = False
     info["restore_sessions_revoked"] = False
-    private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
+    if info["mode"] == "local":
+        prior = info["local_recovery_custody"]
+        next_custody = {**prior, "restore_generation": prior["restore_generation"] + 1,
+                        "recovery_epoch_id": str(uuid.uuid4())}
+        fence = root / "secrets/local-restore-fence/fence.json"
+        atomic_private_write(fence, json.dumps(next_custody, sort_keys=True,
+                                                separators=(",", ":")) + "\n")
+        info["local_recovery_custody"] = next_custody
+    atomic_private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
     labels = ["--label", f"volt.compose.owner-token={info['owner_token']}"]
     for store in ("postgres", "media", "state"):
         command("docker", "volume", "create", *labels,
@@ -1001,7 +1072,7 @@ def provision_restore(args) -> None:
             "--label", "com.docker.compose.network=application",
             "--subnet", info["subnet"], "--gateway", info["gateway"], f"{info['project']}_network")
     info["restore_pending"] = True
-    private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
+    atomic_private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
     print("empty owned volumes and private network provisioned; no VOLT runtime was started")
 
 
@@ -1188,7 +1259,7 @@ def host_validate(args) -> None:
     if (info.get("image_admission", {}).get("version") != "0.1.0-rc.4"
             or info.get("platform") not in SUPPORTED_PLATFORMS):
         raise SystemExit("instance runtime version or platform is not admitted by this installer")
-    print(f"project={info['project']}\nowner_token={info['owner_token']}\nplatform={info['platform']}\nhttp_port={info['ports'][0]}"
+    print(f"project={info['project']}\nowner_token={info['owner_token']}\nmode={info['mode']}\nplatform={info['platform']}\nhttp_port={info['ports'][0]}"
           f"\nrestore_pending={int(bool(info.get('restore_pending')))}"
           f"\nrestore_imported={int(bool(info.get('restore_imported')))}"
           f"\nrestore_capabilities_revoked={int(bool(info.get('restore_capabilities_revoked')))}"

@@ -257,6 +257,23 @@ class ScannerScopeView:
 
 
 @dataclass(frozen=True)
+class RecoveryView:
+    """Safe current backend recovery metadata, never proof or lease authority.
+
+    All values are required from the current authorized metadata read. Initial
+    clear/null/false values describe verified initial state, never a fallback
+    for absent configuration or missing recovery state.
+    """
+    state: Literal["clear", "quarantined", "awaiting_activation"]
+    epoch_id: str | None
+    fresh_credentials_required: bool
+    fresh_version_ready: bool
+    clearance_state: Literal["missing", "available", "applied", "expired", "invalidated"]
+    approval_id: str | None
+    approval_expires_at: str | None
+
+
+@dataclass(frozen=True)
 class ScannerView:
     schema_version: Literal[1]
     connector_id: str
@@ -280,6 +297,7 @@ class ScannerView:
     latest_attempt_run_id: str | None
     latest_complete_run_id: str | None
     collection_recency: CollectionRecencyView
+    recovery: RecoveryView
 
 
 @dataclass(frozen=True)
@@ -454,6 +472,7 @@ class ScannerRegistrationMetadata:
     configuration_revision: int
     active_configuration_revision: int | None
     credential: CredentialView
+    recovery: RecoveryView
 
 
 @dataclass(frozen=True)
@@ -515,6 +534,40 @@ class ScannerCommandCommit:
     snapshot: ScannerBindingSnapshot
 
 
+@dataclass(frozen=True)
+class _ScannerDispositionBase:
+    schema_version: Literal[1]
+    command_id: str
+    connector_id: str
+    source_id: str
+    action: ScannerAction
+    actor_id: str
+    request_digest: str
+
+
+@dataclass(frozen=True)
+class ScannerNotCommittedDisposition(_ScannerDispositionBase):
+    disposition: Literal["not_committed"]
+    audit_event_id: str
+    occurred_at: str
+
+
+@dataclass(frozen=True)
+class ScannerCommittedDisposition(_ScannerDispositionBase):
+    disposition: Literal["committed"]
+    receipt: ScannerCommandReceipt
+
+
+@dataclass(frozen=True)
+class ScannerAdmittedDisposition(_ScannerDispositionBase):
+    disposition: Literal["admitted"]
+    operation: OperationView
+
+
+ScannerCommandDisposition = (ScannerNotCommittedDisposition
+    | ScannerCommittedDisposition | ScannerAdmittedDisposition)
+
+
 class ScannerTransaction(Protocol):
     """Backend-owned live handle; not constructible from API request data.
 
@@ -540,6 +593,10 @@ class ScannerTransaction(Protocol):
         matching terminal facts return ScannerCommandAbandonment, changed
         principal/action/digest conflicts. A tombstone together with a retained
         admission/receipt is inconsistent, never definitive noncommit.
+        Under adopted ee79830, None additionally means no occupancy in ANY
+        shared command family (assessment/connector/scanner/pending secret).
+        Foreign-family occupancy conflicts, never becomes a scanner result or
+        noncommit proof; all shared writers/settlements must honor tombstones.
         """
         ...
 
@@ -551,7 +608,8 @@ class ScannerTransaction(Protocol):
         Current session/CSRF/exact source authority uses the original scanner
         action; historical admission revisions are intentionally not evaluated.
         Derive actor/action/source from the live handle. Recheck no receipt or
-        admitted intent exists under the shared policy/connector lock, then
+        admitted intent or foreign-family/pending-secret occupancy exists under
+        the shared policy/connector lock, then
         atomically append audit plus the existing0065 terminal ledger row. Do
         not synthesize operation admission or replace original stale fences.
         Exact matching replay returns the original fact without a new audit;

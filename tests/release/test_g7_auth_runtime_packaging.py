@@ -147,8 +147,8 @@ else:
         self.assertIn('UVM_AUTH_MODE:-bearer} == oidc && $UVM_OIDC_DEPLOYMENT_MODE == demo', ENTRYPOINT)
         self.assertIn("G7_LOCAL_AUTH=key-length-invalid", ENTRYPOINT)
         self.assertIn("install -o uvm -g uvm -m 0600 /run/secrets/local-auth.json", ENTRYPOINT)
-        self.assertIn("chown uvm:uvm /run/volt-bootstrap", ENTRYPOINT)
-        self.assertIn("chmod 0700 /run/volt-bootstrap", ENTRYPOINT)
+        self.assertNotIn("chown uvm:uvm /run/volt-bootstrap", ENTRYPOINT)
+        self.assertIn("recovery_maintenance prepare-initial-installation", ENTRYPOINT)
 
     def test_publisher_health_requires_live_child_and_fresh_status(self):
         config = self.root / "publisher.json"

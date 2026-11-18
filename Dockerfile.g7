@@ -172,13 +172,14 @@ COPY --from=ui-build --chown=uvm:uvm /ui/dist /opt/uvm/ui
 COPY --chown=uvm:uvm THIRD-PARTY-NOTICES.md LICENSE /usr/share/doc/volt/third-party/
 COPY --chown=uvm:uvm third-party/notices/ /usr/share/doc/volt/third-party/source/
 WORKDIR /app
+COPY docker/g7/local_maintenance.py /usr/local/bin/uvm-local-maintenance
 COPY docker/g7/entrypoint.sh /usr/local/bin/uvm-g7-entrypoint
 COPY docker/g7/identity_runtime.sh /usr/local/bin/uvm-g7-identity-runtime
 COPY docker/g7/schema-head /etc/uvm-g7-schema-head
 COPY docker/g7/healthcheck.sh /usr/local/bin/uvm-g7-healthcheck
 COPY docker/g7/valkey-server /usr/local/bin/valkey-server
 COPY docker/g7/valkey-cli /usr/local/bin/valkey-cli
-RUN chmod 0755 /usr/local/bin/uvm-g7-entrypoint /usr/local/bin/uvm-g7-identity-runtime /usr/local/bin/uvm-g7-healthcheck /usr/local/bin/valkey-server /usr/local/bin/valkey-cli
+RUN chmod 0755 /usr/local/bin/uvm-local-maintenance /usr/local/bin/uvm-g7-entrypoint /usr/local/bin/uvm-g7-identity-runtime /usr/local/bin/uvm-g7-healthcheck /usr/local/bin/valkey-server /usr/local/bin/valkey-cli
 RUN valkey-server --version && valkey-cli --version
 # pip is retained in the build stage for uv installation only. The final CE
 # runtime installs no packages dynamically; remove its installer and vendored

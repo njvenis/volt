@@ -232,27 +232,25 @@ if [[ ${UVM_AUTH_MODE:-} == local ]]; then
       echo 'G7_LOCAL_AUTH=recovery-custody-file-missing-or-unsafe' >&2; exit 70;
     }
   done
-  [[ -d /run/secrets/local-recovery-fence && ! -L /run/secrets/local-recovery-fence \
-      && -s /run/secrets/local-recovery-fence/fence.json \
-      && ! -L /run/secrets/local-recovery-fence/fence.json ]] || {
+  [[ -d /run/volt-restore-fence && ! -L /run/volt-restore-fence \
+      && -s /run/volt-restore-fence/fence.json \
+      && ! -L /run/volt-restore-fence/fence.json ]] || {
     echo 'G7_LOCAL_AUTH=recovery-fence-missing-or-unsafe' >&2; exit 70;
   }
   install -d -o root -g uvm -m 0750 /etc/volt
   install -o uvm -g uvm -m 0600 /run/secrets/local-auth.json "$UVM_LOCAL_AUTH_CONFIG_FILE"
-  install -o root -g uvm -m 0600 /run/secrets/local-recovery.json "$UVM_LOCAL_RECOVERY_CONFIG_FILE"
-  install -d -o root -g uvm -m 0750 /run/uvm-local-recovery /run/volt-restore-fence
+  install -o uvm -g uvm -m 0600 /run/secrets/local-recovery.json "$UVM_LOCAL_RECOVERY_CONFIG_FILE"
+  install -d -o root -g uvm -m 0750 /run/uvm-local-recovery
   install -o uvm -g uvm -m 0600 /run/secrets/local-recovery-issuer.key /run/uvm-local-recovery/issuer.key
   install -o uvm -g uvm -m 0600 /run/secrets/local-recovery-issuer.pub /run/uvm-local-recovery/issuer.pub
   install -o uvm -g uvm -m 0600 /run/secrets/local-recovery-operator.pub /run/uvm-local-recovery/operator.pub
   install -o uvm -g uvm -m 0600 /run/secrets/local-recovery-material.key /run/uvm-local-recovery/material.key
-  install -o uvm -g uvm -m 0600 /run/secrets/local-recovery-fence/fence.json /run/volt-restore-fence/fence.json
   install -d -o uvm -g uvm -m 0700 /opt/uvm/state/scanner-evidence
   [[ ${UVM_SCANNER_EVIDENCE_DIR:-} == /opt/uvm/state/scanner-evidence ]] || {
     echo 'G7_LOCAL_AUTH=scanner-evidence-path-invalid' >&2; exit 70;
   }
   [[ -d /run/volt-bootstrap && ! -L /run/volt-bootstrap ]] || { echo 'G7_LOCAL_AUTH=bootstrap-delivery-missing' >&2; exit 70; }
-  chown uvm:uvm /run/volt-bootstrap
-  chmod 0700 /run/volt-bootstrap
+  # Host owns this private delivery directory. Root maintenance alone writes it.
   [[ -s ${UVM_LOCAL_AUTH_CONFIG_FILE:-} ]] || { echo 'G7_LOCAL_AUTH=config-missing' >&2; exit 70; }
   if [[ -n ${UVM_OIDC_FIXTURE_SUBJECT:-}${UVM_OIDC_FIXTURE_IDENTITIES:-}${UVM_GITHUB_PREVIEW_SECRET:-} ]]; then
     echo 'G7_LOCAL_AUTH=synthetic-identity-settings-forbidden' >&2; exit 70
@@ -463,21 +461,26 @@ setpriv --reuid=uvm --regid=uvm --init-groups env -i PATH="$PATH" HOME=/opt/uvm 
 abort_if_shutdown
 fi
 if [[ ${UVM_AUTH_MODE:-} == local && ${UVM_G7_VERIFICATION_ONLY:-0} != 1 ]]; then
+  install -d -o root -g root -m 0700 /run/uvm-maintenance
+  python - <<'ENVIRONMENT'
+import json, os
+from pathlib import Path
+keys = ('UVM_DB_URL', 'UVM_AUTH_MODE', 'UVM_LOCAL_AUTH_CONFIG_FILE',
+        'UVM_LOCAL_RECOVERY_CONFIG_FILE', 'UVM_CONNECTOR_LOCAL_KEY_FILE',
+        'UVM_CONNECTOR_LOCAL_KEY_ID', 'UVM_SCANNER_EVIDENCE_DIR')
+path = Path('/run/uvm-maintenance/environment.json')
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+with os.fdopen(fd, 'w') as stream:
+    json.dump({key: os.environ[key] for key in keys}, stream)
+ENVIRONMENT
   recovery_maintenance() {
-    local operation=$1
-    setpriv --reuid=uvm --regid=uvm --init-groups env -i PATH="$PATH" HOME=/opt/uvm \
-      PYTHONPATH=/opt/uvm/app UVM_AUTH_MODE=local UVM_DB_URL="$UVM_DB_URL" \
-      UVM_LOCAL_AUTH_CONFIG_FILE=/etc/volt/local-auth.json \
-      UVM_LOCAL_RECOVERY_CONFIG_FILE=/etc/volt/local-recovery.json \
-      UVM_CONNECTOR_LOCAL_KEY_FILE=/run/uvm-connector/local-key \
-      UVM_CONNECTOR_LOCAL_KEY_ID="${UVM_CONNECTOR_LOCAL_KEY_ID:?local secret-source ID is required}" \
-      UVM_SCANNER_EVIDENCE_DIR=/opt/uvm/state/scanner-evidence \
-      python -m uvm.auth.maintenance "$operation" --config /etc/volt/local-auth.json \
-      >/dev/null || { echo "G7_LOCAL_RECOVERY=startup-$operation-failed" >&2; exit 70; }
+    /usr/local/bin/uvm-local-maintenance "$1" --config /etc/volt/local-auth.json
   }
-  recovery_maintenance validate-local-recovery
-  recovery_maintenance apply-local-restore-fence
-  recovery_maintenance initialize-scanner-rule
+  recovery_maintenance prepare-initial-installation >/dev/null
+  recovery_maintenance validate-local-recovery > /run/uvm-maintenance/validated.json
+  recovery_maintenance apply-local-restore-fence > /run/uvm-maintenance/applied.json
+  chmod 0600 /run/uvm-maintenance/*.json
+  recovery_maintenance initialize-scanner-rule >/dev/null
   abort_if_shutdown
 fi
 

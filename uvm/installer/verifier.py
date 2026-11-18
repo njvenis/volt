@@ -115,6 +115,103 @@ def _cosign_fixture(policy: dict, *args: str) -> str:
     return result.stdout
 
 
+def verify_platform_configs(runtime: dict, *, reference: str, source_revision: str,
+                            source_snapshot: str, version: str, index_data: bytes, fixture: bool,
+                            fetch=None) -> dict[str, str]:
+    """Bind both signed platform children to actual immutable manifest/config bytes."""
+    from urllib.error import HTTPError
+    from urllib.parse import urlencode, urlsplit
+    from urllib.request import Request, build_opener, HTTPRedirectHandler, ProxyHandler
+
+    class NoRedirect(HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            target = urlsplit(newurl)
+            if (fixture or '/blobs/' not in req.full_url or target.scheme != 'https'
+                    or target.username or target.password or target.port not in (None, 443)
+                    or not target.hostname or not target.hostname.endswith('.githubusercontent.com')):
+                raise ValueError('registry redirect refused during child admission')
+            # Blob bytes are content-addressed. Never forward the GHCR token.
+            return Request(newurl, headers={'Accept': 'application/octet-stream'})
+
+    if fixture:
+        if not re.fullmatch(r'127\.0\.0\.1:46150/volt@sha256:[0-9a-f]{64}', reference):
+            raise ValueError('fixture child registry is not the owned loopback registry')
+        origin, repository = 'http://127.0.0.1:46150', 'volt'
+    else:
+        if not re.fullmatch(r'ghcr\.io/njvenis/volt@sha256:[0-9a-f]{64}', reference):
+            raise ValueError('child registry is not the fixed official repository')
+        origin, repository = 'https://ghcr.io', 'njvenis/volt'
+    opener = build_opener(ProxyHandler({}), NoRedirect())
+    token = None
+
+    def read_json_path(path, *, limit=1024 * 1024):
+        nonlocal token
+        headers = {'Accept': 'application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json,application/json'}
+        if token:
+            headers['Authorization'] = 'Bearer ' + token
+        try:
+            response = opener.open(Request(origin + path, headers=headers), timeout=20)
+        except HTTPError as error:
+            if fixture or error.code != 401 or token is not None:
+                raise ValueError('registry child request failed closed') from None
+            token_path = '/token?' + urlencode({'scope': 'repository:njvenis/volt:pull'})
+            with opener.open(Request(origin + token_path), timeout=20) as response:
+                document = json.loads(response.read(65537))
+            token = document.get('token') or document.get('access_token')
+            if not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9._~+/-]+=*', token):
+                raise ValueError('registry pull token invalid')
+            headers['Authorization'] = 'Bearer ' + token
+            response = opener.open(Request(origin + path, headers=headers), timeout=20)
+        with response:
+            content = response.read(limit + 1)
+        if len(content) > limit:
+            raise ValueError('registry child document too large')
+        return content
+
+    def fetch_document(kind, digest, size):
+        if not re.fullmatch(r'sha256:[0-9a-f]{64}', digest):
+            raise ValueError('registry child digest invalid')
+        if type(size) is not int or not 0 < size <= 1024 * 1024:
+            raise ValueError('registry child size invalid')
+        raw = (fetch(kind, digest) if fetch is not None else
+               read_json_path(f'/v2/{repository}/{kind}/{digest}'))
+        if len(raw) != size or 'sha256:' + sha256(raw) != digest:
+            raise ValueError('actual child/config bytes differ from signed digest')
+        document = json.loads(raw)
+        if not isinstance(document, dict):
+            raise ValueError('registry child document invalid')
+        return document
+
+    descriptors = {item.get('digest'): item for item in json.loads(index_data)['manifests']}
+    configs = {}
+    for platform, digest in runtime['platform_children'].items():
+        descriptor = descriptors[digest]
+        manifest = fetch_document('manifests', digest, descriptor.get('size'))
+        if descriptor.get('mediaType') != manifest.get('mediaType'):
+            raise ValueError('signed child media type differs')
+        config_digest = (manifest.get('config') or {}).get('digest')
+        if (manifest.get('schemaVersion') != 2 or manifest.get('mediaType') not in {
+                'application/vnd.oci.image.manifest.v1+json', 'application/vnd.docker.distribution.manifest.v2+json'}
+                or not isinstance(manifest.get('layers'), list) or not manifest['layers']):
+            raise ValueError('actual platform child is not an executable image manifest')
+        config = fetch_document('blobs', config_digest, manifest['config'].get('size'))
+        labels = (config.get('config') or {}).get('Labels') or {}
+        if (f"{config.get('os')}/{config.get('architecture')}" != platform
+                or labels.get('org.opencontainers.image.revision') != source_revision
+                or labels.get('org.volt.compose.source-snapshot') != source_snapshot
+                or labels.get('org.opencontainers.image.version') != version
+                or labels.get('org.volt.compose-install.contract') != '1'
+                or 'local' not in (labels.get('org.volt.oidc-deployment-modes') or '').split(',')):
+            raise ValueError('actual platform config differs from signed source/platform contract')
+        if manifest['config'].get('mediaType') not in {
+                'application/vnd.oci.image.config.v1+json', 'application/vnd.docker.container.image.v1+json'}:
+            raise ValueError('actual platform config media type unsupported')
+        configs[platform] = config_digest
+    if configs[runtime['platform']] != runtime['image_id']:
+        raise ValueError('selected Docker config ID differs from signed platform child')
+    return configs
+
+
 def discover_signed_reference(bundle: Path, signature: Path, signer: str, issuer: str) -> tuple[str, str]:
     if bundle.is_symlink() or signature.is_symlink() or not bundle.is_file() or not signature.is_file():
         raise ValueError("signed bundle inputs are missing or unsafe")
@@ -157,6 +254,9 @@ def verify(args: argparse.Namespace) -> dict:
         reference=args.reference, source_revision=args.source_revision,
         source_snapshot=args.source_snapshot, version=args.version,
         platform=args.platform, bundle_sha256=bundle["bundle_sha256"])
+    runtime["platform_configs"] = verify_platform_configs(runtime, reference=args.reference,
+        source_revision=args.source_revision, source_snapshot=args.source_snapshot,
+        version=args.version, index_data=args.index.read_bytes(), fixture=FIXTURE_POLICY.is_file())
     return {"bundle": bundle, "runtime": runtime}
 
 

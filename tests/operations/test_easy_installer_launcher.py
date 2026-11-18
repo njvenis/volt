@@ -62,8 +62,8 @@ class EasyInstallerLauncherTests(unittest.TestCase):
         start = source.split('elif [ "$ACTION" = start ]; then', 1)[1].split('elif [ "$ACTION" = stop ]; then', 1)[0]
         self.assertLess(start.index('RESTORE_IMPORTED'), start.index('locked_compose create'))
         self.assertLess(start.index('verify_actual_mounts'), start.index('locked_compose start'))
-        self.assertIn('RESTORE_CAPABILITIES_REVOKED', start)
-        self.assertIn('RESTORE_SESSIONS_REVOKED', start)
+        self.assertLess(start.index('acknowledge_start'), start.index('read_instance'))
+        self.assertLess(start.index('read_instance'), start.rindex('locked_compose create'))
         self.assertIn('local-restore.yaml', source.split('locked_compose() {', 1)[1].split('\n}', 1)[0])
         for field in ("restore_pending", "restore_imported", "restore_capabilities_revoked", "restore_sessions_revoked"):
             self.assertIn(f"{field})", source)

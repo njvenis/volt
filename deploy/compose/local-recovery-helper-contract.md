@@ -82,3 +82,40 @@ signature, attestation digest, target, and current journal/fence tuple before
 producing a 15-minute operator signature. Request, approval, and API receipt
 remain in a mode-0700 temporary directory and are removed at exit. Only the
 source label, imported state, and expiry are printed.
+
+## Live fence and acknowledged startup
+
+The adopted fence-only mapping keeps the host UID from the validated instance
+root. Its dedicated directory is host-owned, GID1800, mode0710; fence.json is
+host-owned, GID1800, mode0640. The closed API configuration pins
+`restore_fence_custody={owner_uid:HOST_UID,runtime_gid:1800}`. Other private
+files remain0600 and directories0700. Preparation uses the admitted root helper
+with only CHOWN, SETUID and DAC_OVERRIDE on the isolated instance mount to
+publish this mapping. Runtime receives the dedicated directory read-only at
+`/run/volt-restore-fence`; it reopens the live envelope rather than a copy.
+
+Preparation commits SHA256 fingerprints for both configurations, local storage
+key and all issuer/operator/material files in `local_recovery_inventory` before
+acknowledging success. It fsyncs the custody directories and their secrets
+parent before the instance journal. Resume rejects replacement bytes, even
+when a replacement signing pair is internally consistent.
+
+The root-only `/usr/local/bin/uvm-local-maintenance` entry point reads an
+entrypoint-created ephemeral root0600 environment file. It supplies the database
+and configured key paths without putting credentials into Docker arguments or
+configuration. Recovery operations drop to UID/GID1800; account capability
+delivery retains host ownership of its separate private directory. Startup
+initialises an empty local installation through the supported auth constructor,
+prepares setup only when unclaimed, then validates/applies the live fence and
+initialises the fixed scanner rule before workers start.
+
+`acknowledge --request-stdin --instance-root /instance` accepts only the closed
+backend apply-local-restore-fence acknowledgement for the exact current host
+installation, journal, generation and epoch. It validates custody and committed
+fingerprints again, atomically records the safe acknowledgement and releases
+restore admission only after offline import. Restored startup first uses the
+closed-ingress overlay; it verifies actual image/mounts and the acknowledgement
+before recreating with normal ingress. No count, status or tuple is inferred
+from ordinary readiness. `advance-fence` is the fixed root helper used by
+restore-provision: it increments generation, creates a new epoch and publishes
+only a correctly owned/mapped fence before committing the pending journal.

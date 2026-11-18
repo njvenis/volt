@@ -4,6 +4,7 @@ import base64
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -16,6 +17,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 ROOT = Path(__file__).resolve().parents[2]
+# Unit subprocesses use the current test group; real gid1800/uid1800 access is
+# qualified separately through Docker with the unmodified production constant.
+HELPER = [sys.executable, "-c", "import os; import uvm.installer.recovery_authority as h; h.RUNTIME_GID=os.getgid(); h.main()"]
 
 
 class RecoveryAuthorityPreparationTests(unittest.TestCase):
@@ -46,7 +50,7 @@ class RecoveryAuthorityPreparationTests(unittest.TestCase):
         return request, journal_id
 
     def invoke(self, root: Path, request: dict) -> subprocess.CompletedProcess:
-        return subprocess.run([sys.executable, "-m", "uvm.installer.recovery_authority",
+        return subprocess.run([*HELPER,
                                "prepare", "--request-stdin", "--instance-root", str(root)],
                               input=json.dumps(request), text=True, capture_output=True,
                               cwd=ROOT, check=False)
@@ -70,7 +74,8 @@ class RecoveryAuthorityPreparationTests(unittest.TestCase):
                     "secrets/local-recovery-runtime/material.key", "secrets/local-recovery-authority/operator.key",
                     "secrets/local-recovery-authority/host.json", "secrets/local-restore-fence/fence.json"):
                 path = root / relative
-                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(path.stat().st_mode & 0o777,
+                                 0o640 if relative.endswith("fence.json") else 0o600)
             resumed = self.invoke(root, request)
             self.assertEqual(resumed.returncode, 0, resumed.stderr)
             self.assertEqual(json.loads(resumed.stdout), response)
@@ -78,6 +83,53 @@ class RecoveryAuthorityPreparationTests(unittest.TestCase):
             missing = self.invoke(root, request)
             self.assertNotEqual(missing.returncode, 0)
             self.assertFalse((root / "secrets/local-recovery-runtime/material.key").exists())
+
+    def test_changed_material_and_coherent_signing_replacement_fail_host_inventory(self):
+        for coherent in (False, True):
+            with self.subTest(coherent=coherent), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                request, _ = self.fixture(root)
+                result = self.invoke(root, request)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                if coherent:
+                    key = Ed25519PrivateKey.generate()
+                    (root / "secrets/local-recovery-runtime/issuer.key").write_bytes(key.private_bytes_raw())
+                    for relative in ("secrets/local-recovery-runtime/issuer.pub", "secrets/local-recovery-authority/issuer.pub"):
+                        (root / relative).write_bytes(key.public_key().public_bytes_raw())
+                else:
+                    (root / "secrets/local-recovery-runtime/material.key").write_bytes(b"z" * 32)
+                self.assertNotEqual(self.invoke(root, request).returncode, 0)
+
+    def test_restore_resume_and_acknowledgement_require_the_exact_current_tuple(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request, _ = self.fixture(root)
+            self.assertEqual(self.invoke(root, request).returncode, 0)
+            journal_path = root / "instance.json"
+            journal = json.loads(journal_path.read_text())
+            custody = {**journal["local_recovery_custody"], "restore_generation": 2,
+                       "recovery_epoch_id": str(uuid.uuid4())}
+            journal.update(local_recovery_custody=custody, restore_pending=True, restore_imported=True)
+            journal_path.write_text(json.dumps(journal))
+            (root / "secrets/local-restore-fence/fence.json").write_text(json.dumps(custody))
+            resumed = self.invoke(root, request)
+            self.assertEqual(resumed.returncode, 0, resumed.stderr)
+            self.assertEqual(json.loads(resumed.stdout)["restore_generation"], 2)
+            self.assertEqual(json.loads(resumed.stdout)["recovery_epoch_id"], custody["recovery_epoch_id"])
+            acknowledgement = {**custody, "operation": "apply-local-restore-fence", "status": "applied",
+                "revoked_sessions": 1, "revoked_capabilities": 1, "quarantined_connectors": 1}
+            command = [*HELPER, "acknowledge", "--request-stdin", "--instance-root", str(root)]
+            bad = subprocess.run(command, input=json.dumps({**acknowledgement, "restore_generation": 1}),
+                                 text=True, capture_output=True, cwd=ROOT)
+            self.assertNotEqual(bad.returncode, 0)
+            self.assertTrue(json.loads(journal_path.read_text())["restore_pending"])
+            valid = subprocess.run(command, input=json.dumps(acknowledgement), text=True, capture_output=True, cwd=ROOT)
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            committed = json.loads(journal_path.read_text())
+            self.assertFalse(committed["restore_pending"])
+            self.assertTrue(committed["restore_sessions_revoked"])
+            self.assertTrue(committed["restore_capabilities_revoked"])
+            self.assertEqual(committed["local_recovery_acknowledgement"], acknowledgement)
 
     def test_wrong_path_policy_fails_before_creating_any_custody_files(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -108,14 +160,14 @@ class RecoveryAuthorityPreparationTests(unittest.TestCase):
             request, journal_id = self.fixture(root)
             prepared = self.invoke(root, request)
             self.assertEqual(prepared.returncode, 0, prepared.stderr)
-            process = subprocess.run([sys.executable, "-m", "uvm.installer.recovery_authority",
+            process = subprocess.run([*HELPER,
                 "request", "--instance-root", str(root)],
                 text=True, capture_output=True, cwd=ROOT, check=False)
             self.assertEqual(process.returncode, 0, process.stderr)
             self.assertEqual(json.loads(process.stdout), request)
             before = {str(path.relative_to(root)): path.read_bytes()
                       for path in root.rglob("*") if path.is_file()}
-            validation = subprocess.run([sys.executable, "-m", "uvm.installer.recovery_authority",
+            validation = subprocess.run([*HELPER,
                 "validate", "--request-stdin", "--instance-root", str(root)],
                 input=json.dumps(request), text=True, capture_output=True, cwd=ROOT, check=False)
             self.assertEqual(validation.returncode, 0, validation.stderr)
@@ -180,9 +232,11 @@ class RecoveryAuthorityPreparationTests(unittest.TestCase):
             "targets": [{"connector_id": connector, "source_id": source,
                 "display_name": "Qualys Prod", "account_label": "account-1", "platform_id": "platform-1",
                 "state": "quarantined", "configuration_revision": 4}]}
-        command = [sys.executable, "-m", "uvm.installer.recovery_authority", "select-target",
+        command = [*HELPER, "select-target",
             "--request-stdin", "--source", "Qualys Prod [account-1]", "--rationale", "Fresh scanner credential",
             "--evidence-ref", "recovery-case-9"]
+        targets["targets"].append({**targets["targets"][0], "display_name": "Unconfigured",
+                                    "configuration_revision": 0})
         result = subprocess.run(command, input=json.dumps(targets), text=True, capture_output=True,
                                 cwd=ROOT, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)

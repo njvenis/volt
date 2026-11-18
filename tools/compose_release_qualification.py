@@ -12,6 +12,7 @@ import re
 import secrets
 import select
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -304,7 +305,7 @@ def validate_admission_fixture(path: Path, *, image_id: str, source_snapshot: st
     index_json = evidence / "runtime-image-index.json"
     image_json.write_text(inspected.stdout, encoding="utf-8")
     index_json.write_text(index.stdout, encoding="utf-8")
-    admission_run = run("fixture-full-runtime-admission", ["docker", "run", "--rm", "--network", "host",
+    admission_command = ["docker", "run", "--rm", "--network", "host",
         "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--tmpfs",
         "/tmp:rw,noexec,nosuid,size=16m", "--env", "HOME=/tmp", "--mount",
         f"type=bind,src={public_root},dst=/fixture,readonly", "--mount",
@@ -316,7 +317,9 @@ def validate_admission_fixture(path: Path, *, image_id: str, source_snapshot: st
         "--image-inspect", "/runtime-image.json", "--index", "/runtime-index.json",
         "--output-dir", "/tmp/verified", "--reference", image_reference, "--signer", "fixture",
         "--issuer", "fixture", "--source-revision", source_commit, "--source-snapshot", source_snapshot,
-        "--version", version, "--platform", platform], evidence)
+        "--version", version, "--platform", platform]
+    admission_run = run("fixture-full-runtime-admission", admission_command, evidence)
+    qualify_admission_negatives(admission_command, bundle, image_json, index_json, evidence)
     try:
         admitted = json.loads(admission_run.stdout)
         runtime = admitted["runtime"]
@@ -332,6 +335,54 @@ def validate_admission_fixture(path: Path, *, image_id: str, source_snapshot: st
         "verifier_reference": verifier_reference}
     result["fixture_directory"] = str(root)
     return result
+
+def qualify_admission_negatives(command: list[str], bundle: Path, image_json: Path,
+                                 index_json: Path, evidence: Path) -> None:
+    """Exercise rejection by the independently admitted verifier before runtime execution."""
+    directory = evidence / "admission-negatives"
+    directory.mkdir(mode=0o755)
+    cases = []
+    for name, option, value in (("source-revision", "--source-revision", "0" * 40),
+                                ("source-snapshot", "--source-snapshot", "sha256:" + "0" * 64),
+                                ("version", "--version", "0.1.0-rc.3"),
+                                ("platform", "--platform", "linux/arm64" if command[command.index("--platform") + 1] == "linux/amd64" else "linux/amd64")):
+        candidate = list(command)
+        candidate[candidate.index(option) + 1] = value
+        cases.append((name, candidate))
+    damaged_index = directory / "wrong-child-index.json"
+    index = json.loads(index_json.read_text())
+    index["manifests"][0]["digest"] = "sha256:" + "0" * 64
+    damaged_index.write_text(json.dumps(index))
+    damaged_image = directory / "wrong-image.json"
+    inspected = json.loads(image_json.read_text())
+    inspected[0]["Id"] = "sha256:" + "0" * 64
+    damaged_image.write_text(json.dumps(inspected))
+    damaged_bundle = directory / "tampered-bundle.tar.gz"
+    content = bytearray(bundle.read_bytes())
+    content[len(content) // 2] ^= 1
+    damaged_bundle.write_bytes(content)
+    for name, original, replacement in (("index-child", index_json, damaged_index),
+                                        ("image-config", image_json, damaged_image),
+                                        ("bundle-content", bundle, damaged_bundle)):
+        candidate = [argument.replace(f"src={original},", f"src={replacement},") for argument in command]
+        replacement.chmod(0o444)
+        cases.append((name, candidate))
+    for name, candidate in cases:
+        result = run("admission-negative-" + name, candidate, evidence, check=False)
+        if result.returncode == 0:
+            raise RuntimeError(f"independent verifier accepted negative {name}")
+    (evidence / "admission-negatives.json").write_text(json.dumps({
+        "status": "passed", "before_candidate_execution": True,
+        "cases": [name for name, _ in cases]}, sort_keys=True, indent=2) + "\n")
+
+
+def trusted_launcher_environment(bin_directory: Path, admission: dict) -> dict[str, str]:
+    environment = launcher_minimal_environment(bin_directory)
+    environment.update({"VOLT_EXPECTED_VERIFIER_IMAGE": admission["verifier_reference"],
+        "VOLT_EXPECTED_VERSION": "0.1.0-rc.4", "VOLT_EXPECTED_SIGNER": SIGNER,
+        "VOLT_EXPECTED_ISSUER": ISSUER, "VOLT_BOOTSTRAP_VERIFIER_VERIFIED": "1"})
+    return environment
+
 
 def launcher_minimal_environment(bin_directory: Path) -> dict[str, str]:
     """Expose only POSIX utilities and Docker to the installed host launcher."""
@@ -421,14 +472,7 @@ def qualify_local_runtime(*, package: Path, bundle: Path, admission: dict[str, s
         "signed_launcher_was_mutated_after_signing": False,
     }, sort_keys=True, indent=2) + "\n")
     launcher_bin = private / "minimal-host-path"
-    launcher_env = launcher_minimal_environment(launcher_bin)
-    launcher_env.update({
-        "VOLT_EXPECTED_VERIFIER_IMAGE": admission["verifier_reference"],
-        "VOLT_EXPECTED_VERSION": "0.1.0-rc.4",
-        "VOLT_EXPECTED_SIGNER": SIGNER,
-        "VOLT_EXPECTED_ISSUER": ISSUER,
-        "VOLT_BOOTSTRAP_VERIFIER_VERIFIED": "1",
-    })
+    launcher_env = trusted_launcher_environment(launcher_bin, admission)
     run("minimal-host-compose-preflight", ["docker", "compose", "version"], evidence, env=launcher_env)
     run("minimal-host-launcher-syntax", ["sh", "-n", str(launcher)], evidence, env=launcher_env)
     origin = f"http://127.0.0.1:{http_port}"
@@ -562,6 +606,7 @@ def main() -> int:
     launcher_environment = None
     cleanup_result = 0
     started = False
+    admission = None
     outcome = 0
     try:
         bundle_command = compose_bundle_verify_command(args.bundle, version=args.version,
@@ -774,7 +819,9 @@ def main() -> int:
             if metadata.is_file() and launcher.is_file():
                 try:
                     project = json.loads(metadata.read_text(encoding="utf-8"))["project"]
-                    minimal = launcher_minimal_environment(private / "minimal-host-path")
+                    if admission is None:
+                        raise RuntimeError("no authenticated launcher context for cleanup")
+                    minimal = trusted_launcher_environment(private / "minimal-host-path", admission)
                     result = subprocess.run(["sh", str(launcher), "destroy", "--directory", str(state),
                         "--confirm-project", project, "--remove-state"],
                         text=True, capture_output=True, env=minimal)

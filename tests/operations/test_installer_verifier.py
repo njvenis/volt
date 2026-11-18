@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 from uvm.installer.admission import RC4_FILES
-from uvm.installer.verifier import verify_closed_bundle
+from uvm.installer.verifier import verify_closed_bundle, verify_platform_configs
 
 
 REFERENCE = "ghcr.io/njvenis/volt@sha256:" + "a" * 64
@@ -36,6 +36,63 @@ def make_bundle(path: Path, *, duplicate: bool = False) -> None:
             item = tarfile.TarInfo("volt-compose-0.1.0-rc.4/VERSION")
             item.size = 3
             archive.addfile(item, io.BytesIO(b"bad"))
+
+
+class PlatformConfigAdmissionTests(unittest.TestCase):
+    def fixture(self, *, arm_source="a" * 40):
+        records, descriptors, children = {}, [], {}
+        for architecture in ("amd64", "arm64"):
+            config = json.dumps({"os": "linux", "architecture": architecture, "config": {"Labels": {
+                "org.opencontainers.image.revision": arm_source if architecture == "arm64" else "a" * 40,
+                "org.volt.compose.source-snapshot": "sha256:" + "b" * 64,
+                "org.opencontainers.image.version": "0.1.0-rc.4",
+                "org.volt.compose-install.contract": "1", "org.volt.oidc-deployment-modes": "local"}}}).encode()
+            config_digest = "sha256:" + hashlib.sha256(config).hexdigest()
+            manifest = json.dumps({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {"digest": config_digest, "size": len(config), "mediaType": "application/vnd.oci.image.config.v1+json"},
+                "layers": [{"digest": "sha256:" + "c" * 64, "size": 5}]}).encode()
+            digest = "sha256:" + hashlib.sha256(manifest).hexdigest()
+            records["manifests", digest] = manifest
+            records["blobs", config_digest] = config
+            descriptors.append({"digest": digest, "size": len(manifest),
+                "mediaType": "application/vnd.oci.image.manifest.v1+json", "platform": {"os": "linux", "architecture": architecture}})
+            children["linux/" + architecture] = digest
+            if architecture == "amd64":
+                image_id = config_digest
+        index = {"schemaVersion": 2, "manifests": descriptors}
+        runtime = {"image_id": image_id, "platform": "linux/amd64", "platform_children": children}
+        return records, index, runtime
+
+    def verify(self, records, index, runtime):
+        return verify_platform_configs(runtime, reference="127.0.0.1:46150/volt@sha256:" + "d" * 64,
+            source_revision="a" * 40, source_snapshot="sha256:" + "b" * 64, version="0.1.0-rc.4",
+            index_data=json.dumps(index).encode(), fixture=True, fetch=lambda kind, digest: records[kind, digest])
+
+    def test_both_actual_children_admit_and_selected_config_is_bound(self):
+        records, index, runtime = self.fixture()
+        admitted = self.verify(records, index, runtime)
+        self.assertEqual(admitted["linux/amd64"], runtime["image_id"])
+        self.assertEqual(set(admitted), {"linux/amd64", "linux/arm64"})
+        with self.assertRaisesRegex(ValueError, "selected Docker config"):
+            self.verify(records, index, {**runtime, "image_id": "sha256:" + "0" * 64})
+
+    def test_mixed_source_other_platform_cannot_be_labelled_as_current(self):
+        records, index, runtime = self.fixture(arm_source="e" * 40)
+        with self.assertRaisesRegex(ValueError, "source/platform"):
+            self.verify(records, index, runtime)
+
+    def test_child_digest_size_and_media_are_checked_before_candidate_execution(self):
+        for change in ("bytes", "size", "media"):
+            records, index, runtime = self.fixture()
+            if change == "bytes":
+                key = ("manifests", runtime["platform_children"]["linux/amd64"])
+                records[key] += b" "
+            elif change == "size":
+                index["manifests"][0]["size"] += 1
+            else:
+                index["manifests"][0]["mediaType"] = "application/vnd.oci.image.index.v1+json"
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.verify(records, index, runtime)
 
 
 class IndependentVerifierArchiveTests(unittest.TestCase):

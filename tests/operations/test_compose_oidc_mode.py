@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import hashlib
 import tempfile
 from pathlib import Path
@@ -244,7 +245,14 @@ class ExternalOIDCModeTests(unittest.TestCase):
                 "ports":[46180,46181,46190],"gateway":"10.240.0.1",
                 "env_sha256":hashlib.sha256(env.read_bytes()).hexdigest()}
             (root/"instance.json").write_text(json.dumps(metadata)); (root/"instance.json").chmod(0o600)
-            self.assertEqual(load_instance(str(root))[1]["installation_id"],installation)
+            from uvm.installer.recovery_authority import custody_inventory
+            metadata["local_recovery_inventory"] = custody_inventory(root)
+            (root/"instance.json").write_text(json.dumps(metadata))
+            (root/"secrets/local-restore-fence").chmod(0o710)
+            (root/"secrets/local-restore-fence/fence.json").write_text(json.dumps(recovery))
+            (root/"secrets/local-restore-fence/fence.json").chmod(0o640)
+            with patch("deploy.compose.setup.FENCE_RUNTIME_GID", os.getgid()):
+                self.assertEqual(load_instance(str(root))[1]["installation_id"],installation)
             (root/"secrets"/"local-auth-key").write_bytes(b"k"*31)
             with self.assertRaisesRegex(SystemExit,"missing or unsafe"):
                 load_instance(str(root))

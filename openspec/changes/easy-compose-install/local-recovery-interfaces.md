@@ -447,3 +447,8 @@ request to reopen the adopted profile. Backend implementation can start after
 root records delivery-compatible adoption; provider supplies RecoveryView, UI
 uses its safe fields, delivery owns all helper/key/backup/launcher code. Scoped
 425 GO and historical source/evidence are preserved throughout.
+
+
+## Live fence ownership amendment
+
+The adopted [live-fence custody mapping](live-fence-custody.md) supersedes the earlier fence-only0700/0600 modes with host-owned fixed-group0710/0640 and a closed restore_fence_custody binding. Other private files and external/demo behavior remain unchanged. Actual non-root and mount admission proof is required.

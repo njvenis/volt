@@ -1150,6 +1150,20 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
             finally:
                 key.write_bytes(original);key.chmod(0o600)
 
+    def _replace_recovery_fence(self,document):
+        """Owned disposable fixture only; not the delivery host producer."""
+        target=self.recovery_fence_path
+        temporary=target.with_name('.fence-'+uuid.uuid4().hex)
+        descriptor=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o640)
+        try:
+            with os.fdopen(descriptor,'wb') as stream:
+                os.fchown(stream.fileno(),-1,1800);os.fchmod(stream.fileno(),0o640)
+                stream.write(json.dumps(document,sort_keys=True,separators=(',',':')).encode())
+                stream.flush();os.fsync(stream.fileno())
+            os.replace(temporary,target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def _isolated_recovery_authority(self):
         """Isolated backend fixture only: not delivery key custody/helper proof."""
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -1163,14 +1177,18 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
         local=json.loads(self.config_path.read_text());installation=local['installation_id']
         fence={'schema_version':1,'profile':'volt_local_recovery_v1','installation_id':installation,
             'journal_id':str(uuid.uuid4()),'restore_generation':0,'recovery_epoch_id':None}
-        self.recovery_fence_path=Path(write('fence.json',json.dumps(fence).encode()))
+        fence_directory=root/'live-fence';fence_directory.mkdir(mode=0o710)
+        os.chown(fence_directory,-1,1800);fence_directory.chmod(0o710)
+        self.recovery_fence_path=fence_directory/'fence.json'
+        self._replace_recovery_fence(fence)
         config={'schema_version':1,'profile':'volt_local_recovery_v1','installation_id':installation,
             'issuer_key_id':str(uuid.uuid4()),'operator_key_id':str(uuid.uuid4()),'operator_id':'local-host:'+installation,
             'issuer_public_key_file':write('issuer.pub',issuer.public_key().public_bytes(Encoding.Raw,PublicFormat.Raw)),
             'issuer_private_key_file':write('issuer.key',issuer.private_bytes(Encoding.Raw,PrivateFormat.Raw,NoEncryption())),
             'operator_public_key_file':write('operator.pub',operator.public_key().public_bytes(Encoding.Raw,PublicFormat.Raw)),
             'material_key_file':write('material.key',secrets.token_bytes(32)),
-            'restore_fence_file':str(self.recovery_fence_path),'proof_store':{'kind':'postgresql','schema_revision':'0067'}}
+            'restore_fence_file':str(self.recovery_fence_path),
+            'restore_fence_custody':{'owner_uid':os.geteuid(),'runtime_gid':1800},'proof_store':{'kind':'postgresql','schema_revision':'0067'}}
         self.recovery_config_path=Path(write('config.json',json.dumps(config).encode()))
         os.environ['UVM_LOCAL_RECOVERY_CONFIG_FILE']=str(self.recovery_config_path)
         maintain('validate-local-recovery',config_path=str(self.config_path))
@@ -1186,7 +1204,7 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
         config=json.loads(self.recovery_config_path.read_text());fence=json.loads(self.recovery_fence_path.read_text())
         self.assertEqual(self.client.get('/api/v1/auth/session').status_code,200)
         fence.update(restore_generation=1,recovery_epoch_id=str(uuid.uuid4()))
-        self.recovery_fence_path.write_text(json.dumps(fence))
+        self._replace_recovery_fence(fence)
         ack=maintenance_fence(self.engine,'apply-local-restore-fence',json.loads(self.config_path.read_text()))
         self.assertEqual(ack['status'],'applied');self.assertEqual(ack['revoked_sessions'],1)
         self.assertEqual(self.client.get('/api/v1/auth/session').status_code,401)
@@ -1224,7 +1242,7 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
         for replacement in (None,{**json.loads(original),'installation_id':str(uuid.uuid4())}):
             if replacement is None:self.recovery_fence_path.unlink()
             else:
-                self.recovery_fence_path.write_text(json.dumps(replacement));self.recovery_fence_path.chmod(0o600)
+                self._replace_recovery_fence(replacement)
             try:
                 with patch('uvm.connectors.scanner_install.scanner_worker_lifespan',worker):
                     with self.assertRaises(HTTPException) as rejected:
@@ -1233,7 +1251,7 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
                 self.assertEqual(rejected.exception.status_code,503)
                 self.assertEqual(called,[])
             finally:
-                self.recovery_fence_path.write_bytes(original);self.recovery_fence_path.chmod(0o600)
+                self._replace_recovery_fence(json.loads(original))
 
     def _registered_scanner(self, csrf, suffix='bridge'):
         import uuid
@@ -1915,7 +1933,7 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
         self.assertEqual(revoked.status_code,200,revoked.text)
         fence=json.loads(self.recovery_fence_path.read_text());fence.update(
             restore_generation=1,recovery_epoch_id=str(uuid.uuid4()))
-        self.recovery_fence_path.write_text(json.dumps(fence))
+        self._replace_recovery_fence(fence)
         maintenance_fence(self.engine,'apply-local-restore-fence',json.loads(self.config_path.read_text()))
         self.assertEqual(self.client.get('/api/v1/auth/session').status_code,401)
         login=self.client.post('/api/v1/auth/local/login',json={'username':'first-admin','password':self.admin_password},headers=self.origin)
@@ -2202,7 +2220,7 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
                         from uvm.connectors.local_recovery import maintenance_fence
                         fence=json.loads(self.recovery_fence_path.read_text())
                         fence.update(restore_generation=1,recovery_epoch_id=str(uuid.uuid4()))
-                        self.recovery_fence_path.write_text(json.dumps(fence))
+                        self._replace_recovery_fence(fence)
                         maintenance_fence(self.engine,'apply-local-restore-fence',json.loads(self.config_path.read_text()))
                         self.assertEqual(client.get('/api/v1/auth/session').status_code,401)
                         login=client.post('/api/v1/auth/local/login',json={'username':'first-admin',

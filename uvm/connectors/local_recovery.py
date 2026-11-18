@@ -73,6 +73,53 @@ def private_read(path, *, limit=1_000_000, size=None):
     return data
 
 
+def read_live_fence(path, custody, *, limit=16_384):
+    """Read only the adopted live envelope; this is NOT a private-file exception.
+
+    O_PATH opens traversal-only0710 directories without requesting list access.
+    Every authority load walks/reopens the named file; no copied/cached inode.
+    """
+    from pathlib import Path
+    if (not isinstance(custody,dict) or set(custody)!={'owner_uid','runtime_gid'}
+            or type(custody['owner_uid']) is not int or custody['owner_uid']<0
+            or type(custody['runtime_gid']) is not int or custody['runtime_gid']!=1800
+            or not isinstance(path,str) or not os.path.isabs(path) or os.path.normpath(path)!=path
+            or Path(path).name!='fence.json'):
+        raise ValueError('live recovery fence configuration invalid')
+    required=('O_PATH','O_DIRECTORY','O_NOFOLLOW','O_NONBLOCK','O_CLOEXEC')
+    if not all(hasattr(os,name) for name in required):raise ValueError('live fence descriptor support unavailable')
+    directory_flags=os.O_PATH|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC
+    parent=os.open('/',directory_flags)
+    def directory_valid(info):
+        return (stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode)==0o710
+            and info.st_uid==custody['owner_uid'] and info.st_gid==1800)
+    def file_valid(info):
+        return (stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode)==0o640
+            and info.st_uid==custody['owner_uid'] and info.st_gid==1800 and info.st_size<=limit)
+    def identity(info):
+        return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,
+            info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+    try:
+        for component in Path(path).parts[1:-1]:
+            child=os.open(component,directory_flags,dir_fd=parent)
+            os.close(parent);parent=child
+        if not directory_valid(os.fstat(parent)):raise ValueError('live recovery fence directory unsafe')
+        descriptor=os.open('fence.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC,dir_fd=parent)
+        with os.fdopen(descriptor,'rb') as stream:
+            before=os.fstat(stream.fileno())
+            if not file_valid(before):raise ValueError('live recovery fence file unsafe')
+            data=stream.read(limit+1)
+            after=os.fstat(stream.fileno())
+            named=os.stat('fence.json',dir_fd=parent,follow_symlinks=False)
+            if (len(data)>limit or not directory_valid(os.fstat(parent))
+                    or not file_valid(after) or not file_valid(named)
+                    or identity(before)!=identity(after) or identity(after)!=identity(named)):
+                raise ValueError('live recovery fence changed during read')
+        return data
+    finally:
+        os.close(parent)
+
+
 def _uuid(value):
     if not isinstance(value,str) or str(uuid.UUID(value))!=value:raise ValueError('recovery UUID invalid')
     return value
@@ -109,7 +156,7 @@ def load_authority(local_config=None):
         config=parse_document(private_read(path))
         fields={'schema_version','profile','installation_id','issuer_key_id','operator_key_id','operator_id',
             'issuer_public_key_file','issuer_private_key_file','operator_public_key_file','material_key_file',
-            'restore_fence_file','proof_store'}
+            'restore_fence_file','restore_fence_custody','proof_store'}
         if (not isinstance(config,dict) or set(config)!=fields or type(config['schema_version']) is not int
                 or config['schema_version']!=1 or config['profile']!=PROFILE
                 or config['proof_store']!={'kind':'postgresql','schema_revision':'0067'}):raise ValueError('config schema invalid')
@@ -129,7 +176,7 @@ def load_authority(local_config=None):
             raise ValueError('encrypted-local source identity changed')
         if (aes in (seed,material) or any(Ed25519PrivateKey.from_private_bytes(key).public_key().public_bytes(
                 Encoding.Raw,PublicFormat.Raw)==operator for key in (aes,material))):raise ValueError('recovery key reused')
-        fence=parse_document(private_read(config['restore_fence_file']))
+        fence=parse_document(read_live_fence(config['restore_fence_file'],config['restore_fence_custody']))
         if (not isinstance(fence,dict) or set(fence)!={'schema_version','profile','installation_id',
                 'journal_id','restore_generation','recovery_epoch_id'}
                 or type(fence['schema_version']) is not int or fence['schema_version']!=1

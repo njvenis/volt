@@ -21,6 +21,6 @@ services:
       - ${VOLT_INSTANCE_DIR:?run setup first}/secrets/local-recovery-runtime/issuer.pub:/run/secrets/local-recovery-issuer.pub:ro
       - ${VOLT_INSTANCE_DIR:?run setup first}/secrets/local-recovery-runtime/operator.pub:/run/secrets/local-recovery-operator.pub:ro
       - ${VOLT_INSTANCE_DIR:?run setup first}/secrets/local-recovery-runtime/material.key:/run/secrets/local-recovery-material.key:ro
-      - ${VOLT_INSTANCE_DIR:?run setup first}/secrets/local-restore-fence:/run/secrets/local-recovery-fence:ro
+      - ${VOLT_INSTANCE_DIR:?run setup first}/secrets/local-restore-fence:/run/volt-restore-fence:ro
     labels:
       volt.installation.mode: local-auth

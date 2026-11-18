@@ -29,6 +29,7 @@ HISTORICAL_RC1_IMAGE = "ghcr.io/njvenis/volt@sha256:c0c49bc9c38a0ea946d1868748fc
 SECRET_SIZES = {"uvm_db_password": 32, "ce_db_password": 32, "ce_admin_password": 32,
                 "ce_secret_key": 64, "ce_credential_key": 32, "uvm_cursor_secret": 48,
                 "oidc_client_secret": 48, "oidc_sync_secret": 48, "oidc_operator_secret": 48}
+FENCE_RUNTIME_GID = 1800
 SUPPORTED_PLATFORMS = ("linux/amd64", "linux/arm64")
 
 
@@ -679,19 +680,40 @@ def load_instance(path: str) -> tuple[Path, dict]:
             "secrets/local-recovery-authority/operator.pub": 0o600,
             "secrets/local-recovery-authority/issuer.pub": 0o600,
             "secrets/local-recovery-authority/host.json": 0o600,
-            "secrets/local-restore-fence/fence.json": 0o600,
         }
         for relative, mode in recovery_inventory.items():
             path = root / relative
             if (path.is_symlink() or not path.is_file() or stat.S_IMODE(path.stat().st_mode) != mode
                     or path.stat().st_uid != os.getuid()):
                 raise SystemExit(f"local recovery custody file is missing or unsafe: {relative}")
-        for relative in ("secrets/local-recovery-runtime", "secrets/local-recovery-authority",
-                         "secrets/local-restore-fence"):
+        fence_directory = root / "secrets/local-restore-fence"
+        try:
+            directory_fd = os.open(fence_directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                directory_info = os.fstat(directory_fd)
+                file_fd = os.open("fence.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                with os.fdopen(file_fd, "rb") as stream:
+                    file_info = os.fstat(stream.fileno())
+                    if (stat.S_IMODE(directory_info.st_mode) != 0o710
+                            or directory_info.st_uid != os.getuid() or directory_info.st_gid != FENCE_RUNTIME_GID
+                            or not stat.S_ISREG(file_info.st_mode) or stat.S_IMODE(file_info.st_mode) != 0o640
+                            or file_info.st_uid != os.getuid() or file_info.st_gid != FENCE_RUNTIME_GID or file_info.st_size > 16384):
+                        raise ValueError("fence mapping differs")
+                    if json.loads(stream.read(16385)) != recovery:
+                        raise ValueError("fence tuple differs")
+            finally:
+                os.close(directory_fd)
+        except (OSError, ValueError):
+            raise SystemExit("local recovery live fence differs from committed custody") from None
+        for relative in ("secrets/local-recovery-runtime", "secrets/local-recovery-authority"):
             path = root / relative
             if (path.is_symlink() or not path.is_dir() or stat.S_IMODE(path.stat().st_mode) != 0o700
                     or path.stat().st_uid != os.getuid()):
                 raise SystemExit(f"local recovery custody directory is missing or unsafe: {relative}")
+        committed_paths = ["local-auth.json", "secrets/local-auth-key", *recovery_inventory]
+        fingerprints = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in committed_paths}
+        if metadata.get("local_recovery_inventory") != fingerprints:
+            raise SystemExit("local recovery committed fingerprints changed")
         try:
             local = json.loads(config_path.read_text())
             source = local["secret_source"]
@@ -780,7 +802,7 @@ def resolved_compose(root: Path, info: dict):
             "/run/secrets/local-recovery-issuer.pub": str(root / "secrets/local-recovery-runtime/issuer.pub"),
             "/run/secrets/local-recovery-operator.pub": str(root / "secrets/local-recovery-runtime/operator.pub"),
             "/run/secrets/local-recovery-material.key": str(root / "secrets/local-recovery-runtime/material.key"),
-            "/run/secrets/local-recovery-fence": str(root / "secrets/local-restore-fence"),
+            "/run/volt-restore-fence": str(root / "secrets/local-restore-fence"),
         })
     volume_names = resolved.get("volumes", {})
     validate_identity_secret_mounts(resolved, service, identity_secrets, info)
@@ -797,7 +819,7 @@ def resolved_compose(root: Path, info: dict):
             "/run/secrets/local-recovery-issuer.pub": True,
             "/run/secrets/local-recovery-operator.pub": True,
             "/run/secrets/local-recovery-material.key": True,
-            "/run/secrets/local-recovery-fence": True}
+            "/run/volt-restore-fence": True}
         environment = service.get("environment", {})
         local_source = json.loads((root / "local-auth.json").read_text())["secret_source"]["secret_source_id"]
         if (any(bool(mounts_by_target.get(target, {}).get("read_only")) != read_only
@@ -868,6 +890,15 @@ def compose(args, action: str) -> None:
         compose_loaded(root, info, action)
 
 
+def admit_actual_local_container(root: Path, info: dict) -> None:
+    inspected = command("docker", "container", "inspect", f"{info['project']}-volt-1", capture=True)
+    command("docker", "run", "--rm", "-i", "--network", "none", "--read-only", "--cap-drop=ALL",
+        "--security-opt=no-new-privileges", "--user", f"{os.getuid()}:{os.getgid()}",
+        "--mount", f"type=bind,src={root},dst=/instance,readonly",
+        "--entrypoint", "/opt/uvm/venv/bin/python", info["image"], "-m", "uvm.installer.runtime_mounts",
+        "--instance-root", "/instance", "--host-root", str(root), input_data=inspected)
+
+
 def compose_loaded(root: Path, info: dict, action: str) -> None:
     if action == "up" and info.get("restore_pending") and not info.get("restore_imported"):
         raise SystemExit("offline restore volumes must be imported and admitted with restore-admit before any runtime starts")
@@ -886,25 +917,34 @@ def compose_loaded(root: Path, info: dict, action: str) -> None:
     if action == "up":
         info.pop("backup_inventory", None)
         private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
-    command("docker", "compose", *files, "--env-file", str(envfile), "-p", info["project"], action,
-            *( ["-d"] if action == "up" else ["--timeout", "600"] if action == "stop" else []),
-            env=clean_env)
+    if action == "up" and info.get("mode") == "local":
+        command("docker", "compose", *files, "--env-file", str(envfile), "-p", info["project"], "create", env=clean_env)
+        admit_actual_local_container(root, info)
+        command("docker", "compose", *files, "--env-file", str(envfile), "-p", info["project"], "start", env=clean_env)
+    else:
+        command("docker", "compose", *files, "--env-file", str(envfile), "-p", info["project"], action,
+                *( ["-d"] if action == "up" else ["--timeout", "600"] if action == "stop" else []),
+                env=clean_env)
     if action == "up":
         check_owned_resources(info, allow_missing=False)
+        if info.get("mode") == "local":
+            admit_actual_local_container(root, info)
         info["established"] = True
         private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
-        if (info.get("mode") == "local" and info.get("restore_pending")
-                and info.get("restore_imported") and not info.get("restore_sessions_revoked")):
-            # The reviewed backend checkpoint currently exposes capability
-            # revocation but does not guarantee restored-session revocation.
-            # Keep the restore overlay selected and refuse ingress until that
-            # missing backend guarantee is accepted and wired here.
-            if not info.get("restore_capabilities_revoked"):
-                wait_until_ready(info)
-                revoke_restored_local_capabilities(root, info, files, envfile, clean_env)
-                info["restore_capabilities_revoked"] = True
-                private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
-            raise SystemExit("restored local sessions lack backend-confirmed revocation; ingress remains unpublished")
+        if info.get("mode") == "local":
+            wait_until_ready(info)
+            acknowledgement = json.loads(command("docker", "compose", *files, "--env-file", str(envfile),
+                "-p", info["project"], "exec", "-T", "--user", "0:0", "volt", "cat",
+                "/run/uvm-maintenance/applied.json", capture=True, env=clean_env))
+            command("docker", "run", "--rm", "-i", "--network", "none", "--read-only", "--cap-drop=ALL",
+                "--security-opt=no-new-privileges", "--user", f"{os.getuid()}:{os.getgid()}",
+                "--mount", f"type=bind,src={root},dst=/instance", "--entrypoint", "/opt/uvm/venv/bin/python",
+                info["image"], "-m", "uvm.installer.recovery_authority", "acknowledge", "--request-stdin",
+                "--instance-root", "/instance", input_data=json.dumps(acknowledgement))
+            if info.get("restore_pending"):
+                # Exact durable backend ack permits the normal overlay only now.
+                refreshed = json.loads((root / "instance.json").read_text())
+                compose_loaded(root, refreshed, "up")
     elif action == "stop":
         verify_cold_stop(info)
         print("controlled shutdown verified; cold backup inventory may now be captured")
@@ -925,19 +965,6 @@ def verify_cold_stop(info: dict) -> None:
                 "G7_SHUTDOWN=controlled service_cleanup_status=0")
     if any(marker not in logs for marker in required) or "G7_STOP_ERROR" in logs:
         raise SystemExit("controlled supervisor cleanup evidence is missing or failed; do not capture a cold backup")
-
-
-def revoke_restored_local_capabilities(root: Path, info: dict, files: list[str],
-                                       envfile: Path, clean_env: dict[str, str]) -> None:
-    """Revoke restored sessions and capabilities before publishing local ingress."""
-    argv = ["docker", "compose", *files, "--env-file", str(envfile), "-p", info["project"],
-            "exec", "-T", "--user", "0:0", "volt", "/opt/uvm/venv/bin/python",
-            "-m", "uvm.auth.maintenance", "revoke-capabilities",
-            "--config", "/etc/volt/local-auth.json"]
-    result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.PIPE, text=True, env=clean_env)
-    if result.returncode:
-        raise SystemExit("restored local capabilities could not be revoked; ingress remains unpublished")
 
 
 # Read-only, network-free helper: include names, types, ownership, permissions and
@@ -1054,14 +1081,15 @@ def provision_restore(args) -> None:
     info["restore_capabilities_revoked"] = False
     info["restore_sessions_revoked"] = False
     if info["mode"] == "local":
-        prior = info["local_recovery_custody"]
-        next_custody = {**prior, "restore_generation": prior["restore_generation"] + 1,
-                        "recovery_epoch_id": str(uuid.uuid4())}
-        fence = root / "secrets/local-restore-fence/fence.json"
-        atomic_private_write(fence, json.dumps(next_custody, sort_keys=True,
-                                                separators=(",", ":")) + "\n")
-        info["local_recovery_custody"] = next_custody
-    atomic_private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
+        command("docker", "run", "--rm", "--network", "none", "--read-only",
+            "--cap-drop=ALL", "--cap-add=CHOWN", "--cap-add=SETUID", "--cap-add=DAC_OVERRIDE",
+            "--security-opt=no-new-privileges", "--user", "0:0",
+            "--mount", f"type=bind,src={root},dst=/instance",
+            "--entrypoint", "/opt/uvm/venv/bin/python", info["image"],
+            "-m", "uvm.installer.recovery_authority", "advance-fence", "--instance-root", "/instance")
+        info = json.loads((root / "instance.json").read_text())
+    else:
+        atomic_private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
     labels = ["--label", f"volt.compose.owner-token={info['owner_token']}"]
     for store in ("postgres", "media", "state"):
         command("docker", "volume", "create", *labels,
@@ -1209,7 +1237,7 @@ def local_maintenance_loaded(args, root: Path, info: dict) -> None:
             # the container. The host account's numeric uid is unrelated and
             # cannot safely access either file.
             "exec", "-T", "--user", "0:0", "volt",
-            "/opt/uvm/venv/bin/python", "-m", "uvm.auth.maintenance",
+            "/usr/local/bin/uvm-local-maintenance",
             operation, "--config", "/etc/volt/local-auth.json"]
     if args.username is not None:
         argv += ["--username", args.username]

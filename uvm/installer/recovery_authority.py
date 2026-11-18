@@ -21,6 +21,7 @@ import uuid
 PROFILE = "volt_local_recovery_v1"
 UTC = timezone.utc
 MAX_REQUEST = 16 * 1024
+RUNTIME_GID = 1800
 PATH_POLICY = {
     "api_config": "local-recovery.json",
     "runtime_directory": "secrets/local-recovery-runtime",
@@ -151,7 +152,7 @@ def approve_document(request: dict, host_config: dict, operator_seed: bytes,
     target = request["target"]
     if (not isinstance(target, dict) or set(target) != target_fields
             or type(target["configuration_revision"]) is not int
-            or target["configuration_revision"] < 1 or target["purpose"] != "qualys_vm_basic"
+            or target["configuration_revision"] < 0 or target["purpose"] != "qualys_vm_basic"
             or not isinstance(target["source_tuple"], dict)
             or set(target["source_tuple"]) != {"source_family", "source_account_id", "scope_key"}
             or target["source_tuple"]["source_family"] != "qualys"):
@@ -264,6 +265,8 @@ def _write_exclusive(path: Path, data: bytes) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags, 0o600)
     try:
+        if os.geteuid() == 0:
+            os.fchown(descriptor, os.getuid(), -1)
         with os.fdopen(descriptor, "wb", closefd=False) as stream:
             stream.write(data)
             stream.flush()
@@ -280,14 +283,91 @@ def _private_file(path: Path) -> bytes:
     return path.read_bytes()
 
 
+def _fence_read(directory: Path, owner_uid: int) -> bytes:
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(descriptor)
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o710
+                or info.st_uid != owner_uid or info.st_gid != RUNTIME_GID):
+            raise ValueError("live fence directory custody differs")
+        fd = os.open("fence.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=descriptor)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o640
+                    or info.st_uid != owner_uid or info.st_gid != RUNTIME_GID or info.st_size > MAX_REQUEST):
+                raise ValueError("live fence file custody differs")
+            return stream.read(MAX_REQUEST + 1)
+    finally:
+        os.close(descriptor)
+
+
+def _publish_fence(root: Path, value: dict) -> None:
+    directory = root / PATH_POLICY["fence_directory"]
+    owner = root.stat().st_uid
+    info = directory.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != owner
+            or info.st_gid != RUNTIME_GID or stat.S_IMODE(info.st_mode) != 0o710):
+        raise ValueError("unsafe live fence directory")
+    temporary = directory / (".fence." + secrets.token_hex(8))
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchown(descriptor, owner, RUNTIME_GID)
+        os.fchmod(descriptor, 0o640)
+        with os.fdopen(descriptor, "wb", closefd=False) as stream:
+            stream.write(_canonical(value) + b"\n")
+            stream.flush()
+            os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, directory / "fence.json")
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _host_writer(root: Path) -> None:
+    info = root.lstat()
+    if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+        raise ValueError("selected instance root unsafe")
+    if os.geteuid() == 0:
+        # Keep selected host identity for all private inventory checks while
+        # retaining only this fixed helper's privilege to set fence group1800.
+        os.setreuid(info.st_uid, 0)
+    elif info.st_uid != os.getuid():
+        raise ValueError("selected host owner differs")
+
+
+def advance_fence(args) -> None:
+    root = Path(args.instance_root)
+    _host_writer(root)
+    request = _request_for_instance(root)
+    _resume(root, request)
+    metadata = json.loads(_private_file(root / "instance.json"), object_pairs_hook=_pairs)
+    if metadata.get("restore_pending") or set(metadata.get("backup_inventory", {})) != {"postgres", "media", "state"}:
+        raise ValueError("a cold backup and no pending restore are required")
+    custody = {**metadata["local_recovery_custody"],
+               "restore_generation": metadata["local_recovery_custody"]["restore_generation"] + 1,
+               "recovery_epoch_id": str(uuid.uuid4())}
+    _publish_fence(root, custody)
+    metadata.update(established=False, restore_pending=True, restore_imported=False,
+                    restore_capabilities_revoked=False, restore_sessions_revoked=False,
+                    local_recovery_custody=custody)
+    metadata.pop("local_recovery_acknowledgement", None)
+    _commit_metadata(root, metadata)
+    print("restore_fence=advanced")
+
+
 def _safe_response(instance_id: str, journal_id: str, issuer_id: str,
-                   operator_id: str, issuer_public: bytes, operator_public: bytes) -> dict:
+                   operator_id: str, issuer_public: bytes, operator_public: bytes,
+                   *, restore_generation: int = 0, recovery_epoch_id: str | None = None) -> dict:
     return {"schema_version": 1, "profile": PROFILE, "status": "prepared",
             "installation_id": instance_id, "journal_id": journal_id,
             "issuer_key_id": issuer_id, "operator_key_id": operator_id,
             "issuer_public_sha256": hashlib.sha256(issuer_public).hexdigest(),
             "operator_public_sha256": hashlib.sha256(operator_public).hexdigest(),
-            "restore_generation": 0, "recovery_epoch_id": None}
+            "restore_generation": restore_generation, "recovery_epoch_id": recovery_epoch_id}
 
 
 def _validate_directory(path: Path, expected: set[str]) -> None:
@@ -298,6 +378,56 @@ def _validate_directory(path: Path, expected: set[str]) -> None:
         raise ValueError("committed custody directory is unsafe")
 
 
+def custody_inventory(root: Path) -> dict[str, str]:
+    paths = ["local-recovery.json", "local-auth.json", "secrets/local-auth-key"]
+    paths += ["secrets/local-recovery-runtime/" + name for name in
+              ("issuer.key", "issuer.pub", "operator.pub", "material.key")]
+    paths += ["secrets/local-recovery-authority/" + name for name in
+              ("operator.key", "operator.pub", "issuer.pub", "host.json")]
+    return {name: hashlib.sha256(_private_file(root / name)).hexdigest() for name in paths}
+
+
+def _commit_metadata(root: Path, metadata: dict) -> None:
+    temp = root / f".instance.json.{secrets.token_hex(8)}"
+    _write_exclusive(temp, json.dumps(metadata, sort_keys=True, indent=2).encode() + b"\n")
+    os.replace(temp, root / "instance.json")
+    descriptor = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def acknowledge(args) -> None:
+    root = Path(args.instance_root)
+    request = _request_for_instance(root)
+    _resume(root, request)
+    metadata = json.loads(_private_file(root / "instance.json"), object_pairs_hook=_pairs)
+    acknowledgement = _read_document(sys.stdin)
+    custody = metadata["local_recovery_custody"]
+    expected = set(custody) | {"operation", "status", "revoked_sessions", "revoked_capabilities", "quarantined_connectors"}
+    if (set(acknowledgement) != expected
+            or any(type(acknowledgement[key]) is not type(value) or acknowledgement[key] != value
+                   for key, value in custody.items())
+            or acknowledgement["operation"] != "apply-local-restore-fence"
+            or acknowledgement["status"] not in {"applied", "already_applied"}
+            or any(type(acknowledgement[key]) is not int or acknowledgement[key] < 0
+                   for key in ("revoked_sessions", "revoked_capabilities", "quarantined_connectors"))):
+        raise ValueError("backend acknowledgement differs from current host custody")
+    if metadata.get("restore_pending") and not metadata.get("restore_imported"):
+        raise ValueError("restore has not passed offline import admission")
+    metadata["local_recovery_acknowledgement"] = acknowledgement
+    if metadata.get("restore_pending"):
+        if custody["restore_generation"] < 1:
+            raise ValueError("restored journal lacks a new host generation")
+        metadata["restore_capabilities_revoked"] = True
+        metadata["restore_sessions_revoked"] = True
+        metadata["restore_pending"] = False
+    metadata["established"] = True
+    _commit_metadata(root, metadata)
+    print("acknowledged=1")
+
+
 def _resume(root: Path, request: dict) -> dict:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
@@ -306,7 +436,8 @@ def _resume(root: Path, request: dict) -> dict:
         ("runtime_directory", "authority_directory", "fence_directory"))
     _validate_directory(runtime, {"issuer.key", "issuer.pub", "operator.pub", "material.key"})
     _validate_directory(authority, {"operator.key", "operator.pub", "issuer.pub", "host.json"})
-    _validate_directory(fence, {"fence.json"})
+    if {item.name for item in fence.iterdir()} != {"fence.json"}:
+        raise ValueError("live fence directory inventory differs")
     issuer_seed = _private_file(runtime / "issuer.key")
     operator_seed = _private_file(authority / "operator.key")
     issuer_public, operator_public = (_private_file(runtime / "issuer.pub"),
@@ -330,7 +461,7 @@ def _resume(root: Path, request: dict) -> dict:
         object_pairs_hook=_pairs, parse_float=_no_float, parse_constant=_no_float)
     host_config = json.loads(_private_file(authority / "host.json"),
         object_pairs_hook=_pairs, parse_float=_no_float, parse_constant=_no_float)
-    fence_value = json.loads(_private_file(fence / "fence.json"),
+    fence_value = json.loads(_fence_read(fence, root.stat().st_uid),
         object_pairs_hook=_pairs, parse_float=_no_float, parse_constant=_no_float)
     metadata = json.loads(_private_file(root / "instance.json"), object_pairs_hook=_pairs)
     tuple_value = metadata.get("local_recovery_custody") if isinstance(metadata, dict) else None
@@ -373,6 +504,7 @@ def _resume(root: Path, request: dict) -> dict:
         "operator_public_key_file": "/run/uvm-local-recovery/operator.pub",
         "material_key_file": "/run/uvm-local-recovery/material.key",
         "restore_fence_file": "/run/volt-restore-fence/fence.json",
+        "restore_fence_custody": {"owner_uid": root.stat().st_uid, "runtime_gid": RUNTIME_GID},
         "proof_store": {"kind": "postgresql", "schema_revision": "0067"}}
     expected_host = {"schema_version": 1, "profile": PROFILE,
         "installation_id": request["installation_id"],
@@ -385,8 +517,12 @@ def _resume(root: Path, request: dict) -> dict:
         "journal_file": "/authority/instance.json"}
     if api_config != expected_api or host_config != expected_host:
         raise ValueError("committed closed configuration differs from admitted policy")
+    if metadata.get("local_recovery_inventory") != custody_inventory(root):
+        raise ValueError("committed custody fingerprints changed")
     return _safe_response(request["installation_id"], request["journal_id"],
-                          issuer_id, operator_id, issuer_public, operator_public)
+                          issuer_id, operator_id, issuer_public, operator_public,
+                          restore_generation=tuple_value["restore_generation"],
+                          recovery_epoch_id=tuple_value["recovery_epoch_id"])
 
 
 def prepare(args) -> None:
@@ -395,6 +531,7 @@ def prepare(args) -> None:
 
     request = _read_request(sys.stdin)
     root = Path(args.instance_root)
+    _host_writer(root)
     root_info = root.lstat()
     if (root.is_symlink() or not stat.S_ISDIR(root_info.st_mode)
             or stat.S_IMODE(root_info.st_mode) != 0o700 or root_info.st_uid != os.getuid()):
@@ -429,6 +566,11 @@ def prepare(args) -> None:
             raise ValueError("custody journal exists but committed key directories are missing")
         for directory in (runtime, authority, fence):
             directory.mkdir(mode=0o700)
+            if os.geteuid() == 0:
+                os.chown(directory, os.getuid(), -1)
+            if directory == fence:
+                os.chown(directory, os.getuid(), RUNTIME_GID)
+                directory.chmod(0o710)
             created.append(directory)
         issuer_seed, operator_seed, material_key = (secrets.token_bytes(32) for _ in range(3))
         issuer_private = Ed25519PrivateKey.from_private_bytes(issuer_seed)
@@ -445,6 +587,7 @@ def prepare(args) -> None:
             "operator_public_key_file": "/run/uvm-local-recovery/operator.pub",
             "material_key_file": "/run/uvm-local-recovery/material.key",
             "restore_fence_file": "/run/volt-restore-fence/fence.json",
+            "restore_fence_custody": {"owner_uid": root.stat().st_uid, "runtime_gid": RUNTIME_GID},
             "proof_store": {"kind": "postgresql", "schema_revision": "0067"}}
         host_config = {"schema_version": 1, "profile": PROFILE,
             "installation_id": request["installation_id"],
@@ -464,27 +607,20 @@ def prepare(args) -> None:
             (authority / "operator.pub", operator_public),
             (authority / "issuer.pub", issuer_public),
             (authority / "host.json", _canonical(host_config) + b"\n"),
-            (fence / "fence.json", _canonical(tuple_value) + b"\n"),
             (root / PATH_POLICY["api_config"], _canonical(api_config) + b"\n"),
         )
         for path, data in values:
             _write_exclusive(path, data)
-        for directory in (runtime, authority, fence, root):
+        _publish_fence(root, tuple_value)
+        for directory in (runtime, authority, fence, root / "secrets", root):
             directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
             try:
                 os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
         metadata["local_recovery_custody"] = tuple_value
-        temp = root / f".instance.json.{secrets.token_hex(8)}"
-        _write_exclusive(temp, json.dumps(metadata, sort_keys=True, indent=2).encode() + b"\n")
-        os.replace(temp, metadata_path)
-        os.chmod(metadata_path, 0o600)
-        directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        metadata["local_recovery_inventory"] = custody_inventory(root)
+        _commit_metadata(root, metadata)
     except Exception:
         # Partial preparation is deliberately not repaired or regenerated on
         # resume. The next invocation will fail closed on existing files.
@@ -515,7 +651,7 @@ def approve(args) -> None:
     host_config = json.loads(_private_file(Path(args.authority_config)), object_pairs_hook=_pairs,
                              parse_float=_no_float, parse_constant=_no_float)
     request_document = _read_document(sys.stdin)
-    fence = json.loads(_private_file(Path("/authority/fence/fence.json")), object_pairs_hook=_pairs,
+    fence = json.loads(_fence_read(Path("/authority/fence"), os.getuid()), object_pairs_hook=_pairs,
                        parse_float=_no_float, parse_constant=_no_float)
     journal = json.loads(_private_file(Path("/authority/instance.json")), object_pairs_hook=_pairs,
                          parse_float=_no_float, parse_constant=_no_float)
@@ -550,7 +686,7 @@ def select_target(args) -> None:
     for target in targets_doc["targets"]:
         if (not isinstance(target, dict) or set(target) != target_fields
                 or type(target["configuration_revision"]) is not int
-                or target["configuration_revision"] < 1
+                or target["configuration_revision"] < 0
                 or any(not isinstance(target[key], str) or not target[key]
                        for key in ("display_name", "account_label", "platform_id", "state"))):
             raise ValueError("scanner target response contains an invalid entry")
@@ -564,6 +700,8 @@ def select_target(args) -> None:
            for value in (args.rationale, args.evidence_ref)):
         raise ValueError("recovery rationale or evidence reference is invalid")
     target = selected[0]
+    if target["configuration_revision"] < 1:
+        raise ValueError("selected scanner has no recovery configuration")
     request = {"schema_version": 1, "profile": PROFILE,
         "installation_id": installation_id, "connector_id": target["connector_id"],
         "source_id": target["source_id"], "configuration_revision": target["configuration_revision"],
@@ -609,9 +747,18 @@ def main() -> None:
     summary_parser = subparsers.add_parser("summarize-import")
     summary_parser.add_argument("--request-stdin", action="store_true", required=True)
     summary_parser.add_argument("--source", required=True)
+    advance_parser = subparsers.add_parser("advance-fence")
+    advance_parser.add_argument("--instance-root", required=True)
+    ack_parser = subparsers.add_parser("acknowledge")
+    ack_parser.add_argument("--request-stdin", action="store_true", required=True)
+    ack_parser.add_argument("--instance-root", required=True)
     args = parser.parse_args()
     try:
-        if args.operation == "prepare":
+        if args.operation == "advance-fence":
+            advance_fence(args)
+        elif args.operation == "acknowledge":
+            acknowledge(args)
+        elif args.operation == "prepare":
             prepare(args)
         elif args.operation == "validate":
             validate(args)

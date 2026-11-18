@@ -1,0 +1,518 @@
+name: Prepare and publish VOLT RC3
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful main-branch native candidate run to publish (blank prepares candidates)
+        type: string
+        required: false
+        default: ""
+      candidate_source_sha:
+        description: Exact source commit in the named candidate run
+        type: string
+        required: false
+        default: ""
+      publish_approved:
+        description: Explicitly approve publication of the named retained candidate
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: volt-rc3-release
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    if: github.ref == 'refs/heads/main' && inputs.candidate_run_id == ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      PYTHON_VERSION: "3.13.15"
+      NODE_VERSION: "24.21.0"
+      UV_VERSION: "0.12.18"
+      OPENSPEC_VERSION: "1.11.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate fixed main source and unused RC3 release identity
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          test -z "$(git status --porcelain)"
+          test -z "$(git tag --list v0.1.0-rc.3)"
+          image=$(sed -n 's/^gitleaks_image=//p' tools/release/tools.lock)
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo:ro" -w /repo "$image" dir . --config tools/release/gitleaks.toml
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo:ro" -w /repo "$image" git . --config tools/release/gitleaks.toml --log-opts=--all
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install pinned uv
+        run: python -m pip install "uv==${UV_VERSION}"
+      - name: Portable checks
+        run: |
+          set -euo pipefail
+          python3 tools/release/install_actionlint.py
+          /tmp/volt-release-tools/actionlint .github/workflows/release-rc3.yml .github/workflows/release.yml .github/workflows/security.yml .github/workflows/ci.yml
+          uv sync --locked
+          uv run python -m unittest discover -s tests/engine -v
+          uv run python -m unittest discover -s tests/identity -v
+          uv run python -m unittest tests.ingestion.test_run -v
+          uv run python -m unittest discover -s tests/release -v
+          uv run python -m unittest discover -s tests/public_check -v
+          uv run python tools/public_check.py .
+          npm --prefix ui ci
+          npm --prefix ui run check:api
+          npm --prefix ui run build
+          (cd ui && npx playwright install --with-deps chromium)
+          node --test ui/tests/*.test.mjs
+          npm --prefix tools/g0_ci/openspec ci
+          test "$(tools/g0_ci/openspec/node_modules/.bin/openspec --version)" = "${OPENSPEC_VERSION}"
+          tools/g0_ci/openspec/node_modules/.bin/openspec validate --all --strict
+
+  native_candidate:
+    if: github.ref == 'refs/heads/main' && inputs.candidate_run_id == ''
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-24.04
+            api_port: "8180"
+            oidc_port: "8190"
+            machine: x86_64
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            api_port: "8280"
+            oidc_port: "8290"
+            machine: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      UV_VERSION: "0.12.18"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13.15"
+      - name: Install pinned uv and project tools
+        run: |
+          python -m pip install "uv==${UV_VERSION}"
+          uv sync --locked
+      - name: Validate native runner architecture and image build declaration
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "${{ matrix.machine }}"
+          docker info --format '{{.Architecture}}' | grep -E '^(x86_64|aarch64|arm64)$'
+          docker build --check --platform "${{ matrix.platform }}" -f Dockerfile.g7 .
+      - name: Build and capture exact source-bound image
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/volt-rc3-${{ matrix.arch }}"
+          mkdir -p "$out"
+          export RELEASE_OUT="$out"
+          echo "RELEASE_OUT=$out" >> "$GITHUB_ENV"
+          printf '%s\n' "$GITHUB_RUN_ID" > "$out/prepare-run-id.txt"
+          git archive --format=tar --output="$out/source.tar" "$GITHUB_SHA"
+          source_snapshot="sha256:$(sha256sum "$out/source.tar" | cut -d' ' -f1)"
+          printf '%s\n' "$source_snapshot" > "$out/source-snapshot.txt"
+          docker build --platform "${{ matrix.platform }}" \
+            --build-arg VOLT_SOURCE_SNAPSHOT="$source_snapshot" \
+            --label org.opencontainers.image.version=0.1.0-rc.3 \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label org.opencontainers.image.source="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label org.opencontainers.image.licenses=Apache-2.0 \
+            --label org.volt.oidc-deployment-modes=demo,external \
+            --label org.volt.compose.source-snapshot="$source_snapshot" \
+            --label org.volt.compose-install.contract=1 \
+            -f Dockerfile.g7 -t "volt-rc3:${{ matrix.arch }}-candidate" .
+          docker image inspect "volt-rc3:${{ matrix.arch }}-candidate" --format '{{.Id}}' > "$out/image-id.txt"
+          docker save --output "$out/image.tar" "volt-rc3:${{ matrix.arch }}-candidate"
+          git bundle create "$out/source.bundle" HEAD
+          uv run python tools/build_compose_bundle.py build --output "$out/compose-qualification.tar.gz"
+          python3 - <<'PYIMAGE'
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, "tools/release")
+          from archive import validate_docker_archive
+          root=Path(os.environ["RELEASE_OUT"])
+          print(json.dumps(validate_docker_archive(root/"image.tar", {
+            "image_id":(root/"image-id.txt").read_text().strip(),
+            "source_commit":os.environ["GITHUB_SHA"],
+            "source_snapshot":(root/"source-snapshot.txt").read_text().strip(),
+            "version":"0.1.0-rc.3", "platform":"${{ matrix.platform }}"}), sort_keys=True))
+          PYIMAGE
+      - name: Qualify native Compose admin, restart, and cold restore lifecycle
+        run: |
+          set -euo pipefail
+          python3 tools/compose_release_qualification.py \
+            --image-id "$(cat "$RELEASE_OUT/image-id.txt")" \
+            --source-snapshot "$(cat "$RELEASE_OUT/source-snapshot.txt")" \
+            --source-commit "$GITHUB_SHA" --version 0.1.0-rc.3 \
+            --platform "${{ matrix.platform }}" --project-prefix volt-rc3-qual \
+            --bundle "$RELEASE_OUT/compose-qualification.tar.gz" \
+            --evidence "$RELEASE_OUT/compose-evidence"
+      - name: Retain native qualification evidence on success or failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: volt-rc3-qualification-${{ github.sha }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/volt-rc3-${{ matrix.arch }}/compose-evidence/
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Upload native image inputs without publication credentials
+        if: success()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: volt-rc3-built-${{ github.sha }}-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/volt-rc3-${{ matrix.arch }}/image.tar
+            ${{ runner.temp }}/volt-rc3-${{ matrix.arch }}/image-id.txt
+            ${{ runner.temp }}/volt-rc3-${{ matrix.arch }}/source.tar
+            ${{ runner.temp }}/volt-rc3-${{ matrix.arch }}/source.bundle
+            ${{ runner.temp }}/volt-rc3-${{ matrix.arch }}/source-snapshot.txt
+            ${{ runner.temp }}/volt-rc3-${{ matrix.arch }}/prepare-run-id.txt
+            ${{ runner.temp }}/volt-rc3-${{ matrix.arch }}/compose-qualification.tar.gz
+          if-no-files-found: error
+          retention-days: 90
+
+  retain_candidate:
+    if: github.ref == 'refs/heads/main' && inputs.candidate_run_id == ''
+    needs: native_candidate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+          - platform: linux/arm64
+            arch: arm64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      actions: read
+      contents: read
+    env:
+      UV_VERSION: "0.12.18"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13.15"
+      - name: Install pinned uv and project tools
+        run: |
+          python -m pip install "uv==${UV_VERSION}"
+          uv sync --locked
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: volt-rc3-built-${{ github.sha }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/volt-rc3-${{ matrix.arch }}
+      - name: Validate native image archive before import
+        env:
+          PORTABLE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYIMAGE'
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, "tools/release")
+          from archive import validate_docker_archive
+          root=Path(os.environ["RUNNER_TEMP"])/"volt-rc3-${{ matrix.arch }}"
+          print(json.dumps(validate_docker_archive(root/"image.tar", {
+            "image_id":(root/"image-id.txt").read_text().strip(),
+            "source_commit":os.environ["GITHUB_SHA"],
+            "source_snapshot":(root/"source-snapshot.txt").read_text().strip(),
+            "version":"0.1.0-rc.3", "platform":os.environ["PORTABLE_PLATFORM"]}), sort_keys=True))
+          PYIMAGE
+          docker load --input "$RUNNER_TEMP/volt-rc3-${{ matrix.arch }}/image.tar"
+      - name: Generate exact image-bound notices and vulnerability scan
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/volt-rc3-${{ matrix.arch }}"
+          image_id=$(cat "$out/image-id.txt")
+          python3 tools/notices/prepare_release_sources.py --output "$out/source-preparation"
+          python3 tools/release/install_syft.py
+          python3 tools/notices/collect.py --image "$image_id" --output "$out/notices" \
+            --syft /tmp/volt-release-tools/syft \
+            --debian-dispositions "$out/source-preparation/debian-source-dispositions.json" \
+            --debian-developer-keyring "$out/source-preparation/debian-developer-keyring.gpg"
+          python3 tools/notices/verify.py --directory "$out/notices" --image "$image_id"
+          python3 tools/release/install_trivy.py
+          export PATH="/tmp/volt-release-tools:$PATH"
+          python3 tools/release/scan.py --image "$image_id" --expected-image-id "$image_id" \
+            --exceptions tools/release/exceptions.example.json --output "$out/release-scan.json"
+          test "$(cat "$out/prepare-run-id.txt")" = "$GITHUB_RUN_ID"
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -C "$out" -cf - image.tar image-id.txt source.tar source.bundle source-snapshot.txt \
+            prepare-run-id.txt compose-qualification.tar.gz notices release-scan.json | gzip -n \
+            > "$RUNNER_TEMP/volt-rc3-candidate-${{ matrix.arch }}.tar.gz"
+      - name: Upload verified native candidate inputs
+        if: success()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: volt-rc3-candidate-${{ github.sha }}-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/volt-rc3-candidate-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    if: github.ref == 'refs/heads/main' && inputs.candidate_run_id != '' && inputs.publish_approved == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    environment: volt-rc1-publication
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate current controller and exact candidate source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          CANDIDATE_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          [[ "$CANDIDATE_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$CANDIDATE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git merge-base --is-ancestor "$CANDIDATE_SOURCE_SHA" origin/main
+          test -z "$(git tag --list v0.1.0-rc.3)"
+          test -z "$(gh release list --json tagName --jq '[.[] | select(.tagName == "v0.1.0-rc.3")] | length')"
+          for arch in amd64 arm64; do
+            python3 tools/release/verify_candidate_run.py --run-id "$CANDIDATE_RUN_ID" \
+              --source "$CANDIDATE_SOURCE_SHA" --controller-source "$GITHUB_SHA" \
+              --repository "$GITHUB_REPOSITORY" --workflow .github/workflows/release-rc3.yml \
+              --artifact-name "volt-rc3-candidate-$CANDIDATE_SOURCE_SHA-linux-$arch" \
+              > "$RUNNER_TEMP/identity-$arch.json"
+          done
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: volt-rc3-candidate-${{ inputs.candidate_source_sha }}-linux-amd64
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: ${{ runner.temp }}/rc3-amd64-transfer
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: volt-rc3-candidate-${{ inputs.candidate_source_sha }}-linux-arm64
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: ${{ runner.temp }}/rc3-arm64-transfer
+      - name: Restore and revalidate both retained candidate artifacts
+        env:
+          CANDIDATE_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            mkdir -p "$RUNNER_TEMP/rc3-$arch"
+            python3 - "$RUNNER_TEMP/rc3-$arch-transfer/volt-rc3-candidate-$arch.tar.gz" "$RUNNER_TEMP/rc3-$arch" <<'PYEXTRACT'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0,"tools/release")
+          from archive import safe_extract
+          safe_extract(Path(sys.argv[1]),Path(sys.argv[2]))
+          PYEXTRACT
+            platform="linux/$arch"
+            python3 tools/release/verify_candidate_artifact.py --directory "$RUNNER_TEMP/rc3-$arch" \
+              --source "$CANDIDATE_SOURCE_SHA" --prepare-run-id "$CANDIDATE_RUN_ID" \
+              --version 0.1.0-rc.3 --platform "$platform"
+          done
+      - name: Verify explicit approval and required environment reviewers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/environments/volt-rc1-publication" > "$RUNNER_TEMP/environment.json"
+          python3 tools/release/guards.py --approved '${{ inputs.publish_approved }}' \
+            --environment-json "$RUNNER_TEMP/environment.json" \
+            --approval-reference "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
+      - name: Preflight immutable index and child tags before registry writes
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
+        run: |
+          set -euo pipefail
+          python3 tools/release/registry.py --version-tag 0.1.0-rc.3 \
+            --sha-tag "sha-$CANDIDATE_SOURCE_SHA" \
+            --amd64-tag "sha-$CANDIDATE_SOURCE_SHA-linux-amd64" \
+            --arm64-tag "sha-$CANDIDATE_SOURCE_SHA-linux-arm64"
+          python3 tools/release/install_cosign.py
+          echo /tmp/volt-release-tools >> "$GITHUB_PATH"
+          /tmp/volt-release-tools/cosign initialize
+      - name: Publish exact retained images, create signed index, and verify immutable digests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
+        run: |
+          set -euo pipefail
+          registry=ghcr.io/njvenis/volt
+          docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<< "$GH_TOKEN"
+          for arch in amd64 arm64; do
+            image_id=$(cat "$RUNNER_TEMP/rc3-$arch/image-id.txt")
+            docker load --input "$RUNNER_TEMP/rc3-$arch/image.tar"
+            docker tag "$image_id" "$registry:sha-$CANDIDATE_SOURCE_SHA-linux-$arch"
+            docker push "$registry:sha-$CANDIDATE_SOURCE_SHA-linux-$arch"
+            python3 - "$arch" "$RUNNER_TEMP/rc3-$arch" <<'PYDIGEST'
+          import os, sys
+          from pathlib import Path
+          sys.path.insert(0,"tools/release")
+          import registry
+          arch, root = sys.argv[1], Path(sys.argv[2])
+          source=os.environ["CANDIDATE_SOURCE_SHA"]
+          value=registry.tag_digest(f"sha-{source}-linux-{arch}", username=os.environ["GITHUB_ACTOR"], password=os.environ["GH_TOKEN"])
+          (root/"platform-digest.txt").write_text(value+"\n")
+          PYDIGEST
+          done
+          amd=$(cat "$RUNNER_TEMP/rc3-amd64/platform-digest.txt")
+          arm=$(cat "$RUNNER_TEMP/rc3-arm64/platform-digest.txt")
+          docker buildx imagetools create \
+            --tag "$registry:0.1.0-rc.3" --tag "$registry:sha-$CANDIDATE_SOURCE_SHA" \
+            "$registry@$amd" "$registry@$arm"
+          python3 - "$RUNNER_TEMP/index-digest.txt" <<'PYINDEX'
+          import os, sys
+          from pathlib import Path
+          sys.path.insert(0,"tools/release")
+          import registry
+          digest=registry.tag_digest("0.1.0-rc.3", username=os.environ["GITHUB_ACTOR"], password=os.environ["GH_TOKEN"])
+          Path(sys.argv[1]).write_text(digest+"\n")
+          PYINDEX
+          index=$(cat "$RUNNER_TEMP/index-digest.txt")
+          docker buildx imagetools inspect "$registry@$index" --raw > "$RUNNER_TEMP/rc3-index.json"
+          python3 - "$RUNNER_TEMP/rc3-index.json" "$amd" "$arm" <<'PYPLATFORMS'
+          import json, sys
+          data=json.load(open(sys.argv[1]))
+          expected={("linux","amd64"):sys.argv[2],("linux","arm64"):sys.argv[3]}
+          manifests=data.get("manifests",[])
+          if len(manifests) != 2: raise SystemExit("published index must contain exactly two platform descriptors")
+          found={}
+          for item in manifests:
+            platform=item.get("platform",{})
+            key=(platform.get("os"),platform.get("architecture"))
+            if key in expected:
+              if key in found: raise SystemExit(f"duplicate index platform: {key}")
+              found[key]=item.get("digest")
+          if found != expected: raise SystemExit(f"published index platform descriptors differ: {found}")
+          PYPLATFORMS
+          /tmp/volt-release-tools/cosign verify --output=json \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release-rc3.yml@refs/heads/main" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com "$registry@$index" >/dev/null
+          for arch in amd64 arm64; do
+            out="$RUNNER_TEMP/rc3-$arch"
+            digest=$(cat "$out/platform-digest.txt")
+            /tmp/volt-release-tools/cosign sign --yes "$registry@$digest"
+            /tmp/volt-release-tools/cosign attest --yes --type spdxjson \
+              --predicate "$out/notices/sbom.spdx.json" "$registry@$digest"
+            python3 - "$out/provenance.json" "$arch" <<'PYPROV'
+          import json, os, sys
+          from pathlib import Path
+          server=os.environ["GITHUB_SERVER_URL"]; repository=os.environ["GITHUB_REPOSITORY"]
+          source=f"{server}/{repository}"; sha=os.environ["CANDIDATE_SOURCE_SHA"]
+          workflow=os.environ["GITHUB_WORKFLOW_REF"]
+          identity=json.loads((Path(os.environ["RUNNER_TEMP"])/f"identity-{sys.argv[2]}.json").read_text())
+          archive=Path(os.environ["RUNNER_TEMP"])/f"rc3-{sys.argv[2]}-transfer"/f"volt-rc3-candidate-{sys.argv[2]}.tar.gz"
+          archive_sha=__import__("hashlib").sha256(archive.read_bytes()).hexdigest()
+          controller={"commit":os.environ["GITHUB_SHA"],"workflow_ref":workflow,
+            "candidate_source_commit":sha,"candidate_run_id":os.environ["CANDIDATE_RUN_ID"],
+            "publication_run_id":os.environ["GITHUB_RUN_ID"],"artifact_id":str(identity["artifact_id"]),
+            "artifact_digest":identity["artifact_digest"],"candidate_archive_sha256":archive_sha,
+            "recovery_mode":False}
+          predicate={"buildDefinition":{"buildType":"https://github.com/Attestations/GitHubActionsWorkflow@v1",
+            "externalParameters":{"workflow":{"ref":workflow,"repository":source},"source":{"uri":source,"ref":sha}},
+            "internalParameters":{"voltReleaseController":controller},
+            "resolvedDependencies":[{"uri":"git+"+source,"digest":{"gitCommit":sha}}]},
+            "runDetails":{"builder":{"id":"https://github.com/actions/runner"},
+              "metadata":{"invocationId":f"{server}/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}"}}}
+          Path(sys.argv[1]).write_text(json.dumps(predicate,sort_keys=True)+"\n")
+          PYPROV
+            /tmp/volt-release-tools/cosign attest --yes --type slsaprovenance1 \
+              --predicate "$out/provenance.json" "$registry@$digest"
+            python3 tools/release/publication_verify.py --cosign /tmp/volt-release-tools/cosign \
+              --digest "$digest" --source "$CANDIDATE_SOURCE_SHA" --controller-commit "$GITHUB_SHA" \
+              --image-id "$(cat "$out/image-id.txt")" --spdx "$out/notices/sbom.spdx.json" \
+              --provenance "$out/provenance.json" --notice-manifest "$out/notices/notice-manifest.json" \
+              --version 0.1.0-rc.3 --platform "linux/$arch"
+          done
+          python3 tools/release/registry.py --version-tag 0.1.0-rc.3 \
+            --sha-tag "sha-$CANDIDATE_SOURCE_SHA" \
+            --amd64-tag "sha-$CANDIDATE_SOURCE_SHA-linux-amd64" \
+            --arm64-tag "sha-$CANDIDATE_SOURCE_SHA-linux-arm64" \
+            --expected-digest "$index" --expected-amd64-digest "$amd" --expected-arm64-digest "$arm"
+          printf '%s\n' "$index" > "$RUNNER_TEMP/index-digest.txt"
+      - name: Publish standalone Compose bundle, signed archives, checksums, and GitHub Release
+        env:
+          CANDIDATE_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          registry=ghcr.io/njvenis/volt
+          index=$(cat "$RUNNER_TEMP/index-digest.txt")
+          source_root="$RUNNER_TEMP/volt-rc3-source"
+          mkdir -p "$source_root"
+          git archive "$CANDIDATE_SOURCE_SHA" deploy/compose | tar -x -C "$source_root"
+          python3 tools/build_compose_bundle.py build --output "$RUNNER_TEMP/volt-compose.tar.gz" \
+            --image-reference "$registry@$index" --source-root "$source_root"
+          python3 tools/build_compose_bundle.py verify --archive "$RUNNER_TEMP/volt-compose.tar.gz" --source-root "$source_root"
+          for arch in amd64 arm64; do
+            out="$RUNNER_TEMP/rc3-$arch"
+            cp -a "$out/notices/." "$out/"
+            printf '%s\n' "$index" > "$out/registry-digest.txt"
+            cp "$RUNNER_TEMP/volt-compose.tar.gz" "$out/volt-compose.tar.gz"
+            cp "$RUNNER_TEMP/volt-compose.tar.gz.sha256" "$out/volt-compose.tar.gz.sha256"
+            git show "$CANDIDATE_SOURCE_SHA:tools/release/VERIFY-RELEASE.md" > "$out/VERIFY.txt"
+            python3 tools/release/archive.py prepare --directory "$out" --version 0.1.0-rc.3 \
+              --source-sha "$CANDIDATE_SOURCE_SHA" --image-id "$(cat "$out/image-id.txt")" \
+              --registry-digest "$index" --platform "linux/$arch"
+            python3 tools/release/archive.py sign --directory "$out" --cosign /tmp/volt-release-tools/cosign \
+              --production-oidc --approval "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
+            python3 tools/release/archive.py pack --directory "$out" --archive "$RUNNER_TEMP/volt-0.1.0-rc.3-linux-$arch.tar"
+            python3 tools/release/archive.py verify --archive "$RUNNER_TEMP/volt-0.1.0-rc.3-linux-$arch.tar" \
+              --cosign /tmp/volt-release-tools/cosign --source-sha "$CANDIDATE_SOURCE_SHA" \
+              --image-id "$(cat "$out/image-id.txt")"
+            python3 tools/release/archive.py load --archive "$RUNNER_TEMP/volt-0.1.0-rc.3-linux-$arch.tar" \
+              --cosign /tmp/volt-release-tools/cosign --source-sha "$CANDIDATE_SOURCE_SHA" \
+              --image-id "$(cat "$out/image-id.txt")"
+            gzip -n -c "$RUNNER_TEMP/volt-0.1.0-rc.3-linux-$arch.tar" > "$RUNNER_TEMP/volt-0.1.0-rc.3-linux-$arch.tar.gz"
+          done
+          git show "$CANDIDATE_SOURCE_SHA:tools/release/VERIFY-RELEASE.md" > "$RUNNER_TEMP/VERIFY-RELEASE.md"
+          gh release create v0.1.0-rc.3 --target "$CANDIDATE_SOURCE_SHA" \
+            --title "VOLT 0.1.0-rc.3 (evaluation prerelease)" --notes-file "$RUNNER_TEMP/VERIFY-RELEASE.md" \
+            --prerelease "$RUNNER_TEMP/volt-0.1.0-rc.3-linux-amd64.tar.gz" \
+            "$RUNNER_TEMP/volt-0.1.0-rc.3-linux-arm64.tar.gz" \
+            "$RUNNER_TEMP/volt-compose.tar.gz" "$RUNNER_TEMP/volt-compose.tar.gz.sha256" \
+            "$RUNNER_TEMP/VERIFY-RELEASE.md"

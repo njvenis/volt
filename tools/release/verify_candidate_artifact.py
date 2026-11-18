@@ -54,8 +54,12 @@ def main() -> int:
     p.add_argument("--directory", type=Path, required=True)
     p.add_argument("--source", required=True)
     p.add_argument("--prepare-run-id", required=True)
+    p.add_argument("--version", choices=("0.1.0-rc.2", "0.1.0-rc.3"), default="0.1.0-rc.2")
+    p.add_argument("--platform", choices=("linux/amd64", "linux/arm64"), default="linux/amd64")
     args = p.parse_args()
     root = args.directory.resolve()
+    if args.version == "0.1.0-rc.2" and args.platform != "linux/amd64":
+        p.error("historical RC2 candidate artifacts are amd64-only")
     try:
         if not re.fullmatch(r"[0-9a-f]{40}", args.source):
             raise ValueError("source commit is malformed")
@@ -72,7 +76,7 @@ def main() -> int:
         sys.path.insert(0,str(Path(__file__).parent))
         from archive import validate_docker_archive
         validate_docker_archive(root/"image.tar", {"image_id":image_id,"source_commit":args.source,
-            "source_snapshot":snapshot,"version":"0.1.0-rc.2","platform":"linux/amd64"})
+            "source_snapshot":snapshot,"version":args.version,"platform":args.platform})
         report=json.loads((root/"release-scan.json").read_text())
         if report.get("Metadata",{}).get("ImageID") != image_id:
             raise ValueError("retained full scan is not bound to the candidate image ID")

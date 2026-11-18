@@ -38,6 +38,28 @@ class PublicationVerifierTests(unittest.TestCase):
             for call in calls:
                 self.assertIn(verify.IDENTITY,call); self.assertIn(verify.ISSUER,call); self.assertIn("ghcr.io/njvenis/volt@"+digest,call)
 
+    def test_rc3_arm64_uses_its_fixed_signer_identity_and_notice_platform(self):
+        with TemporaryDirectory() as temp:
+            root=Path(temp); digest,source,spdx,prov,spdx_out,prov_out=self.fixture()
+            workflow="njvenis/volt/.github/workflows/release-rc3.yml@refs/heads/main"
+            prov["buildDefinition"]["externalParameters"]["workflow"]["ref"]=workflow
+            spdx_path=root/"sbom.json"; spdx_path.write_text(json.dumps(spdx))
+            prov_path=root/"provenance.json"; prov_path.write_text(json.dumps(prov))
+            notice=root/"notice.json"; notice.write_text(json.dumps({"image_id":"sha256:"+"b"*64,"platform":"linux/arm64","files":[{"path":"sbom.spdx.json","sha256":hashlib.sha256(spdx_path.read_bytes()).hexdigest()}]}))
+            prov_statement={"_type":"https://in-toto.io/Statement/v1","subject":[{"name":"ghcr.io/njvenis/volt","digest":{"sha256":digest.removeprefix("sha256:")}}],"predicateType":"https://slsa.dev/provenance/v1","predicate":prov}
+            prov_out=json.dumps({"payload":base64.b64encode(json.dumps(prov_statement).encode()).decode()})
+            calls=[]
+            def run(cmd, **kwargs):
+                calls.append(cmd)
+                if "verify-attestation" not in cmd: return SimpleNamespace(stdout="[]")
+                return SimpleNamespace(stdout=spdx_out if "spdxjson" in cmd else prov_out)
+            with patch.object(verify.subprocess,"run",side_effect=run):
+                verify.verify("cosign",digest,source,"sha256:"+"b"*64,spdx_path,prov_path,notice,
+                              version="0.1.0-rc.3",platform="linux/arm64")
+            expected="https://github.com/"+workflow
+            self.assertTrue(all(expected in call for call in calls))
+            self.assertTrue(all("linux/arm64" not in " ".join(call) for call in calls))
+
     def test_actual_consumer_rejects_wrong_notice_image_and_predicate_subject(self):
         with TemporaryDirectory() as temp:
             root=Path(temp); digest,source,spdx,prov,spdx_out,prov_out=self.fixture()

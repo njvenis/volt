@@ -13,9 +13,12 @@ class ComposeQuickstartDocumentationTests(unittest.TestCase):
         install = (ROOT / "docs/installation.md").read_text()
         self.assertIn("Planned primary installation: VOLT 0.1.0-rc.3 Compose evaluation prerelease", readme)
         self.assertIn("only after those assets are present and authenticated", readme)
+        self.assertIn("archive cannot select verifier code", readme)
+        self.assertIn("authenticate `volt-compose.tar.gz` against its signed embedded bytes before extraction", readme)
         self.assertIn("ec98113969cf554aa04b3e56baf9c63926d4fe42", readme)
         self.assertIn("images tagged `0.1.0-demo` completed synthetic Compose functional runs", readme)
         self.assertIn("Versioned RC3 candidate qualification and publication remain pending", readme)
+        self.assertIn("common multi-platform index separately from each platform image ID", readme)
         self.assertNotIn("candidate images passed the reviewed synthetic Compose and release checks", readme)
         self.assertIn("linux/arm64", readme)
         self.assertIn("linux/amd64", readme)
@@ -30,11 +33,17 @@ class ComposeQuickstartDocumentationTests(unittest.TestCase):
             self.assertIn(asset, install)
         rc3 = install.split("## RC3 Compose installation", 1)[1].split(
             "## RC2 Compose installation", 1)[0]
-        self.assertLess(rc3.index("never execute verifier installation code selected by an archive field such as `source_commit`"),
-            rc3.index("tar -xOf \"$VOLT_ARCHIVE\" volt-compose.tar.gz"))
+        self.assertIn("Never let an archive field such as `source_commit` select verifier code", rc3)
+        self.assertLess(rc3.index("fixed `v0.1.0-rc.3` repository tag"), rc3.index("authenticate-bundle"))
         self.assertIn("Do not trust a verifier, checksum, signature key or Sigstore root solely because it was included", rc3)
-        self.assertIn("does not require a VOLT checkout, Git, Node.js, npm", rc3)
-        self.assertIn("An offline image import assumes those verifier and trust materials are already provisioned", rc3)
+        self.assertIn("ordinary runtime setup does not require a VOLT source checkout, Git, Node.js, npm", rc3)
+        self.assertIn("An offline image import is possible only after those verifier and trust materials have been provisioned", rc3)
+        self.assertIn("source SHA from that trusted tag", rc3)
+        self.assertIn("--source-sha \"$SOURCE_SHA\"", rc3)
+        self.assertLess(rc3.index("authenticate-bundle"), rc3.index("tar -xzf \"$VOLT_BUNDLE\""))
+        self.assertLess(rc3.index("authenticate-bundle"), rc3.index("EXPECTED_BUNDLE_SHA="))
+        self.assertIn("registry_digest`/`image_index_id` identify the multi-platform index", rc3)
+        self.assertIn("image_id`/`image_config_id` identify the selected platform image", rc3)
         self.assertIn("Group removal revokes existing sessions", rc3)
 
     def test_documentation_index_marks_rc3_planned_and_rc2_historical(self):

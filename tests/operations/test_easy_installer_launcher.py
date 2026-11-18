@@ -24,7 +24,8 @@ class EasyInstallerLauncherTests(unittest.TestCase):
         self.assertLess(source.index("--runtime-prepare"), source.index('  start_local_instance\n'))
         self.assertLess(source.index("verify_actual_mounts"), source.index('locked_compose start'))
         self.assertIn("--network none --read-only --cap-drop=ALL", source)
-        self.assertLess(source.index("remote Docker contexts are unsupported"), source.index('docker pull "$VERIFIER_IMAGE"'))
+        self.assertLess(source.index("remote Docker contexts are unsupported"),
+                        source.index('docker pull --platform "$ENGINE_PLATFORM" "$VERIFIER_IMAGE"'))
         self.assertIn('unix://*)', source)
         self.assertIn("--mount", source)
         self.assertNotIn("/var/run/docker.sock", source)

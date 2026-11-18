@@ -1,0 +1,5 @@
+# Exact historical noncredential disposition; no file/rule/commit-wide exclusion.
+# Proven synthetic salted scrypt unit-test verifier, never an issued API credential.
+# User explicitly approved this one exception: "approve exception" (2026-11-18).
+# Rationale, evidence and required negative coverage: tests/release/GITLEAKS-FINGERPRINT.md
+11fab25894046bf7f9b339753755f308f9d32fbd:tests/operations/test_demo_password_login.py:generic-api-key:29

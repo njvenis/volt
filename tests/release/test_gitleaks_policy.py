@@ -45,3 +45,12 @@ class GitleaksPolicyTests(unittest.TestCase):
         self.assertTrue(re.search(exception["regexes"][0], marker))
         self.assertFalse(re.search(exception["regexes"][0], marker + "-changed"))
         self.assertNotIn(marker, (root / "tools/compose_release_qualification.py").read_text())
+
+
+    def test_historical_verifier_disposition_is_one_exact_immutable_fingerprint(self):
+        root = Path(__file__).resolve().parents[2]
+        lines = (root / ".gitleaksignore").read_text().splitlines()
+        entries = [line for line in lines if line.strip() and not line.lstrip().startswith("#")]
+        self.assertEqual(entries, [
+            "11fab25894046bf7f9b339753755f308f9d32fbd:tests/operations/test_demo_password_login.py:generic-api-key:29"])
+        self.assertIn('"approve exception"', "\n".join(lines))

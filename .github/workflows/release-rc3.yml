@@ -289,7 +289,7 @@ jobs:
           python3 tools/release/rc3_candidate.py seal --directory "$stage"
           python3 tools/release/verify_candidate_artifact.py --directory "$stage" --source "$GITHUB_SHA" \
             --prepare-run-id "$GITHUB_RUN_ID" --version 0.1.0-rc.3 --platform "${{ matrix.platform }}"
-          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+          tar --hard-dereference --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
             -C "$stage" -cf - image.tar image-id.txt source.tar source.bundle source-snapshot.txt \
             prepare-run-id.txt compose-qualification.tar.gz compose-qualification.tar.gz.sha256 notices \
             compose-evidence release-scan.json release-scan.json.diagnostics.txt candidate.json | gzip -n > "$RUNNER_TEMP/volt-rc3-candidate-${{ matrix.arch }}.tar.gz"

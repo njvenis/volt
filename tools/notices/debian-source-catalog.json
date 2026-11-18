@@ -38414,7 +38414,7 @@
           "sha256": "2ae27ed8a5581e2cc4969c266e655a280a8982f87dfe72c011c3f03d91897076"
         }
       ],
-      "dsc_sha256": "0baf11fbc9cd651c2238c1b394142a9d58006bba604e5840f38086331286ee5c",
+      "dsc_sha256": "041c7af261546dbad4ee57ccb237f02a8697b762be34aed2e1617ed49595942a",
       "file_stanzas": [
         {
           "copyright_path": "/usr/share/doc/linux-libc-dev/copyright",
@@ -38583,20 +38583,20 @@
       ],
       "source_files": [
         {
-          "filename": "linux_6.12.115.orig.tar.xz",
-          "sha256": "eaccd6c987f438de08039859df5507600a31245bb041ca62f2ef3fd30bd2172d",
-          "fallback_url": "https://deb.debian.org/debian-security/pool/updates/main/l/linux/linux_6.12.115.orig.tar.xz"
+          "filename": "linux_6.12.117.orig.tar.xz",
+          "sha256": "77cf7a48a73aeaa7cf4f94cb6d17f8fe545bf33a5dd8a56d6428db3a54645c74",
+          "fallback_url": "https://deb.debian.org/debian-security/pool/updates/main/l/linux/linux_6.12.117.orig.tar.xz"
         },
         {
-          "filename": "linux_6.12.115-2.debian.tar.xz",
-          "sha256": "6dfede7b22c69e60578764470734eeccead495111e1b417b224303d7a2de5df9",
-          "fallback_url": "https://deb.debian.org/debian-security/pool/updates/main/l/linux/linux_6.12.115-2.debian.tar.xz"
+          "filename": "linux_6.12.117-1.debian.tar.xz",
+          "sha256": "e3f3bec0723f780d9ef2a2b3215aea25d34c61cd884f1f858c9708a846c4f8f9",
+          "fallback_url": "https://deb.debian.org/debian-security/pool/updates/main/l/linux/linux_6.12.117-1.debian.tar.xz"
         }
       ],
       "source_package": "linux",
-      "source_version": "6.12.115-2",
-      "immutable_dsc_sha1": "392fc47bff05a3eaf352d9782c83392d29f2706c",
-      "immutable_dsc_fallback_url": "https://deb.debian.org/debian-security/pool/updates/main/l/linux/linux_6.12.115-2.dsc"
+      "source_version": "6.12.117-1",
+      "immutable_dsc_sha1": "7b96c2cad4a8256df4233057d03252c3d10cf4b2",
+      "immutable_dsc_fallback_url": "https://deb.debian.org/debian-security/pool/updates/main/l/linux/linux_6.12.117-1.dsc"
     },
     {
       "copyright_files": [

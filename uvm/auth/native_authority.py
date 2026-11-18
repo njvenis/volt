@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 
 UTC = timezone.utc
 NATIVE_MODE = "uvm_native_v1"
+LOCAL_NATIVE_MODE = "uvm_native_v2"
+NATIVE_MODES = {NATIVE_MODE, LOCAL_NATIVE_MODE}
 NATIVE_ACTIONS = {
     "native.authority.activate", "native.authority.rollback",
     "access_group.create", "access_group.update", "access_group.membership.set",
@@ -35,7 +37,7 @@ def native_state(policy: dict) -> dict:
 def effective_access(policy: dict, principal_id: str, at: datetime | None = None):
     """Return current native group IDs, roles and exact source scopes."""
     state = native_state(policy)
-    if state.get("mode") != NATIVE_MODE:
+    if state.get("mode") not in NATIVE_MODES:
         return None
     if policy.get("principals", {}).get(principal_id, {}).get("enabled") is False:
         return (), (), (), int(state.get("revision", 0))
@@ -175,7 +177,8 @@ def apply_command(policy: dict, action: str, payload: dict, principal_id: str,
         permissions = payload.get("permissions", [])
         if not isinstance(name, str) or not name.strip() or not isinstance(description, str) or type(enabled) is not bool:
             raise ValueError("Access-group display fields are invalid")
-        if not isinstance(source_scopes, list) or not source_scopes:
+        local_v2 = state.get("mode") == LOCAL_NATIVE_MODE
+        if not isinstance(source_scopes, list) or (not source_scopes and not local_v2):
             raise ValueError("Access group requires explicit exact source scopes")
         scope_keys = ("source_family", "source_account_id", "scope_key")
         normalized_scopes = []
@@ -228,6 +231,21 @@ def apply_command(policy: dict, action: str, payload: dict, principal_id: str,
                     raise ValueError("Observer timing permission requires exact deployment scopes")
                 role_input["deployment_scopes"] = list(deployment_scopes)
             role = validate_permission(role_input)
+            if local_v2:
+                typed = role["target_scope"]
+                if typed.get("kind") != "deployment" and not normalized_scopes:
+                    raise ValueError("Local-v2 source permissions require exact source scopes")
+                if typed.get("kind") == "source_read":
+                    permission_scopes = {tuple(item[key] for key in scope_keys) for item in typed.get("source_scopes", [])}
+                    if permission_scopes != {tuple(item[key] for key in scope_keys) for item in normalized_scopes}:
+                        raise ValueError("Local-v2 source-read permission must match the access-group source ceiling exactly")
+                if typed.get("kind") == "connector":
+                    pairs = typed.get("source_pairs", [])
+                    pair_scopes = {tuple(pair[key] for key in scope_keys) for pair in pairs}
+                    pair_connectors = {pair["connector_id"] for pair in pairs}
+                    if (pair_scopes != {tuple(item[key] for key in scope_keys) for item in normalized_scopes}
+                            or pair_connectors != set(typed.get("connector_ids", []))):
+                        raise ValueError("Local-v2 connector targets must pair every connector with its exact source tuple")
             if deployment_scopes is not None:
                 role["deployment_scopes"] = list(deployment_scopes)
             if not envelope_allows(state.get("grantable_envelope", {}), role,

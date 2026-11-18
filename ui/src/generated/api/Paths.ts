@@ -21,10 +21,53 @@ export type GroupId = string;
 export type Cursor = string | null;
 export type Authorization5 = string | null;
 export type Authorization6 = string | null;
+export type Body1 =
+  | {
+      action: "connector.binding.register";
+      command_id: string;
+      expected_authority_revision: number;
+      expected_connector_registry_revision: number;
+      expected_policy_revision: number;
+      /**
+       * @maxItems 0
+       */
+      membership_ids: [];
+      payload: {
+        account_label: string;
+        display_name: string;
+        environment_label: string;
+        evidence_ref: string;
+        grant_initial_read: boolean;
+        platform_id: "us1" | "us2" | "us3" | "eu1" | "eu2" | "in1";
+        product: "qualys_vm";
+        rationale: string;
+        scope: {
+          kind: "account_visible";
+        };
+        source_family: "qualys";
+      };
+      schema_version: 1;
+      target_id: "00000000-0000-0000-0000-000000000000";
+    }
+  | {
+      action: string;
+      command_id: string;
+      expected_revisions: {
+        [k: string]: unknown;
+      };
+      membership_ids: string[];
+      payload: {
+        [k: string]: unknown;
+      };
+      target_id: string;
+      [k: string]: unknown;
+    };
 export type Authorization7 = string | null;
+export type CommandId = string;
 export type Authorization8 = string | null;
 export type Authorization9 = string | null;
 export type Authorization10 = string | null;
+export type Authorization11 = string | null;
 export type NativeId = string | null;
 export type SourceFamily = string | null;
 export type Cve = string | null;
@@ -37,21 +80,43 @@ export type Sort = string;
 export type Limit = number;
 export type Cursor1 = string | null;
 export type GroupId1 = string;
-export type Authorization11 = string | null;
-export type GroupId2 = string;
 export type Authorization12 = string | null;
-export type GroupId3 = string;
+export type GroupId2 = string;
 export type Authorization13 = string | null;
-export type GroupId4 = string;
+export type GroupId3 = string;
 export type Authorization14 = string | null;
+export type GroupId4 = string;
+export type Authorization15 = string | null;
 export type GroupId5 = string;
 export type IntentId1 = string;
-export type Authorization15 = string | null;
 export type Authorization16 = string | null;
-export type TeamId = string;
 export type Authorization17 = string | null;
+export type TeamId = string;
 export type Authorization18 = string | null;
+export type Authorization19 = string | null;
 export type GroupId6 = string;
+export type Mode = "local";
+export type SchemaVersion = 1;
+export type SetupState = "required" | "claimed" | "unavailable";
+export type AccessGroups = string[];
+export type Authenticated = boolean;
+export type CredentialMode = "local_session";
+export type CsrfToken = string;
+export type PrincipalId = string;
+export type ProtectedAdmin = boolean;
+export type ReceiptId = string | null;
+export type SchemaVersion1 = 1;
+export type SourceScopes = string[][];
+export type Authorization20 = string | null;
+export type LinkId = string;
+export type Authorization21 = string | null;
+export type AccessGroups1 = string[];
+export type Authenticated1 = boolean;
+export type CredentialMode1 = "oidc_session" | "github_link" | "service_bearer";
+export type CsrfToken1 = string | null;
+export type PrincipalId1 = string;
+export type SchemaVersion2 = 1;
+export type SourceScopes1 = string[][];
 export type Limit1 = number;
 export type Cursor2 = string | null;
 export type ConnectorId = string;
@@ -77,7 +142,7 @@ export type SourceId3 = string;
 export type ConnectorId7 = string;
 export type SourceId4 = string;
 export type ConnectorId8 = string;
-export type CommandId = string;
+export type CommandId1 = string;
 export type SourceId5 = string;
 export type ConnectorId9 = string;
 export type SubmissionId = string;
@@ -91,120 +156,133 @@ export type ConnectorId11 = string;
 export type SecretId2 = string;
 export type ConnectorId12 = string;
 export type SourceId8 = string;
-export type Authorization19 = string | null;
-export type Authorization20 = string | null;
-export type GroupId7 = string;
-export type Authorization21 = string | null;
-export type GroupId8 = string;
+export type AuthorityRevision = number;
+export type CanRegisterConnector = boolean;
+export type ConnectorRegistryRevision = number;
+export type ConfigurationRevision1 = number;
+export type ConnectorId13 = string;
+export type ConnectorRevision = number;
+export type EnvironmentLabel = string;
+export type Lifecycle = string;
+export type SourceRevision = number;
+export type Connectors = LocalConnectorSummaryDTO[];
+export type InstallationId1 = string;
+export type PolicyRevision = number;
+export type SchemaVersion3 = 1;
 export type Authorization22 = string | null;
 export type Authorization23 = string | null;
-export type LinkId = string;
+export type GroupId7 = string;
 export type Authorization24 = string | null;
+export type GroupId8 = string;
 export type Authorization25 = string | null;
-export type RepositoryId = string;
 export type Authorization26 = string | null;
-export type RepositoryId1 = string;
+export type LinkId1 = string;
 export type Authorization27 = string | null;
+export type Authorization28 = string | null;
+export type RepositoryId = string;
+export type Authorization29 = string | null;
+export type RepositoryId1 = string;
+export type Authorization30 = string | null;
 export type Limit2 = number;
 export type Cursor3 = string | null;
 export type RunId = string;
-export type Authorization28 = string | null;
+export type Authorization31 = string | null;
 export type Limit3 = number;
 export type Cursor4 = string | null;
 export type RunId1 = string;
 export type Revision = number;
-export type Authorization29 = string | null;
-export type Authorization30 = string | null;
+export type Authorization32 = string | null;
+export type Authorization33 = string | null;
 export type Limit4 = number;
 export type Cursor5 = string | null;
-export type Authorization31 = string | null;
+export type Authorization34 = string | null;
 export type Limit5 = number;
 export type Offset = number;
 export type DeploymentId = string | null;
 export type GroupId9 = string | null;
-export type Authorization32 = string | null;
+export type Authorization35 = string | null;
 export type TransitionId = string;
-export type Authorization33 = string | null;
-export type Authorization34 = string | null;
+export type Authorization36 = string | null;
+export type Authorization37 = string | null;
 export type Cursor6 = string | null;
 export type DeploymentId1 = string;
-export type Authorization35 = string | null;
+export type Authorization38 = string | null;
 export type DeploymentId2 = string;
-export type Authorization36 = string | null;
+export type Authorization39 = string | null;
 export type DeploymentId3 = string;
-export type CommandId1 = string;
-export type Authorization37 = string | null;
+export type CommandId2 = string;
+export type Authorization40 = string | null;
 export type DeploymentId4 = string;
 export type Revision1 = number;
-export type Authorization38 = string | null;
-export type Authorization39 = string | null;
+export type Authorization41 = string | null;
+export type Authorization42 = string | null;
 export type Limit6 = number;
 export type Cursor7 = string | null;
 export type DeploymentId5 = string;
-export type Authorization40 = string | null;
-export type DeploymentId6 = string;
-export type Authorization41 = string | null;
-export type DeploymentId7 = string;
-export type Authorization42 = string | null;
-export type DeploymentId8 = string;
 export type Authorization43 = string | null;
-export type DeploymentId9 = string;
+export type DeploymentId6 = string;
 export type Authorization44 = string | null;
+export type DeploymentId7 = string;
+export type Authorization45 = string | null;
+export type DeploymentId8 = string;
+export type Authorization46 = string | null;
+export type DeploymentId9 = string;
+export type Authorization47 = string | null;
 export type Limit7 = number;
 export type SinkId = string;
 export type DeploymentId10 = string;
-export type CommandId2 = string;
-export type Authorization45 = string | null;
+export type CommandId3 = string;
+export type Authorization48 = string | null;
 export type DeploymentId11 = string;
 export type Revision2 = number;
-export type Authorization46 = string | null;
-export type Authorization47 = string | null;
+export type Authorization49 = string | null;
+export type Authorization50 = string | null;
 export type SourceFamily1 = string;
 export type SourceAccountId = string;
 export type ScopeKey = string;
 export type EvidenceId = string;
-export type Authorization48 = string | null;
-export type Authorization49 = string | null;
+export type Authorization51 = string | null;
+export type Authorization52 = string | null;
 export type SnapshotId = string;
 export type ClassId = string;
 export type Limit8 = number;
 export type Cursor8 = string | null;
-export type Authorization50 = string | null;
-export type CommandId3 = string;
-export type Authorization51 = string | null;
-export type Authorization52 = string | null;
-export type GroupId10 = string;
 export type Authorization53 = string | null;
+export type CommandId4 = string;
 export type Authorization54 = string | null;
+export type Authorization55 = string | null;
+export type GroupId10 = string;
+export type Authorization56 = string | null;
+export type Authorization57 = string | null;
 export type GroupId11 = string | null;
 export type ReportId1 = string;
-export type Authorization55 = string | null;
+export type Authorization58 = string | null;
 export type ReportId2 = string;
-export type Authorization56 = string | null;
+export type Authorization59 = string | null;
 export type Limit9 = number;
 export type Cursor9 = string | null;
 export type Metric = string | null;
 export type Population = string;
 export type Presentation = string | null;
 export type ReportId3 = string;
-export type Authorization57 = string | null;
+export type Authorization60 = string | null;
 export type Format = string;
-export type Authorization58 = string | null;
+export type Authorization61 = string | null;
 export type Limit10 = number;
 export type Cursor10 = string | null;
-export type Authorization59 = string | null;
-export type DeploymentId12 = string;
-export type Authorization60 = string | null;
-export type DeploymentId13 = string;
-export type Authorization61 = string | null;
-export type DeploymentId14 = string;
 export type Authorization62 = string | null;
-export type DeploymentId15 = string;
+export type DeploymentId12 = string;
 export type Authorization63 = string | null;
-export type DeploymentId16 = string;
+export type DeploymentId13 = string;
 export type Authorization64 = string | null;
-export type DeploymentId17 = string;
+export type DeploymentId14 = string;
 export type Authorization65 = string | null;
+export type DeploymentId15 = string;
+export type Authorization66 = string | null;
+export type DeploymentId16 = string;
+export type Authorization67 = string | null;
+export type DeploymentId17 = string;
+export type Authorization68 = string | null;
 
 export interface Paths {
   "/api/v1/assessment/access-groups": {
@@ -491,10 +569,12 @@ export interface Paths {
           };
     };
   };
-  "/api/v1/assessment/exception-warning-actor-links": {
+  "/api/v1/assessment/commands/{command_id}/abandon": {
     post: {
       request: {
-        path?: {};
+        path: {
+          command_id: CommandId;
+        };
         headers: {
           authorization?: Authorization8;
           "Content-Type": "application/json";
@@ -507,6 +587,42 @@ export interface Paths {
           [k: string]: unknown;
         };
         body: Body3;
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: unknown;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/assessment/exception-warning-actor-links": {
+    post: {
+      request: {
+        path?: {};
+        headers: {
+          authorization?: Authorization9;
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+        body: Body4;
       };
       responses:
         | {
@@ -556,7 +672,7 @@ export interface Paths {
       request: {
         path?: {};
         headers: {
-          authorization?: Authorization9;
+          authorization?: Authorization10;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -566,7 +682,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body4;
+        body: Body5;
       };
       responses:
         | {
@@ -592,7 +708,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization10;
+          authorization?: Authorization11;
           [k: string]: unknown;
         };
         cookies?: {
@@ -639,7 +755,7 @@ export interface Paths {
           group_id: GroupId1;
         };
         headers?: {
-          authorization?: Authorization11;
+          authorization?: Authorization12;
           [k: string]: unknown;
         };
         cookies?: {
@@ -675,7 +791,7 @@ export interface Paths {
           group_id: GroupId2;
         };
         headers?: {
-          authorization?: Authorization12;
+          authorization?: Authorization13;
           [k: string]: unknown;
         };
         cookies?: {
@@ -711,7 +827,7 @@ export interface Paths {
           group_id: GroupId3;
         };
         headers?: {
-          authorization?: Authorization13;
+          authorization?: Authorization14;
           [k: string]: unknown;
         };
         cookies?: {
@@ -747,7 +863,7 @@ export interface Paths {
           group_id: GroupId4;
         };
         headers?: {
-          authorization?: Authorization14;
+          authorization?: Authorization15;
           [k: string]: unknown;
         };
         cookies?: {
@@ -784,7 +900,7 @@ export interface Paths {
           intent_id: IntentId1;
         };
         headers?: {
-          authorization?: Authorization15;
+          authorization?: Authorization16;
           [k: string]: unknown;
         };
         cookies?: {
@@ -818,7 +934,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization16;
+          authorization?: Authorization17;
           [k: string]: unknown;
         };
         cookies?: {
@@ -854,7 +970,7 @@ export interface Paths {
           team_id: TeamId;
         };
         headers?: {
-          authorization?: Authorization17;
+          authorization?: Authorization18;
           [k: string]: unknown;
         };
         cookies?: {
@@ -888,7 +1004,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization18;
+          authorization?: Authorization19;
           [k: string]: unknown;
         };
         cookies?: {
@@ -907,6 +1023,375 @@ export interface Paths {
               [k: string]: unknown;
             };
             body: unknown;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/auth/callback": {
+    get: {
+      request: {
+        path?: {};
+        headers?: {
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+      };
+      responses: {
+        status: "200";
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        body: unknown;
+      };
+    };
+  };
+  "/api/v1/auth/config": {
+    get: {
+      request: {
+        path?: {};
+        headers?: {
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+      };
+      responses: {
+        status: "200";
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        body: LocalAuthConfigDTO;
+      };
+    };
+  };
+  "/api/v1/auth/local/enrol": {
+    post: {
+      request: {
+        path?: {};
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+        body: Body6;
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: unknown;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/auth/local/login": {
+    post: {
+      request: {
+        path?: {};
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+        body: Body7;
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: LocalSessionDTO;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/auth/local/password": {
+    post: {
+      request: {
+        path?: {};
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+        body: Body8;
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: unknown;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/auth/local/recovery": {
+    post: {
+      request: {
+        path?: {};
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+        body: Body9;
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: unknown;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/auth/login": {
+    get: {
+      request: {
+        path?: {};
+        headers?: {
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+      };
+      responses: {
+        status: "200";
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        body: unknown;
+      };
+    };
+  };
+  "/api/v1/auth/logout": {
+    post: {
+      request: {
+        path?: {};
+        headers?: {
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+      };
+      responses: {
+        status: "200";
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        body: unknown;
+      };
+    };
+  };
+  "/api/v1/auth/operator/links": {
+    post: {
+      request: {
+        path?: {};
+        headers: {
+          authorization?: Authorization20;
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+        body: Body10;
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: unknown;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/auth/operator/links/{link_id}/revoke": {
+    post: {
+      request: {
+        path: {
+          link_id: LinkId;
+        };
+        headers: {
+          authorization?: Authorization21;
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+        body: Body11;
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: unknown;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/auth/session": {
+    get: {
+      request: {
+        path?: {};
+        headers?: {
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+      };
+      responses: {
+        status: "200";
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        body: OIDCSessionDTO | LocalSessionDTO;
+      };
+    };
+  };
+  "/api/v1/auth/setup/claim": {
+    post: {
+      request: {
+        path?: {};
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+        body: Body12;
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: LocalSessionDTO;
           }
         | {
             status: "422";
@@ -1042,7 +1527,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body5;
+        body: Body13;
       };
       responses:
         | {
@@ -1254,7 +1739,7 @@ export interface Paths {
       request: {
         path: {
           connector_id: ConnectorId8;
-          command_id: CommandId;
+          command_id: CommandId1;
         };
         headers?: {
           [k: string]: unknown;
@@ -1379,7 +1864,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body6;
+        body: Body14;
       };
       responses:
         | {
@@ -1436,6 +1921,30 @@ export interface Paths {
           };
     };
   };
+  "/api/v1/deployment": {
+    get: {
+      request: {
+        path?: {};
+        headers?: {
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+      };
+      responses: {
+        status: "200";
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        body: LocalDeploymentDTO;
+      };
+    };
+  };
   "/api/v1/deployment/mode": {
     get: {
       request: {
@@ -1465,7 +1974,7 @@ export interface Paths {
       request: {
         path?: {};
         headers: {
-          authorization?: Authorization19;
+          authorization?: Authorization22;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -1475,7 +1984,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body7;
+        body: Body15;
       };
       responses:
         | {
@@ -1501,7 +2010,7 @@ export interface Paths {
       request: {
         path?: {};
         headers: {
-          authorization?: Authorization20;
+          authorization?: Authorization23;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -1511,7 +2020,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body8;
+        body: Body16;
       };
       responses:
         | {
@@ -1539,7 +2048,7 @@ export interface Paths {
           group_id: GroupId7;
         };
         headers: {
-          authorization?: Authorization21;
+          authorization?: Authorization24;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -1549,7 +2058,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body9;
+        body: Body17;
       };
       responses:
         | {
@@ -1577,7 +2086,7 @@ export interface Paths {
           group_id: GroupId8;
         };
         headers?: {
-          authorization?: Authorization22;
+          authorization?: Authorization25;
           [k: string]: unknown;
         };
         cookies?: {
@@ -1611,7 +2120,7 @@ export interface Paths {
       request: {
         path?: {};
         headers: {
-          authorization?: Authorization23;
+          authorization?: Authorization26;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -1621,7 +2130,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body10;
+        body: Body18;
       };
       responses:
         | {
@@ -1646,10 +2155,10 @@ export interface Paths {
     patch: {
       request: {
         path: {
-          link_id: LinkId;
+          link_id: LinkId1;
         };
         headers: {
-          authorization?: Authorization24;
+          authorization?: Authorization27;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -1659,7 +2168,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body11;
+        body: Body19;
       };
       responses:
         | {
@@ -1685,7 +2194,7 @@ export interface Paths {
       request: {
         path?: {};
         headers: {
-          authorization?: Authorization25;
+          authorization?: Authorization28;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -1695,7 +2204,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body12;
+        body: Body20;
       };
       responses:
         | {
@@ -1723,7 +2232,7 @@ export interface Paths {
           repository_id: RepositoryId;
         };
         headers: {
-          authorization?: Authorization26;
+          authorization?: Authorization29;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -1733,7 +2242,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body13;
+        body: Body21;
       };
       responses:
         | {
@@ -1794,7 +2303,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization27;
+          authorization?: Authorization30;
           [k: string]: unknown;
         };
         cookies?: {
@@ -1832,7 +2341,7 @@ export interface Paths {
           run_id: RunId;
         };
         headers?: {
-          authorization?: Authorization28;
+          authorization?: Authorization31;
           [k: string]: unknown;
         };
         cookies?: {
@@ -1871,7 +2380,7 @@ export interface Paths {
           revision: Revision;
         };
         headers?: {
-          authorization?: Authorization29;
+          authorization?: Authorization32;
           [k: string]: unknown;
         };
         cookies?: {
@@ -1905,7 +2414,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization30;
+          authorization?: Authorization33;
           [k: string]: unknown;
         };
         cookies?: {
@@ -1941,7 +2450,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization31;
+          authorization?: Authorization34;
           [k: string]: unknown;
         };
         cookies?: {
@@ -1977,7 +2486,7 @@ export interface Paths {
       request: {
         path?: {};
         headers: {
-          authorization?: Authorization32;
+          authorization?: Authorization35;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -2015,7 +2524,7 @@ export interface Paths {
           transition_id: TransitionId;
         };
         headers: {
-          authorization?: Authorization33;
+          authorization?: Authorization36;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -2051,7 +2560,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization34;
+          authorization?: Authorization37;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2088,7 +2597,7 @@ export interface Paths {
           deployment_id: DeploymentId1;
         };
         headers?: {
-          authorization?: Authorization35;
+          authorization?: Authorization38;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2124,7 +2633,7 @@ export interface Paths {
           deployment_id: DeploymentId2;
         };
         headers: {
-          authorization?: Authorization36;
+          authorization?: Authorization39;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -2134,7 +2643,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body14;
+        body: Body22;
       };
       responses:
         | {
@@ -2160,10 +2669,10 @@ export interface Paths {
       request: {
         path: {
           deployment_id: DeploymentId3;
-          command_id: CommandId1;
+          command_id: CommandId2;
         };
         headers?: {
-          authorization?: Authorization37;
+          authorization?: Authorization40;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2200,7 +2709,7 @@ export interface Paths {
           revision: Revision1;
         };
         headers?: {
-          authorization?: Authorization38;
+          authorization?: Authorization41;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2234,7 +2743,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization39;
+          authorization?: Authorization42;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2272,7 +2781,7 @@ export interface Paths {
           deployment_id: DeploymentId5;
         };
         headers?: {
-          authorization?: Authorization40;
+          authorization?: Authorization43;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2308,7 +2817,7 @@ export interface Paths {
           deployment_id: DeploymentId6;
         };
         headers: {
-          authorization?: Authorization41;
+          authorization?: Authorization44;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -2318,7 +2827,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body15;
+        body: Body23;
       };
       responses:
         | {
@@ -2346,7 +2855,7 @@ export interface Paths {
           deployment_id: DeploymentId7;
         };
         headers?: {
-          authorization?: Authorization42;
+          authorization?: Authorization45;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2382,7 +2891,7 @@ export interface Paths {
           deployment_id: DeploymentId8;
         };
         headers: {
-          authorization?: Authorization43;
+          authorization?: Authorization46;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -2392,7 +2901,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body16;
+        body: Body24;
       };
       responses:
         | {
@@ -2420,7 +2929,7 @@ export interface Paths {
           deployment_id: DeploymentId9;
         };
         headers?: {
-          authorization?: Authorization44;
+          authorization?: Authorization47;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2456,10 +2965,10 @@ export interface Paths {
       request: {
         path: {
           deployment_id: DeploymentId10;
-          command_id: CommandId2;
+          command_id: CommandId3;
         };
         headers?: {
-          authorization?: Authorization45;
+          authorization?: Authorization48;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2496,7 +3005,7 @@ export interface Paths {
           revision: Revision2;
         };
         headers?: {
-          authorization?: Authorization46;
+          authorization?: Authorization49;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2530,7 +3039,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization47;
+          authorization?: Authorization50;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2569,7 +3078,7 @@ export interface Paths {
           evidence_id: EvidenceId;
         };
         headers?: {
-          authorization?: Authorization48;
+          authorization?: Authorization51;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2603,7 +3112,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization49;
+          authorization?: Authorization52;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2641,7 +3150,7 @@ export interface Paths {
       request: {
         path?: {};
         headers: {
-          authorization?: Authorization50;
+          authorization?: Authorization53;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -2651,7 +3160,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body17;
+        body: Body25;
       };
       responses:
         | {
@@ -2676,10 +3185,10 @@ export interface Paths {
     get: {
       request: {
         path: {
-          command_id: CommandId3;
+          command_id: CommandId4;
         };
         headers?: {
-          authorization?: Authorization51;
+          authorization?: Authorization54;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2713,7 +3222,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization52;
+          authorization?: Authorization55;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2746,7 +3255,7 @@ export interface Paths {
       request: {
         path?: {};
         headers: {
-          authorization?: Authorization53;
+          authorization?: Authorization56;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -2756,7 +3265,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body18;
+        body: Body26;
       };
       responses:
         | {
@@ -2782,7 +3291,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization54;
+          authorization?: Authorization57;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2819,7 +3328,7 @@ export interface Paths {
           report_id: ReportId1;
         };
         headers?: {
-          authorization?: Authorization55;
+          authorization?: Authorization58;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2855,7 +3364,7 @@ export interface Paths {
           report_id: ReportId2;
         };
         headers?: {
-          authorization?: Authorization56;
+          authorization?: Authorization59;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2896,7 +3405,7 @@ export interface Paths {
           report_id: ReportId3;
         };
         headers?: {
-          authorization?: Authorization57;
+          authorization?: Authorization60;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2931,7 +3440,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization58;
+          authorization?: Authorization61;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2967,7 +3476,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization59;
+          authorization?: Authorization62;
           [k: string]: unknown;
         };
         cookies?: {
@@ -3003,7 +3512,7 @@ export interface Paths {
           deployment_id: DeploymentId12;
         };
         headers: {
-          authorization?: Authorization60;
+          authorization?: Authorization63;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -3013,7 +3522,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body19;
+        body: Body27;
       };
       responses:
         | {
@@ -3041,7 +3550,7 @@ export interface Paths {
           deployment_id: DeploymentId13;
         };
         headers: {
-          authorization?: Authorization61;
+          authorization?: Authorization64;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -3051,7 +3560,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body20;
+        body: Body28;
       };
       responses:
         | {
@@ -3079,7 +3588,7 @@ export interface Paths {
           deployment_id: DeploymentId14;
         };
         headers?: {
-          authorization?: Authorization62;
+          authorization?: Authorization65;
           [k: string]: unknown;
         };
         cookies?: {
@@ -3115,7 +3624,7 @@ export interface Paths {
           deployment_id: DeploymentId15;
         };
         headers: {
-          authorization?: Authorization63;
+          authorization?: Authorization66;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -3125,7 +3634,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body21;
+        body: Body29;
       };
       responses:
         | {
@@ -3153,7 +3662,7 @@ export interface Paths {
           deployment_id: DeploymentId16;
         };
         headers: {
-          authorization?: Authorization64;
+          authorization?: Authorization67;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -3163,7 +3672,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body22;
+        body: Body30;
       };
       responses:
         | {
@@ -3191,7 +3700,7 @@ export interface Paths {
           deployment_id: DeploymentId17;
         };
         headers: {
-          authorization?: Authorization65;
+          authorization?: Authorization68;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -3201,7 +3710,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body23;
+        body: Body31;
       };
       responses:
         | {
@@ -3241,14 +3750,40 @@ export interface Context {
 export interface Body {
   [k: string]: unknown;
 }
-export interface Body1 {
-  [k: string]: unknown;
-}
 export interface Body2 {
   [k: string]: unknown;
 }
 export interface Body3 {
-  [k: string]: unknown;
+  command: {
+    action: "connector.binding.register";
+    command_id: string;
+    expected_authority_revision: number;
+    expected_connector_registry_revision: number;
+    expected_policy_revision: number;
+    /**
+     * @maxItems 0
+     */
+    membership_ids: [];
+    payload: {
+      account_label: string;
+      display_name: string;
+      environment_label: string;
+      evidence_ref: string;
+      grant_initial_read: boolean;
+      platform_id: "us1" | "us2" | "us3" | "eu1" | "eu2" | "in1";
+      product: "qualys_vm";
+      rationale: string;
+      scope: {
+        kind: "account_visible";
+      };
+      source_family: "qualys";
+    };
+    schema_version: 1;
+    target_id: "00000000-0000-0000-0000-000000000000";
+  };
+  evidence_ref: string;
+  rationale: string;
+  schema_version: 1;
 }
 export interface Body4 {
   [k: string]: unknown;
@@ -3256,17 +3791,43 @@ export interface Body4 {
 export interface Body5 {
   [k: string]: unknown;
 }
-export interface Body6 {
+export interface LocalAuthConfigDTO {
+  mode: Mode;
+  schema_version?: SchemaVersion;
+  setup_state: SetupState;
   [k: string]: unknown;
 }
+export interface Body6 {
+  capability: string;
+  new_password: string;
+}
 export interface Body7 {
+  password: string;
+  username: string;
+}
+export interface LocalSessionDTO {
+  access_groups: AccessGroups;
+  authenticated: Authenticated;
+  authority: Authority;
+  credential_mode: CredentialMode;
+  csrf_token: CsrfToken;
+  principal_id: PrincipalId;
+  protected_admin: ProtectedAdmin;
+  receipt_id?: ReceiptId;
+  schema_version?: SchemaVersion1;
+  source_scopes: SourceScopes;
+  [k: string]: unknown;
+}
+export interface Authority {
   [k: string]: unknown;
 }
 export interface Body8 {
-  [k: string]: unknown;
+  current_password: string;
+  new_password: string;
 }
 export interface Body9 {
-  [k: string]: unknown;
+  capability: string;
+  new_password: string;
 }
 export interface Body10 {
   [k: string]: unknown;
@@ -3274,20 +3835,54 @@ export interface Body10 {
 export interface Body11 {
   [k: string]: unknown;
 }
-export interface Body12 {
+export interface OIDCSessionDTO {
+  access_groups: AccessGroups1;
+  authenticated: Authenticated1;
+  authority: Authority1;
+  credential_mode: CredentialMode1;
+  csrf_token: CsrfToken1;
+  principal_id: PrincipalId1;
+  schema_version?: SchemaVersion2;
+  source_scopes: SourceScopes1;
   [k: string]: unknown;
+}
+export interface Authority1 {
+  [k: string]: unknown;
+}
+export interface Body12 {
+  capability: string;
+  display_name: string;
+  password: string;
+  username: string;
 }
 export interface Body13 {
   [k: string]: unknown;
 }
-export interface Payload {
-  [k: string]: unknown;
-}
-export interface Payload1 {
-  [k: string]: unknown;
-}
 export interface Body14 {
   [k: string]: unknown;
+}
+export interface LocalDeploymentDTO {
+  authority_revision: AuthorityRevision;
+  can_register_connector: CanRegisterConnector;
+  connector_registry_revision: ConnectorRegistryRevision;
+  connectors: Connectors;
+  installation_id: InstallationId1;
+  policy_revision: PolicyRevision;
+  schema_version?: SchemaVersion3;
+  [k: string]: unknown;
+}
+export interface LocalConnectorSummaryDTO {
+  configuration_revision: ConfigurationRevision1;
+  connector_id: ConnectorId13;
+  connector_revision: ConnectorRevision;
+  environment_label: EnvironmentLabel;
+  lifecycle: Lifecycle;
+  source: Source;
+  source_revision: SourceRevision;
+  [k: string]: unknown;
+}
+export interface Source {
+  [k: string]: string;
 }
 export interface Body15 {
   [k: string]: unknown;
@@ -3310,9 +3905,39 @@ export interface Body20 {
 export interface Body21 {
   [k: string]: unknown;
 }
+export interface Payload {
+  [k: string]: unknown;
+}
+export interface Payload1 {
+  [k: string]: unknown;
+}
 export interface Body22 {
   [k: string]: unknown;
 }
 export interface Body23 {
+  [k: string]: unknown;
+}
+export interface Body24 {
+  [k: string]: unknown;
+}
+export interface Body25 {
+  [k: string]: unknown;
+}
+export interface Body26 {
+  [k: string]: unknown;
+}
+export interface Body27 {
+  [k: string]: unknown;
+}
+export interface Body28 {
+  [k: string]: unknown;
+}
+export interface Body29 {
+  [k: string]: unknown;
+}
+export interface Body30 {
+  [k: string]: unknown;
+}
+export interface Body31 {
   [k: string]: unknown;
 }

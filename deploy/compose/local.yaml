@@ -1,0 +1,18 @@
+# Persisted local-account mode. This overlay never starts the synthetic OIDC
+# provider and mounts only the local-auth configuration/key plus the narrow
+# private bootstrap-delivery directory with atomic-replace support.
+services:
+  volt:
+    environment:
+      UVM_AUTH_MODE: local
+      UVM_OIDC_DEPLOYMENT_MODE: local
+      UVM_OIDC_CONFIG_FILE: ""
+      UVM_LOCAL_AUTH_CONFIG_FILE: /etc/volt/local-auth.json
+      UVM_CONNECTOR_LOCAL_KEY_FILE: /run/secrets/local-auth-key
+      UVM_CONNECTOR_LOCAL_KEY_ID: ${VOLT_LOCAL_SECRET_SOURCE_ID:?run setup first}
+    volumes:
+      - ${VOLT_INSTANCE_DIR:?run setup first}/local-auth.json:/run/secrets/local-auth.json:ro
+      - ${VOLT_INSTANCE_DIR:?run setup first}/secrets/local-auth-key:/run/secrets/local-auth-key:ro
+      - ${VOLT_INSTANCE_DIR:?run setup first}/secrets/bootstrap-delivery:/run/volt-bootstrap:rw
+    labels:
+      volt.installation.mode: local-auth

@@ -13,6 +13,82 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class ComposeBundleTests(unittest.TestCase):
+    def test_scanner_evidence_path_is_private_and_inside_coordinated_state_volume(self):
+        compose = (ROOT / "deploy/compose/compose.yaml").read_text()
+        entrypoint = (ROOT / "docker/g7/entrypoint.sh").read_text()
+        backup = (ROOT / "deploy/compose/backup-restore.md").read_text()
+        self.assertIn("UVM_SCANNER_EVIDENCE_DIR: /opt/uvm/state/scanner-evidence", compose)
+        self.assertIn("state:/opt/uvm/state", compose)
+        self.assertIn("install -d -o uvm -g uvm -m 0700 /opt/uvm/state/scanner-evidence", entrypoint)
+        self.assertIn("/opt/uvm/state/scanner-evidence", backup)
+        self.assertIn("host-only recovery operator key", backup)
+
+    def test_rc4_file_inventory_is_additive_and_rc3_inventory_stays_fixed(self):
+        from tools.build_compose_bundle import RC3_FILES, RC4_FILES, files_for_version
+        self.assertEqual(files_for_version("0.1.0-rc.3"), RC3_FILES)
+        self.assertNotIn("local.yaml", RC3_FILES)
+        self.assertTrue({"local.yaml", "local-restore.yaml", "launcher.sh", "release-image.ref"}.issubset(RC4_FILES))
+        self.assertEqual(files_for_version("0.1.0-rc.4"), RC4_FILES)
+
+    def test_future_rc4_bundle_binds_launcher_and_exact_runtime_reference(self):
+        import json
+        import shutil
+        with tempfile.TemporaryDirectory(prefix="volt-compose-rc4-structure-") as directory:
+            base = Path(directory); source = base / "source"
+            (source / "deploy").mkdir(parents=True); shutil.copytree(ROOT / "deploy/compose", source / "deploy/compose")
+            (source / "deploy/compose/VERSION").write_text("0.1.0-rc.4\n")
+            image = "ghcr.io/njvenis/volt@sha256:" + "c" * 64
+            verifier = "ghcr.io/njvenis/volt-installer-verifier@sha256:" + "d" * 64
+            archive = base / "candidate.tar.gz"
+            build = subprocess.run(("python3", str(ROOT / "tools/build_compose_bundle.py"), "build",
+                "--output", str(archive), "--image-reference", image, "--source-root", str(source),
+                "--verifier-reference", verifier),
+                check=False, capture_output=True, text=True)
+            self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+            checked = subprocess.run(("python3", str(ROOT / "tools/build_compose_bundle.py"), "verify",
+                "--archive", str(archive), "--source-root", str(source),
+                "--verifier-reference", verifier),
+                check=False, capture_output=True, text=True)
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+            with tarfile.open(archive, "r:gz") as package:
+                payload = {Path(m.name).name: package.extractfile(m).read()
+                    for m in package.getmembers() if m.isfile()}
+            manifest = json.loads(payload["manifest.json"])
+            self.assertEqual(manifest["bundle_version"], "0.1.0-rc.4")
+            self.assertEqual(payload["release-image.ref"].decode().strip(), image)
+            self.assertIn(verifier.encode(), payload["launcher.sh"])
+            self.assertNotIn(b"VOLT_RELEASE_IMAGE_REFERENCE", payload["README.md"])
+            self.assertIn(b"/opt/uvm/venv/bin/python", payload["launcher.sh"])
+
+    def test_local_fixture_bundle_pins_both_loopback_images_and_is_explicitly_scoped(self):
+        import json
+        import shutil
+        with tempfile.TemporaryDirectory(prefix="volt-compose-local-fixture-") as directory:
+            base = Path(directory); source = base / "source"
+            (source / "deploy").mkdir(parents=True)
+            shutil.copytree(ROOT / "deploy/compose", source / "deploy/compose")
+            (source / "deploy/compose/VERSION").write_text("0.1.0-rc.4\n")
+            image = "127.0.0.1:46150/volt@sha256:" + "d" * 64
+            verifier = "127.0.0.1:46150/volt-installer-verifier@sha256:" + "e" * 64
+            archive = base / "candidate.tar.gz"
+            common = ("--output", str(archive), "--image-reference", image, "--source-root", str(source),
+                      "--local-admission-fixture", "--verifier-reference", verifier)
+            built = subprocess.run(("python3", str(ROOT / "tools/build_compose_bundle.py"), "build", *common),
+                                   capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            checked = subprocess.run(("python3", str(ROOT / "tools/build_compose_bundle.py"), "verify",
+                "--archive", str(archive), "--source-root", str(source), "--local-admission-fixture"),
+                capture_output=True, text=True)
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+            rejected = subprocess.run(("python3", str(ROOT / "tools/build_compose_bundle.py"), "verify",
+                "--archive", str(archive), "--source-root", str(source)), capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            with tarfile.open(archive, "r:gz") as package:
+                files = {Path(item.name).name: package.extractfile(item).read()
+                         for item in package.getmembers() if item.isfile()}
+            self.assertIn(verifier.encode(), files["launcher.sh"])
+            self.assertEqual(json.loads(files["manifest.json"])["verifier_reference"], verifier)
+
     def test_bundle_builds_source_free_and_verifies_every_file(self):
         with tempfile.TemporaryDirectory(prefix="volt-compose-bundle-") as directory:
             archive = Path(directory) / "volt-compose.tar.gz"

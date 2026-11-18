@@ -10,10 +10,17 @@ import tempfile
 
 from tools.compose_release_qualification import (SUPPORTED_IMAGE_VERSIONS, SUPPORTED_RELEASE_VERSIONS, init_command,
     admit_bundle_version, platform_from_image_inspect, qualification_release_metadata,
-    qualification_scope, verified_bundle_version)
+    qualification_scope, scanner_stage_record, verified_bundle_version)
 
 
 class ComposeQualificationPlatformTests(unittest.TestCase):
+    def test_local_auth_scanner_stage_is_explicitly_pending(self):
+        record = scanner_stage_record()
+        self.assertEqual(record["provider"], "Qualys")
+        self.assertEqual(record["status"], "pending")
+        self.assertIs(record["activation_qualified"], False)
+        self.assertIn("No accepted packaged Qualys", record["reason"])
+
     def test_scope_uses_actual_runner_context_not_release_version(self):
         self.assertEqual(qualification_scope(version="0.1.0-rc.2", development_fixture=False, environment={}),
                          "local_synthetic_rc2")
@@ -40,7 +47,8 @@ class ComposeQualificationPlatformTests(unittest.TestCase):
 
     def test_release_version_allowlist_and_verified_bundle_version(self):
         self.assertEqual(SUPPORTED_RELEASE_VERSIONS, ("0.1.0-rc.2", "0.1.0-rc.3"))
-        self.assertEqual(SUPPORTED_IMAGE_VERSIONS, ("0.1.0-rc.2", "0.1.0-rc.3", "0.1.0-demo"))
+        self.assertEqual(SUPPORTED_IMAGE_VERSIONS,
+                         ("0.1.0-rc.2", "0.1.0-rc.3", "0.1.0-rc.4", "0.1.0-demo"))
         self.assertEqual(admit_bundle_version("verified_version=0.1.0-rc.2 files=8", "0.1.0-rc.2"),
                          "0.1.0-rc.2")
         self.assertEqual(admit_bundle_version("verified_version=0.1.0-rc.3 files=10", "0.1.0-rc.3"),
@@ -50,8 +58,8 @@ class ComposeQualificationPlatformTests(unittest.TestCase):
         self.assertEqual(verified_bundle_version("verified_version=0.1.0-rc.3 files=10 sha256=" + "a" * 64),
                          "0.1.0-rc.3")
         with self.assertRaisesRegex(RuntimeError, "supported release version"):
-            verified_bundle_version("verified_version=0.1.0-rc.4 files=10")
-        with self.assertRaisesRegex(RuntimeError, "fixed RC2, RC3 and explicit demo fixture"):
+            verified_bundle_version("verified_version=0.1.0-rc.5 files=10")
+        with self.assertRaisesRegex(RuntimeError, "future RC4 candidate.*local-auth fixture"):
             admit_bundle_version("verified_version=0.1.0-rc.3 files=10", "0.1.0-rc.4")
         with self.assertRaisesRegex(RuntimeError, "requires explicit development-fixture"):
             admit_bundle_version("verified_version=0.1.0-rc.3 files=10", "0.1.0-demo")
@@ -103,7 +111,7 @@ class ComposeQualificationPlatformTests(unittest.TestCase):
             bundle_tmp = base / "extracted"; bundle_tmp.mkdir()
             result = subprocess.run([sys.executable, str(root / "tools/compose_release_qualification.py"),
                 "--image-id", "sha256:" + "a" * 64, "--source-snapshot", "sha256:" + "b" * 64,
-                "--source-commit", "c" * 40, "--version", "0.1.0-rc.4", "--bundle", str(base / "missing.tar.gz"),
+                "--source-commit", "c" * 40, "--version", "0.1.0-rc.5", "--bundle", str(base / "missing.tar.gz"),
                 "--evidence", str(evidence), "--private-tmp", str(private_tmp), "--bundle-tmp", str(bundle_tmp)],
                 text=True, capture_output=True)
             self.assertNotEqual(result.returncode, 0)

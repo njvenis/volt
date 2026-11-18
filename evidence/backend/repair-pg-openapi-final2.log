@@ -1,0 +1,295 @@
+test_abandonment_is_durable_and_fences_delayed_registration_retry (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_abandonment_is_durable_and_fences_delayed_registration_retry) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+ok
+test_abandonment_returns_exact_committed_receipt (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_abandonment_returns_exact_committed_receipt) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+ok
+test_audit_failure_rolls_back_claim_and_leaves_capability_reusable (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_audit_failure_rolls_back_claim_and_leaves_capability_reusable) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+Local authentication database operation failed (ProgrammingError)
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+ok
+test_claim_atomic_replay_session_restart_password_and_purpose_bound_enrolment (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_claim_atomic_replay_session_restart_password_and_purpose_bound_enrolment) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+github_webhook_worker_disabled_no_service_principal
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+github_webhook_worker_disabled_no_service_principal
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+ok
+test_database_failure_logs_hide_password_verifier_and_capability (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_database_failure_logs_hide_password_verifier_and_capability) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+Local authentication database operation failed (ProgrammingError)
+ok
+test_failed_login_attempt_is_durably_throttled (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_failed_login_attempt_is_durably_throttled) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+ok
+test_local_config_rejects_remote_http_unsupported_scheme_and_host_mismatch (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_local_config_rejects_remote_http_unsupported_scheme_and_host_mismatch) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+ok
+test_local_mode_never_falls_back_when_database_records_local_install (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_local_mode_never_falls_back_when_database_records_local_install) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+ok
+test_local_source_ceiling_stays_paired_to_its_granting_group (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_local_source_ceiling_stays_paired_to_its_granting_group) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+ok
+test_native_principal_disable_reenable_does_not_restore_old_local_session (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_native_principal_disable_reenable_does_not_restore_old_local_session) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+ok
+test_native_v2_typed_delegation_uses_independent_exact_ceilings (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_native_v2_typed_delegation_uses_independent_exact_ceilings) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+ok
+test_non_admin_cannot_read_deployment_inventory (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_non_admin_cannot_read_deployment_inventory) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+ok
+test_password_change_race_never_leaves_old_password_session_valid (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_password_change_race_never_leaves_old_password_session_valid) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+ok
+test_password_contract_uses_normalized_phc_and_exact_account_names (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_password_contract_uses_normalized_phc_and_exact_account_names) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+ok
+test_password_recovery_race_never_leaves_old_password_session_valid (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_password_recovery_race_never_leaves_old_password_session_valid) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+ok
+test_prepare_setup_reemits_existing_capability_without_rotation (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_prepare_setup_reemits_existing_capability_without_rotation) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+ok
+test_registration_and_abandonment_reject_schema_extras_at_runtime (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_registration_and_abandonment_reject_schema_extras_at_runtime) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+ok
+test_registration_submission_races_abandonment_under_policy_serialization (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_registration_submission_races_abandonment_under_policy_serialization) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+github_webhook_worker_disabled_no_service_principal
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+github_webhook_worker_disabled_no_service_principal
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+ok
+test_restore_capability_revocation_also_invalidates_local_sessions (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_restore_capability_revocation_also_invalidates_local_sessions) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+ok
+test_user_and_peer_buckets_are_independent_with_separate_limits (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_user_and_peer_buckets_are_independent_with_separate_limits) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints

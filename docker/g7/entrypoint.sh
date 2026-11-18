@@ -183,7 +183,10 @@ if [[ -n ${UVM_GITHUB_TOKEN_FILE:-} ]]; then
   export UVM_GITHUB_TOKEN_FILE
 fi
 if [[ -n ${UVM_CONNECTOR_LOCAL_KEY_FILE:-} ]]; then
-  [[ -f "$UVM_CONNECTOR_LOCAL_KEY_FILE" ]] || { echo 'configured connector local key file is absent' >&2; exit 70; }
+  [[ -f "$UVM_CONNECTOR_LOCAL_KEY_FILE" && ! -L "$UVM_CONNECTOR_LOCAL_KEY_FILE" ]] || { echo 'configured connector local key file is absent or unsafe' >&2; exit 70; }
+  if [[ ${UVM_AUTH_MODE:-} == local && $(wc -c <"$UVM_CONNECTOR_LOCAL_KEY_FILE") -ne 32 ]]; then
+    echo 'G7_LOCAL_AUTH=key-length-invalid' >&2; exit 70
+  fi
   install -d -o uvm -g uvm -m 0700 /run/uvm-connector
   install -o uvm -g uvm -m 0600 "$UVM_CONNECTOR_LOCAL_KEY_FILE" /run/uvm-connector/local-key
   UVM_CONNECTOR_LOCAL_KEY_FILE=/run/uvm-connector/local-key
@@ -208,11 +211,28 @@ oidc_config_value() {
 }
 UVM_OIDC_DEPLOYMENT_MODE=${UVM_OIDC_DEPLOYMENT_MODE:-demo}
 case "$UVM_OIDC_DEPLOYMENT_MODE" in
-  demo|external) ;;
+  demo|external|local) ;;
   *) echo 'G7_OIDC_DEPLOYMENT_MODE=invalid' >&2; exit 70 ;;
 esac
 if [[ $UVM_OIDC_DEPLOYMENT_MODE == external && ${UVM_AUTH_MODE:-} != oidc ]]; then
   echo 'G7_OIDC_EXTERNAL=oidc-auth-mode-required' >&2; exit 70
+fi
+if [[ $UVM_OIDC_DEPLOYMENT_MODE == local && ${UVM_AUTH_MODE:-} != local ]]; then
+  echo 'G7_LOCAL_AUTH=local-auth-mode-required' >&2; exit 70
+fi
+if [[ ${UVM_AUTH_MODE:-} == local ]]; then
+  [[ $UVM_OIDC_DEPLOYMENT_MODE == local ]] || { echo 'G7_LOCAL_AUTH=deployment-mode-mismatch' >&2; exit 70; }
+  [[ ${UVM_LOCAL_AUTH_CONFIG_FILE:-} == /etc/volt/local-auth.json ]] || { echo 'G7_LOCAL_AUTH=config-path-invalid' >&2; exit 70; }
+  [[ -s /run/secrets/local-auth.json && ! -L /run/secrets/local-auth.json ]] || { echo 'G7_LOCAL_AUTH=config-missing-or-unsafe' >&2; exit 70; }
+  install -d -o root -g uvm -m 0750 /etc/volt
+  install -o uvm -g uvm -m 0600 /run/secrets/local-auth.json "$UVM_LOCAL_AUTH_CONFIG_FILE"
+  [[ -d /run/volt-bootstrap && ! -L /run/volt-bootstrap ]] || { echo 'G7_LOCAL_AUTH=bootstrap-delivery-missing' >&2; exit 70; }
+  chown uvm:uvm /run/volt-bootstrap
+  chmod 0700 /run/volt-bootstrap
+  [[ -s ${UVM_LOCAL_AUTH_CONFIG_FILE:-} ]] || { echo 'G7_LOCAL_AUTH=config-missing' >&2; exit 70; }
+  if [[ -n ${UVM_OIDC_FIXTURE_SUBJECT:-}${UVM_OIDC_FIXTURE_IDENTITIES:-}${UVM_GITHUB_PREVIEW_SECRET:-} ]]; then
+    echo 'G7_LOCAL_AUTH=synthetic-identity-settings-forbidden' >&2; exit 70
+  fi
 fi
 if [[ -n ${UVM_OIDC_CONFIG_FILE:-} ]]; then
   [[ -s "$UVM_OIDC_CONFIG_FILE" ]] || { echo 'G7_OIDC_CONFIG=file-missing' >&2; exit 70; }
@@ -234,6 +254,7 @@ if [[ ${UVM_AUTH_MODE:-bearer} == oidc ]]; then
     install -o uvm -g uvm -m 0600 /run/secrets/github_webhook_secret_v2 /run/uvm-g7-secrets/github_webhook_secret_v2
     install -o root -g uvm -m 0640 /run/secrets/github_webhook_secret_version /run/uvm-g7-secrets/github_webhook_secret_version
   fi
+  install -d -o uvm -g uvm -m 0700 /opt/uvm/state/scanner-evidence
   UVM_OIDC_ISSUER=$(oidc_config_value issuer)
   UVM_OIDC_CLIENT_ID=$(oidc_config_value client_id)
   UVM_OIDC_CALLBACK_URL=$(oidc_config_value callback_url)
@@ -453,8 +474,8 @@ start_recovery_control() {
 if [[ ${UVM_G7_RECOVERY_STAGE:-} == control-only || ${UVM_G7_RECOVERY_STAGE:-} == released ]]; then
   [[ ${UVM_G7_VERIFICATION_ONLY:-0} == 1 || ${UVM_G7_RECOVERY_STAGE:-} == released ]] || { echo 'G7_RECOVERY_ERROR control-only requires verification-only mode' >&2; exit 70; }
   case ${UVM_AUTH_MODE:-bearer} in
-    bearer|oidc) ;;
-    *) echo 'G7_RECOVERY_ERROR verification-only product API requires bearer or restored OIDC session authentication' >&2; exit 70 ;;
+    bearer|oidc|local) ;;
+    *) echo 'G7_RECOVERY_ERROR verification-only product API authentication mode is unsupported' >&2; exit 70 ;;
   esac
   : "${UVM_G7_STARTUP_FENCE_TOKEN:?signed startup-fence token is required}"
   : "${UVM_G7_HOST_PUBLIC_KEY_FILE:?host verification key is required}"
@@ -648,6 +669,7 @@ start_child api 1800 1800 env -i PATH="$PATH" HOME=/opt/uvm \
   UVM_G7_PRESERVATION_ENVIRONMENT="${UVM_G7_PRESERVATION_ENVIRONMENT-}" \
   UVM_G7_PRESERVATION_MAX_FUTURE_SKEW_SECONDS="${UVM_G7_PRESERVATION_MAX_FUTURE_SKEW_SECONDS-}" \
   UVM_AUTH_MODE="${UVM_AUTH_MODE-bearer}" UVM_OIDC_CONFIG="${UVM_OIDC_CONFIG-}" \
+  UVM_LOCAL_AUTH_CONFIG_FILE="${UVM_LOCAL_AUTH_CONFIG_FILE-}" \
   UVM_OIDC_DEPLOYMENT_MODE="$UVM_OIDC_DEPLOYMENT_MODE" \
   SSL_CERT_FILE="${SSL_CERT_FILE-}" \
   UVM_GITHUB_API_BASE_URL="${UVM_GITHUB_API_BASE_URL-}" \

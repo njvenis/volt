@@ -26,6 +26,7 @@ from uvm.persistence.assessment_schema import (assessment_audit_events,
 from uvm.persistence.connector_schema import (connectors, connector_configurations,
     connector_secret_heads, connector_secrets, connector_receipts, connector_intents, connector_submissions,
     connector_nonce_reservations)
+from uvm.persistence.connector_binding_schema import connector_bindings
 from uvm.persistence.connector_schema import connector_setup_flows
 from uvm.persistence.auth_schema import oidc_sessions
 from uvm.connectors.crypto import encrypt, decrypt
@@ -34,6 +35,7 @@ from uvm.connectors.recovery import (issuer_entry, issuer_entry_diagnostic,
 from uvm.github.app_auth import app_jwt
 
 ZERO = "00000000-0000-4000-8000-000000000000"
+DEPLOYMENT_TARGET = "00000000-0000-0000-0000-000000000000"
 _LOG = logging.getLogger(__name__)
 UTC = timezone.utc
 PURPOSES = {"private_key", "oauth_client_secret", "webhook_secret", "preview_secret", "rest_token"}
@@ -198,6 +200,18 @@ def _fixture(connector_id: str) -> dict:
 
 
 def _ensure(app, connector_id: str):
+    from uvm.auth.local import LocalAuth
+    if isinstance(getattr(app.state, "oidc_auth", None), LocalAuth):
+        # Local sources are protected, persisted registrations; fixture
+        # environment variables never select or create their bindings.
+        with app.state.engine.connect() as c:
+            row = c.execute(sa.select(connectors).join(connector_bindings,
+                connector_bindings.c.connector_id == connectors.c.connector_id).where(
+                connectors.c.connector_id == connector_id)).mappings().first()
+            if row is None:
+                _fail(404, "not_found", "Connector does not exist")
+            return {key: row[key] for key in ("connector_id", "source_id", "source_family",
+                "source_account_id", "scope_key", "environment_label")}
     binding = _fixture(connector_id)
     now = _now(app)
     with app.state.engine.begin() as c:
@@ -221,6 +235,19 @@ def _ensure(app, connector_id: str):
                 if existing[key] != binding[key]:
                     _fail(503, "scope_changed", "Provisioned connector binding changed")
         return binding
+
+
+def _qualys_slot(connection, connector_id, secret_id, purpose):
+    registration = connection.execute(sa.select(connector_bindings.c.registration).where(
+        connector_bindings.c.connector_id == connector_id)).scalar_one_or_none()
+    qualys = registration is not None and registration.get("product") == "qualys_vm"
+    if qualys:
+        if (purpose != "qualys_vm_basic" or secret_id != registration["credential_slots"]["qualys_vm_basic"]["secret_id"]):
+            _fail(403, "source_scope_forbidden", "Credential must use the registered Qualys slot and purpose")
+        return registration
+    if purpose == "qualys_vm_basic":
+        _fail(403, "source_scope_forbidden", "Qualys credential requires a registered source")
+    return None
 
 
 def _auth_context(app, request, connection):
@@ -253,7 +280,7 @@ def _grants(policy, actor, action, binding):
             continue
         result.append(grant)
     context = AUTHORITY_CONTEXT.get()
-    if context is not None and context.credential_mode in {"oidc_session", "github_link"}:
+    if context is not None and context.credential_mode in {"oidc_session", "github_link", "local_session"}:
         eligible = set(context.scopes_for_granting_groups(g.get("principal_id") for g in result))
         if binding_scope(binding) not in eligible:
             return []
@@ -483,7 +510,11 @@ def _secret_view(connection, connector_id, secret_id, *, actor=None, binding=Non
         connector_secrets.c.connector_id == connector_id,
         connector_secrets.c.secret_id == secret_id).order_by(connector_secrets.c.created_at)).mappings().all()
     if not rows:
-        return None
+        head = connection.execute(sa.select(connector_secret_heads).where(
+            connector_secret_heads.c.connector_id == connector_id,
+            connector_secret_heads.c.secret_id == secret_id)).mappings().first()
+        return ({"secret_id":secret_id, "revision":head["revision"], "purpose":head["purpose"], "versions":[]}
+            if head else None)
     versions = []
     for row in rows:
         versions.append({"version_id":row["version_id"],"state":row["state"],"present":True,
@@ -600,9 +631,27 @@ def install_connector_routes(app):
 
     @app.get("/api/v1/connectors")
     def list_connectors(request: Request, limit: int = 25, cursor: str | None = None):
-        if limit < 1 or limit > 100 or cursor is not None:
+        if limit < 1 or limit > 100:
             _fail(400, "invalid_request", "Connector pagination parameters are invalid")
         actor = _authenticate(app, request)
+        from uvm.auth.local import LocalAuth
+        if isinstance(getattr(app.state, "oidc_auth", None), LocalAuth):
+            if cursor is not None:
+                _uuid(cursor, "cursor")
+            with engine.begin() as c:
+                lock_policy(c, shared=True)
+                context = _auth_context(app, request, c)
+                policy = _policy(c)
+                query = sa.select(connectors).join(connector_bindings,
+                    connectors.c.connector_id == connector_bindings.c.connector_id)
+                if cursor is not None:
+                    query = query.where(connectors.c.connector_id > cursor)
+                rows = c.execute(query.order_by(connectors.c.connector_id)).mappings().all()
+                visible = [row for row in rows if _grants(policy["document"], actor, "connector.read", row)]
+                return {"schema_version":1, "items":[_connector_view(c,row,row,policy,context) for row in visible[:limit]],
+                    "next_cursor":visible[limit-1]["connector_id"] if len(visible) > limit else None}
+        if cursor is not None:
+            _fail(400, "invalid_request", "Connector pagination parameters are invalid")
         configured = os.getenv("UVM_CONNECTOR_FIXTURE_ID")
         if not configured:
             return {"schema_version":1,"items":[],"next_cursor":None}
@@ -649,13 +698,16 @@ def install_connector_routes(app):
             _fail(400,"invalid_request","Secret submission shape is invalid")
         submission_id = _uuid(body["submission_id"],"submission_id"); version_id = _uuid(body["version_id"],"version_id")
         if body["source_id"] != binding["source_id"]: _fail(403,"source_scope_forbidden","Source scope does not match")
-        if body["purpose"] not in PURPOSES or not isinstance(body["rationale"],str) or not body["rationale"].strip() or not isinstance(body["evidence_ref"],str) or not body["evidence_ref"].strip():
+        if body["purpose"] not in PURPOSES | {"qualys_vm_basic"} or not isinstance(body["rationale"],str) or not body["rationale"].strip() or not isinstance(body["evidence_ref"],str) or not body["evidence_ref"].strip():
             _fail(400,"invalid_request","Secret submission metadata is invalid")
         data = body["input"]
         if not isinstance(data,dict) or set(data)!={"kind","value"} or data.get("kind")!="value" or not isinstance(data.get("value"),str):
             _fail(400,"invalid_request","Only encrypted-local secret values are supported in this fixture")
         raw = data["value"].encode("utf-8")
         body["input"]["value"] = ""
+        if body["purpose"] == "qualys_vm_basic":
+            from uvm.connectors.scanner_runtime import parse_qualys_credential
+            parse_qualys_credential(raw).close()
         now = _now(app)
         # Durable admission precedes the commit attempt. An interrupted second
         # transaction remains outcome_unknown and cannot be retried with bytes.
@@ -664,6 +716,7 @@ def install_connector_routes(app):
                 lock_policy(admission); policy0=_policy(admission); context0=_auth_context(app,request,admission)
                 _require(policy0["document"],actor,"connector.secret.manage",binding)
                 row0=admission.execute(sa.select(connectors).where(connectors.c.connector_id==connector_id).with_for_update()).mappings().one()
+                _qualys_slot(admission, connector_id, secret_id, body["purpose"])
                 head0=admission.execute(sa.select(connector_secret_heads.c.revision).where(connector_secret_heads.c.connector_id==connector_id,connector_secret_heads.c.secret_id==secret_id)).scalar_one_or_none() or 0
                 _check_revisions(body["expected_revisions"],_revisions(row0,policy0,context0,int(head0)))
                 existing=admission.execute(sa.select(connector_submissions).where(sa.or_(
@@ -719,6 +772,7 @@ def install_connector_routes(app):
                 context = _auth_context(app,request,c)
                 _require(policy["document"],actor,"connector.secret.manage",binding)
                 row = c.execute(sa.select(connectors).where(connectors.c.connector_id==connector_id).with_for_update()).mappings().one()
+                qualys_registration = _qualys_slot(c, connector_id, secret_id, body["purpose"])
                 recovery = row["recovery"]
                 if recovery.get("state") != "clear":
                     proof = issuer_entry(connector_id, secret_id, version_id, body["purpose"],
@@ -750,6 +804,11 @@ def install_connector_routes(app):
                     _fail(400,"invalid_request","Secret value must contain 1 to 65536 UTF-8 bytes")
                 active_settings=_settings(row,c,connector_id)
                 provider=active_settings.get("secret_source")
+                if qualys_registration is not None:
+                    config = app.state.oidc_auth.config
+                    if row["secret_source_id"] != config["secret_source"]["secret_source_id"]:
+                        _fail(409, "credential_revoked", "Local secret source changed")
+                    provider = {"kind": "encrypted_local_v1", "key_binding_id": row["secret_source_id"]}
                 if not isinstance(provider,dict) or provider.get("kind")!="encrypted_local_v1":
                     _fail(409,"credentials_unavailable","Encrypted-local source is not selected")
                 # Secret content never participates in audit, receipts, or a request digest.
@@ -762,6 +821,22 @@ def install_connector_routes(app):
                 if encrypted["key_id"]!=provider.get("key_binding_id"):
                     _fail(503,"credentials_unavailable","Encrypted-local key binding changed")
                 del raw
+                version_state = "inactive"
+                if qualys_registration is not None:
+                    # Qualys uses one allocated active Basic slot. Rotation
+                    # invalidates connector/configuration fences atomically.
+                    version_state = "active"
+                    c.execute(connector_secrets.update().where(
+                        connector_secrets.c.connector_id == connector_id,
+                        connector_secrets.c.secret_id == secret_id,
+                        connector_secrets.c.state == "active").values(state="inactive"))
+                    changed = {"connector_revision": row["connector_revision"] + 1,
+                        "active_configuration_revision": None,
+                        "lifecycle": "staged" if row["configuration_revision"] else "disabled",
+                        "validation": {"status":"unverified", "checked_at":None, "intent_id":None,
+                            "configuration_revision":None, "reason":None}, "updated_at":now}
+                    c.execute(connectors.update().where(connectors.c.connector_id == connector_id).values(**changed))
+                    row = {**row, **changed}
                 sequence = c.execute(sa.select(sa.func.max(assessment_audit_events.c.event_sequence))).scalar_one() or 0
                 event_id = str(uuid.uuid4())
                 receipt = {"schema_version":1,"command_id":submission_id,"action":"connector.secret.submit","target_id":ZERO,
@@ -769,12 +844,12 @@ def install_connector_routes(app):
                     "result":{"effect":"connector_secret_submitted","connector_id":connector_id,"source_id":binding["source_id"],
                         "revisions":_revisions(row,policy,context,int(head["revision"])+1),
                         "configuration_revision":row["configuration_revision"],"active_configuration_revision":row["active_configuration_revision"],
-                        "lifecycle":row["lifecycle"],"secret_id":secret_id,"version_id":version_id,"version_state":"inactive",
+                        "lifecycle":row["lifecycle"],"secret_id":secret_id,"version_id":version_id,"version_state":version_state,
                         "submission_id":submission_id,"submission_outcome":"committed","flow_id":None,"recovery":row["recovery"]}}
                 after = {"connector_id":connector_id,"source_id":binding["source_id"],"secret_id":secret_id,"version_id":version_id,
-                    "purpose":body["purpose"],"state":"inactive","ciphertext_present":True}
+                    "purpose":body["purpose"],"state":version_state,"ciphertext_present":True}
                 c.execute(connector_secrets.insert().values(connector_id=connector_id,secret_id=secret_id,version_id=version_id,
-                    purpose=body["purpose"],state="inactive",algorithm=encrypted["algorithm"],key_id=encrypted["key_id"],
+                    purpose=body["purpose"],state=version_state,algorithm=encrypted["algorithm"],key_id=encrypted["key_id"],
                     nonce=encrypted["nonce"],ciphertext=encrypted["ciphertext"],reference=None,quarantine="clear",
                     remote_revocation={"status":"not_requested","intent_id":None,"observed_at":None,"expires_at":None,"reason":None},
                     actor_id=actor,created_at=now))
@@ -1557,8 +1632,10 @@ def execute_connector_command(app, body: dict, request: Request, actor: str):
     action=body.get("action"); payload=body.get("payload")
     if not isinstance(payload,dict):_fail(400,"invalid_command","Connector command payload is invalid")
     connector_id=_uuid(payload.get("connector_id"),"connector_id");source_id=_uuid(payload.get("source_id"),"source_id")
-    binding=_fixture(connector_id)
-    if source_id!=binding["source_id"]:_fail(403,"source_scope_forbidden","Source scope does not match")
+    from uvm.auth.local import LocalAuth
+    local_mode = isinstance(getattr(app.state, "oidc_auth", None), LocalAuth)
+    binding = None if local_mode else _fixture(connector_id)
+    if not local_mode and source_id!=binding["source_id"]:_fail(403,"source_scope_forbidden","Source scope does not match")
     command_id=_uuid(body.get("command_id"),"command_id")
     if body.get("target_id")!=ZERO or body.get("membership_ids")!=[] or body.get("schema_version")!=1:
         _fail(422,"invalid_command","Connector command envelope is invalid")
@@ -1571,9 +1648,27 @@ def execute_connector_command(app, body: dict, request: Request, actor: str):
         lock_policy(c);policy=_policy(c);context=_auth_context(app,request,c)
         row=c.execute(sa.select(connectors).where(connectors.c.connector_id==connector_id).with_for_update()).mappings().one_or_none()
         if row is None:_fail(404,"not_found","Connector does not exist")
+        if local_mode:
+            registered = c.execute(sa.select(connector_bindings.c.connector_id).where(
+                connector_bindings.c.connector_id == connector_id).with_for_update()).first()
+            if registered is None:
+                _fail(404, "not_found", "Connector does not exist")
+            binding = {key: row[key] for key in ("connector_id", "source_id", "source_family",
+                "source_account_id", "scope_key", "environment_label")}
+            if source_id != binding["source_id"]:
+                _fail(403, "source_scope_forbidden", "Source scope does not match")
         _require(policy["document"],actor,
             "connector.secret.manage" if action in {"connector.secret.version.revoke",
                 "connector.secret.submission.reconcile"} else "connector.configure",binding)
+        registration = c.execute(sa.select(connector_bindings.c.registration).where(
+            connector_bindings.c.connector_id == connector_id)).scalar_one_or_none() if local_mode else None
+        if registration and registration.get("product") == "qualys_vm":
+            if action not in {"connector.secret.version.revoke", "connector.secret.submission.reconcile"}:
+                _fail(400, "invalid_command", "Qualys configuration requires the scanner command interface")
+            purpose = c.execute(sa.select(connector_secret_heads.c.purpose).where(
+                connector_secret_heads.c.connector_id == connector_id,
+                connector_secret_heads.c.secret_id == payload.get("secret_id"))).scalar_one_or_none()
+            _qualys_slot(c, connector_id, payload.get("secret_id"), purpose)
         digest=hashlib.sha256(json.dumps({"principal_id":actor,**body},sort_keys=True,separators=(",",":")).encode()).hexdigest()
         replay=c.execute(sa.select(connector_receipts).where(connector_receipts.c.connector_id==connector_id,connector_receipts.c.command_id==command_id)).mappings().first()
         if replay:
@@ -1881,3 +1976,188 @@ def execute_connector_command(app, body: dict, request: Request, actor: str):
         c.execute(assessment_audit_events.insert().values(event_id=event_id,event_sequence=sequence+1,actor_id=actor,actor_kind="principal",origin="local_api",action=action,target_id=ZERO,before_value={"connector_id":connector_id,"connector_revision":row["connector_revision"]},after_value=result,membership_ids=[],membership_revision=0,rationale=payload["rationale"],evidence_ref=payload["evidence_ref"],policy_revision=policy["revision"],identity_revision=0,occurred_at=now,received_at=now,correlation_id=str(uuid.uuid4()),command_id=command_id,authorization_context=context.document() if context else None))
         c.execute(connector_receipts.insert().values(connector_id=connector_id,command_id=command_id,actor_id=actor,action=action,request_digest=digest,receipt=receipt,created_at=now))
         return receipt
+
+
+def execute_local_binding_registration(app, body: dict, request: Request, actor: str):
+    """Commit a protected local source binding and exact initial grants."""
+    from uvm.auth.native_authority import LOCAL_NATIVE_MODE, native_state
+    from uvm.persistence.auth_schema import local_auth_installation
+    from uvm.persistence.assessment_schema import (assessment_audit_events,
+        assessment_command_abandonments, assessment_command_receipts,
+        assessment_policy)
+    from uvm.persistence.native_authority_schema import administration_reconciliation_intents
+
+    required = {"schema_version", "command_id", "action", "target_id",
+        "membership_ids", "payload"}
+    expected_keys = {"expected_policy_revision", "expected_authority_revision",
+        "expected_connector_registry_revision"}
+    if (not isinstance(body, dict) or set(body) != required | expected_keys
+            or body.get("schema_version") != 1):
+        _fail(422, "invalid_command", "Command envelope is invalid")
+    deployment_target = "00000000-0000-0000-0000-000000000000"
+    if (body["action"] != "connector.binding.register" or body["target_id"] != deployment_target
+            or body["membership_ids"] != []):
+        _fail(422, "invalid_command", "Local connector registration target is invalid")
+    command_id = _uuid(body["command_id"], "command_id")
+    payload = body["payload"]
+    fields = {"display_name", "source_family", "account_label", "product", "platform_id", "scope",
+        "environment_label", "rationale", "evidence_ref", "grant_initial_read"}
+    if not isinstance(payload, dict) or set(payload) != fields:
+        _fail(422, "invalid_command", "Connector registration payload is invalid")
+    from uvm.scanners.qualys_vm import PLATFORM_ORIGINS
+    if (payload["source_family"] != "qualys" or payload["product"] != "qualys_vm"
+            or not isinstance(payload["platform_id"], str) or payload["platform_id"] not in PLATFORM_ORIGINS
+            or payload["scope"] != {"kind": "account_visible"}):
+        _fail(422, "invalid_command", "Supported Qualys product, platform and scope are required")
+    text_fields = ("display_name", "account_label", "environment_label", "rationale", "evidence_ref")
+    if any(not isinstance(payload[key], str) or not payload[key].strip() or len(payload[key]) > limit
+            for key, limit in zip(text_fields, (120, 120, 128, 1000, 1000))):
+        _fail(422, "invalid_command", "Connector registration fields are invalid")
+    if type(payload["grant_initial_read"]) is not bool:
+        _fail(422, "invalid_command", "Initial read grant must be an explicit boolean")
+    if any(type(body[key]) is not int or body[key] < 0 for key in expected_keys):
+        _fail(422, "invalid_command", "Registration expected revisions are invalid")
+    engine = app.state.engine
+    from uvm.assessment.policy_lock import lock_policy
+    now = _now(app)
+    request_digest = hashlib.sha256(json.dumps({"principal_id": actor, **body}, sort_keys=True,
+        separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+    with engine.begin() as c:
+        lock_policy(c)
+        policy_row = c.execute(sa.select(assessment_policy).where(
+            assessment_policy.c.policy_id == 1).with_for_update()).mappings().first()
+        if policy_row is None:
+            _fail(503, "persistence_unavailable", "Assessment policy is unavailable")
+        auth_service = getattr(app.state, "oidc_auth", None)
+        context = auth_service.final_context(c, request) if auth_service is not None else None
+        if context is None or context.credential_mode != "local_session" or context.principal_id != actor:
+            _fail(403, "forbidden", "A current local protected administrator is required")
+        before_policy = copy.deepcopy(policy_row["document"])
+        policy = copy.deepcopy(before_policy)
+        native = native_state(policy)
+        if native.get("mode") != LOCAL_NATIVE_MODE or actor not in set(native.get("bootstrap_admins", [])):
+            _fail(403, "forbidden", "A current local protected administrator is required")
+        terminal = c.execute(sa.select(assessment_command_abandonments).where(
+            assessment_command_abandonments.c.command_id == command_id).with_for_update()).mappings().first()
+        if terminal is not None:
+            if terminal["principal_id"] != actor or terminal["request_digest"] != request_digest:
+                _fail(409, "command_id_reused", "Command ID is terminally bound to different content")
+            _fail(409, "command_terminal", "This command has a definitive not-committed disposition")
+        prior = c.execute(sa.select(assessment_command_receipts).where(
+            assessment_command_receipts.c.command_id == command_id).with_for_update()).mappings().first()
+        if prior is not None:
+            if prior["request_digest"] != request_digest:
+                _fail(409, "command_id_reused", "Command ID is bound to different content")
+            return dict(prior["result"])
+        registry_revision = int(policy.get("connector_registry_revision", 0))
+        actual_policy, actual_authority = int(policy_row["revision"]), int(native.get("revision", 0))
+        if (body["expected_policy_revision"] != actual_policy
+                or body["expected_authority_revision"] != actual_authority
+                or body["expected_connector_registry_revision"] != registry_revision):
+            _fail(409, "revision_conflict", "Policy, authority or connector registry changed")
+        install = c.execute(sa.select(local_auth_installation.c.installation_id).where(
+            local_auth_installation.c.singleton_id == 1).with_for_update()).scalar_one_or_none()
+        if install is None:
+            _fail(503, "persistence_unavailable", "Local installation identity is unavailable")
+        scope = {"source_family": "qualys", "source_account_id": str(uuid.uuid4()), "scope_key": str(uuid.uuid4())}
+        slot_id = str(uuid.uuid4())
+        registration = {"account_label": payload["account_label"].strip(), "product": "qualys_vm",
+            "platform_id": payload["platform_id"], "scope": {"kind": "account_visible"},
+            "credential_slots": {"qualys_vm_basic": {"secret_id": slot_id}}}
+        existing = c.execute(sa.select(connectors.c.connector_id).where(
+            connectors.c.source_family == scope["source_family"],
+            connectors.c.source_account_id == scope["source_account_id"],
+            connectors.c.scope_key == scope["scope_key"]).with_for_update()).first()
+        if existing:
+            _fail(409, "source_binding_exists", "This exact source binding is already registered")
+        connector_id, source_id = str(uuid.uuid4()), str(uuid.uuid4())
+        group_id, role_id = str(uuid.uuid4()), str(uuid.uuid4())
+        now_z = _z(now)
+        source_pair = {"connector_id": connector_id, **scope}
+        connector = {"connector_id": connector_id, "source_id": source_id, **scope,
+            "environment_label": payload["environment_label"].strip(), "source_revision": 1,
+            "secret_source_id": auth_service.config["secret_source"]["secret_source_id"], "secret_source_revision": 1,
+            "connector_revision": 1, "configuration_revision": 0,
+            "active_configuration_revision": None, "last_activated_authentication_mode": None,
+            "lifecycle": "disabled", "validation": {"status": "unverified", "checked_at": None,
+                "intent_id": None, "configuration_revision": None, "reason": None},
+            "recovery": {"state": "clear", "recovery_epoch_id": None,
+                "operator_clearance_present": False, "requires_fresh_credentials": False, "reason": None},
+            "updated_at": now}
+        c.execute(connectors.insert().values(**connector))
+        c.execute(connector_bindings.insert().values(connector_id=connector_id,
+            display_name=payload["display_name"].strip(), registration=registration))
+        c.execute(connector_secret_heads.insert().values(connector_id=connector_id,
+            secret_id=slot_id, purpose="qualys_vm_basic", revision=0))
+        grantable = native.get("grantable_envelope", {})
+        if grantable.get("version") != 2:
+            _fail(409, "authority_version_conflict", "Local grantable authority version changed")
+        grantable["connector_ids"] = sorted(set(grantable.get("connector_ids", [])) | {connector_id})
+        grantable["connector_sources"] = [*grantable.get("connector_sources", []), source_pair]
+        grantable["source_scopes"] = [*grantable.get("source_scopes", []), scope]
+        permissions = []
+        limits = grantable.get("limits", {})
+        duties = grantable.get("separation_of_duties", {})
+        connector_scope = {"kind": "connector", "connector_ids": [connector_id], "source_pairs": [source_pair]}
+        for action in ("connector.read", "connector.configure", "connector.secret.manage"):
+            permissions.append({"permission_id": str(uuid.uuid4()), "role_id": role_id,
+                "action": action, "target_scope": connector_scope, "limits": limits,
+                "separation_of_duties": duties})
+        if payload["grant_initial_read"]:
+            grantable["source_read_targets"] = [*grantable.get("source_read_targets", []), scope]
+            for action in ("assessment.read", "audit.read"):
+                permissions.append({"permission_id": str(uuid.uuid4()), "role_id": role_id,
+                    "action": action, "target_scope": {"kind": "source_read",
+                        "membership_mode": "all_current", "source_scopes": [scope]},
+                    "limits": limits, "separation_of_duties": duties})
+        group = {"access_group_id": group_id, "display_name": payload["display_name"].strip(),
+            "description": "Protected exact-source scanner registration", "enabled": True,
+            "revision": 1, "source_scopes": [scope], "permissions": permissions,
+            "memberships": [{"principal_id": actor, "effective_from": now_z,
+                "effective_until": None, "enabled": True, "revision": actual_authority + 1,
+                "recorded_at": now_z, "recorded_by": actor}],
+            "created_at": now_z, "updated_at": now_z}
+        native.setdefault("access_groups", {})[group_id] = group
+        native["revision"] = actual_authority + 1
+        policy["connector_registry_revision"] = registry_revision + 1
+        next_policy_revision = actual_policy + 1
+        event_id, decision_id, intent_id = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+        seq = c.execute(sa.select(sa.func.coalesce(sa.func.max(
+            assessment_audit_events.c.event_sequence), 0) + 1)).scalar_one()
+        c.execute(assessment_audit_events.insert().values(event_id=event_id,
+            event_sequence=seq, actor_id=actor, actor_kind="local_account", origin="local_api",
+            action="connector.binding.register", target_id=connector_id,
+            before_value=before_policy, after_value=policy,
+            membership_ids=[], membership_revision=0, rationale=payload["rationale"].strip(),
+            evidence_ref=payload["evidence_ref"].strip(), policy_revision=next_policy_revision,
+            identity_revision=0, occurred_at=now, received_at=now,
+            correlation_id=command_id, command_id=command_id,
+            authorization_context=context.document()))
+        c.execute(administration_reconciliation_intents.insert().values(intent_id=intent_id,
+            audit_event_id=event_id, kind="administration.authority.reconcile", target_id=group_id,
+            authority_revision=native["revision"], status="pending", attempts=0,
+            last_error=None, created_at=now, updated_at=now))
+        c.execute(assessment_policy.update().where(assessment_policy.c.policy_id == 1).values(
+            revision=next_policy_revision, document=policy, updated_at=now, updated_by=actor))
+        result = {"schema_version": 1, "command_id": command_id, "decision_id": decision_id,
+            "audit_event_id": event_id, "intent_id": intent_id,
+            "committed_revision": next_policy_revision, "projection": "pending",
+            "action": "connector.binding.register", "target_id": DEPLOYMENT_TARGET,
+            "policy_revision": next_policy_revision,
+            "intents": [{"intent_id": intent_id, "kind": "administration.authority.reconcile",
+                "target_id": group_id, "authority_revision": native["revision"], "status": "pending"}],
+            "result": {"effect": "native_administration_state_committed",
+                "authority_mode": LOCAL_NATIVE_MODE, "policy_revision": next_policy_revision,
+                "authority_revision": native["revision"], "object_kind": "connector_binding",
+                "object_id": connector_id, "object_revision": 1,
+                "connector_registry_revision": policy["connector_registry_revision"],
+                "lifecycle": "disabled", "source_tuple": scope,
+                "credential_slots": registration["credential_slots"],
+                "allocated_ids": {"connector_id": connector_id,
+                    "source_id": source_id, "access_group_id": group_id, "role_id": role_id}}}
+        c.execute(assessment_command_receipts.insert().values(command_id=command_id,
+            principal_id=actor, action="connector.binding.register", target_id=DEPLOYMENT_TARGET,
+            request_digest=request_digest, decision_id=decision_id, audit_event_id=event_id,
+            intent_id=intent_id, result=result, created_at=now,
+            authorization_context=context.document()))
+        return result

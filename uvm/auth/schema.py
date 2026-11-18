@@ -40,13 +40,13 @@ class AuthorityContext:
         return dict(self.group_roles).get(group_id, ())
 
     def scopes_for_group(self, group_id: str) -> tuple[tuple[str, str, str], ...]:
-        if self.credential_mode not in {"oidc_session", "github_link"}:
+        if self.credential_mode not in {"oidc_session", "github_link", "local_session"}:
             return self.source_scopes
         return dict(self.group_scopes).get(group_id, ())
 
     def scopes_for_granting_groups(self, group_ids) -> frozenset[tuple[str, str, str]]:
         """Union only ceilings attached to groups that supplied a role grant."""
-        if self.credential_mode not in {"oidc_session", "github_link"}:
+        if self.credential_mode not in {"oidc_session", "github_link", "local_session"}:
             return frozenset(self.source_scopes)
         return frozenset(scope for group_id in set(group_ids)
             if group_id in self.access_groups for scope in self.scopes_for_group(group_id))

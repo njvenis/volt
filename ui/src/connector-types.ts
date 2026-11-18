@@ -166,7 +166,7 @@ export type StartFlowResponse = Schema & {flow: FlowView;
 
 export type SubmitSecret = Schema & {
   submission_id: UUID; version_id: UUID; source_id: UUID;
-  purpose: Secret["purpose"]; expected_revisions: Revisions;
+  purpose: Secret["purpose"] | "qualys_vm_basic"; expected_revisions: Revisions;
   rationale: Text; evidence_ref: Text;
   input: {kind: "value"; value: Text} |
     {kind: "reference"; reference: Text};

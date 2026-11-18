@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import getpass
 import hashlib
 import ipaddress
 import json
+import fcntl
 import os
 from pathlib import Path
 import re
@@ -16,6 +18,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import uuid
 from http.cookiejar import CookieJar
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -43,6 +46,59 @@ def command(*args: str, capture: bool = False, env: dict | None = None,
 def private_write(path: Path, value: str | bytes) -> None:
     path.write_bytes(value.encode() if isinstance(value, str) else value)
     path.chmod(0o600)
+
+
+def atomic_private_write(path: Path, value: str | bytes) -> None:
+    data = value.encode() if isinstance(value, str) else value
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+@contextmanager
+def exclusive_instance_lock(root: Path):
+    """Serialize host lifecycle and maintenance changes; kernel releases stale locks."""
+    lock_path = root / ".install.lock"
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError:
+        raise SystemExit("could not open the private instance lock") from None
+    try:
+        if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
+            raise SystemExit("private instance lock permissions are unsafe")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit("another VOLT lifecycle or maintenance operation is active") from None
+        yield
+    finally:
+        os.close(fd)
+
+
+def compose_env_line(name: str, value: str) -> str:
+    """Quote a generated Compose dotenv value without expanding dollar signs."""
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name) or "\n" in value or "\r" in value:
+        raise SystemExit("generated Compose environment value is malformed")
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"{name}='{escaped}'"
+
+
+def compose_instance_path(root: Path, *, runtime_prepare: bool,
+                          host_instance_directory: str | None) -> str:
+    if not runtime_prepare:
+        return str(root)
+    if (not host_instance_directory or not Path(host_instance_directory).is_absolute()
+            or any(c in host_instance_directory for c in ",:\n\r")):
+        raise SystemExit("runtime preparation requires the exact absolute host instance path")
+    return host_instance_directory
 
 
 def private_secret(path: Path) -> bytes:
@@ -123,8 +179,10 @@ def inspect_image(image: str, mode: str, expected_platform: str) -> dict:
     actual_platform = f"{os_name}/{arch}"
     if actual_platform != expected_platform:
         raise SystemExit(f"selected image platform {actual_platform} does not match declared package platform {expected_platform}")
-    if labels.get("org.volt.oidc-deployment-modes") != "demo,external":
-        raise SystemExit("this image is not Compose-install compatible; RC1 does not support the OIDC config-file contract; pass an explicitly built candidate image with both deployment modes")
+    declared_modes = set((labels.get("org.volt.oidc-deployment-modes") or "").split(","))
+    required_mode = {"demo": "demo", "external": "external", "local": "local"}.get(mode)
+    if required_mode is None or required_mode not in declared_modes:
+        raise SystemExit("this image is not Compose-install compatible with the selected authentication mode")
     source_snapshot = labels.get("org.volt.compose.source-snapshot", "")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", source_snapshot):
         raise SystemExit("Compose installs require a candidate image bound to an exact source snapshot archive")
@@ -242,6 +300,52 @@ def demo_identity(principal: str | None, subject: str | None) -> tuple[str, str]
     return principal, subject
 
 
+def local_auth_configuration(installation_id: str, secret_source_id: str,
+                             public_origin: str, http_port: int, gateway: str) -> dict:
+    """Build the exact version-1 local runtime file for an owned loopback install."""
+    try:
+        if str(uuid.UUID(installation_id)) != installation_id or str(uuid.UUID(secret_source_id)) != secret_source_id:
+            raise ValueError
+        origin = urlsplit(public_origin)
+        if (origin.scheme != "http" or origin.hostname not in {"127.0.0.1", "localhost", "::1"}
+                or origin.username or origin.password or origin.path or origin.query or origin.fragment
+                or origin.port != http_port):
+            raise ValueError
+        gateway_address = ipaddress.ip_address(gateway)
+        if not gateway_address.is_private:
+            raise ValueError
+    except (ValueError, TypeError):
+        raise SystemExit("local mode currently requires an exact loopback HTTP origin and private Docker gateway") from None
+    return {"schema_version": 1, "installation_id": installation_id,
+        "public_origin": public_origin,
+        "secret_source": {"kind": "encrypted_local_v1", "secret_source_id": secret_source_id,
+                          "key_path": "/run/uvm-connector/local-key"},
+        "bootstrap_delivery": {"kind": "private_file", "path": "/run/volt-bootstrap/capability"},
+        "session_policy": {"ttl_seconds": 3600},
+        "trusted_ingress": {"mode": "loopback",
+            "allowed_hosts": [f"127.0.0.1:{http_port}", f"localhost:{http_port}"],
+            "allowed_peer_cidrs": ["127.0.0.1/32", f"{gateway}/32"]}}
+
+
+def capability_from_delivery(value: bytes, operation: str) -> str:
+    purposes = {"prepare-setup": ("setup", 1800), "rotate-setup": ("setup", 1800),
+        "create-account": ("enrolment", 900), "issue-enrolment": ("enrolment", 900),
+        "issue-recovery": ("recovery", 900)}
+    expected = purposes.get(operation)
+    try:
+        document = json.loads(value)
+        capability = document["capability"]
+        if (expected is None or not isinstance(document, dict)
+                or set(document) != {"schema_version", "purpose", "capability", "expires_in_seconds"}
+                or document["schema_version"] != 1 or document["purpose"] != expected[0]
+                or document["expires_in_seconds"] != expected[1]
+                or not isinstance(capability, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", capability)):
+            raise ValueError
+    except (TypeError, KeyError, ValueError, json.JSONDecodeError):
+        raise SystemExit("private capability delivery document is invalid for the requested operation") from None
+    return capability
+
+
 def choose_network() -> tuple[str, str]:
     used = []
     try:
@@ -267,14 +371,44 @@ def choose_network() -> tuple[str, str]:
 
 def init(args) -> None:
     root = Path(args.directory).expanduser().absolute()
-    if root.exists():
+    if args.runtime_prepare:
+        compose_assets = root / "compose"
+        expected_assets = {"compose.yaml", "local.yaml", "local-restore.yaml"}
+        if (not root.is_dir() or root.is_symlink() or stat.S_IMODE(root.stat().st_mode) != 0o700
+                or {item.name for item in root.iterdir()} != {"compose"}
+                or compose_assets.is_symlink() or not compose_assets.is_dir()
+                or {item.name for item in compose_assets.iterdir()} != expected_assets
+                or any(item.is_symlink() or not item.is_file() for item in compose_assets.iterdir())):
+            raise SystemExit("runtime preparation requires an empty private instance plus the closed Compose asset set")
+    elif root.exists():
         raise SystemExit(f"refusing to initialize existing instance path: {root}")
-    check_ports_available((args.http_port, args.recovery_port, args.oidc_port))
     image = args.image
     if not image:
         raise SystemExit(f"Compose installation requires --image with an explicitly built compatible candidate; historical RC1 {HISTORICAL_RC1_IMAGE} is retained for launcher users and lacks the Compose contract")
-    admitted = inspect_image(image, args.mode, args.platform)
+    if args.runtime_prepare:
+        if (args.mode != "local" or not args.admitted_image_id
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", args.admitted_image_id)
+                or not re.fullmatch(r"[0-9a-f]{40}", args.admitted_source_revision or "")
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", args.admitted_source_snapshot or "")
+                or args.admitted_version != "0.1.0-rc.4"
+                or not args.network_gateway or not args.network_subnet or not args.owner_token
+                or not re.fullmatch(r"[0-9a-f]{64}", args.owner_token)):
+            raise SystemExit("runtime preparation requires exact local RC4 image and private network admission metadata")
+        host_instance_path = compose_instance_path(root, runtime_prepare=True,
+            host_instance_directory=args.host_instance_directory)
+        try:
+            if not ipaddress.ip_network(args.network_subnet, strict=True).is_private:
+                raise ValueError
+        except ValueError:
+            raise SystemExit("runtime preparation requires a private Docker subnet") from None
+        admitted = {"id": args.admitted_image_id, "source_revision": args.admitted_source_revision,
+            "version": args.admitted_version, "source_snapshot": args.admitted_source_snapshot,
+            "platform": args.platform, "registry_digests": [image]}
+    else:
+        check_ports_available((args.http_port, args.recovery_port, args.oidc_port))
+        admitted = inspect_image(image, args.mode, args.platform)
     okta_config, okta_private_key = None, None
+    local_auth = None
     if args.mode == "external":
         if args.demo_admin_username is not None:
             raise SystemExit("--demo-admin-username is available only in demo mode")
@@ -292,6 +426,21 @@ def init(args) -> None:
                 Path(args.okta_publisher_config).expanduser(), oidc)
         else:
             okta_config, okta_private_key = None, None
+    elif args.mode == "local":
+        if any((args.external_config, args.client_secret_file, args.okta_publisher_config,
+                args.bootstrap_principal, args.demo_subject, args.demo_admin_username)):
+            raise SystemExit("local mode does not accept demo or external OIDC bootstrap arguments")
+        public_origin = args.public_origin or f"http://127.0.0.1:{args.http_port}"
+        args.bootstrap_principal = ""
+        installation_id = str(uuid.uuid4())
+        secret_source_id = str(uuid.uuid4())
+        local_auth = None
+        args.local_installation_id = installation_id
+        args.local_secret_source_id = secret_source_id
+        args.local_public_origin = public_origin
+        oidc = None
+        demo_credentials = None
+        external_client_secret = None
     else:
         if not args.demo_admin_username:
             raise SystemExit("demo mode requires --demo-admin-username and a hidden password prompt")
@@ -332,12 +481,22 @@ def init(args) -> None:
     if not project or not project[0].isalpha():
         raise SystemExit("project must start with a letter and contain only letters, numbers, '-' or '_'")
     hosts = allowed_host_names(args.allowed_hosts)
-    for kind, name in [("volume", f"{project}_{part}") for part in ("postgres", "media", "state")]+[("network", f"{project}_network")]:
-        if subprocess.run(("docker", kind, "inspect", name), stdout=subprocess.DEVNULL,
-                          stderr=subprocess.DEVNULL, check=False).returncode == 0:
-            raise SystemExit(f"refusing to adopt existing Docker resource {name}; choose a new project name")
-    subnet, gateway = choose_network()
-    root.mkdir(mode=0o700, parents=True)
+    if args.runtime_prepare:
+        subnet, gateway = args.network_subnet, args.network_gateway
+    else:
+        for kind, name in [("volume", f"{project}_{part}") for part in ("postgres", "media", "state")]+[("network", f"{project}_network")]:
+            if subprocess.run(("docker", kind, "inspect", name), stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, check=False).returncode == 0:
+                raise SystemExit(f"refusing to adopt existing Docker resource {name}; choose a new project name")
+        subnet, gateway = choose_network()
+    if args.mode == "local":
+        local_auth = local_auth_configuration(args.local_installation_id,
+            args.local_secret_source_id, args.local_public_origin, args.http_port, gateway)
+    if args.runtime_prepare:
+        if stat.S_IMODE(root.stat().st_mode) != 0o700:
+            raise SystemExit("runtime-prepared instance directory must have mode 0700")
+    else:
+        root.mkdir(mode=0o700, parents=True)
     secrets_dir = root / "secrets"
     secrets_dir.mkdir(mode=0o700)
     for name, size in SECRET_SIZES.items():
@@ -348,13 +507,23 @@ def init(args) -> None:
             private_write(secrets_dir / "okta_service_private_key", okta_private_key)
             private_write(root / "okta-publisher.json",
                           json.dumps(okta_config, sort_keys=True, separators=(",", ":")) + "\n")
-    else:
+    elif args.mode == "demo":
         private_write(secrets_dir / "demo_admin_credentials", demo_credentials)
+    else:
+        private_write(secrets_dir / "local-auth-key", secrets.token_bytes(32))
+        (secrets_dir / "bootstrap-delivery").mkdir(mode=0o700)
+        private_write(root / "local-auth.json",
+                      json.dumps(local_auth, sort_keys=True, separators=(",", ":")) + "\n")
     make_tls(secrets_dir)
-    private_write(root / "oidc.json", json.dumps(oidc, separators=(",", ":")) + "\n")
-    compose_root = Path(__file__).resolve().parent
-    owner_token = secrets.token_hex(32)
-    scopes = oidc.get("source_scope_ceilings", [])
+    if oidc is not None:
+        private_write(root / "oidc.json", json.dumps(oidc, separators=(",", ":")) + "\n")
+    else:
+        # The base Compose file mounts this path for legacy modes. Local mode
+        # clears UVM_OIDC_CONFIG_FILE and never reads the inert compatibility file.
+        private_write(root / "oidc.json", "{}\n")
+    compose_root = Path(args.runtime_compose_directory).resolve() if args.runtime_prepare else Path(__file__).resolve().parent
+    owner_token = args.owner_token if args.runtime_prepare else secrets.token_hex(32)
+    scopes = oidc.get("source_scope_ceilings", []) if oidc else []
     envelope = {"actions": ["access_group.read", "ownership.team.read", "ownership.team.manage"],
         "target_scope": {"group_ids": ["*"], "source_families": ["*"], "environments": ["*"],
                          "service_ids": ["*"], "membership_mode": "all_current"},
@@ -367,16 +536,40 @@ def init(args) -> None:
         "separation_of_duties": {"approval_requires_distinct_actor": True,
             "prohibit_requester_approval": True, "required_approver_count": 1,
             "prohibited_action_pairs": []}}
-    env = "\n".join((f"VOLT_PROJECT={project}", f"VOLT_INSTANCE_DIR={root}", f"VOLT_IMAGE={image}",
-                      f"VOLT_IMAGE_ID={admitted['id']}",
-                      f"VOLT_PLATFORM={admitted['platform']}",
-                      f"VOLT_OKTA_PUBLISHER_CONFIG_FILE={'/run/uvm-g7-secrets/okta-publisher.json' if okta_config else ''}",
-                      f"VOLT_DEMO_ADMIN_SUBJECT={args.demo_subject or ''}",
-                      f"VOLT_BOOTSTRAP_PRINCIPAL={args.bootstrap_principal}",
-                      "VOLT_NATIVE_GRANTABLE_ENVELOPE=" + json.dumps(envelope, separators=(",", ":")),
-                      f"VOLT_OWNER_TOKEN={owner_token}", f"VOLT_SUBNET={subnet}", f"VOLT_GATEWAY={gateway}",
-                      f"VOLT_HTTP_PORT={args.http_port}", f"VOLT_RECOVERY_PORT={args.recovery_port}",
-                      f"VOLT_OIDC_PORT={args.oidc_port}", f"VOLT_ALLOWED_HOSTS={hosts}", ""))
+    if local_auth is not None:
+        envelope = {"contract_version": 2,
+            "actions": ["policy.read", "access_group.read", "ownership.team.read", "ownership.team.manage",
+                        "connector.read", "connector.configure", "connector.secret.manage",
+                        "assessment.read", "audit.read"],
+            "target_scope": {"group_ids": [], "source_families": [], "environments": [],
+                             "service_ids": [], "membership_mode": "explicit"},
+            "source_scopes": [],
+            "deployment_targets": [local_auth["installation_id"]],
+            "connector_targets": [], "source_read_targets": [],
+            "limits": {"maximum_acceptance_days": None, "maximum_severity": None,
+                "whole_group_confirmation": False, "allowed_environments": [], "allowed_service_ids": [],
+                "allowed_sla_clock_bases": [], "allowed_sla_severities": [], "allowed_sla_start_sources": [],
+                "maximum_sla_duration_seconds": None, "allow_sla_backfill": False,
+                "maximum_deadline_extension_seconds": None, "allowed_identity_scalar_fields": {}},
+            "separation_of_duties": {"approval_requires_distinct_actor": True,
+                "prohibit_requester_approval": True, "required_approver_count": 1,
+                "prohibited_action_pairs": []}}
+    env_values = (
+        ("VOLT_PROJECT", project),
+        ("VOLT_INSTANCE_DIR", host_instance_path if args.runtime_prepare else str(root)),
+        ("VOLT_IMAGE", image),
+        ("VOLT_AUTH_MODE", "local" if args.mode == "local" else "oidc"),
+        ("VOLT_LOCAL_SECRET_SOURCE_ID", local_auth["secret_source"]["secret_source_id"] if local_auth else ""),
+        ("VOLT_IMAGE_ID", admitted["id"]), ("VOLT_PLATFORM", admitted["platform"]),
+        ("VOLT_OKTA_PUBLISHER_CONFIG_FILE", "/run/uvm-g7-secrets/okta-publisher.json" if okta_config else ""),
+        ("VOLT_DEMO_ADMIN_SUBJECT", args.demo_subject or ""),
+        ("VOLT_BOOTSTRAP_PRINCIPAL", args.bootstrap_principal),
+        ("VOLT_NATIVE_GRANTABLE_ENVELOPE", json.dumps(envelope, separators=(",", ":"))),
+        ("VOLT_OWNER_TOKEN", owner_token), ("VOLT_SUBNET", subnet), ("VOLT_GATEWAY", gateway),
+        ("VOLT_HTTP_PORT", str(args.http_port)), ("VOLT_RECOVERY_PORT", str(args.recovery_port)),
+        ("VOLT_OIDC_PORT", str(args.oidc_port)), ("VOLT_ALLOWED_HOSTS", hosts),
+    )
+    env = "\n".join(compose_env_line(name, value) for name, value in env_values) + "\n"
     private_write(root / ".env", env)
     metadata = {"format_version": 1, "project": project, "mode": args.mode, "image": image,
                 "image_admission": admitted, "oidc_config_sha256": hashlib.sha256((root / "oidc.json").read_bytes()).hexdigest(),
@@ -389,8 +582,13 @@ def init(args) -> None:
                     if okta_config else None,
                 "ports": [args.http_port, args.recovery_port, args.oidc_port],
                 "subnet": subnet, "gateway": gateway, "established": False, "initialized": True}
+    if local_auth is not None:
+        metadata["installation_id"] = local_auth["installation_id"]
+        metadata["local_auth_config_sha256"] = hashlib.sha256((root / "local-auth.json").read_bytes()).hexdigest()
     metadata["env_sha256"] = hashlib.sha256((root / ".env").read_bytes()).hexdigest()
     private_write(root / "instance.json", json.dumps(metadata, indent=2) + "\n")
+    private_write(root / ".project", project + "\n")
+    private_write(root / ".owner-token", owner_token + "\n")
     print(f"instance={root}\nmode={args.mode}\nimage_id={admitted['id']}\nsource_revision={admitted['source_revision']}\nversion={admitted['version']}")
 
 
@@ -404,7 +602,8 @@ def load_instance(path: str) -> tuple[Path, dict]:
         raise SystemExit("instance is not initialized") from exc
     if metadata.get("format_version") != 1 or metadata.get("initialized") is not True:
         raise SystemExit("instance metadata is not recognized")
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", metadata.get("bootstrap_principal", "")):
+    if (metadata.get("mode") != "local"
+            and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", metadata.get("bootstrap_principal", ""))):
         raise SystemExit("instance bootstrap principal metadata is invalid")
     if (metadata.get("platform") not in SUPPORTED_PLATFORMS
             or (metadata.get("image_admission") or {}).get("platform") != metadata.get("platform")):
@@ -434,6 +633,43 @@ def load_instance(path: str) -> tuple[Path, dict]:
     actual = hashlib.sha256((root / "oidc.json").read_bytes()).hexdigest()
     if actual != metadata.get("oidc_config_sha256"):
         raise SystemExit("OIDC config changed after initialization; use explicit reconfigure after review")
+    if metadata.get("mode") == "local":
+        config_path = root / "local-auth.json"
+        local_key = root / "secrets" / "local-auth-key"
+        delivery = root / "secrets" / "bootstrap-delivery"
+        if (config_path.is_symlink() or not config_path.is_file()
+                or stat.S_IMODE(config_path.stat().st_mode) != 0o600
+                or local_key.is_symlink() or not local_key.is_file()
+                or stat.S_IMODE(local_key.stat().st_mode) != 0o600
+                or len(local_key.read_bytes()) != 32
+                or delivery.is_symlink() or not delivery.is_dir()
+                or stat.S_IMODE(delivery.stat().st_mode) != 0o700):
+            raise SystemExit("local auth configuration, encryption key or bootstrap delivery directory is missing or unsafe")
+        try:
+            local = json.loads(config_path.read_text())
+            source = local["secret_source"]
+            capability = local["bootstrap_delivery"]
+            url = urlsplit(local["public_origin"])
+            port = metadata["ports"][0]
+            if (set(local) != {"schema_version", "installation_id", "public_origin", "secret_source",
+                               "bootstrap_delivery", "session_policy", "trusted_ingress"}
+                    or local["schema_version"] != 1
+                    or str(uuid.UUID(local["installation_id"])) != local["installation_id"]
+                    or local["installation_id"] != metadata.get("installation_id")
+                    or hashlib.sha256(config_path.read_bytes()).hexdigest() != metadata.get("local_auth_config_sha256")
+                    or source != {"kind": "encrypted_local_v1", "secret_source_id":
+                                  source["secret_source_id"], "key_path": "/run/uvm-connector/local-key"}
+                    or str(uuid.UUID(source["secret_source_id"])) != source["secret_source_id"]
+                    or capability != {"kind": "private_file", "path": "/run/volt-bootstrap/capability"}
+                    or local["session_policy"] != {"ttl_seconds": 3600}
+                    or local["trusted_ingress"] != {"mode": "loopback", "allowed_hosts":
+                        [f"127.0.0.1:{port}", f"localhost:{port}"], "allowed_peer_cidrs":
+                        ["127.0.0.1/32", f"{metadata['gateway']}/32"]}
+                    or url.scheme != "http" or url.hostname not in {"127.0.0.1", "localhost", "::1"}
+                    or url.port != port or url.path or url.query or url.fragment):
+                raise ValueError
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            raise SystemExit("local auth configuration does not match its private instance contract") from None
     publisher_digest = metadata.get("okta_publisher_config_sha256")
     if publisher_digest is not None:
         config_file = root / "okta-publisher.json"
@@ -454,7 +690,13 @@ def compose_environment() -> dict[str, str]:
 
 def compose_files(info: dict) -> list[str]:
     files = ["-f", str(Path(info["compose_directory"]) / "compose.yaml")]
-    if info["mode"] == "demo":
+    if info["mode"] == "local":
+        files += ["-f", str(Path(info["compose_directory"]) / "local.yaml")]
+        if (info.get("restore_pending") and info.get("restore_imported")
+                and not (info.get("restore_capabilities_revoked")
+                         and info.get("restore_sessions_revoked"))):
+            files += ["-f", str(Path(info["compose_directory"]) / "local-restore.yaml")]
+    elif info["mode"] == "demo":
         files += ["-f", str(Path(info["compose_directory"]) / "demo.yaml")]
     elif info.get("okta_publisher_config_sha256") is not None:
         files += ["-f", str(Path(info["compose_directory"]) / "okta-publisher.yaml")]
@@ -481,11 +723,33 @@ def resolved_compose(root: Path, info: dict):
         "/opt/uvm/state": f"{info['project']}_state",
         "/etc/volt/oidc.json": str(root / "oidc.json"),
     }
+    if info["mode"] == "local":
+        expected_mounts.update({
+            "/run/secrets/local-auth.json": str(root / "local-auth.json"),
+            "/run/secrets/local-auth-key": str(root / "secrets" / "local-auth-key"),
+            "/run/volt-bootstrap": str(root / "secrets" / "bootstrap-delivery"),
+        })
     volume_names = resolved.get("volumes", {})
     validate_identity_secret_mounts(resolved, service, identity_secrets, info)
     actual_mounts = {item.get("target"): (volume_names.get(item.get("source"), {}).get("name", item.get("source"))
-                                           if item.get("type") == "volume" else item.get("source"))
+                                           if item.get("type") == "volume" else item.get("source", "").replace("$$", "$"))
                      for item in service.get("volumes", [])}
+    if info["mode"] == "local":
+        mounts_by_target = {item.get("target"): item for item in service.get("volumes", [])}
+        expected_access = {"/run/secrets/local-auth.json": True,
+            "/run/secrets/local-auth-key": True,
+            "/run/volt-bootstrap": False}
+        environment = service.get("environment", {})
+        local_source = json.loads((root / "local-auth.json").read_text())["secret_source"]["secret_source_id"]
+        if (any(bool(mounts_by_target.get(target, {}).get("read_only")) != read_only
+                    for target, read_only in expected_access.items())
+                or environment.get("UVM_AUTH_MODE") != "local"
+                or environment.get("UVM_OIDC_DEPLOYMENT_MODE") != "local"
+                or environment.get("UVM_LOCAL_AUTH_CONFIG_FILE") != "/etc/volt/local-auth.json"
+                or environment.get("UVM_OIDC_CONFIG_FILE") != ""
+                or environment.get("UVM_CONNECTOR_LOCAL_KEY_ID") != local_source
+                or environment.get("UVM_CONNECTOR_LOCAL_KEY_FILE") != "/run/secrets/local-auth-key"):
+            raise SystemExit("local Compose auth mode or private-file access differs from its admitted config")
     labels = service.get("labels", {})
     if (service.get("image") != info["image"] or service.get("platform") != info["platform"]
             or actual_mounts != expected_mounts or
@@ -504,6 +768,8 @@ def identity_secret_sources(root: Path, info: dict) -> dict[str, Path]:
         if info.get("okta_publisher_config_sha256") is not None:
             raise SystemExit("demo mode cannot admit external Okta publisher secrets")
         return {"demo-admin-credentials": root / "secrets" / "demo_admin_credentials"}
+    if info.get("mode") == "local":
+        return {}
     if info.get("mode") != "external":
         raise SystemExit("instance identity mode is unsupported")
     if info.get("okta_publisher_config_sha256") is None:
@@ -537,6 +803,11 @@ def validate_identity_secret_mounts(resolved: dict, service: dict,
 
 def compose(args, action: str) -> None:
     root, info = load_instance(args.directory)
+    with exclusive_instance_lock(root):
+        compose_loaded(root, info, action)
+
+
+def compose_loaded(root: Path, info: dict, action: str) -> None:
     if action == "up" and info.get("restore_pending") and not info.get("restore_imported"):
         raise SystemExit("offline restore volumes must be imported and admitted with restore-admit before any runtime starts")
     files, envfile, clean_env = resolved_compose(root, info)
@@ -561,6 +832,18 @@ def compose(args, action: str) -> None:
         check_owned_resources(info, allow_missing=False)
         info["established"] = True
         private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
+        if (info.get("mode") == "local" and info.get("restore_pending")
+                and info.get("restore_imported") and not info.get("restore_sessions_revoked")):
+            # The reviewed backend checkpoint currently exposes capability
+            # revocation but does not guarantee restored-session revocation.
+            # Keep the restore overlay selected and refuse ingress until that
+            # missing backend guarantee is accepted and wired here.
+            if not info.get("restore_capabilities_revoked"):
+                wait_until_ready(info)
+                revoke_restored_local_capabilities(root, info, files, envfile, clean_env)
+                info["restore_capabilities_revoked"] = True
+                private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
+            raise SystemExit("restored local sessions lack backend-confirmed revocation; ingress remains unpublished")
     elif action == "stop":
         verify_cold_stop(info)
         print("controlled shutdown verified; cold backup inventory may now be captured")
@@ -581,6 +864,19 @@ def verify_cold_stop(info: dict) -> None:
                 "G7_SHUTDOWN=controlled service_cleanup_status=0")
     if any(marker not in logs for marker in required) or "G7_STOP_ERROR" in logs:
         raise SystemExit("controlled supervisor cleanup evidence is missing or failed; do not capture a cold backup")
+
+
+def revoke_restored_local_capabilities(root: Path, info: dict, files: list[str],
+                                       envfile: Path, clean_env: dict[str, str]) -> None:
+    """Revoke restored sessions and capabilities before publishing local ingress."""
+    argv = ["docker", "compose", *files, "--env-file", str(envfile), "-p", info["project"],
+            "exec", "-T", "--user", "0:0", "volt", "/opt/uvm/venv/bin/python",
+            "-m", "uvm.auth.maintenance", "revoke-capabilities",
+            "--config", "/etc/volt/local-auth.json"]
+    result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, text=True, env=clean_env)
+    if result.returncode:
+        raise SystemExit("restored local capabilities could not be revoked; ingress remains unpublished")
 
 
 # Read-only, network-free helper: include names, types, ownership, permissions and
@@ -692,6 +988,8 @@ def provision_restore(args) -> None:
     info["established"] = False
     info["restore_pending"] = True
     info["restore_imported"] = False
+    info["restore_capabilities_revoked"] = False
+    info["restore_sessions_revoked"] = False
     private_write(root / "instance.json", json.dumps(info, indent=2) + "\n")
     labels = ["--label", f"volt.compose.owner-token={info['owner_token']}"]
     for store in ("postgres", "media", "state"):
@@ -819,12 +1117,109 @@ print(json.dumps({"authority_mode":catalogue["authority_mode"],"principal_id":ex
             origin, info["bootstrap_principal"], env=clean_env, input_data=cookie + "\n")
 
 
+def local_maintenance(args) -> None:
+    root, info = load_instance(args.directory)
+    with exclusive_instance_lock(root):
+        local_maintenance_loaded(args, root, info)
+
+
+def local_maintenance_loaded(args, root: Path, info: dict) -> None:
+    if info.get("mode") != "local":
+        raise SystemExit("local account maintenance requires a local-auth instance")
+    files, envfile, clean_env = resolved_compose(root, info)
+    wait_until_ready(info)
+    operation = args.operation
+    allowed = {"prepare-setup", "rotate-setup", "create-account", "issue-enrolment",
+               "issue-recovery", "disable-account", "revoke-capabilities"}
+    if operation not in allowed:
+        raise SystemExit("unsupported local maintenance operation")
+    argv = ["docker", "compose", *files, "--env-file", str(envfile), "-p", info["project"],
+            # The delivered config and connector key are uvm-owned 0600 inside
+            # the container. The host account's numeric uid is unrelated and
+            # cannot safely access either file.
+            "exec", "-T", "--user", "0:0", "volt",
+            "/opt/uvm/venv/bin/python", "-m", "uvm.auth.maintenance",
+            operation, "--config", "/etc/volt/local-auth.json"]
+    if args.username is not None:
+        argv += ["--username", args.username]
+    if args.display_name is not None:
+        argv += ["--display-name", args.display_name]
+    result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, text=True, env=clean_env)
+    if result.returncode:
+        raise SystemExit("local maintenance operation failed; inspect redacted application status")
+    if operation in {"prepare-setup", "rotate-setup", "create-account", "issue-enrolment", "issue-recovery"}:
+        show_local_capability(root, info, unattended=args.unattended, purpose=operation)
+
+
+def show_local_capability(root: Path, info: dict, *, unattended: bool, purpose: str = "setup") -> None:
+    files, envfile, clean_env = resolved_compose(root, info)
+    delivered = subprocess.run(("docker", "compose", *files, "--env-file", str(envfile), "-p", info["project"],
+        "exec", "-T", "--user", "0:0", "volt", "cat", "/run/volt-bootstrap/capability"),
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=clean_env, check=False)
+    if delivered.returncode:
+        raise SystemExit("private capability delivery file is unavailable")
+    value = capability_from_delivery(delivered.stdout, purpose)
+    path = root / "secrets" / "bootstrap-capability-output"
+    atomic_private_write(path, value + "\n")
+    config = json.loads((root / "local-auth.json").read_text())
+    if unattended or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print(f"capability_file={path}")
+        return
+    if purpose in {"prepare-setup", "rotate-setup", "setup"}:
+        print(f"Setup URL: {config['public_origin']}/")
+    print(f"One-use {purpose} capability (private; do not paste into logs): {value}")
+
+
+def show_setup_capability(args) -> None:
+    root, info = load_instance(args.directory)
+    if info.get("mode") != "local":
+        raise SystemExit("setup capability display requires a local-auth instance")
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise SystemExit("setup capability display requires a controlling terminal")
+    show_local_capability(root, info, unattended=False)
+
+
+def host_validate(args) -> None:
+    """Validate instance files inside the admitted runtime for the POSIX launcher."""
+    root, info = load_instance(args.directory)
+    if info.get("mode") != "local" or info.get("image") != args.image:
+        raise SystemExit("instance mode or immutable runtime image differs from this signed installer")
+    if (info.get("image_admission", {}).get("version") != "0.1.0-rc.4"
+            or info.get("platform") not in SUPPORTED_PLATFORMS):
+        raise SystemExit("instance runtime version or platform is not admitted by this installer")
+    print(f"project={info['project']}\nowner_token={info['owner_token']}\nplatform={info['platform']}\nhttp_port={info['ports'][0]}"
+          f"\nrestore_pending={int(bool(info.get('restore_pending')))}"
+          f"\nrestore_imported={int(bool(info.get('restore_imported')))}"
+          f"\nrestore_capabilities_revoked={int(bool(info.get('restore_capabilities_revoked')))}"
+          f"\nrestore_sessions_revoked={int(bool(info.get('restore_sessions_revoked')))}")
+
+
+def extract_capability(args) -> None:
+    root = Path(args.directory)
+    if (root.is_symlink() or not root.is_dir() or stat.S_IMODE(root.stat().st_mode) != 0o700):
+        raise SystemExit("private instance directory is unsafe")
+    secrets_dir = root / "secrets"
+    if (secrets_dir.is_symlink() or not secrets_dir.is_dir()
+            or stat.S_IMODE(secrets_dir.stat().st_mode) != 0o700):
+        raise SystemExit("private secret directory is unsafe")
+    document = root / "secrets" / "bootstrap-capability-document.json"
+    output = root / "secrets" / "bootstrap-capability-output"
+    if (document.is_symlink() or not document.is_file()
+            or stat.S_IMODE(document.stat().st_mode) != 0o600
+            or document.stat().st_size > 4096):
+        raise SystemExit("private capability delivery document is missing or unsafe")
+    value = capability_from_delivery(document.read_bytes(), args.operation)
+    atomic_private_write(output, value + "\n")
+    print("capability-ready=1")
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(required=True)
     create = sub.add_parser("init")
     create.add_argument("directory")
-    create.add_argument("--mode", choices=("demo", "external"), required=True)
+    create.add_argument("--mode", choices=("demo", "external", "local"), required=True)
     create.add_argument("--project", default="volt-compose")
     create.add_argument("--image", required=True, help="explicit immutable Compose-compatible candidate image; historical RC1 lacks this contract")
     create.add_argument("--platform", choices=SUPPORTED_PLATFORMS, required=True,
@@ -839,7 +1234,29 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--recovery-port", type=int, default=8181)
     create.add_argument("--oidc-port", type=int, default=8190)
     create.add_argument("--allowed-hosts", default="localhost,127.0.0.1")
+    create.add_argument("--public-origin",
+                        help="exact local browser origin; local mode defaults to its loopback HTTP port")
+    create.add_argument("--runtime-prepare", action="store_true",
+                        help=argparse.SUPPRESS)
+    create.add_argument("--admitted-image-id", help=argparse.SUPPRESS)
+    create.add_argument("--admitted-source-revision", help=argparse.SUPPRESS)
+    create.add_argument("--admitted-source-snapshot", help=argparse.SUPPRESS)
+    create.add_argument("--admitted-version", help=argparse.SUPPRESS)
+    create.add_argument("--network-gateway", help=argparse.SUPPRESS)
+    create.add_argument("--network-subnet", help=argparse.SUPPRESS)
+    create.add_argument("--owner-token", help=argparse.SUPPRESS)
+    create.add_argument("--runtime-compose-directory", help=argparse.SUPPRESS)
+    create.add_argument("--host-instance-directory", help=argparse.SUPPRESS)
     create.set_defaults(fn=init)
+    validate = sub.add_parser("host-validate")
+    validate.add_argument("directory")
+    validate.add_argument("--image", required=True)
+    validate.set_defaults(fn=host_validate)
+    extract = sub.add_parser("extract-capability")
+    extract.add_argument("directory")
+    extract.add_argument("--operation", choices=("prepare-setup", "rotate-setup", "create-account",
+        "issue-enrolment", "issue-recovery"), required=True)
+    extract.set_defaults(fn=extract_capability)
     for name in ("start", "stop", "status"):
         item = sub.add_parser(name); item.add_argument("directory"); item.set_defaults(fn=lambda a, n=name: compose(a, "up" if n == "start" else "ps" if n == "status" else "stop"))
     remove = sub.add_parser("cleanup")
@@ -857,6 +1274,18 @@ def parser() -> argparse.ArgumentParser:
     link.add_argument("--rationale"); link.add_argument("--evidence-ref"); link.set_defaults(fn=link_subject)
     authority = sub.add_parser("initialize-authority")
     authority.add_argument("directory"); authority.set_defaults(fn=initialize_authority)
+    for operation in ("prepare-setup", "rotate-setup", "create-account", "issue-enrolment",
+                      "issue-recovery", "disable-account", "revoke-capabilities"):
+        item = sub.add_parser(operation)
+        item.add_argument("directory")
+        item.add_argument("--username")
+        item.add_argument("--display-name")
+        item.add_argument("--unattended", action="store_true",
+                          help="leave any new capability in the private delivery file and print only its path")
+        item.set_defaults(fn=local_maintenance, operation=operation)
+    show_capability = sub.add_parser("show-setup-capability")
+    show_capability.add_argument("directory")
+    show_capability.set_defaults(fn=show_setup_capability)
     return p
 
 

@@ -37,6 +37,7 @@ import uvm.persistence.deadline_reference_schema  # noqa: F401 supplied history 
 import uvm.persistence.auth_schema  # noqa: F401 registers G7 OIDC authority metadata
 import uvm.persistence.native_authority_schema  # noqa: F401 registers native authority reconciliation metadata
 import uvm.persistence.connector_schema  # noqa: F401 registers G7 connector metadata
+import uvm.persistence.connector_binding_schema  # noqa: F401 registers source binding labels
 import uvm.persistence.incident_schema  # noqa: F401 registers additive G7 incident projection
 import uvm.persistence.observer_settings_schema  # noqa: F401 registers G7 observer settings
 from uvm.persistence.schema import uvm_metadata  # noqa: E402

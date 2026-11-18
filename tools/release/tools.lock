@@ -4,6 +4,7 @@ trivy_release=https://github.com/aquasecurity/trivy/releases/download/v0.76.1/tr
 trivy_linux_amd64_sha256=c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0
 gitleaks_image=ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:b109bc5f8f76a38196a3e413704fc5b9e3c32360bce4e4b603bd6f45b3721dbb
 cosign_version=3.1.4
+cosign_official_oci_image=gcr.io/projectsigstore/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d
 cosign_release_template=https://github.com/sigstore/cosign/releases/download/v{version}/cosign-{platform}
 cosign_linux_amd64_sha256=424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa
 cosign_linux_arm64_sha256=ade83b7aac62e131cacfe96d958948b2150cc9efec46a570a2649b8e27dedad2

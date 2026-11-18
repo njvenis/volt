@@ -15,8 +15,9 @@ services:
       DD_ADMIN_MAIL: admin@localhost.invalid
       DD_ALLOWED_HOSTS: ${VOLT_ALLOWED_HOSTS:-localhost,127.0.0.1}
       DD_INITIALIZE: "true"
-      UVM_AUTH_MODE: oidc
+      UVM_AUTH_MODE: ${VOLT_AUTH_MODE:-oidc}
       UVM_OIDC_DEPLOYMENT_MODE: external
+      UVM_SCANNER_EVIDENCE_DIR: /opt/uvm/state/scanner-evidence
       UVM_OIDC_CONFIG_FILE: /etc/volt/oidc.json
       UVM_G3_BOOTSTRAP_PRINCIPAL: ${VOLT_BOOTSTRAP_PRINCIPAL:-}
       UVM_NATIVE_BOOTSTRAP_PRINCIPALS: ${VOLT_BOOTSTRAP_PRINCIPAL:-}

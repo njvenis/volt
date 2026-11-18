@@ -38,7 +38,7 @@ RUN set -eu; case "$TARGETARCH" in amd64) musl_arch=x86_64;; arm64) musl_arch=aa
 
 FROM ${CE_IMAGE} AS runtime
 ARG TARGETARCH
-ARG VOLT_OIDC_DEPLOYMENT_MODES=demo,external
+ARG VOLT_OIDC_DEPLOYMENT_MODES=demo,external,local
 ARG VOLT_SOURCE_SNAPSHOT=unspecified
 LABEL org.volt.oidc-deployment-modes=${VOLT_OIDC_DEPLOYMENT_MODES} \
       org.volt.compose.source-snapshot=${VOLT_SOURCE_SNAPSHOT} \

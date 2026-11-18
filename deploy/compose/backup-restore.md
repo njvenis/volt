@@ -1,6 +1,6 @@
 # Compose cold backup and restore
 
-This is a cold, single-image evaluation procedure. It has no RPO/RTO promise and does not demonstrate a live backup controller or production recovery. It captures all three Compose volumes together with OIDC/client and recovery keys, application secrets, the exact image ID, bundle version and configuration digest.
+This is a cold, single-image evaluation procedure. It has no RPO/RTO promise and does not demonstrate a live backup controller or production recovery. It captures all three Compose volumes together with OIDC/client and recovery keys, application secrets, the exact image ID, bundle version and configuration digest. The private Qualys page evidence directory is `/opt/uvm/state/scanner-evidence` inside the existing `state` volume; its file bytes, ownership and mode are included in that volume's inventory and archive. The host-only recovery operator key remains in the protected instance directory and outside every API mount.
 
 ## Capture
 

@@ -1,0 +1,28 @@
+test_failed_login_attempt_is_durably_throttled (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_failed_login_attempt_is_durably_throttled) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+FAIL
+
+======================================================================
+FAIL: test_failed_login_attempt_is_durably_throttled (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_failed_login_attempt_is_durably_throttled)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/volt-easy-install-20261118/auth/tests/operations/test_local_accounts_postgres.py", line 303, in test_failed_login_attempt_is_durably_throttled
+    self.assertGreaterEqual(attempts, 1, "failed attempt counter must commit before returning 401")
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 not greater than or equal to 1 : failed attempt counter must commit before returning 401
+
+----------------------------------------------------------------------
+Ran 1 test in 1.003s
+
+FAILED (failures=1)
+Capability written to configured private delivery file.

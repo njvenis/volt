@@ -133,6 +133,23 @@ else:
         self.assertEqual(result.stdout.splitlines(), ["unset", "unset"])
         self.assertFalse(self.state.exists())
 
+    def test_persistent_local_mode_does_not_stage_synthetic_or_oidc_identity(self):
+        self.write_secret("demo-admin-credentials", b"synthetic-only\n")
+        self.write_secret("okta-publisher.json", b"{}\n")
+        self.write_secret("okta_service_private_key", b"synthetic-key\n")
+        result = self.source_script(
+            'uvm_g7_stage_identity_material "$@"; printf "%s\\n" "${UVM_OIDC_DEMO_CREDENTIALS_FILE-unset}" "${UVM_G7_OKTA_PUBLISHER_CONFIG_FILE-unset}"',
+            self.secrets, self.runtime_secrets, self.state, "local", "local", "0", "")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["unset", "unset"])
+        self.assertFalse(self.state.exists())
+        self.assertIn("G7_LOCAL_AUTH=config-missing", ENTRYPOINT)
+        self.assertIn('UVM_AUTH_MODE:-bearer} == oidc && $UVM_OIDC_DEPLOYMENT_MODE == demo', ENTRYPOINT)
+        self.assertIn("G7_LOCAL_AUTH=key-length-invalid", ENTRYPOINT)
+        self.assertIn("install -o uvm -g uvm -m 0600 /run/secrets/local-auth.json", ENTRYPOINT)
+        self.assertIn("chown uvm:uvm /run/volt-bootstrap", ENTRYPOINT)
+        self.assertIn("chmod 0700 /run/volt-bootstrap", ENTRYPOINT)
+
     def test_publisher_health_requires_live_child_and_fresh_status(self):
         config = self.root / "publisher.json"
         config.write_text("{}")

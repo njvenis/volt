@@ -7,15 +7,32 @@ import path from 'node:path';
 import {policyExpectedRevisions,requireAdminRendered,requireAudit,requirePersistedState,requireReceipt,requireSession} from './g7_local_preview_smoke_checks.mjs';
 
 function arg(name){const i=process.argv.indexOf(name);if(i<0||!process.argv[i+1])throw new Error(`missing ${name}`);return process.argv[i+1];}
-const origin=arg('--origin'), issuer=arg('--issuer'), subject=arg('--subject'), principal=arg('--principal'), evidence=arg('--evidence');
+const localMode=process.argv.includes('--local');
+const localSetup=localMode&&process.argv.includes('--setup');
+const registerLocalScanner=localMode&&process.argv.includes('--register-scanner');
+const origin=arg('--origin'), issuer=localMode?null:arg('--issuer'), subject=localMode?null:arg('--subject'), principal=localMode?null:arg('--principal'), evidence=arg('--evidence');
 const deploymentLabel=process.argv.includes('--deployment-label')?arg('--deployment-label'):'Synthetic local demo';
 const readbackOnly=process.argv.includes('--readback');
 const verifyProviderRevocation=process.argv.includes('--verify-provider-revocation');
-const username=arg('--username');
-if(!process.argv.includes('--password-stdin'))throw new Error('missing --password-stdin');
+const legacyUsername=localMode?null:arg('--username');
+if(!process.argv.includes(localMode?'--credentials-stdin':'--password-stdin'))throw new Error('missing --password-stdin');
 const passwordChunks=[];
 for await(const chunk of process.stdin)passwordChunks.push(Buffer.from(chunk));
-const password=Buffer.concat(passwordChunks).toString('utf8');
+const input=Buffer.concat(passwordChunks).toString('utf8');
+let credentials;
+try {
+  credentials=localMode?JSON.parse(input):{username:legacyUsername,password:input};
+  if(!credentials||typeof credentials!=='object'||Array.isArray(credentials)||
+      typeof credentials.username!=='string'||typeof credentials.password!=='string'||
+      !credentials.username||!credentials.password)throw new Error();
+  if(localSetup&&(!credentials.capability||typeof credentials.capability!=='string'||!credentials.display_name||typeof credentials.display_name!=='string'))throw new Error();
+  if(registerLocalScanner&&(!credentials.scanner||typeof credentials.scanner!=='object'||Array.isArray(credentials.scanner)||!['display_name','account_label','platform_id','environment_label','rationale','evidence_ref','username','password'].every(k=>typeof credentials.scanner[k]==='string'&&credentials.scanner[k].length>0)||typeof credentials.scanner.grant_initial_read!=='boolean'||!['us1','us2','us3','eu1','eu2','in1'].includes(credentials.scanner.platform_id)))throw new Error();
+} catch {
+  // JSON parser diagnostics can quote the input. Never expose their error/cause.
+  process.stderr.write('Invalid credential input.\n');
+  process.exit(1);
+}
+const {username,password}=credentials;
 await mkdir(evidence,{recursive:true,mode:0o700});
 const launchOptions={headless:true};
 if(process.env.CHROMIUM_EXECUTABLE_PATH)launchOptions.executablePath=process.env.CHROMIUM_EXECUTABLE_PATH;
@@ -25,7 +42,7 @@ const context=await browser.newContext({ignoreHTTPSErrors:true});
 const page=await context.newPage();
 const zero='00000000-0000-4000-8000-000000000000';
 // Temporary, opt-in diagnosis. Never retain cookies, CSRF tokens or credential headers.
-const diagnostic=verifyProviderRevocation;
+const diagnostic=verifyProviderRevocation&&!localMode;
 let phase='initial', requestSequence=0;
 const trace=[], pendingCaptures=new Set(), requestIds=new WeakMap();
 const digest=value=>crypto.createHash('sha256').update(value).digest('hex');
@@ -115,6 +132,84 @@ async function cardFor(groupId,revision){
 }
 try{
   await page.goto(origin+'/',{waitUntil:'domcontentloaded',timeout:30000});
+  if(localMode){
+    await page.getByRole('heading',{name:localSetup?'Set up your VOLT account':'Sign in to VOLT'}).waitFor();
+    if(localSetup){await page.getByLabel('One-use capability',{exact:true}).fill(credentials.capability);await page.getByLabel('Display name',{exact:true}).fill(credentials.display_name);}
+    await page.getByLabel('Username',{exact:true}).fill(username);
+    await page.getByLabel(localSetup?'New password':'Password',{exact:true}).fill(password);
+    await page.getByRole('button',{name:localSetup?'Create administrator account':'Sign in',exact:true}).click();
+    await waitForSession(page,{status:200,authenticated:true});
+    const localSession=(await api('/api/v1/auth/session')).body;
+    ensure(localSession?.credential_mode==='local_session','local_session_mode_required');
+    await page.getByRole('button',{name:'Sign out',exact:true}).waitFor();
+    ensure(await page.locator('input[type=password]').count()===0,'credential_form_not_cleared');
+    if(localSetup){ensure(localSession.protected_admin===true,'setup_admin_not_confirmed');await page.getByRole('heading',{name:'Your workspace is ready for its first scanner'}).waitFor();}
+    await page.screenshot({path:`${evidence}/local-signed-in.png`,fullPage:true});
+    if(registerLocalScanner){
+      ensure(localSession.protected_admin===true,'registration_admin_required');
+      await page.getByRole('link',{name:'Overview',exact:true}).click();
+      await page.getByRole('button',{name:'Register scanner',exact:true}).click();
+      for(const [label,key] of [['Display name','display_name'],['Account label','account_label'],['Environment label','environment_label'],['Reason for registration','rationale'],['Evidence reference','evidence_ref']])await page.getByLabel(label,{exact:true}).fill(credentials.scanner[key]);
+      await page.getByLabel('Qualys platform',{exact:true}).selectOption(credentials.scanner.platform_id);
+      await page.getByRole('checkbox',{name:'Grant me read access'}).setChecked(credentials.scanner.grant_initial_read);
+      const registrationResponse=page.waitForResponse(r=>r.url().endsWith('/api/v1/assessment/commands')&&r.request().method()==='POST');
+      await page.getByRole('button',{name:'Register disabled scanner',exact:true}).click();
+      const registrationHttp=await registrationResponse;ensure(registrationHttp.status()===200,'registration_response_failed');
+      const registered=(await registrationHttp.json()).result;ensure(registered?.lifecycle==='disabled'&&registered?.source_tuple?.source_family==='qualys'&&registered?.credential_slots?.qualys_vm_basic?.secret_id,'registration_identity_missing');
+      await page.getByRole('status').filter({hasText:'Registration confirmed. Current connection state: disabled'}).waitFor();
+      const cid=registered.allocated_ids.connector_id,source=registered.allocated_ids.source_id;
+      await page.locator('a[href="#scanner?connector_id='+encodeURIComponent(cid)+'&source_id='+encodeURIComponent(source)+'"]').click();
+      await page.getByRole('heading',{name:credentials.scanner.display_name,exact:true}).waitFor();
+      let scanner=(await api('/api/v1/scanners/'+cid+'?source_id='+source)).body;
+      ensure(scanner?.source_tuple?.source_account_id===registered.source_tuple.source_account_id&&scanner?.source_tuple?.scope_key===registered.source_tuple.scope_key&&scanner?.credential?.secret_id===registered.credential_slots.qualys_vm_basic.secret_id,'scanner_identity_mismatch');
+      await page.getByLabel('Reason for scanner action').fill(credentials.scanner.rationale);
+      await page.getByLabel('Scanner evidence reference').fill(credentials.scanner.evidence_ref);
+      async function scannerClick(label,action){
+        const observed=page.waitForResponse(r=>r.url().endsWith('/api/v1/scanners/'+cid+'/commands')&&r.request().method()==='POST',{timeout:150000});
+        await page.getByRole('button',{name:label,exact:true}).click();
+        const response=await observed;ensure([200,202].includes(response.status()),'scanner_command_rejected');
+        let value=await response.json();
+        if(value.operation_id)ensure(response.status()===202&&value.status==='running'&&value.receipt_id===null,'scanner_operation_has_no_audited_receipt');
+        const id=value.command_id;
+        const deadline=Date.now()+150000;
+        while(value.operation_id&&value.status==='running'&&Date.now()<deadline){
+          // Replays the frozen admitted command in the UI; never creates a new one.
+          const next=page.waitForResponse(r=>r.url().endsWith('/api/v1/scanners/'+cid+'/commands')&&r.request().method()==='POST',{timeout:150000});
+          await page.getByRole('button',{name:'Check original scanner command',exact:true}).click();
+          const checked=await next;ensure([200,202].includes(checked.status()),'scanner_poll_rejected');
+          value=await checked.json();ensure(value.command_id===id,'scanner_poll_command_changed');
+          if(value.operation_id)ensure(checked.status()===202&&value.status==='running'&&value.receipt_id===null,'scanner_operation_has_no_audited_receipt');
+          if(value.operation_id&&value.status==='running')await page.waitForTimeout(1000);
+        }
+        ensure(!value.operation_id&&value.schema_version===1&&['decision_id','audit_event_id','intent_id'].every(k=>typeof value[k]==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value[k])),'scanner_operation_has_no_audited_receipt');
+        ensure(value.command_id===id&&value.action===action&&value.target_id===cid&&value.result,'scanner_receipt_missing');
+        ensure(value.projection?.connector_id===cid&&value.projection?.source_id===source,'scanner_receipt_source_mismatch');
+        if(value.result.status)ensure(value.result.status==='succeeded','scanner_operation_not_succeeded');
+        await page.getByRole('button',{name:'Refresh source access',exact:true}).waitFor({state:'visible'});
+        return value;
+      }
+      await scannerClick('Save Qualys configuration','scanner.configuration.save');
+      await page.getByLabel('Qualys username',{exact:true}).fill(credentials.scanner.username);
+      await page.getByLabel('Qualys password',{exact:true}).fill(credentials.scanner.password);
+      const credentialResponse=page.waitForResponse(r=>r.url().endsWith('/versions')&&r.request().method()==='POST');
+      await page.getByRole('button',{name:'Save Qualys credentials',exact:true}).click();
+      const credentialHttp=await credentialResponse;ensure(credentialHttp.status()===201,'qualys_credential_submission_failed');
+      const credentialReceipt=await credentialHttp.json();ensure(credentialReceipt.result?.secret_id===registered.credential_slots.qualys_vm_basic.secret_id&&credentialReceipt.result?.source_id===source&&credentialReceipt.result?.version_state==='active','qualys_credential_receipt_mismatch');
+      await page.getByRole('status').filter({hasText:'Credential version recorded'}).waitFor();
+      ensure(await page.getByLabel('Qualys username',{exact:true}).inputValue()===''&&await page.getByLabel('Qualys password',{exact:true}).inputValue()==='','qualys_credential_fields_retained');
+      await scannerClick('Test connection','scanner.connection.test');
+      await scannerClick('Activate configuration','scanner.configuration.activate');
+      const collected=await scannerClick('Collect now','scanner.collection.start');
+      const detections=await api('/api/v1/scanners/'+cid+'/runs/'+collected.result.run_id+'/detections?source_id='+source+'&limit=50');
+      ensure(detections.status===200&&detections.body?.items?.length>0&&detections.body.coverage?.status==='unknown'&&detections.body.source_freshness?.status==='unknown','persisted_source_observations_missing');
+      await page.getByRole('cell',{name:detections.body.items[0].qid}).first().waitFor();
+      await page.screenshot({path:`${evidence}/local-qualys-observations.png`,fullPage:true});
+    }
+    await page.getByRole('button',{name:'Sign out',exact:true}).click();
+    await waitForSession(page,{status:401,authenticated:false});
+    await page.getByRole('heading',{name:'Sign in to VOLT'}).waitFor();
+    console.log(JSON.stringify({browser_login:'passed',mode:'local',logout:'confirmed',setup:localSetup?'confirmed':'not requested',registration:registerLocalScanner?'Qualys registration, configuration, credential, test, activation, collection and persisted observations confirmed':'not requested'}));
+  }else{
   await page.getByText(deploymentLabel,{exact:true}).waitFor({state:'visible',timeout:10000});
   await page.getByRole('link',{name:/sign in/i}).click({timeout:10000});
   await page.getByLabel('Username').fill(username);
@@ -256,4 +351,5 @@ try{
     await writeFile(`${evidence}/provider-group-removal.json`,JSON.stringify({environment:'local synthetic OIDC Compose process',old_cookie_revoked:true,fresh_code_flow_authenticated:true,retained_native_access_group:true,effective_role_ids:after.authority.role_ids,effective_source_scopes:after.authority.source_scopes},null,2)+'\n',{mode:0o600});
   }
   console.log(JSON.stringify({browser_login:'passed',issuer,subject,principal_id:principal,admin_view:'loaded',admin_control:'enabled',...(readbackOnly?{restart_readback:readback.status}:{public_admin_readback:readback.status}),audited:true,create_audit_event_id:createReceipt.audit_event_id,membership_audit_event_id:membershipReceipt.audit_event_id,object_revision:item.revision,group_id:item.access_group_id,create_command_id:createReceipt.command_id,membership_command_id:membershipReceipt.command_id}));
-}finally{if(diagnostic){await Promise.allSettled([...pendingCaptures]);await snapshot('final');}await context.close();await browser.close();}
+  }
+}catch(error){if(!localMode)throw error;process.stderr.write('Local browser verification failed.\n');process.exitCode=1;}finally{if(diagnostic){await Promise.allSettled([...pendingCaptures]);await snapshot('final');}await context.close();await browser.close();}

@@ -1,4 +1,10 @@
 from pathlib import Path
+import io
+import json
+import os
+import subprocess
+import tarfile
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,12 +30,58 @@ class RC3WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("docker build --platform", workflow.split("  publish:", 1)[1])
         self.assertNotIn("packages: write", workflow.split("  native_candidate:", 1)[1].split("  retain_candidate:", 1)[0])
 
-    def test_release_bootstrap_uses_trusted_source_before_load(self):
+    def test_release_bootstrap_resolves_fixed_tag_before_helper_and_archive_verification(self):
         instructions = (ROOT / "tools/release/VERIFY-RELEASE.md").read_text()
-        self.assertLess(instructions.index("git clone --no-checkout"), instructions.index("archive.py verify"))
+        block = instructions.split("```sh\n", 1)[1].split("\n```", 1)[0]
+        self.assertLess(block.index("git ls-remote"), block.index("git clone"))
+        self.assertLess(block.index("git clone"), block.index("install_cosign.py"))
         self.assertLess(instructions.index("archive.py verify"), instructions.index("archive.py load"))
-        self.assertIn("Do not execute or install any file from the archive", instructions)
+        self.assertIn('--source-sha "$SOURCE_SHA"', instructions)
+        self.assertIn("Do not read its manifest to choose source code, a verifier, or an installer", instructions)
         self.assertIn("release-rc3.yml@refs/heads/main", instructions)
+        source_assignment = next(line for line in block.splitlines() if line.startswith("SOURCE_SHA="))
+        self.assertIn("TAG_REFS", source_assignment)
+        self.assertNotIn("ARCHIVE", source_assignment)
+        self.assertNotIn("manifest.json", block[:block.index("git clone")])
+
+    def test_malicious_archive_manifest_cannot_select_bootstrap_source(self):
+        instructions = (ROOT / "tools/release/VERIFY-RELEASE.md").read_text()
+        block = instructions.split("```sh\n", 1)[1].split("\n```", 1)[0]
+        start = block.index("TAG_REFS=")
+        end = block.index("git clone", start)
+        pin_source = block[start:end] + "\nprintf '%s\\n' \"$SOURCE_SHA\"\n"
+        trusted_source = "a" * 40
+        malicious_source = "e" * 40
+        with tempfile.TemporaryDirectory(prefix="volt-rc3-bootstrap-negative-") as temporary:
+            root = Path(temporary)
+            archive = root / "attacker.tar.gz"
+            manifest = json.dumps({"source_commit": malicious_source}).encode()
+            with tarfile.open(archive, "w:gz") as bundle:
+                item = tarfile.TarInfo("manifest.json")
+                item.size = len(manifest)
+                bundle.addfile(item, io.BytesIO(manifest))
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_git = fake_bin / "git"
+            fake_git.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = ls-remote ]; then "
+                "printf '%s\\t%s\\n' '" + trusted_source + "' 'refs/tags/v0.1.0-rc.3'; "
+                "else exit 91; fi\n"
+            )
+            fake_git.chmod(0o755)
+            environment = {
+                **os.environ,
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "ARCHIVE": str(archive),
+                "REPOSITORY": "https://github.com/njvenis/volt.git",
+                "RELEASE_TAG": "v0.1.0-rc.3",
+            }
+            result = subprocess.run(["bash", "-c", pin_source], env=environment,
+                                    capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), trusted_source)
+            self.assertNotEqual(result.stdout.strip(), malicious_source)
 
 
 if __name__ == "__main__":

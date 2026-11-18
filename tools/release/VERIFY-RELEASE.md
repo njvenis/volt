@@ -5,22 +5,33 @@ This file is a separate GitHub Release asset. Obtain it from the VOLT release pa
 ## Prerequisites
 
 - Python 3.11 or later, Git, OpenSSL, Docker Engine or Docker Desktop, and Docker Compose v2.
-- Network access to the public VOLT GitHub repository and the official Cosign release asset pinned in the signed source commit.
+- Network access to the public VOLT GitHub repository and the official Cosign release asset pinned in the fixed RC3 source.
 - The matching architecture archive: `amd64` for x86-64 or `arm64` for Apple Silicon/ARM64.
 
 ## Verify before loading
 
-Read `source_commit` from the archive manifest only as a locator. Do not execute or install any file from the archive. Retrieve the exact public source commit and use its maintained verifier and pinned Cosign installer:
+The archive is untrusted input at this point. Do not read its manifest to choose source code, a verifier, or an installer. First obtain the fixed RC3 source from the public VOLT repository's `v0.1.0-rc.3` release tag and use only its maintained verifier and pinned Cosign installer:
 
 ```sh
 mkdir -m 700 volt-rc3-check
 cd volt-rc3-check
 ARCH=arm64 # use amd64 on x86-64
 ARCHIVE="../volt-0.1.0-rc.3-linux-${ARCH}.tar.gz"
-SOURCE_SHA="$(tar -xOf "$ARCHIVE" manifest.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["source_commit"])')"
-git clone --no-checkout https://github.com/njvenis/volt.git trusted-source
+REPOSITORY=https://github.com/njvenis/volt.git
+RELEASE_TAG=v0.1.0-rc.3
+TAG_REFS="$(git ls-remote "$REPOSITORY" "refs/tags/${RELEASE_TAG}" "refs/tags/${RELEASE_TAG}^{}")"
+SOURCE_SHA="$(printf '%s\n' "$TAG_REFS" | awk -v peeled="refs/tags/${RELEASE_TAG}^{}" '$2 == peeled {print $1}')"
+if [ -z "$SOURCE_SHA" ]; then
+  SOURCE_SHA="$(printf '%s\n' "$TAG_REFS" | awk -v direct="refs/tags/${RELEASE_TAG}" '$2 == direct {print $1}')"
+fi
+case "$SOURCE_SHA" in
+  (*[!0-9a-f]*|'') echo "RC3 source tag was not found" >&2; exit 1 ;;
+esac
+test "${#SOURCE_SHA}" -eq 40
+git clone --no-checkout "$REPOSITORY" trusted-source
 git -C trusted-source fetch --no-tags origin "$SOURCE_SHA"
 git -C trusted-source checkout --detach "$SOURCE_SHA"
+test "$(git -C trusted-source rev-parse HEAD)" = "$SOURCE_SHA"
 python3 trusted-source/tools/release/install_cosign.py
 /tmp/volt-release-tools/cosign initialize
 python3 trusted-source/tools/release/archive.py verify \
@@ -29,9 +40,9 @@ python3 trusted-source/tools/release/archive.py verify \
   --source-sha "$SOURCE_SHA"
 ```
 
-The verifier checks the Cosign bundle against the fixed identity
+The fixed release tag, retrieved from the public maintainer repository, determines which verifier code runs and the expected archive source. Archive contents cannot select or replace that code. The verifier checks the signed manifest's fixed workflow identity
 `https://github.com/njvenis/volt/.github/workflows/release-rc3.yml@refs/heads/main`
-and issuer `https://token.actions.githubusercontent.com`. It validates the signed closed inventory, exact source bundle and snapshot, architecture/image identities, image-bound notices and scan, and the Compose bundle's shared registry index digest. The source commit value is not trusted until signature verification succeeds.
+and issuer `https://token.actions.githubusercontent.com`. It validates the signed closed inventory, exact source bundle and snapshot, architecture/image identities, image-bound notices and scan, and the Compose bundle's shared registry index digest. It also requires the signed `source_commit` to match the source commit resolved from the fixed release tag.
 
 Only after successful verification, load the image through the same trusted helper:
 

@@ -150,7 +150,7 @@ class LocalPreviewPasswordTests(unittest.TestCase):
             self.assertIn("--username", command)
             self.assertEqual(command[command.index("--username") + 1], "preview-admin")
             self.assertIn("--password-stdin", command)
-            self.assertEqual(invoke.call_args.kwargs["input"], "a-long-preview-password\n")
+            self.assertEqual(invoke.call_args.kwargs["input"], "a-long-preview-password")
             self.assertNotIn("a-long-preview-password", " ".join(command))
             self.assertTrue(password.exists(), "caller-owned password file must survive both smoke stages")
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ import re
 import secrets
 import select
 import shutil
+import shlex
 import signal
 import stat
 import subprocess
@@ -466,6 +468,167 @@ def qualify_offline_fixture_entry(*, closure: Path, fixture: Path, verifier_refe
     }, sort_keys=True, indent=2) + '\n')
 
 
+
+def create_offline_fixture_entry(*, state: Path, admission: dict, private: Path) -> Path:
+    """Provision the maintainer's EXTERNAL fixed fixture entry, never package code.
+
+    Every expectation below comes from this controller's independently selected
+    original release admission. Cache/journal bytes cannot select a key, policy,
+    verifier, runtime, source, command or another instance. Production is closed.
+    The generated POSIX entry runs in the same restricted host environment as
+    the online launcher; the controller's Python never runs on that target path.
+    """
+    state = state.resolve(strict=True)
+    closure = state.parent / (state.name + '.installer-artifacts') / 'originals'
+    fixture = Path(admission['fixture_directory']).resolve(strict=True)
+    verifier = admission['verifier_reference']
+    runtime = admission['image_reference']
+    platform = admission['platform']
+    if (platform not in SUPPORTED_PLATFORMS
+            or not re.fullmatch(r'127\.0\.0\.1:46150/volt-installer-verifier@sha256:[0-9a-f]{64}', verifier)
+            or not re.fullmatch(r'127\.0\.0\.1:46150/volt@sha256:[0-9a-f]{64}', runtime)
+            or not re.fullmatch(r'[0-9a-f]{40}', admission['source_commit'])
+            or not re.fullmatch(r'sha256:[0-9a-f]{64}', admission['source_snapshot'])
+            or admission['bundle_version'] != '0.1.0-rc.4'):
+        raise ValueError('external offline entry requires the exact original independently admitted fixture release')
+    for path in (private, state, closure.parent, fixture):
+        info = path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or path.is_symlink() or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o700):
+            raise ValueError('external entry private material custody differs')
+    if any(parent in (state, closure.parent, closure) for parent in (fixture, *fixture.parents)):
+        raise ValueError('external trust material overlaps downloaded cache or instance')
+    policies = private / 'public-offline-entry-policies'
+    policies.mkdir(mode=0o700)
+    for name, predicate in (('signature', 'https://sigstore.dev/cosign/sign/v1'),
+                            ('slsa', 'https://slsa.dev/provenance/v1')):
+        destination = policies / (name + '.cue')
+        with destination.open('x') as stream:
+            stream.write(f'predicateType: "{predicate}"\nsubject: [{{digest: {{sha256: "{verifier.split("@sha256:")[1]}"}}}}]\n')
+        destination.chmod(0o600)
+    base = ['docker', 'run', '--rm', '--platform', platform, '--pull=never', '--network', 'none',
+        '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--tmpfs',
+        '/tmp:rw,noexec,nosuid,size=32m', '--env', 'HOME=/tmp', '--user', f'{os.getuid()}:{os.getgid()}']
+    cosign = [*base, '--mount', f'type=bind,src={closure},dst=/closure,readonly',
+        '--mount', f'type=bind,src={fixture},dst=/independent-trust,readonly',
+        '--mount', f'type=bind,src={policies},dst=/independent-policy,readonly', COSIGN_IMAGE]
+    lines = ['#!/bin/sh', 'set -eu', 'umask 077',
+        'fail() { printf "%s\\n" "external offline entry: $*" >&2; exit 1; }',
+        '[ "$#" -ge 3 ] || fail "fixed action and selected directory required"',
+        'action=$1; shift',
+        'case "$action" in verify-cache|stop|start|logs|diagnose|backup-record|backup-status|restore-provision|restore-admit|destroy) ;; *) fail "unsupported fixed lifecycle action" ;; esac',
+        '[ "$1" = --directory ] || fail "selected directory is mandatory"',
+        '[ "$2" = ' + shlex.quote(str(state)) + ' ] || fail "different instance refused"', 'shift 2',
+        'for argument do [ "$argument" != --directory ] || fail "duplicate directory selector"; done',
+        'CLOSURE=' + shlex.quote(str(closure)),
+        'if [ ! -e "$CLOSURE" ] && [ ! -L "$CLOSURE" ]; then',
+        '  count=0',
+        '  for candidate in ' + shlex.quote(str(closure.parent)) + '/.originals.partial.????????; do',
+        '    [ -e "$candidate" ] || [ -L "$candidate" ] || continue',
+        '    name=${candidate##*/}; suffix=${name#.originals.partial.}',
+        '    case "$suffix" in *[!A-Za-z0-9]*|\'\') fail "malformed retained stage name" ;; esac',
+        '    [ -d "$candidate" ] && [ ! -L "$candidate" ] || fail "linked retained stage"',
+        '    count=$((count + 1)); CLOSURE=$candidate',
+        '  done',
+        '  [ "$count" -eq 1 ] || fail "single exact retained stage required"',
+        'fi',
+        '[ -d "$CLOSURE" ] && [ ! -L "$CLOSURE" ] || fail "original cache transport unavailable"']
+    for name, predicate in (('signature', 'https://sigstore.dev/cosign/sign/v1'),
+                            ('slsa', 'https://slsa.dev/provenance/v1')):
+        lines.append(shlex.join([*cosign, 'verify-attestation', '--type', predicate,
+            '--policy', '/independent-policy/' + name + '.cue', '--key', '/independent-trust/fixture.pub',
+            '--trusted-root', '/independent-trust/trusted-root.json', '--local-image', '/closure/verifier']) + ' >/dev/null')
+    for name, signature in (('launcher.sh', 'launcher.sigstore.json'),
+                             ('installer.bundle.tar.gz', 'installer.bundle.sigstore.json')):
+        lines.append(shlex.join([*cosign, 'verify-blob', '--key', '/independent-trust/fixture.pub',
+            '--trusted-root', '/independent-trust/trusted-root.json', '--bundle',
+            '/closure/package/' + signature, '/closure/package/' + name]) + ' >/dev/null')
+    lines += ['WORK=$(mktemp -d "${TMPDIR:-/tmp}/volt-external-offline.XXXXXXXX")',
+        'chmod 700 "$WORK"', "trap 'rm -rf \"$WORK\"' 0 HUP INT TERM",
+        shlex.join(['docker', 'image', 'inspect', '--platform', platform, runtime]) + ' >"$WORK/runtime-image.json"',
+        shlex.join(['cp', str(closure / 'runtime-index/blobs/sha256' / runtime.split('@sha256:')[1])]) + ' "$WORK/runtime-index.json"',
+        'chmod 400 "$WORK/runtime-image.json" "$WORK/runtime-index.json"']
+    lines.append('set -- ' + shlex.join(base) +
+        ' --mount "type=bind,src=$WORK,dst=/admission,readonly" ' + shlex.join([
+            '--mount', f'type=bind,src={closure},dst=/run/volt-offline-artifacts,readonly',
+            '--mount', f'type=bind,src={closure.parent},dst=/run/volt-cache-parent,readonly']))
+    # verify-cache is the full external authentication BEFORE archive extraction;
+    # all lifecycle actions additionally compare the RESTORED/current pin. The
+    # missing journal exception never calls a launcher or creates an identity.
+    lines += ['if [ "$action" != verify-cache ]; then',
+        '  [ -f ' + shlex.quote(str(state / 'instance.json')) + ' ] && [ ! -L ' + shlex.quote(str(state / 'instance.json')) + ' ] || fail "current selected journal missing"',
+        '  set -- "$@" ' + shlex.join(['--mount', f'type=bind,src={state / "instance.json"},dst=/run/volt-selected-journal/instance.json,readonly']),
+        'fi',
+        'set -- "$@" ' + shlex.join([verifier, '--offline-artifacts', '--expected-verifier-reference', verifier,
+            '--bundle', '/run/volt-offline-artifacts/package/installer.bundle.tar.gz',
+            '--bundle-signature', '/run/volt-offline-artifacts/package/installer.bundle.sigstore.json',
+            '--image-inspect', '/admission/runtime-image.json', '--index', '/admission/runtime-index.json',
+            '--output-dir', '/tmp/verified', '--reference', runtime, '--signer', SIGNER, '--issuer', ISSUER,
+            '--source-revision', admission['source_commit'], '--source-snapshot', admission['source_snapshot'],
+            '--version', admission['bundle_version'], '--platform', platform]),
+        'if [ "$action" != verify-cache ]; then set -- "$@" --require-installed-pin; fi',
+        '"$@" >/dev/null',
+        'if [ "$action" = verify-cache ]; then printf "%s\\n" "external_full_graph_verified=1"; exit 0; fi',
+        'export VOLT_OFFLINE=1 VOLT_BOOTSTRAP_VERIFIER_VERIFIED=1',
+        'export VOLT_EXPECTED_VERIFIER_IMAGE=' + shlex.quote(verifier),
+        'export VOLT_EXPECTED_VERSION=' + shlex.quote(admission['bundle_version']),
+        'export VOLT_EXPECTED_SIGNER=' + shlex.quote(SIGNER),
+        'export VOLT_EXPECTED_ISSUER=' + shlex.quote(ISSUER),
+        'exec sh ' + shlex.quote(str(closure / 'package/launcher.sh')) + ' "$action" --directory ' + shlex.quote(str(state)) + ' "$@"']
+    # Function positional arguments keep the original public suffix intact.
+    verify_start = next(i for i, line in enumerate(lines) if line.startswith('WORK='))
+    verify_end = lines.index('"$@" >/dev/null')
+    lines.insert(verify_start, 'verify_graph() {')
+    lines.insert(verify_end + 2, '}')
+    lines.insert(verify_end + 3, 'verify_graph')
+    lines.insert(verify_end + 4, 'rm -rf "$WORK"; WORK=; trap - 0 HUP INT TERM')
+    wrapper = private / 'trusted-offline-entry.sh'
+    with wrapper.open('x') as stream:
+        script = '\n'.join(lines) + '\n'
+        # Only these fixed cache transport arguments expand the selected view;
+        # all external trust/identity/release expectations remain literals.
+        for destination in ('/closure', '/run/volt-offline-artifacts'):
+            argument = f'type=bind,src={closure},dst={destination},readonly'
+            script = script.replace(shlex.quote(argument), f'"type=bind,src=$CLOSURE,dst={destination},readonly"')
+        for suffix in ('runtime-index/blobs/sha256/' + runtime.split('@sha256:')[1], 'package/launcher.sh'):
+            script = script.replace(shlex.quote(str(closure / suffix)), '"$CLOSURE/' + suffix + '"')
+        stream.write(script)
+    wrapper.chmod(0o700)
+    return wrapper
+
+
+@contextmanager
+def owned_registry_outage(evidence: Path):
+    """Stop/restart ONLY the previously inspected owned disposable registry."""
+    registry = 'volt-easy-delivery-registry'
+    rows = json.loads(run('offline-registry-owned-before', ['docker', 'inspect', registry], evidence).stdout)
+    expected_image = 'registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373'
+    expected_data = '/tmp/volt-easy-install-20261118/evidence/delivery/trust-positive/registry-data'
+    if len(rows) != 1:
+        raise RuntimeError('owned registry identity is ambiguous')
+    row = rows[0]
+    mounts = row.get('Mounts', [])
+    if (row.get('Name') != '/' + registry or row.get('Config', {}).get('Image') != expected_image
+            or row.get('State', {}).get('Running') is not True
+            or row.get('HostConfig', {}).get('PortBindings') !=
+                {'5000/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '46150'}]}
+            or len(mounts) != 1 or mounts[0].get('Type') != 'bind'
+            or mounts[0].get('Source') != expected_data or mounts[0].get('Destination') != '/var/lib/registry'
+            or not re.fullmatch(r'[0-9a-f]{64}', row.get('Id', ''))):
+        raise RuntimeError('registry outage refuses an unowned or contradictory listener/data binding')
+    identity = row['Id']
+    try:
+        run('offline-registry-stop-exact-owned', ['docker', 'stop', identity], evidence)
+        stopped = run('offline-registry-stopped', ['docker', 'inspect', identity, '--format', '{{.State.Running}}'], evidence)
+        if stopped.stdout.strip() != 'false':
+            raise RuntimeError('owned registry outage did not occur')
+        yield
+    finally:
+        run('offline-registry-restore-exact-owned', ['docker', 'start', identity], evidence)
+        running = run('offline-registry-restored', ['docker', 'inspect', identity, '--format', '{{.State.Running}}'], evidence)
+        if running.stdout.strip() != 'true':
+            raise RuntimeError('owned registry did not restart after the outage test')
+
 def host_dependency_json(path: Path) -> dict:
     descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     with os.fdopen(descriptor, 'rb') as stream:
@@ -850,8 +1013,11 @@ def qualify_local_restore(*, setup: Path, launcher: Path | None, launcher_env: d
     destroy = ([*cli, 'cleanup', str(state), '--confirm-project', project, '--remove-data'] if launcher is None
         else ['sh', str(launcher), 'destroy', '--directory', str(state), '--confirm-project', project, '--remove-state'])
     run('local-destroy-before-restore', destroy, evidence, env=launcher_env)
+    if launcher is not None:
+        run('local-pre-extraction-external-full-graph', ['sh', str(launcher), 'verify-cache',
+            '--directory', str(state)], evidence, env=launcher_env)
     state.mkdir(mode=0o700)
-    run('local-restore-instance', ['docker', 'run', '--rm', '--platform', admission['platform'], '--network', 'none',
+    run('local-restore-instance', ['docker', 'run', '--rm', '--pull=never', '--platform', admission['platform'], '--network', 'none',
         '--mount', f'type=bind,src={state},dst=/target',
         '--mount', f'type=bind,src={backup},dst=/backup,readonly', '--entrypoint', '/bin/bash', image,
         '-c', 'tar --numeric-owner -xpf /backup/instance.tar -C /target'], evidence)
@@ -865,18 +1031,18 @@ def qualify_local_restore(*, setup: Path, launcher: Path | None, launcher_env: d
     if negative.returncode == 0:
         raise RuntimeError('local restore accepted empty stores')
     for store in ('postgres', 'media', 'state'):
-        run('local-restore-import-' + store, ['docker', 'run', '--rm', '--platform', admission['platform'], '--network', 'none',
+        run('local-restore-import-' + store, ['docker', 'run', '--rm', '--pull=never', '--platform', admission['platform'], '--network', 'none',
             '--mount', f'type=volume,src={project}_{store},dst=/target',
             '--mount', f'type=bind,src={backup},dst=/backup,readonly', '--entrypoint', '/bin/bash', image,
             '-c', f'tar --numeric-owner -xpf /backup/{store}.tar -C /target'], evidence)
     # A real corruption is detected before runtime execution, then removed.
-    run('local-restore-corrupt-state', ['docker', 'run', '--rm', '--platform', admission['platform'], '--network', 'none',
+    run('local-restore-corrupt-state', ['docker', 'run', '--rm', '--pull=never', '--platform', admission['platform'], '--network', 'none',
         '--mount', f'type=volume,src={project}_state,dst=/target', '--entrypoint', '/bin/bash', image,
         '-c', 'printf corrupt > /target/.volt-qualification-corruption'], evidence)
     negative = run('local-restore-corruption-negative', admit, evidence, env=launcher_env, check=False)
     if negative.returncode == 0:
         raise RuntimeError('local restore accepted corrupted store')
-    run('local-restore-remove-corruption', ['docker', 'run', '--rm', '--platform', admission['platform'], '--network', 'none',
+    run('local-restore-remove-corruption', ['docker', 'run', '--rm', '--pull=never', '--platform', admission['platform'], '--network', 'none',
         '--mount', f'type=volume,src={project}_state,dst=/target', '--entrypoint', '/bin/bash', image,
         '-c', 'rm /target/.volt-qualification-corruption'], evidence)
     run('local-restore-admit', admit, evidence, env=launcher_env)
@@ -1019,14 +1185,21 @@ def qualify_local_runtime(*, package: Path, bundle: Path, admission: dict[str, s
         input_text=json.dumps({"username": "qualification-admin", "password": password}))
     protected_local_readback(origin, private / "cookie", local_config["installation_id"],
                              evidence, "local-restart-protected-deployment-readback")
-    qualify_local_restore(setup=package / "setup.py", launcher=launcher, launcher_env=launcher_env,
-        state=state, private=private, evidence=evidence, admission=admission, project=project,
-        origin=origin, password=password, consumed_capability=consumed_capability,
-        installation_id=local_config["installation_id"])
+    offline_entry = create_offline_fixture_entry(state=state, admission=admission, private=private)
+    run('external-offline-entry-syntax', ['sh', '-n', str(offline_entry)], evidence, env=launcher_env)
+    with owned_registry_outage(evidence):
+        unavailable = run('offline-owned-registry-fetch-denied', ['docker', 'buildx', 'imagetools',
+            'inspect', '--raw', admission['image_reference']], evidence, env=launcher_env, check=False)
+        if unavailable.returncode == 0:
+            raise RuntimeError('owned registry metadata unexpectedly available during the outage')
+        qualify_local_restore(setup=package / "setup.py", launcher=offline_entry, launcher_env=launcher_env,
+            state=state, private=private, evidence=evidence, admission=admission, project=project,
+            origin=origin, password=password, consumed_capability=consumed_capability,
+            installation_id=local_config["installation_id"])
     (evidence / "local-auth-journey.json").write_text(json.dumps({
         "status": "passed",
-        "host_runtime": "Install/start/stop use restricted POSIX shell and Docker/Compose; offline backup/restore orchestration also uses host Python",
-        "minimal_host_cold_restore_qualified": False,
+        "host_runtime": "Restricted POSIX shell and Docker/Compose; externally authenticated complete cached graph and public cold restore under owned registry outage",
+        "minimal_host_cold_restore_qualified": True,
         "instance_outside_checkout": True,
         "source_revision": admission["source_commit"],
         "source_snapshot": admission["source_snapshot"],

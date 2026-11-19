@@ -371,3 +371,33 @@ every leaf replaced by its type and SHA256, so differing identity fields can
 be assessed without disclosing secret values. Exact phase-record digests and
 operation UUIDs accompany these traces. The host retains owner logs on both
 success and failure. No completed backup is published on a mismatch.
+
+## External offline entry and pre-extraction admission
+
+The maintained fixture controller provisions a separate owned0700 POSIX entry
+from its independently selected ORIGINAL admission: fixed Cosign digest,
+verifier/runtime references, native platform, source revision/snapshot, RC4
+version and original public key/trusted root. Neither journal nor downloaded
+cache chooses these expectations. Production trust/time activation stays closed.
+The entry authenticates exact verifier signature/SLSA subjects with trusted
+Cosign CUE before any verifier execution, and original launcher/bundle blobs
+before shell execution. Every Docker execution is network-none/pull-never.
+It then runs full original graph admission against a fresh cached-engine inspect.
+
+The single fixed `verify-cache --directory CANONICAL_STATE` action performs this
+same complete external authentication and exits without any candidate launcher,
+helper, extraction, identity writer or journal reconstruction. This is the
+required admission BEFORE instance extraction. Subsequent restore provisioning
+repeats authentication and compares the RESTORED exact pin before authority or
+workers. Missing pins never trigger backfill. All extraction/import containers
+also require explicit pull-never.
+
+If committed originals is absent, entry/launcher may discover only a single
+nonlinked directory with the fixed .originals.partial. plus eight ASCII alnum
+name under the dedicated anchor. This selects a TRANSPORT VIEW only, creates
+nothing, and grants no authority. Fresh independent verification must compare
+its exact original bytes, live inode, journal-bound stage, prepared/unestablished/
+unacknowledged generation-zero intent and immutable fingerprints before an
+actual FD owner can continue publication. Unknown, multiple, substituted,
+acked/established or restored-stage contradictions deny. Offline NEW install
+remains denied; verification-only material never recreates an instance.

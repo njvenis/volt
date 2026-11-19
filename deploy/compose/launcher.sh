@@ -244,6 +244,21 @@ publish_installer_cache() {
 if [ "$OFFLINE_MODE" -eq 1 ]; then
   [ "$EARLY_ACTION" != install ] || fail 'a verification cache cannot authorize a new installation'
   resolve_cache_location
+  if [ ! -e "$CACHE_DIRECTORY" ] && [ ! -L "$CACHE_DIRECTORY" ]; then
+    # Transport discovery ONLY. The independently authenticated verifier binds
+    # the sole live candidate to the exact initial journal pin BEFORE use.
+    transport_count=0
+    for transport_candidate in "$CACHE_PARENT"/.originals.partial.????????; do
+      [ -e "$transport_candidate" ] || [ -L "$transport_candidate" ] || continue
+      transport_name=${transport_candidate##*/}
+      transport_suffix=${transport_name#.originals.partial.}
+      case "$transport_suffix" in *[!A-Za-z0-9]*|'') fail 'malformed retained initial cache name' ;; esac
+      [ -d "$transport_candidate" ] && [ ! -L "$transport_candidate" ] || fail 'retained initial cache is linked or not a directory'
+      transport_count=$((transport_count + 1))
+      CACHE_DIRECTORY=$transport_candidate
+    done
+    [ "$transport_count" -eq 1 ] || fail 'exact single retained initial verification stage is required'
+  fi
   [ -d "$CACHE_DIRECTORY" ] && [ ! -L "$CACHE_DIRECTORY" ] || fail 'complete original verification cache is missing or linked'
 fi
 

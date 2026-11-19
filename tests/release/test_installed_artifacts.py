@@ -84,6 +84,18 @@ class InstalledArtifactTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'unknown or contradictory'):
                 installed.durable_stage(str(root), info['installer_cache_stage'])
 
+    def test_retained_stage_cannot_resume_acked_established_or_restored_intent(self):
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            _root, _anchor, _stage, _current, info, _receipt = self.fixture(Path(temporary), stack)
+            self.assertEqual(installed.validate_live_cache(info), 'retained_initial_stage')
+            for change in ({'initialized': False}, {'established': True},
+                    {'local_recovery_acknowledgement': {'status': 'applied'}},
+                    {'restore_pending': True}, {'installer_phase': 'ready'},
+                    {'local_recovery_custody': {'restore_generation': 1, 'recovery_epoch_id': 'restored'}},
+                    {'local_recovery_custody': {'restore_generation': True, 'recovery_epoch_id': None}}):
+                with self.subTest(change=change), self.assertRaises(ValueError):
+                    installed.validate_live_cache({**info, **change})
+
     def test_prepared_fingerprints_never_repair_or_regenerate_missing_keys(self):
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
             root, _anchor, _stage, _current, info, _receipt = self.fixture(Path(temporary), stack)

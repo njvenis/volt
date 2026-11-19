@@ -282,10 +282,15 @@ def validate_live_cache(info: dict) -> str:
                 if (child.st_dev, child.st_ino) == (mounted.st_dev, mounted.st_ino): matched = name; break
         if matched is None:
             raise ValueError('bound cache view has no live original named entry in its dedicated anchor')
-        if matched == stage_name and (info.get('installer_phase') != 'prepared'
+        if matched == stage_name and (info.get('initialized') is not True or info.get('installer_phase') != 'prepared'
                 or info.get('established') is not False or info.get('restore_pending')
                 or info.get('local_recovery_acknowledgement') is not None):
             raise ValueError('original stage is not an admissible interrupted initial publication intent')
+        recovery = info.get('local_recovery_custody')
+        if matched == stage_name and recovery is not None and (not isinstance(recovery, dict)
+                or type(recovery.get('restore_generation')) is not int
+                or recovery['restore_generation'] != 0 or recovery.get('recovery_epoch_id') is not None):
+            raise ValueError('retained initial stage cannot resume a restored custody generation')
         current = Closure(fixture=None)
         if current.hash != pin['closure_sha256']:
             raise ValueError('live named cache contradicts committed original bytes')

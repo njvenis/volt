@@ -200,6 +200,84 @@ EOF_INSTALLER_INTENT
 collect_cache_mounts() {
   cache_containers=$(docker ps -aq --filter label=org.volt.compose-install.contract=1) \
     || fail 'actual API container inventory is unavailable'
+  api_containers=''
+  for container_id in $cache_containers; do
+    case "$container_id" in *[!0-9a-f]*|'') fail 'Docker returned malformed contract container identity' ;; esac
+    role=$(docker inspect "$container_id" --format '{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "org.volt.compose-install.role"}}') \
+      || fail 'actual contract container role is unavailable'
+    case "$role" in
+      volt'|'*) api_containers="$api_containers $container_id" ;;
+      '|host-lifecycle-lock'|'<no value>|host-lifecycle-lock')
+        helper_identity=$(docker inspect "$container_id" --format '{{.Id}}|{{.Config.Image}}|{{index .Config.Labels "volt.compose.owner-token"}}|{{index .Config.Labels "volt.compose.project"}}|{{.Image}}|{{if .ImageManifestDescriptor}}{{.ImageManifestDescriptor.digest}}|{{.ImageManifestDescriptor.mediaType}}|{{.ImageManifestDescriptor.size}}|{{.ImageManifestDescriptor.platform.os}}/{{.ImageManifestDescriptor.platform.architecture}}{{end}}|{{.State.Running}}') \
+          || fail 'fixed helper actual image/owner identity is unavailable'
+        IFS='|' read -r helper_id helper_ref helper_owner helper_project helper_image helper_digest helper_media helper_size helper_platform helper_running <<EOF_CACHE_HELPER_ID
+$helper_identity
+EOF_CACHE_HELPER_ID
+        if [ "$helper_id" != "$LOCK_ID" ]; then
+          # Only THIS invocation's genuinely admitted FD owner is exempt.
+          api_containers="$api_containers $container_id"
+          continue
+        fi
+        [ "$helper_running|$helper_ref|$helper_owner|$helper_project" = "true|$IMAGE_REF|$OWNER_TOKEN|$PROJECT" ] \
+          || fail 'current claimed helper image reference or owner differs'
+        if [ "$helper_image" != "$IMAGE_ID" ]; then
+          [ "$IMAGE_ID_KIND" = selected_manifest ] && [ "$helper_image" = "$IMAGE_ENGINE_ID" ] \
+            && [ "$helper_digest|$helper_media|$helper_size|$helper_platform" = "$SELECTED_MANIFEST_ID|$SELECTED_MANIFEST_MEDIA|$SELECTED_MANIFEST_SIZE|$PLATFORM" ] \
+            || fail 'current helper lacks the authenticated typed selected-child image witness'
+        fi
+        shape=$(docker inspect "$container_id" --format '{{json .Config.Entrypoint}}|{{json .Config.Cmd}}|{{.HostConfig.NetworkMode}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.Privileged}}|{{json .HostConfig.PortBindings}}') \
+          || fail 'fixed lifecycle helper shape is unavailable'
+        case "$shape" in
+          '["/opt/uvm/venv/bin/python"]|["-m","uvm.installer.lock","/state/.install.lock"]|none|true|false|'*|\
+          '["/opt/uvm/venv/bin/python"]|["-m","uvm.installer.lock","/state/.install.lock","--initialize-local"]|none|true|false|'*)
+            case "${shape##*|}" in null|'{}') ;; *) fail 'fixed lifecycle helper has published ports' ;; esac ;;
+          *) fail 'contract lifecycle role has an unexpected process or isolation shape' ;;
+        esac
+        helper_tmpfs=$(docker inspect "$container_id" --format '{{json .HostConfig.Tmpfs}}') \
+          || fail 'current helper fixed ephemeral stores are unavailable'
+        [ "$helper_tmpfs" = '{"/app/media":"rw,noexec,nosuid,nodev,size=1m","/opt/uvm/state":"rw,noexec,nosuid,nodev,size=1m","/tmp":"rw,noexec,nosuid,size=8m","/var/lib/postgresql/data":"rw,noexec,nosuid,nodev,size=1m"}' ] \
+          || fail 'current helper ephemeral datastore recipe differs'
+        helper_mounts=$(docker inspect "$container_id" --format '{{range .Mounts}}{{printf "%s|%s|%s|%t\n" .Type .Source .Destination .RW}}{{end}}') \
+          || fail 'current helper mount shape is unavailable'
+        helper_seen='|'
+        while IFS='|' read -r helper_type helper_source helper_target helper_rw; do
+          [ -n "$helper_target" ] || continue
+          case "$helper_seen" in *"|$helper_target|"*) fail 'current helper repeats a mount destination' ;; esac
+          helper_seen="$helper_seen$helper_target|"
+          if [ "$helper_type" = tmpfs ]; then
+            case "$helper_target" in /tmp|/app/media|/opt/uvm/state|/var/lib/postgresql/data) ;; *) fail 'unexpected helper ephemeral mount' ;; esac
+            [ -z "$helper_source" ] && [ "$helper_rw" = true ] || fail 'helper ephemeral mount access differs'
+            continue
+          fi
+          case "$helper_target" in
+            /state) helper_expected="$STATE|true" ;;
+            /package) helper_expected="$PACKAGE|false" ;;
+            /run/volt-offline-artifacts) helper_expected="$CACHE_DIRECTORY|false" ;;
+            /run/volt-cache-parent) helper_expected="$CACHE_PARENT|false" ;;
+            /run/volt-initialization/request.json) helper_expected="$WORK/runtime-init-request.json|false" ;;
+            /run/volt-initialization-admission/receipt.json) helper_expected="$WORK/init-admission.json|false" ;;
+            *) fail 'current helper has an unexpected or broad mount' ;;
+          esac
+          [ "$helper_type|$helper_source|$helper_rw" = "bind|$helper_expected" ] \
+            || fail 'current helper mount source/access contradicts the fixed admitted recipe'
+        done <<EOF_CACHE_HELPER_MOUNTS
+$helper_mounts
+EOF_CACHE_HELPER_MOUNTS
+        for required_mount in /state /package /run/volt-offline-artifacts; do
+          case "$helper_seen" in *"|$required_mount|"*) ;; *) fail 'current helper lacks a fixed required mount' ;; esac
+        done
+        case "$shape" in *'"--initialize-local"'*)
+          for required_mount in /run/volt-cache-parent /run/volt-initialization/request.json /run/volt-initialization-admission/receipt.json; do
+            case "$helper_seen" in *"|$required_mount|"*) ;; *) fail 'initial helper lacks a fixed request/admission mount' ;; esac
+          done ;;
+        esac ;;
+      *)
+        # Unknown roles are POTENTIAL APIs: retain every mount/volume for the
+        # unchanged exclusion check; never infer that an unknown role is safe.
+        api_containers="$api_containers $container_id" ;;
+    esac
+  done
+  cache_containers=$api_containers
   volume_names='|'
   {
     printf '{"containers":['; separator=''
@@ -359,14 +437,18 @@ fi
 
 # Complete independent graph admission precedes this first candidate execution.
 docker run --platform "$PLATFORM" --pull=never --rm -i --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
-  --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -c 'import json,sys; result=json.load(sys.stdin); r=result["runtime"]; print("image_id_kind="+r["image_id_kind"]); print("image_config_id="+r["image_config_id"]); print("selected_descriptor="+json.dumps(r["selected_descriptor"],sort_keys=True,separators=(",",":"))); print("installer_pin_json="+json.dumps(result["offline_artifacts"],sort_keys=True,separators=(",",":")))' \
+  --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -c 'import json,sys; result=json.load(sys.stdin); r=result["runtime"]; print("image_id_kind="+r["image_id_kind"]); print("image_config_id="+r["image_config_id"]); print("selected_descriptor="+json.dumps(r["selected_descriptor"],sort_keys=True,separators=(",",":"))); print("selected_manifest_id="+r["selected_descriptor"]["digest"]); print("selected_manifest_media="+r["selected_descriptor"]["mediaType"]); print("selected_manifest_size="+str(r["selected_descriptor"]["size"])); print("installer_pin_json="+json.dumps(result["offline_artifacts"],sort_keys=True,separators=(",",":")))' \
   <"$WORK/graph-admission.json" >"$WORK/runtime-identity.txt" || fail 'admitted runtime identity inventory could not be decoded'
 IMAGE_ID_KIND=''; IMAGE_CONFIG_ID=''; SELECTED_DESCRIPTOR=''; INSTALLER_PIN_JSON=''
+SELECTED_MANIFEST_ID=''; SELECTED_MANIFEST_MEDIA=''; SELECTED_MANIFEST_SIZE=''
 while IFS='=' read -r key value; do
   case "$key" in
     image_id_kind) IMAGE_ID_KIND=$value ;;
     image_config_id) IMAGE_CONFIG_ID=$value ;;
     selected_descriptor) SELECTED_DESCRIPTOR=$value ;;
+    selected_manifest_id) SELECTED_MANIFEST_ID=$value ;;
+    selected_manifest_media) SELECTED_MANIFEST_MEDIA=$value ;;
+    selected_manifest_size) SELECTED_MANIFEST_SIZE=$value ;;
     installer_pin_json) INSTALLER_PIN_JSON=$value ;;
     *) fail 'unknown admitted runtime identity field' ;;
   esac
@@ -641,7 +723,11 @@ take_lock() {
   init_request=${1:-}
   set -- docker run --platform "$PLATFORM" --pull=never -d --name "$LOCK_NAME" --restart=no --network none --read-only \
     --label "volt.compose.owner-token=$OWNER_TOKEN" --label "volt.compose.project=$PROJECT" \
+    --label org.volt.compose-install.role=host-lifecycle-lock \
     --cap-drop=ALL --security-opt=no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=8m \
+    --tmpfs /app/media:rw,noexec,nosuid,nodev,size=1m \
+    --tmpfs /opt/uvm/state:rw,noexec,nosuid,nodev,size=1m \
+    --tmpfs /var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=1m \
     --user "$(id -u):$(id -g)" --mount "type=bind,src=$STATE,dst=/state" \
     --mount "type=bind,src=$PACKAGE,dst=/package,readonly" \
     --mount "type=bind,src=$CACHE_DIRECTORY,dst=/run/volt-offline-artifacts,readonly"

@@ -210,7 +210,11 @@ run_offline_action() {
   LOCK_NAME="volt-offline-${PROJECT}-$$"
   set -- docker run --platform "$PLATFORM" --pull=never -d --name "$LOCK_NAME" --restart=no --network none --read-only \
     --label "volt.compose.owner-token=$OWNER_TOKEN" --label "volt.compose.project=$PROJECT" \
+    --label org.volt.compose-install.role=host-lifecycle-lock \
     --cap-drop=ALL --security-opt=no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=32m \
+    --tmpfs /app/media:rw,noexec,nosuid,nodev,size=1m \
+    --tmpfs /opt/uvm/state:rw,noexec,nosuid,nodev,size=1m \
+    --tmpfs /var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=1m \
     --mount "type=bind,src=$STATE,dst=/state" --mount "type=bind,src=$PACKAGE,dst=/package,readonly" \
     --mount "type=bind,src=$OFFLINE_INPUT,dst=/run/volt-offline-input,readonly" \
     --mount "type=bind,src=$OFFLINE_OUTPUT,dst=/run/volt-offline-output" \

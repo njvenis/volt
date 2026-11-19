@@ -401,3 +401,32 @@ unacknowledged generation-zero intent and immutable fingerprints before an
 actual FD owner can continue publication. Unknown, multiple, substituted,
 acked/established or restored-stage contradictions deny. Offline NEW install
 remains denied; verification-only material never recreates an instance.
+
+Cache mount discovery enumerates ALL running/stopped contract1 containers across
+projects. Supported API means the fixed signed Compose service label
+com.docker.compose.service=volt; its bind mounts and actual named-volume sources
+remain subject to the unchanged ancestor/descendant exclusion. Fixed host FD
+helpers carry org.volt.compose-install.role=host-lifecycle-lock and may be
+classified as non-API ONLY with exact admitted Python/module/closed lock-action
+argv, network-none, read-only rootfs, unprivileged and no published ports.
+A role label alone is insufficient. Unknown contract1 roles are conservatively
+classified as POTENTIAL APIs: ALL their mounts and actual volume sources remain
+inside the unchanged overlap checks. A contradictory claimed-helper shape
+fails closed before publication; caller path/name exclusions are not used.
+Only the CURRENT invocation's actual FD container may receive the helper
+exemption. Its full ID, running state, exact independently admitted immutable
+image reference, owner/project labels and typed selected-object witness must
+match the current graph receipt. A Docker29 parent-index ID alone is never a
+witness: its selected descriptor digest/media/size/platform must match the
+signed selected child. The helper's complete bind destination/source/access set
+must match the fixed current STATE/PACKAGE/cache/request recipe, without extra,
+duplicate or broad mounts. Other helpers remain potential APIs with every
+mount checked; contradictory current-helper claims deny.
+The runtime image declares three datastore VOLUMEs even for fixed helpers.
+Detached FD owners override ONLY these unused image destinations with bounded
+rw,noexec,nosuid,nodev,size=1m tmpfs at /app/media, /opt/uvm/state and
+/var/lib/postgresql/data. This creates no persistent anonymous helper datastore
+and never mounts the instance's business volumes. The current generic/initial
+owner retains its fixed /tmp tmpfs8m; its exact four-entry ephemeral map and
+complete bind shape are checked before exemption. Offline FD owners use their
+existing /tmp32m plus the same three empty bounded store tmpfs views.

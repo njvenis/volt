@@ -229,6 +229,7 @@ EOF_CACHE_HELPER_ID
           || fail 'fixed lifecycle helper shape is unavailable'
         case "$shape" in
           '["/opt/uvm/venv/bin/python"]|["-m","uvm.installer.lock","/state/.install.lock"]|none|true|false|'*|\
+          '["/opt/uvm/venv/bin/python"]|["-m","uvm.installer.lock","/state/.install.lock","--diagnostics"]|none|true|false|'*|\
           '["/opt/uvm/venv/bin/python"]|["-m","uvm.installer.lock","/state/.install.lock","--initialize-local"]|none|true|false|'*)
             case "${shape##*|}" in null|'{}') ;; *) fail 'fixed lifecycle helper has published ports' ;; esac ;;
           *) fail 'contract lifecycle role has an unexpected process or isolation shape' ;;
@@ -254,6 +255,12 @@ EOF_CACHE_HELPER_ID
             /package) helper_expected="$PACKAGE|false" ;;
             /run/volt-offline-artifacts) helper_expected="$CACHE_DIRECTORY|false" ;;
             /run/volt-cache-parent) helper_expected="$CACHE_PARENT|false" ;;
+            /run/volt-diagnostic-input)
+              case "$shape" in *'"--diagnostics"'*) ;; *) fail 'generic helper cannot mount diagnostic input' ;; esac
+              helper_expected="$WORK/diagnostic-input|false" ;;
+            /run/volt-diagnostic-output)
+              case "$shape" in *'"--diagnostics"'*) ;; *) fail 'generic helper cannot mount diagnostic output' ;; esac
+              helper_expected="$WORK/diagnostic-output|true" ;;
             /run/volt-initialization/request.json) helper_expected="$WORK/runtime-init-request.json|false" ;;
             /run/volt-initialization-admission/receipt.json) helper_expected="$WORK/init-admission.json|false" ;;
             *) fail 'current helper has an unexpected or broad mount' ;;
@@ -266,6 +273,11 @@ EOF_CACHE_HELPER_MOUNTS
         for required_mount in /state /package /run/volt-offline-artifacts; do
           case "$helper_seen" in *"|$required_mount|"*) ;; *) fail 'current helper lacks a fixed required mount' ;; esac
         done
+        case "$shape" in *'"--diagnostics"'*)
+          for required_mount in /run/volt-cache-parent /run/volt-diagnostic-input /run/volt-diagnostic-output; do
+            case "$helper_seen" in *"|$required_mount|"*) ;; *) fail 'diagnostic helper lacks fixed private exchange mount' ;; esac
+          done ;;
+        esac
         case "$shape" in *'"--initialize-local"'*)
           for required_mount in /run/volt-cache-parent /run/volt-initialization/request.json /run/volt-initialization-admission/receipt.json; do
             case "$helper_seen" in *"|$required_mount|"*) ;; *) fail 'initial helper lacks a fixed request/admission mount' ;; esac
@@ -721,6 +733,15 @@ take_lock() {
   if [ -n "$LOCK_NAME" ]; then ensure_lock_owner; return 0; fi
   LOCK_NAME="volt-lock-${PROJECT}-$$"
   init_request=${1:-}
+  diagnostic_mode=0
+  case "$ACTION" in diagnose|logs)
+    [ -z "$init_request" ] || fail 'diagnostics cannot initialize or repair an instance'
+    diagnostic_mode=1
+    DIAG_INPUT="$WORK/diagnostic-input"; DIAG_OUTPUT="$WORK/diagnostic-output"
+    mkdir -m 700 "$DIAG_INPUT" "$DIAG_OUTPUT"
+    diagnostic_data emit-request "$ACTION" >"$DIAG_INPUT/request.json" || fail 'fixed diagnostic request failed'
+    chmod 600 "$DIAG_INPUT/request.json" ;;
+  esac
   set -- docker run --platform "$PLATFORM" --pull=never -d --name "$LOCK_NAME" --restart=no --network none --read-only \
     --label "volt.compose.owner-token=$OWNER_TOKEN" --label "volt.compose.project=$PROJECT" \
     --label org.volt.compose-install.role=host-lifecycle-lock \
@@ -737,7 +758,13 @@ take_lock() {
     set -- "$@" --mount "type=bind,src=$WORK/init-admission.json,dst=/run/volt-initialization-admission/receipt.json,readonly"
     set -- "$@" --mount "type=bind,src=$CACHE_PARENT,dst=/run/volt-cache-parent,readonly"
   fi
+  if [ "$diagnostic_mode" -eq 1 ]; then
+    set -- "$@" --mount "type=bind,src=$DIAG_INPUT,dst=/run/volt-diagnostic-input,readonly" \
+      --mount "type=bind,src=$DIAG_OUTPUT,dst=/run/volt-diagnostic-output" \
+      --mount "type=bind,src=$CACHE_PARENT,dst=/run/volt-cache-parent,readonly"
+  fi
   set -- "$@" --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -m uvm.installer.lock /state/.install.lock
+  if [ "$diagnostic_mode" -eq 1 ]; then set -- "$@" --diagnostics; fi
   if [ -n "$init_request" ]; then set -- "$@" --initialize-local; fi
   LOCK_ID=$("$@") || fail 'another lifecycle operation may already hold the private instance lock'
   case "$LOCK_ID" in *[!0-9a-f]*|'') fail 'actual lifecycle container ID is malformed' ;; esac
@@ -747,7 +774,18 @@ take_lock() {
   while [ "$attempts" -lt 30 ]; do
     ensure_lock_owner
     docker logs "$LOCK_NAME" >"$WORK/lock-owner.log" 2>&1 || fail 'actual lifecycle owner log command failed'
-    if grep -q '^locked=1$' "$WORK/lock-owner.log"; then return; fi
+    if grep -q '^locked=1$' "$WORK/lock-owner.log"; then
+      if [ "$diagnostic_mode" -eq 1 ]; then
+        DIAG_OPERATION_ID=''; DIAG_REQUEST_SHA256=''
+        while IFS='=' read -r diagnostic_key diagnostic_value; do
+          case "$diagnostic_key" in diagnostic_operation_id) DIAG_OPERATION_ID=$diagnostic_value ;; diagnostic_request_sha256) DIAG_REQUEST_SHA256=$diagnostic_value ;; esac
+        done <"$WORK/lock-owner.log"
+        case "$DIAG_OPERATION_ID" in ''|*[!0-9a-f-]*) fail 'diagnostic operation UUID differs' ;; esac
+        case "$DIAG_REQUEST_SHA256" in sha256:*) ;; *) fail 'diagnostic request digest differs' ;; esac
+        [ "${#DIAG_OPERATION_ID}" -eq 36 ] && [ "${#DIAG_REQUEST_SHA256}" -eq 71 ] || fail 'diagnostic operation binding is missing'
+      fi
+      return
+    fi
     attempts=$((attempts + 1)); sleep 1
   done
   fail 'private instance lock did not become ready'
@@ -941,7 +979,7 @@ run_maintenance() {
   esac
 }
 
-if [ "$#" -lt 1 ]; then fail 'usage: launcher.sh install|start|stop|status|setup|account [arguments]'; fi
+if [ "$#" -lt 1 ]; then fail 'usage: launcher.sh install|start|stop|status|diagnose|logs|setup|account [arguments]'; fi
 ACTION=$1
 shift
 RECOVERY_COMMAND=''
@@ -1068,6 +1106,10 @@ else
   case "$state_name" in ''|.|..) fail 'instance directory name is unsafe' ;; esac
   STATE="$parent/$state_name"
   [ "$STATE" = "$CACHE_STATE" ] || fail 'canonical selected instance changed during independent admission'
+  case "$ACTION" in diagnose|logs)
+    [ "$INITIAL_PREPARATION" -eq 0 ] && [ "$CACHE_DIRECTORY" = "$CACHE_PARENT/originals" ] \
+      || fail 'read-only diagnostics cannot resume, publish or repair initial preparation' ;;
+  esac
   if [ "$INITIAL_PREPARATION" -eq 1 ] || [ "$CACHE_DIRECTORY" != "$CACHE_PARENT/originals" ]; then
     take_lock
     refresh_installer_admission
@@ -1085,6 +1127,7 @@ esac
 take_lock
 refresh_installer_admission
 read_instance
+case "$ACTION" in diagnose|logs) run_diagnostics; exit $? ;; esac
 validate_local_custody
 check_owned_resources
 if [ "$ACTION" = install ]; then
@@ -1103,7 +1146,7 @@ elif [ "$ACTION" = stop ]; then
   locked_compose stop --timeout 600
 elif [ "$ACTION" = status ]; then
   verify_actual_mounts
-  locked_compose ps
+  locked_compose ps --all
 elif [ "$ACTION" = setup ]; then
   [ "$RESTORE_PENDING" -eq 0 ] || fail 'local setup is unavailable until restored credentials and sessions are revoked'
   run_maintenance prepare-setup
@@ -1125,5 +1168,5 @@ elif [ "$ACTION" = destroy ]; then
     rm -rf "$STATE"
   fi
 else
-  fail 'supported commands are install, start, stop, status, setup, account, recovery, and explicit destroy'
+  fail 'supported commands are install, start, stop, status, diagnose, logs, setup, account, recovery, and explicit destroy'
 fi

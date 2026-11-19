@@ -10,8 +10,20 @@ The independent verification image is an additional download. A native `linux/am
 
 The first local account is claimed in the browser at the loopback setup URL. The one-use capability is shown only on a controlling terminal; unattended operation reports a mode-0600 private file path. Additional accounts are created with the `account create-account` command and receive a one-use enrolment capability. Local auth uses persistent VOLT accounts and a one-hour absolute session lifetime. The synthetic identity provider is not started.
 
-Only fresh Linux/amd64 and Linux/arm64 Compose installations are intended. Loopback HTTP is the only implemented ingress for this candidate; server HTTPS configuration, desktop portability qualification, native scanner integration, and cross-version upgrades are not claimed. The standalone host command does not yet expose a supported packaged cold-backup, restore, or scanner-recovery approval workflow, and those journeys have not been qualified. Do not rely on this candidate for a recoverable installation until those commands and their real restore evidence are available.
+Only fresh Linux/amd64 and Linux/arm64 Compose installations are intended. Loopback HTTP is the only implemented ingress for this candidate; server HTTPS configuration, desktop portability qualification, native scanner integration, and cross-version upgrades are not claimed. The standalone host source exposes fixed cold backup/restore and host scanner-approval commands. The ordinary AMD64 development-fixture cold-restore path has scoped retained verification; that is not production/keyless, ARM execution, a released RC4 package, or packaged scanner-clearance qualification. Scanner ingestion/recovery and the remaining current-source acceptance checks are still incomplete. Preserve the exact source and evidence limits when evaluating this candidate.
 
 This source bundle is not an upgrade package. Preserve RC3 and all existing installations; do not use it to replace historical assets or mutate published releases.
 
 Authenticated runtime reference: `VOLT_RELEASE_IMAGE_REFERENCE`
+
+After independent admission, the fixed host commands include `status`,
+`diagnose`, and `logs`, each with `--directory` selecting the existing private
+instance. `status` includes stopped containers. `diagnose` returns a closed
+nonsecret identity, ownership, lifecycle, resource and custody summary. It never
+repairs missing state. `logs` shows only recognized current-run G7 phase markers
+from a fixed bounded tail; unknown lines and request bodies are never printed.
+Byte, complete-line, marker and time limits are explicit. Producer and reader
+outcomes are separate; truncated, stale, incomplete or failed diagnostics return
+nonzero. These commands retain existing keys/data and require fresh admission,
+including authenticated cached verification when offline. They do not report a
+complete application log history or grant recovery/upgrade authority.

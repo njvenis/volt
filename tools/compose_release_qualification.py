@@ -470,6 +470,169 @@ def qualify_offline_fixture_entry(*, closure: Path, fixture: Path, verifier_refe
 
 
 
+def restore_admit_observer_environment(*, capture: Path, environment: dict, info: dict,
+                                       admission: dict) -> dict:
+    """Test-only POSIX observation before the ORIGINAL exact helper removal.
+
+    Commands/arguments/stdout/stderr/status always reach the installed Docker
+    unchanged. Capture ambiguity disqualifies the evidence, never changes rm.
+    This is explicitly instrumented cause proof, not unmodified-host certification.
+    """
+    if (info.get('image') != admission['image_reference']
+            or info.get('image_admission', {}).get('id') != admission['image_id']
+            or not re.fullmatch(r'[a-z][a-z0-9-]{1,62}', info.get('project', ''))
+            or not re.fullmatch(r'[0-9a-f]{64}', info.get('owner_token', ''))):
+        raise ValueError('owner observation requires the already admitted exact instance/image')
+    capture.mkdir(mode=0o700)
+    binary = capture / 'bin'; binary.mkdir(mode=0o700)
+    pid_file = capture / 'caller.pid'
+    with pid_file.open('x'): pass
+    pid_file.chmod(0o600)
+    real = shutil.which('docker', path=environment['PATH'])
+    if real is None:
+        raise ValueError('original installed Docker executable is missing')
+    real = Path(real).resolve(strict=True)
+    descriptor = info['image_admission']['selected_descriptor']
+    values = {'REAL_DOCKER': str(real), 'CAPTURE': str(capture), 'PID_FILE': str(pid_file),
+        'EXPECTED_PROJECT': info['project'], 'EXPECTED_OWNER': info['owner_token'],
+        'EXPECTED_REFERENCE': admission['image_reference'], 'EXPECTED_ID': admission['image_id'],
+        'EXPECTED_KIND': admission['image_id_kind'],
+        'EXPECTED_ENGINE': info['image_admission']['engine_image_id'],
+        'EXPECTED_CHILD': descriptor['digest'], 'EXPECTED_MEDIA': descriptor['mediaType'],
+        'EXPECTED_SIZE': str(descriptor['size']), 'EXPECTED_PLATFORM': admission['platform']}
+    script = '#!/bin/sh\nset -u\numask 077\n' + '\n'.join(
+        key + '=' + shlex.quote(value) for key, value in values.items()) + r'''
+observe_owned_removal() {
+  [ "$#" -eq 3 ] && [ "$1" = rm ] && [ "$2" = -f ] || return 0
+  IFS= read -r caller <"$PID_FILE" || return 0
+  case "$caller" in ''|*[!0-9]*) return 0 ;; esac
+  expected_name="volt-offline-$EXPECTED_PROJECT-$caller"
+  [ "$3" = "$expected_name" ] || return 0
+  if [ -e "$CAPTURE/guard.status" ]; then
+    printf '%s\n' duplicate >"$CAPTURE/duplicate.status"; return 0
+  fi
+  identity=$("$REAL_DOCKER" inspect "$3" --format '{{.Id}}|{{.Name}}|{{.Config.Image}}|{{index .Config.Labels "volt.compose.owner-token"}}|{{index .Config.Labels "volt.compose.project"}}|{{json .Config.Cmd}}|{{.Image}}|{{if .ImageManifestDescriptor}}{{.ImageManifestDescriptor.digest}}|{{.ImageManifestDescriptor.mediaType}}|{{.ImageManifestDescriptor.size}}|{{.ImageManifestDescriptor.platform.os}}/{{.ImageManifestDescriptor.platform.architecture}}{{end}}' 2>"$CAPTURE/identity.stderr") || {
+    printf '%s\n' unavailable >"$CAPTURE/guard.status"; return 0;
+  }
+  printf '%s\n' "$identity" >"$CAPTURE/identity.txt"
+  IFS='|' read -r cid name reference owner project command image child media size platform <<EOF_OWNER_ID
+$identity
+EOF_OWNER_ID
+  case "$cid" in ''|*[!0-9a-f]*) printf '%s\n' invalid >"$CAPTURE/guard.status"; return 0 ;; esac
+  [ "${#cid}" -eq 64 ] && [ "$name|$reference|$owner|$project|$command" = "/$expected_name|$EXPECTED_REFERENCE|$EXPECTED_OWNER|$EXPECTED_PROJECT|[\"-m\",\"uvm.installer.lock\",\"/state/.install.lock\",\"--offline-restore-admit\"]" ] || {
+    printf '%s\n' contradiction >"$CAPTURE/guard.status"; return 0;
+  }
+  if [ "$image" != "$EXPECTED_ID" ]; then
+    [ "$EXPECTED_KIND" = selected_manifest ] && [ "$image" = "$EXPECTED_ENGINE" ] &&
+      [ "$child|$media|$size|$platform" = "$EXPECTED_CHILD|$EXPECTED_MEDIA|$EXPECTED_SIZE|$EXPECTED_PLATFORM" ] || {
+      printf '%s\n' wrong_image >"$CAPTURE/guard.status"; return 0;
+    }
+  fi
+  input=$("$REAL_DOCKER" inspect "$cid" --format '{{range .Mounts}}{{if eq .Destination "/run/volt-offline-input"}}{{.Source}}{{end}}{{end}}') || return 0
+  output=$("$REAL_DOCKER" inspect "$cid" --format '{{range .Mounts}}{{if eq .Destination "/run/volt-offline-output"}}{{.Source}}{{end}}{{end}}') || return 0
+  case "$input" in /tmp/volt-installer.????????/offline-input) ;; *) printf '%s\n' wrong_exchange >"$CAPTURE/guard.status"; return 0 ;; esac
+  [ "$output" = "${input%/offline-input}/offline-output" ] || { printf '%s\n' wrong_exchange >"$CAPTURE/guard.status"; return 0; }
+  for pair in "$input/request.json:request.json" "$output/plan.json:plan.json" "$input/observed.json:observed.json"; do
+    original=${pair%:*}; copied=${pair##*:}
+    [ -f "$original" ] && [ ! -L "$original" ] && cp -- "$original" "$CAPTURE/$copied" || {
+      printf '%s\n' missing_phase >"$CAPTURE/guard.status"; return 0;
+    }
+    chmod 600 "$CAPTURE/$copied"
+  done
+  "$REAL_DOCKER" inspect "$cid" --format '{"id":{{json .Id}},"name":{{json .Name}},"image_ref":{{json .Config.Image}},"image":{{json .Image}},"selected_witness":{{json .ImageManifestDescriptor}},"labels":{{json .Config.Labels}},"cmd":{{json .Config.Cmd}},"started_at":{{json .State.StartedAt}},"finished_at":{{json .State.FinishedAt}},"exit_code":{{json .State.ExitCode}}}' >"$CAPTURE/owner.json" 2>"$CAPTURE/owner-inspect.stderr" || return 0
+  printf '%s\n' "$REAL_DOCKER" logs --timestamps --tail 128 "$cid" >"$CAPTURE/logs.argv.txt"
+  if "$REAL_DOCKER" logs --timestamps --tail 128 "$cid" >"$CAPTURE/owner.stdout" 2>"$CAPTURE/owner.stderr"; then
+    printf '%s\n' 0 >"$CAPTURE/logs.exit"; printf '%s\n' captured >"$CAPTURE/guard.status"
+  else
+    printf '%s\n' "$?" >"$CAPTURE/logs.exit"; printf '%s\n' logs_failed >"$CAPTURE/guard.status"
+  fi
+}
+# Observation may fail; ORIGINAL Docker command/result is never replaced/skipped.
+( observe_owned_removal "$@" ) >"$CAPTURE/observer.stdout" 2>"$CAPTURE/observer.stderr" || :
+exec "$REAL_DOCKER" "$@"
+'''
+    destination = binary / 'docker'
+    with destination.open('x') as stream: stream.write(script)
+    destination.chmod(0o700)
+    (capture / 'instrumentation.json').write_text(json.dumps({
+        'scope': 'test-only POSIX before-removal observation; NOT unmodified Docker certification',
+        'shim_sha256': sha(destination), 'original_docker': str(real), 'original_docker_sha256': sha(real),
+        'expected_image': admission['image_reference'], 'expected_project': info['project'],
+        'operation': 'restore-admit', 'original_command_results_unchanged': True,
+        'UUID_and_predecessor_binding': 'validated from exact captured plan/observed bytes before evidence credit',
+    }, sort_keys=True, indent=2) + '\n')
+    return {**environment, 'PATH': str(binary) + os.pathsep + environment['PATH']}
+
+
+def qualify_inventory_rejection(*, kind: str, launcher: Path, state: Path, private: Path,
+                                evidence: Path, environment: dict, admission: dict) -> None:
+    """Require the real exact bound owner's specific empty/corrupt inventory cause."""
+    if kind not in ('empty', 'corrupt'):
+        raise ValueError('only fixed empty/corrupt inventory probes are supported')
+    info = json.loads((state / 'instance.json').read_text())
+    capture = private / ('inventory-owner-' + kind)
+    observed_env = restore_admit_observer_environment(capture=capture, environment=environment,
+        info=info, admission=admission)
+    command = ['sh', str(launcher), 'restore-admit', '--directory', str(state)]
+    # This POSIX instrumentation wrapper only records its OWN PID before exec.
+    # Public action argv and the installed Docker command results are unchanged.
+    argv = ['sh', '-c', 'umask 077; printf "%s\n" "$$" >"$1"; shift; exec "$@"',
+        'fixed-inventory-owner-observer', str(capture / 'caller.pid'), *command]
+    name = 'inventory-' + kind + '-specific-denial'
+    record = {'argv': argv, 'public_command': command, 'cwd': str(private),
+        'environment_overrides': {'PATH': observed_env['PATH']}, 'private_capture': str(capture),
+        'scope': 'instrumented current-source inventory cause replay; not original9657 run',
+        'recorded_at': time.time()}
+    (evidence / (name + '.invocation.json')).write_text(json.dumps(record, indent=2) + '\n')
+    with (evidence / (name + '.stdout')).open('x') as stdout, (evidence / (name + '.stderr')).open('x') as stderr:
+        process = subprocess.Popen(argv, cwd=private, env=observed_env, stdout=stdout, stderr=stderr,
+            start_new_session=True)
+        code = process.wait(timeout=900)
+    (evidence / (name + '.exit')).write_text(str(code) + '\n')
+    if code == 0 or (capture / 'caller.pid').read_text().strip() != str(process.pid):
+        raise RuntimeError('negative inventory action or exact caller identity was not established')
+    if (not (capture / 'guard.status').is_file() or (capture / 'guard.status').read_text().strip() != 'captured'
+            or (capture / 'duplicate.status').exists()):
+        raise RuntimeError('exact owner logs were not captured before original removal; no cause credit')
+    plan_raw = (capture / 'plan.json').read_bytes()
+    plan = host_dependency_json(capture / 'plan.json')
+    observed = host_dependency_json(capture / 'observed.json')
+    request = host_dependency_json(capture / 'request.json')
+    owner = host_dependency_json(capture / 'owner.json')
+    operation = plan.get('operation_id')
+    if (not isinstance(operation, str) or str(uuid.UUID(operation)) != operation or uuid.UUID(operation).version != 4
+            or plan.get('operation') != 'restore-admit' or plan.get('phase') != 'plan'
+            or observed.get('operation_id') != operation or observed.get('operation') != 'restore-admit'
+            or observed.get('phase') != 'observed' or observed.get('identity') != plan.get('identity')
+            or observed.get('predecessor_sha256') != 'sha256:' + hashlib.sha256(plan_raw).hexdigest()
+            or request.get('profile') != 'volt_offline_request_v1'
+            or plan['identity'].get('source_revision') != admission['source_commit']
+            or plan['identity'].get('source_snapshot') != admission['source_snapshot']
+            or owner.get('name') != '/volt-offline-' + info['project'] + '-' + str(process.pid)):
+        raise RuntimeError('captured owner request/plan/current-operation/source binding contradicts the replay')
+    required = ('offline store inventory is malformed' if kind == 'empty'
+                else 'offline imports differ from captured store inventories')
+    messages = []
+    for path in (capture / 'owner.stdout', capture / 'owner.stderr'):
+        if path.stat().st_size > 8 * 1024 * 1024:
+            raise RuntimeError('bounded fixed-owner log capture exceeded its contract')
+        for line in path.read_text().splitlines():
+            if 'offline-lifecycle-failed: ' in line:
+                messages.append(line.split('offline-lifecycle-failed: ', 1)[1])
+    actual = observed['data']['inventories']
+    if (messages != [required] or kind == 'empty' and actual['postgres']['postgres_version'] is not None
+            or kind == 'corrupt' and actual['state'] == info['backup_inventory']['state']):
+        raise RuntimeError('observed denial did not prove the exact expected inventory rejection cause')
+    (evidence / (name + '-cause.json')).write_text(json.dumps({
+        'status': 'specific_inventory_cause_proved', 'kind': kind, 'backend_message': required,
+        'actual_owner_CID': owner['id'], 'actual_owner_started_at': owner['started_at'],
+        'actual_owner_finished_at': owner['finished_at'], 'operation_id': operation,
+        'source_revision': admission['source_commit'], 'source_snapshot': admission['source_snapshot'],
+        'owner_stdout_sha256': sha(capture / 'owner.stdout'), 'owner_stderr_sha256': sha(capture / 'owner.stderr'),
+        'plan_sha256': 'sha256:' + hashlib.sha256(plan_raw).hexdigest(),
+        'instrumentation': 'POSIX Docker observation forwards ORIGINAL removal/commands/results unchanged',
+    }, sort_keys=True, indent=2) + '\n')
+
 def create_offline_fixture_entry(*, state: Path, admission: dict, private: Path) -> Path:
     """Provision the maintainer's EXTERNAL fixed fixture entry, never package code.
 
@@ -517,7 +680,7 @@ def create_offline_fixture_entry(*, state: Path, admission: dict, private: Path)
         'fail() { printf "%s\\n" "external offline entry: $*" >&2; exit 1; }',
         '[ "$#" -ge 3 ] || fail "fixed action and selected directory required"',
         'action=$1; shift',
-        'case "$action" in verify-cache|stop|start|logs|diagnose|setup|backup-record|backup-status|restore-provision|restore-admit|destroy) ;; *) fail "unsupported fixed lifecycle action" ;; esac',
+        'case "$action" in verify-cache|stop|start|status|logs|diagnose|setup|backup-record|backup-status|restore-provision|restore-admit|destroy) ;; *) fail "unsupported fixed lifecycle action" ;; esac',
         '[ "$1" = --directory ] || fail "selected directory is mandatory"',
         '[ "$2" = ' + shlex.quote(str(state)) + ' ] || fail "different instance refused"', 'shift 2',
         'for argument do [ "$argument" != --directory ] || fail "duplicate directory selector"; done',
@@ -576,13 +739,40 @@ def create_offline_fixture_entry(*, state: Path, admission: dict, private: Path)
         'export VOLT_EXPECTED_SIGNER=' + shlex.quote(SIGNER),
         'export VOLT_EXPECTED_ISSUER=' + shlex.quote(ISSUER),
         'exec sh ' + shlex.quote(str(closure / 'package/launcher.sh')) + ' "$action" --directory ' + shlex.quote(str(state)) + ' "$@"']
-    # Function positional arguments keep the original public suffix intact.
+    # Isolate AUTHENTICATION diagnostics from the signed launcher's terminal
+    # result. Successful Cosign noise, including claimed-looking artifact text,
+    # can never become a backend maintenance denial. All first failures retain
+    # their original exit code and stop before the candidate shell.
     verify_start = next(i for i, line in enumerate(lines) if line.startswith('WORK='))
     verify_end = lines.index('"$@" >/dev/null')
-    lines.insert(verify_start, 'verify_graph() {')
-    lines.insert(verify_end + 2, '}')
-    lines.insert(verify_end + 3, 'verify_graph')
-    lines.insert(verify_end + 4, 'rm -rf "$WORK"; WORK=; trap - 0 HUP INT TERM')
+    crypto_start = next(i for i, line in enumerate(lines) if ' verify-attestation ' in line)
+    prefix = lines[:crypto_start]
+    crypto = [line + ' || return "$?"' for line in lines[crypto_start:verify_start]]
+    graph = lines[verify_start + 3:verify_end + 1]
+    graph = [line.replace('$WORK/runtime-', '$WORK/admission/runtime-')
+        .replace('src=$WORK,dst=/admission', 'src=$WORK/admission,dst=/admission') for line in graph]
+    for i, line in enumerate(graph):
+        if (line.startswith('docker image inspect ') or line.startswith('cp ')
+                or line.startswith('chmod ') or line == '"$@" >/dev/null'):
+            graph[i] = line + ' || return "$?"'
+    auth_root = private / 'public-offline-authentication'
+    auth_root.mkdir(mode=0o700)
+    setup = [lines[verify_start], lines[verify_start + 1], lines[verify_start + 2],
+        'mkdir -m 700 "$WORK/admission"', 'AUTH_ROOT=' + shlex.quote(str(auth_root)),
+        'AUTH_RECORD=$(mktemp -d "$AUTH_ROOT/entry.XXXXXXXX")', 'chmod 700 "$AUTH_RECORD"',
+        'mkfifo "$WORK/auth.stderr.pipe"',
+        'dd if="$WORK/auth.stderr.pipe" of="$AUTH_RECORD/authentication.stderr" bs=1 count=65536 2>"$AUTH_RECORD/reader.stderr" &',
+        'AUTH_READER=$!']
+    authentication = ['verify_graph() {', *graph, '}', 'authenticate_originals() {',
+        *crypto, 'verify_graph || return "$?"', '}', 'authentication_exit=0',
+        'authenticate_originals 2>"$WORK/auth.stderr.pipe" || authentication_exit=$?',
+        'reader_exit=0; wait "$AUTH_READER" || reader_exit=$?',
+        'printf "%s\\n" "$authentication_exit" >"$AUTH_RECORD/authentication.exit"',
+        'printf "%s\\n" "$reader_exit" >"$AUTH_RECORD/reader.exit"',
+        'if [ "$authentication_exit" -ne 0 ]; then printf "%s\\n" "external offline authentication failed" >&2; exit "$authentication_exit"; fi',
+        'if [ "$reader_exit" -ne 0 ]; then printf "%s\\n" "external offline authentication diagnostic capture failed" >&2; exit 1; fi',
+        'rm -rf "$WORK"; WORK=; trap - 0 HUP INT TERM']
+    lines = [*prefix, *setup, *authentication, *lines[verify_end + 1:]]
     wrapper = private / 'trusted-offline-entry.sh'
     with wrapper.open('x') as stream:
         script = '\n'.join(lines) + '\n'
@@ -673,7 +863,7 @@ def docker_credential_helper_selection(registries: tuple[str, ...]) -> dict:
 
 def launcher_minimal_environment(bin_directory: Path, *, registries: tuple[str, ...] = ()) -> dict[str, str]:
     """Expose POSIX/Docker plus its exact configured credential dependencies."""
-    allowed = ("sh", "docker", "tar", "gzip", "mktemp", "mkfifo", "dirname", "mkdir", "chmod", "cp", "rm",
+    allowed = ("sh", "docker", "tar", "gzip", "dd", "mktemp", "mkfifo", "dirname", "mkdir", "chmod", "cp", "rm",
                "cat", "cut", "grep", "env", "id", "sleep", "mv")
     selection = docker_credential_helper_selection(registries)
     names = (*allowed, *sorted({item['executable'] for item in selection['selections']}))
@@ -1060,6 +1250,14 @@ def qualify_local_restore(*, setup: Path, launcher: Path | None, launcher_env: d
         sort_keys=True, indent=2) + '\n')
 
 
+
+def require_claimed_setup_denial(result: subprocess.CompletedProcess) -> None:
+    """Only the isolated signed-launcher terminal result can prove this cause."""
+    if (result.returncode != 1 or result.stdout != ''
+            or result.stderr != 'volt installer: initial setup is already claimed\n'):
+        raise RuntimeError('claimed-state backend maintenance denial was not explicitly established')
+
+
 def qualify_restored_local_public_state(*, setup: Path, launcher: Path | None, launcher_env: dict,
         state: Path, private: Path, evidence: Path, origin: str, password: str,
         consumed_capability: str, installation_id: str, expected: dict) -> None:
@@ -1093,14 +1291,326 @@ def qualify_restored_local_public_state(*, setup: Path, launcher: Path | None, l
         else ['sh', str(launcher), 'setup', '--directory', str(state)])
     negative = run('local-restored-setup-maintenance-negative', setup_again,
         evidence, env=launcher_env, check=False)
-    if (negative.returncode != 1 or negative.stderr.strip() != 'volt installer: initial setup is already claimed'):
-        raise RuntimeError('claimed-state backend maintenance denial was not explicitly established')
+    require_claimed_setup_denial(negative)
     (evidence / 'local-restore-public-outcomes.json').write_text(json.dumps({'status': 'passed',
         'execution_scope': 'component_existing_setup' if launcher is None else 'source_free_signed_launcher',
         'exact_host_ack_before_ingress': 'passed',
         'session_revocation': 'passed', 'consumed_setup_preserved': 'passed',
         'protected_account_readback': 'passed'}, sort_keys=True, indent=2) + '\n')
 
+
+def qualify_inventory_cause_fixture(*, bundle: Path, fixture: Path, image_id: str,
+        source_revision: str, source_snapshot: str, platform: str, private: Path,
+        evidence: Path) -> None:
+    """Focused CURRENT-source public cold fixture; retain until cause review.
+
+    No account/capability manipulation, browser/session suite or SQL. The one
+    real supported startup supplies a legitimate current backup for the two
+    inventory probes after the original qualification cleaned its fixtures.
+    """
+    admission = validate_admission_fixture(fixture, image_id=image_id,
+        source_snapshot=source_snapshot, source_commit=source_revision,
+        platform=platform, bundle=bundle, version='0.1.0-rc.4', evidence=evidence)
+    extracted = private / 'extracted'; extracted.mkdir(mode=0o700)
+    shutil.unpack_archive(str(bundle), extracted, 'gztar')
+    package = extracted / 'volt-compose-0.1.0-rc.4'
+    outer = private / 'signed-package'; outer.mkdir(mode=0o700)
+    launcher = outer / 'launcher.sh'
+    render_fixture_launcher(package / 'launcher.sh', launcher, fixture)
+    shutil.copyfile(bundle, outer / 'installer.bundle.tar.gz')
+    for name in ('installer.bundle.sigstore.json', 'launcher.sigstore.json'):
+        shutil.copyfile(fixture / name, outer / name)
+    for path in outer.iterdir(): path.chmod(0o600)
+    public = evidence / 'fixture-trust-public'
+    run('focused-trusted-launcher-signature', ['docker', 'run', '--rm', '--platform', platform,
+        '--pull=never', '--network', 'host', '--read-only', '--cap-drop=ALL',
+        '--security-opt=no-new-privileges', '--tmpfs', '/tmp:rw,noexec,nosuid,size=16m',
+        '--user', f'{os.getuid()}:{os.getgid()}', '--mount', f'type=bind,src={public},dst=/fixture,readonly',
+        '--mount', f'type=bind,src={launcher},dst=/launcher,readonly', COSIGN_IMAGE,
+        'verify-blob', '--key', '/fixture/fixture.pub', '--trusted-root', '/fixture/trusted-root.json',
+        '--bundle', '/fixture/launcher.sigstore.json', '/launcher'], evidence)
+    environment = trusted_launcher_environment(private / 'minimal-host-path', admission)
+    state = private / 'instance'
+    run('focused-public-install', ['sh', str(launcher), 'install', '--directory', str(state),
+        '--port', '46180', '--project-prefix', 'volt-easy-delivery'], evidence, env=environment)
+    wait_for_local('http://127.0.0.1:46180', evidence)
+    info = json.loads((state / 'instance.json').read_text()); project = info['project']
+    if (info['image_admission']['source_revision'] != source_revision
+            or info['image_admission']['source_snapshot'] != source_snapshot):
+        raise RuntimeError('focused public instance differs from the original admitted current source')
+    # Retain immediately, including if a later assertion fails; no auto teardown
+    # may erase the very owner/backup evidence this focused replay is collecting.
+    (evidence / 'retained-fixture.json').write_text(json.dumps({'private': str(private),
+        'state': str(state), 'original_signed_launcher': str(launcher), 'project': project,
+        'admission': admission, 'runtime_source_revision': source_revision,
+        'scope': 'CURRENT-source inventory cause fixture; no claimed-state/account/session proof',
+        'cleanup': 'retain until independent cause review, then exact public owned destroy'}, indent=2) + '\n')
+    offline = create_offline_fixture_entry(state=state, admission=admission, private=private)
+    run('focused-public-cold-stop', ['sh', str(offline), 'stop', '--directory', str(state)], evidence, env=environment)
+    parent = private / 'backups'; parent.mkdir(mode=0o700); backup = parent / 'cold-backup'
+    run('focused-public-backup', ['sh', str(offline), 'backup-record', '--directory', str(state),
+        '--backup-directory', str(backup)], evidence, env=environment)
+    run('focused-public-destroy-before-restore', ['sh', str(offline), 'destroy', '--directory', str(state),
+        '--confirm-project', project, '--remove-state'], evidence, env=environment)
+    run('focused-external-verify-before-extract', ['sh', str(offline), 'verify-cache', '--directory', str(state)], evidence, env=environment)
+    state.mkdir(mode=0o700)
+    image = admission['image_reference']
+    base = ['docker', 'run', '--rm', '--platform', platform, '--pull=never', '--network', 'none']
+    run('focused-instance-extract', [*base, '--mount', f'type=bind,src={state},dst=/target',
+        '--mount', f'type=bind,src={backup},dst=/backup,readonly', '--entrypoint', '/bin/bash', image,
+        '-c', 'tar --numeric-owner -xpf /backup/instance.tar -C /target'], evidence)
+    run('focused-public-restore-provision', ['sh', str(offline), 'restore-provision', '--directory', str(state)], evidence, env=environment)
+    qualify_inventory_rejection(kind='empty', launcher=offline, state=state, private=private,
+        evidence=evidence, environment=environment, admission=admission)
+    for store in ('postgres', 'media', 'state'):
+        run('focused-store-import-' + store, [*base, '--mount', f'type=volume,src={project}_{store},dst=/target',
+            '--mount', f'type=bind,src={backup},dst=/backup,readonly', '--entrypoint', '/bin/bash', image,
+            '-c', f'tar --numeric-owner -xpf /backup/{store}.tar -C /target'], evidence)
+    run('focused-state-corruption', [*base, '--mount', f'type=volume,src={project}_state,dst=/target',
+        '--entrypoint', '/bin/bash', image, '-c', 'printf corrupt > /target/.volt-qualification-corruption'], evidence)
+    qualify_inventory_rejection(kind='corrupt', launcher=offline, state=state, private=private,
+        evidence=evidence, environment=environment, admission=admission)
+    run('focused-remove-state-corruption', [*base, '--mount', f'type=volume,src={project}_state,dst=/target',
+        '--entrypoint', '/bin/bash', image, '-c', 'rm /target/.volt-qualification-corruption'], evidence)
+    run('focused-public-valid-admit', ['sh', str(offline), 'restore-admit', '--directory', str(state)], evidence, env=environment)
+    (evidence / 'focused-inventory-cause-outcome.json').write_text(json.dumps({
+        'status': 'empty_corrupt_specific_causes_and_valid_admission_passed',
+        'runtime_source_revision': source_revision, 'runtime_source_snapshot': source_snapshot,
+        'fixture_retained_for_review': True, 'private': str(private),
+        'instrumentation': 'read-only POSIX owner-log capture before ORIGINAL Docker removal; no command/result changes',
+        'account_operations': False, 'browser_or_session_regression': False,
+        'original9657_full_journey_records_unchanged': True,
+    }, indent=2) + '\n')
+
+
+def claim_first_admin_for_maintenance(*, state: Path, private: Path, evidence: Path) -> None:
+    """One genuine claim; retain credentials privately and never capture cookies."""
+    import urllib.request
+    from uvm.installer.lock import _bounded_file
+    origin = 'http://127.0.0.1:46180'
+    capability = _bounded_file(state / 'secrets/bootstrap-capability-output', 4096, private=True).decode().strip()
+    if not capability:
+        raise RuntimeError('genuine public setup capability is missing')
+    payload = json.dumps({'capability': capability, 'username': 'maintenance-proof-admin',
+        'display_name': 'Maintenance proof administrator',
+        'password': secrets.token_urlsafe(32) + 'A7!'}).encode()
+    destination = private / 'setup-credentials.json'
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, 'wb') as stream:
+        stream.write(payload); stream.flush(); os.fsync(stream.fileno())
+    request = urllib.request.Request(origin + '/api/v1/auth/setup/claim', data=payload,
+        headers={'Content-Type': 'application/json', 'Origin': origin}, method='POST')
+    # No environment proxy, CookieJar, redirect, login or cookie persistence.
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    try:
+        with opener.open(request, timeout=30) as response:
+            status = response.status; raw = response.read(65537)
+        if status != 201 or len(raw) > 65536:
+            raise ValueError('public claim status or response bound differs')
+        result = json.loads(raw)
+        principal = str(uuid.UUID(result['principal_id'])); receipt = str(uuid.UUID(result['receipt_id']))
+        if result.get('authenticated') is not True or result.get('credential_mode') != 'local_session':
+            raise ValueError('public claim response is not an authenticated local claim')
+    except Exception:
+        raise RuntimeError('the one supported public first-admin claim failed; private response suppressed') from None
+    (evidence / 'focused-public-first-admin-claim.json').write_text(json.dumps({
+        'method': 'POST', 'path': '/api/v1/auth/setup/claim', 'origin': origin,
+        'status': status, 'principal_id': principal, 'receipt_id': receipt,
+        'genuine_issued_capability': True, 'cookie_saved_or_reused': False,
+        'credentials': 'retained only in private0600 setup-credentials.json',
+    }, indent=2) + '\n')
+
+
+def qualify_claimed_setup_fixture(*, bundle: Path, fixture: Path, image_id: str,
+        source_revision: str, source_snapshot: str, platform: str, private: Path,
+        evidence: Path) -> None:
+    """Narrow signed-package claimed maintenance proof, with one public claim.
+
+    No browser/login/session/readback suite or inventory fault replay. Preserve
+    the owned fixture for independent review of the exact backend diagnostic.
+    """
+    admission = validate_admission_fixture(fixture, image_id=image_id,
+        source_snapshot=source_snapshot, source_commit=source_revision,
+        platform=platform, bundle=bundle, version='0.1.0-rc.4', evidence=evidence)
+    extracted = private / 'extracted'; extracted.mkdir(mode=0o700)
+    shutil.unpack_archive(str(bundle), extracted, 'gztar')
+    package = extracted / 'volt-compose-0.1.0-rc.4'
+    outer = private / 'signed-package'; outer.mkdir(mode=0o700)
+    launcher = outer / 'launcher.sh'
+    render_fixture_launcher(package / 'launcher.sh', launcher, fixture)
+    shutil.copyfile(bundle, outer / 'installer.bundle.tar.gz')
+    for name in ('installer.bundle.sigstore.json', 'launcher.sigstore.json'):
+        shutil.copyfile(fixture / name, outer / name)
+    for path in outer.iterdir(): path.chmod(0o600)
+    public = evidence / 'fixture-trust-public'
+    run('focused-trusted-launcher-signature', ['docker', 'run', '--rm', '--platform', platform,
+        '--pull=never', '--network', 'host', '--read-only', '--cap-drop=ALL',
+        '--security-opt=no-new-privileges', '--tmpfs', '/tmp:rw,noexec,nosuid,size=16m',
+        '--user', f'{os.getuid()}:{os.getgid()}', '--mount', f'type=bind,src={public},dst=/fixture,readonly',
+        '--mount', f'type=bind,src={launcher},dst=/launcher,readonly', COSIGN_IMAGE,
+        'verify-blob', '--key', '/fixture/fixture.pub', '--trusted-root', '/fixture/trusted-root.json',
+        '--bundle', '/fixture/launcher.sigstore.json', '/launcher'], evidence)
+    environment = trusted_launcher_environment(private / 'minimal-host-path', admission)
+    state = private / 'instance'
+    run('focused-public-install', ['sh', str(launcher), 'install', '--directory', str(state),
+        '--port', '46180', '--project-prefix', 'volt-easy-delivery'], evidence, env=environment)
+    wait_for_local('http://127.0.0.1:46180', evidence)
+    info = json.loads((state / 'instance.json').read_text()); project = info['project']
+    if (info['image_admission']['source_revision'] != source_revision
+            or info['image_admission']['source_snapshot'] != source_snapshot):
+        raise RuntimeError('focused public instance differs from the original admitted current source')
+    # Retain immediately, including if a later assertion fails; no auto teardown
+    # may erase the very owner/backup evidence this focused replay is collecting.
+    (evidence / 'retained-fixture.json').write_text(json.dumps({'private': str(private),
+        'state': str(state), 'original_signed_launcher': str(launcher), 'project': project,
+        'admission': admission, 'runtime_source_revision': source_revision,
+        'scope': 'CURRENT-source one genuine public claim and exact setup denial before/after cold restore',
+        'cleanup': 'retain until independent cause review, then exact public owned destroy'}, indent=2) + '\n')
+    claim_first_admin_for_maintenance(state=state, private=private, evidence=evidence)
+    offline = create_offline_fixture_entry(state=state, admission=admission, private=private)
+    before = run('focused-claimed-setup-before-restore', ['sh', str(offline), 'setup', '--directory', str(state)], evidence, env=environment, check=False)
+    require_claimed_setup_denial(before)
+    run('focused-public-cold-stop', ['sh', str(offline), 'stop', '--directory', str(state)], evidence, env=environment)
+    parent = private / 'backups'; parent.mkdir(mode=0o700); backup = parent / 'cold-backup'
+    run('focused-public-backup', ['sh', str(offline), 'backup-record', '--directory', str(state),
+        '--backup-directory', str(backup)], evidence, env=environment)
+    run('focused-public-destroy-before-restore', ['sh', str(offline), 'destroy', '--directory', str(state),
+        '--confirm-project', project, '--remove-state'], evidence, env=environment)
+    run('focused-external-verify-before-extract', ['sh', str(offline), 'verify-cache', '--directory', str(state)], evidence, env=environment)
+    state.mkdir(mode=0o700)
+    image = admission['image_reference']
+    base = ['docker', 'run', '--rm', '--platform', platform, '--pull=never', '--network', 'none']
+    run('focused-instance-extract', [*base, '--mount', f'type=bind,src={state},dst=/target',
+        '--mount', f'type=bind,src={backup},dst=/backup,readonly', '--entrypoint', '/bin/bash', image,
+        '-c', 'tar --numeric-owner -xpf /backup/instance.tar -C /target'], evidence)
+    run('focused-public-restore-provision', ['sh', str(offline), 'restore-provision', '--directory', str(state)], evidence, env=environment)
+    for store in ('postgres', 'media', 'state'):
+        run('focused-store-import-' + store, [*base, '--mount', f'type=volume,src={project}_{store},dst=/target',
+            '--mount', f'type=bind,src={backup},dst=/backup,readonly', '--entrypoint', '/bin/bash', image,
+            '-c', f'tar --numeric-owner -xpf /backup/{store}.tar -C /target'], evidence)
+    run('focused-public-valid-admit', ['sh', str(offline), 'restore-admit', '--directory', str(state)], evidence, env=environment)
+    run('focused-public-restored-start', ['sh', str(offline), 'start', '--directory', str(state)], evidence, env=environment)
+    wait_for_local('http://127.0.0.1:46180', evidence)
+    after = run('focused-claimed-setup-after-restore', ['sh', str(offline), 'setup', '--directory', str(state)], evidence, env=environment, check=False)
+    require_claimed_setup_denial(after)
+    (evidence / 'focused-claimed-setup-outcome.json').write_text(json.dumps({
+        'status': 'exact_claimed_setup_denial_before_and_after_public_cold_restore',
+        'runtime_source_revision': source_revision, 'runtime_source_snapshot': source_snapshot,
+        'fixture_retained_for_review': True, 'private': str(private),
+        'public_claims': 1, 'browser_login_session_readback_suite': False,
+        'terminal': {'exit': 1, 'stdout': '', 'stderr': 'volt installer: initial setup is already claimed\n'},
+        'original9657_records_unchanged': True,
+    }, indent=2) + '\n')
+
+
+def qualify_public_readonly_diagnostics(*, package: Path, bundle: Path, admission: dict[str, str],
+                          state: Path, private: Path, evidence: Path,
+                          http_port: int, project_prefix: str) -> tuple[str, Path, dict[str, str]]:
+    fixture = Path(admission["fixture_directory"])
+    outer = private / "signed-package"
+    outer.mkdir(mode=0o700)
+    launcher_source = package / "launcher.sh"
+    launcher = outer / "launcher.sh"
+    rendered_hash = render_fixture_launcher(launcher_source, launcher, fixture)
+    shutil.copyfile(bundle, outer / "installer.bundle.tar.gz")
+    shutil.copyfile(fixture / "installer.bundle.sigstore.json", outer / "installer.bundle.sigstore.json")
+    shutil.copyfile(fixture / "launcher.sigstore.json", outer / "launcher.sigstore.json")
+    os.chmod(outer / "installer.bundle.tar.gz", 0o600)
+    for path in (outer / "installer.bundle.sigstore.json", outer / "launcher.sigstore.json"):
+        os.chmod(path, 0o600)
+    run("fixture-trusted-launcher-signature", ["docker", "run", "--rm", "--platform", admission["platform"], "--network", "host",
+        "--read-only", "--cap-drop=ALL", "--user", f"{os.getuid()}:{os.getgid()}", "--security-opt=no-new-privileges", "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=16m", "--mount", f"type=bind,src={evidence / 'fixture-trust-public'},dst=/fixture,readonly",
+        "--mount", f"type=bind,src={launcher},dst=/launcher,readonly", COSIGN_IMAGE,
+        "verify-blob", "--key", "/fixture/fixture.pub", "--trusted-root", "/fixture/trusted-root.json",
+        "--bundle", "/fixture/launcher.sigstore.json", "/launcher"], evidence)
+    (evidence / "fixture-render.json").write_text(json.dumps({
+        "packaged_launcher_sha256": sha(launcher_source),
+        "fixture_launcher_sha256": rendered_hash,
+        "fixture_policy": "independently signed launcher and verifier pin; maintainer-only",
+        "signed_launcher_was_mutated_after_signing": False,
+    }, sort_keys=True, indent=2) + "\n")
+    launcher_bin = private / "minimal-host-path"
+    launcher_env = trusted_launcher_environment(launcher_bin, admission)
+    shutil.copyfile(private / 'minimal-host-tools.json', evidence / 'minimal-host-tools.json')
+    run("minimal-host-compose-preflight", ["docker", "compose", "version"], evidence, env=launcher_env)
+    run("minimal-host-launcher-syntax", ["sh", "-n", str(launcher)], evidence, env=launcher_env)
+    origin = f"http://127.0.0.1:{http_port}"
+    install = run("local-launcher-install", ["sh", str(launcher), "install", "--directory", str(state),
+        "--port", str(http_port), "--project-prefix", project_prefix], evidence, env=launcher_env)
+    info = json.loads((state / "instance.json").read_text(encoding="utf-8"))
+    if (info.get("mode") != "local" or info.get("image_admission", {}).get("id") != admission["image_id"]
+            or info.get("platform") != admission["platform"]
+            or info.get("image_admission", {}).get("source_revision") != admission["source_commit"]
+            or info.get("image_admission", {}).get("source_snapshot") != admission["source_snapshot"]):
+        raise RuntimeError("packaged host launcher instance differs from signed source/runtime admission")
+    project = info["project"]
+    if not project.startswith(f"{project_prefix}-"):
+        raise RuntimeError("installer project escaped its assigned resource namespace")
+    info_mounts = json.loads(run("local-compose-config", ["docker", "compose", "-f",
+        str(state / "compose/compose.yaml"), "-f", str(state / "compose/local.yaml"), "--env-file",
+        str(state / ".env"), "-p", project, "config", "--format", "json"], evidence).stdout)
+    if set(info_mounts.get("services", {})) != {"volt"}:
+        raise RuntimeError("local auth Compose unexpectedly started a synthetic identity provider")
+    port = run("local-loopback-binding", ["docker", "port", f"{project}-volt-1", "8000/tcp"], evidence)
+    if not port.stdout.strip().startswith("127.0.0.1:"):
+        raise RuntimeError("local VOLT application binding is not loopback-only")
+    wait_for_local(origin, evidence)
+    qualify_runtime_custody(state=state, project=project, admission=admission, evidence=evidence)
+    offline_entry = create_offline_fixture_entry(state=state, admission=admission, private=private)
+    from uvm.installer.lock import _bounded_file
+    paths = [state/'instance.json', state/'.env', state/'local-auth.json', state/'local-recovery.json']
+    paths += [p for p in (state/'secrets').rglob('*') if p.is_file() and not p.is_symlink()
+              and p.stat().st_uid == os.getuid() and stat.S_IMODE(p.stat().st_mode) in (0o600,0o640)]
+    def fingerprints():
+        return {str(p.relative_to(state)): hashlib.sha256(_bounded_file(p,1024*1024,private=False)).hexdigest() for p in paths}
+    before = fingerprints()
+    with owned_registry_outage(evidence):
+        denied = run('diagnostics-registry-fetch-denied', ['docker','buildx','imagetools','inspect','--raw',admission['image_reference']], evidence,env=launcher_env,check=False)
+        if denied.returncode == 0: raise RuntimeError('owned registry outage was not effective')
+        for phase in ('running','stopped'):
+            if phase == 'stopped':
+                run('diagnostics-public-cold-stop',['sh',str(offline_entry),'stop','--directory',str(state)],evidence,env=launcher_env)
+            for action in ('status','diagnose','logs'):
+                result = run('diagnostics-'+phase+'-'+action,['sh',str(offline_entry),action,'--directory',str(state)],evidence,env=launcher_env)
+                if action == 'diagnose':
+                    value=json.loads(result.stdout)
+                    if (set(value) != {'schema_version','profile','release','instance','container','resources','private_checks'}
+                            or value['profile'] != 'volt_instance_diagnostics_v1'
+                            or value['instance']['project'] != project
+                            or value['release']['source_revision'] != admission['source_commit']
+                            or value['container']['running'] is not (phase == 'running')
+                            or value['container']['status'] != ('running' if phase == 'running' else 'exited')
+                            or value['resources']['network_internal'] is not False):
+                        raise RuntimeError('public diagnostic projection differs from current admitted running/stopped instance')
+                elif action == 'logs':
+                    value=json.loads(result.stdout)
+                    if (value['profile'] != 'volt_redacted_runtime_markers_v1' or not value['markers']
+                            or value['producer_exit'] != 0 or value['reader_exit'] != 0
+                            or value['reader_outcome'] != 'complete' or value['truncated'] is not False):
+                        raise RuntimeError('public current-run logs did not preserve successful producer/reader outcomes')
+            if fingerprints() != before: raise RuntimeError('read-only diagnostics changed observed host private state')
+    cache=state.parent/(state.name+'.installer-artifacts')/'originals'
+    from uvm.installer.offline_artifacts import Closure
+    material=Closure(fixture=None,custody_root=cache)
+    if material.hash != info['installer_admission']['closure_sha256']:
+        raise RuntimeError('actual installed verification material differs from the journal pin')
+    retained=evidence/'actual-installed-originals';shutil.copytree(cache,retained)
+    for path in retained.rglob('*'):path.chmod(0o700 if path.is_dir() else 0o600)
+    retained.chmod(0o700);material.assert_unchanged()
+    if Closure(fixture=None,custody_root=retained).hash != material.hash:
+        raise RuntimeError('retained original verification material differs')
+    (evidence/'public-diagnostics-outcome.json').write_text(json.dumps({
+        'status':'running_and_stopped_public_diagnose_logs_status_passed_under_registry_outage',
+        'runtime_source':admission['source_commit'],'source_snapshot':admission['source_snapshot'],
+        'observed_host_fingerprints':before,'complete_runtime_private_byte_coverage':False,
+        'observed_host_private_bytes_unchanged':True,'no_account_browser_or_session_operations':True,
+        'actual_installed_closure_sha256':material.hash,'full_qualification':False,
+    },indent=2)+'\n')
+    return project, launcher, launcher_env
 
 def qualify_local_runtime(*, package: Path, bundle: Path, admission: dict[str, str],
                           state: Path, private: Path, evidence: Path, password: str,
@@ -1231,6 +1741,8 @@ def main() -> int:
                    help="external fixture root/public key, verifier digest and Cosign bundles (local mode only)")
     p.add_argument("--development-fixture", action="store_true",
                    help="label evidence as development-only when qualifying an explicitly selected fixture image")
+    p.add_argument("--diagnostics-only", action="store_true",
+                   help="focused local public read-only diagnostics/status/logs under owned registry outage; no account/browser journey")
     p.add_argument("--bundle", type=Path, required=True)
     p.add_argument("--evidence", type=Path, required=True)
     p.add_argument("--private-tmp", type=Path, default=Path("/tmp"),
@@ -1240,6 +1752,8 @@ def main() -> int:
     p.add_argument("--project-prefix", default="volt-rc2-qual",
                    help="unique Compose project prefix used for owned disposable resources")
     args = p.parse_args()
+    if args.diagnostics_only and args.auth_mode != "local":
+        p.error("--diagnostics-only requires independently admitted local RC4 qualification")
     if args.version == "0.1.0-demo" and not args.development_fixture:
         p.error("0.1.0-demo requires --development-fixture")
     if args.auth_mode == "local":
@@ -1315,24 +1829,38 @@ def main() -> int:
                 shutil.copy2(args.admission_fixture / name, evidence / name)
             package_root = setup.parent
             (evidence / "source-bundle-root.txt").write_text(str(package_root) + "\n")
-            project, setup, launcher_environment = qualify_local_runtime(package=package_root,
-                bundle=args.bundle, admission=admission, state=state, private=private,
-                evidence=evidence, password=password_value, http_port=46180,
-                project_prefix=args.project_prefix)
+            if args.diagnostics_only:
+                project, setup, launcher_environment = qualify_public_readonly_diagnostics(package=package_root,
+                    bundle=args.bundle, admission=admission, state=state, private=private,
+                    evidence=evidence, http_port=46180, project_prefix=args.project_prefix)
+            else:
+                project, setup, launcher_environment = qualify_local_runtime(package=package_root,
+                    bundle=args.bundle, admission=admission, state=state, private=private,
+                    evidence=evidence, password=password_value, http_port=46180,
+                    project_prefix=args.project_prefix)
             started = True
             release_metadata = qualification_release_metadata(requested_version=args.version,
                 bundle_version=bundle_version, image_version=args.version, image_id=args.image_id,
                 platform=platform or "linux/amd64", source_revision=args.source_commit,
                 source_snapshot=args.source_snapshot, bundle_sha256=sha(args.bundle),
                 scope="development_fixture")
-            (evidence / "qualification.json").write_text(json.dumps({
-                "result": "incomplete", "full_qualification": False, **release_metadata,
-                "project": project, "local_auth_process": "passed",
-                "scanner_provider": "Qualys", "scanner_stage": "pending",
-                "restore_stage": "passed_cold_restore_authentication",
-                "reason": "Provider ingestion and scanner recovery remain unqualified.",
-            }, sort_keys=True, indent=2) + "\n")
-            outcome = 2
+            if args.diagnostics_only:
+                (evidence / "qualification.json").write_text(json.dumps({
+                    "result":"passed_focused_read_only_diagnostics", "full_qualification":False,
+                    **release_metadata,"project":project,"scope":"development_fixture",
+                    "account_browser_session_journey":False,"scanner_stage":"pending",
+                    "read_only_diagnostics":"passed_running_stopped_registry_outage",
+                },sort_keys=True,indent=2)+"\n")
+                outcome=0
+            else:
+                (evidence / "qualification.json").write_text(json.dumps({
+                    "result": "incomplete", "full_qualification": False, **release_metadata,
+                    "project": project, "local_auth_process": "passed",
+                    "scanner_provider": "Qualys", "scanner_stage": "pending",
+                    "restore_stage": "passed_cold_restore_authentication",
+                    "reason": "Provider ingestion and scanner recovery remain unqualified.",
+                }, sort_keys=True, indent=2) + "\n")
+                outcome=2
         else:
             image_inspect = run("image-platform-inspect", ["docker", "image", "inspect", args.image_id], evidence)
             platform = platform_from_image_inspect(image_inspect.stdout, args.platform)

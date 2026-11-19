@@ -439,3 +439,120 @@ extra/partial lines or any other operation retain the existing redacted generic
 failure. Arbitrary private maintenance.stderr is never forwarded. This closed
 backend discriminator requires its independently integrated product source;
 old9657 redacted RuntimeError cannot count as specific claimed-state proof.
+
+The maintainer TEST entry separates authentication diagnostics from the signed
+launcher's terminal result. Trusted Cosign and Q checks execute sequentially
+inside an explicit first-error-return function. Their stderr goes through a
+private FIFO to a separately inventoried installed POSIX dd reader, capped at
+65536 bytes per invocation; records are new private0700/0600 destinations.
+Authentication failure preserves its nonzero exit and emits only a fixed
+external-authentication failure marker. It never executes the signed launcher
+or accepts claimed-looking authentication text as a backend result. Only after
+ALL checks succeed does the original signed launcher own terminal stderr.
+The claimed-state test still requires exit1 and the exact COMPLETE safe launcher
+message, never a substring/last line/generic failure. No runtime, backend or
+trust-policy change is introduced by this test-entry diagnostic transport.
+
+## Fixed read-only diagnostics and current-run marker logs
+
+Pinned before implementation/execution. `diagnose --directory STATE` and
+`logs --directory STATE` require the same independent external entry, complete
+fresh graph/cache admission and installed pin as existing lifecycle actions.
+`status` uses the existing owned Compose projection with `ps --all`, explicitly
+including stopped containers. No command repairs state, adopts resources,
+refreshes keys, changes origin, or grants account/upgrade authority.
+
+The diagnostic holder is the admitted runtime's FIXED
+`-m uvm.installer.lock /state/.install.lock --diagnostics` process. It acquires
+and retains the SAME private exclusive FD through request, fresh receipt,
+before/after Docker observations, validation and private result publication;
+then stays alive through host output. Its only extra mounts are owned0700
+`/run/volt-diagnostic-input` readonly and `/run/volt-diagnostic-output` writable,
+plus the existing readonly cache parent. The current helper exemption requires
+this exact command/image/typed witness/owner/project/networknone/readonly/no
+ports/tmpfs recipe and exact mount sources. Unknown helpers remain potential
+APIs. There is no Docker socket, generic executor or new trust policy.
+
+Input request is canonical CLOSED JSON `{schema_version:1,
+profile:"volt_diagnostic_request_v1",operation:"diagnose"|"logs",
+operation_id:UUID,setup_sha256:SHA256}`. A fixed admitted `emit-request` helper
+emits public data only. The FD owner binds immutable request bytes, fixed
+/package/setup.py digest, current journal bytes/private custody and fresh
+independent graph receipt before and after observation. Before/after files
+are closed Docker projections of exactly one selected API (or explicit absent
+API), three owned local/no-options stores, ordinary bridge Internal=false,
+exact attachments, and this same FD holder. Input files cannot select another
+instance, source, image, operation or output path. Operation UUID correlates;
+it is never authority. Receipt is comparison data after fresh crypto, never a
+cached passed bit. No future journal network_internal field is assumed.
+
+All private input reads are bounded NONBLOCK/NOFOLLOW regular single-link,
+host-owned0600 and stable identity. Directories are owned0700. Canonical result
+is exclusively published0600 inside the new private output directory. Before
+host stdout, recheck FD-holder fullCID/image/owner/project/StartedAt and API
+fullCID/image/owner/project/StartedAt; stale/missing/conflicting observations
+fail without output or any instance mutation. The actual FD owner also checks
+current lock inode, fresh receipt, journal and committed host-key hashes before
+publication. Error text is fixed; private values, tokens, request bodies, raw
+Docker args/config/environment, owner tokens and host/private paths never go
+to public stdout/stderr.
+
+`diagnose` emits exactly `{schema_version:1,
+profile:"volt_instance_diagnostics_v1",release,instance,container,resources,
+private_checks}`. Closed nested fields:
+- release: version, source_revision, source_snapshot, index_digest,
+  selected_digest, selected_kind, platform, bundle_sha256 (fresh admitted values).
+- instance: project, installation_id, phase, restore_pending, ack_generation,
+  custody_ok (existing finite phase/UUID/integer/strict bool; no owner token).
+- container: present, id, running, status, health, started_at, exit_code,
+  oom_killed (fixed Docker status/health enums; explicit nulls when absent).
+- resources: network_name, network_internal, exact_attachment_set,
+  postgres_volume, media_volume, state_volume, ownership_match,
+  driver_options_empty. Ordinary network_internal is observed strict false,
+  not inferred from an absent journal field.
+- private_checks: inventory_complete, private_modes_ok, required_keys_present,
+  fingerprints_match. These cover existing committed host custody only, not
+  runtime-private consumed capability payloads; no content/path output.
+
+`logs` queries ONLY exact admitted fullCID with Docker `logs --timestamps
+--since ACTUAL_STARTED_AT --tail 1024`, no follow/caller selectors. Its fixed
+networknone filter has a10-second absolute read deadline,65,536 input-byte
+bound,1,024-line bound and2,048-byte complete-line bound. No unbounded disk
+buffering, substring matching or arbitrary secret scrubber. Docker producer
+and bounded reader exits are retained SEPARATELY; reader limit/timeout/failure
+terminates producer and returns nonzero, never credits SIGPIPE/cancellation as
+Docker success. Truncation/omission is explicit in the safe result.
+
+Only complete timestamped full-line fixed G7 markers are mapped to finite
+kind enums plus null/0..255 status. The exact marker set is maintained in the
+admitted module; unknown/secret-looking/prefix/suffix/oversized/older-than-
+StartedAt lines are omitted, never echoed. Markers are informational, never
+readiness/recovery/identity authority. `logs` result is exactly
+`{schema_version:1,profile:"volt_redacted_runtime_markers_v1",container_id,
+started_at,queried_tail_lines:1024,markers:[{timestamp,kind,status}],omitted_lines,
+truncated,producer_exit,reader_exit,reader_outcome}`. Outcome is a fixed enum;
+failed/limited results are nonzero after identity checks and never masquerade
+as complete success. Current-run recognized marker absence fails explicitly.
+Long lifetime is handled by fixed tail/current-start selection; log limits do
+not affect independent cold backup or metadata diagnosis.
+
+Exact observation envelope is CLOSED `{schema_version:1,
+profile:"volt_diagnostic_observation_v1",operation_id,request_sha256,
+phase:"before"|"after",data:{containers,volumes,networks,holder}}` and is bound
+to the actual FD owner's request UUID/digest before readiness. Result's private
+identity-lines file is independently compared with fresh actual Docker identity
+before stdout, so self-consistent stale observation data cannot pass by merely
+matching another stale frame. No owner tokens from that private comparison are
+printed. Session deadline is180 seconds; each reader remains10 seconds.
+Marker output additionally caps256 records/65,536 serialized bytes. Marker-cap
+or partial-line outcomes are explicit nonzero truncation; public logs include
+`tail_limited:true`, distinguishing the bounded current-run window from a full
+log-history claim. Exact extra reader outcome enums are marker_limit and
+partial_line. No limit is interpreted as a successful producer result.
+The log producer/filter Docker clients additionally have a fixed15-second host
+watchdog. It records and preserves actual separate exit statuses and kills only
+those newly launched child PIDs. Incomplete transport output is moved privately
+away from the selected input inode, then a NEW fixed timeout/filter_unavailable
+record is published; late child bytes cannot change it. Such transport failure
+is nonzero, never a successful reader or producer result. No host timeout
+binary/interpreter or generic command wrapper is introduced.

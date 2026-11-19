@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from tools.compose_release_qualification import create_offline_fixture_entry
+from tools.compose_release_qualification import create_offline_fixture_entry, require_claimed_setup_denial
 
 class OfflinePublicEntryTests(unittest.TestCase):
     def fixture(self, parent):
@@ -15,7 +15,7 @@ class OfflinePublicEntryTests(unittest.TestCase):
         anchor=parent/'state.installer-artifacts';anchor.mkdir(mode=0o700)
         closure=anchor/'originals';closure.mkdir(mode=0o700)
         package=closure/'package';package.mkdir(mode=0o700)
-        launcher=package/'launcher.sh';launcher.write_text('#!/bin/sh\nprintf "%s\\n" "$@" >"$ENTRY_LAUNCH_LOG"\n');launcher.chmod(0o700)
+        launcher=package/'launcher.sh';launcher.write_text('#!/bin/sh\nprintf "%s\\n" "$@" >"$ENTRY_LAUNCH_LOG"\nif [ "${ENTRY_TERMINAL_DENIAL:-0}" = 1 ]; then printf "%s\\n" "volt installer: initial setup is already claimed" >&2; exit 1; fi\nif [ "${ENTRY_TERMINAL_GENERIC:-0}" = 1 ]; then printf "%s\\n" "volt installer: local maintenance command failed" >&2; exit 1; fi\n');launcher.chmod(0o700)
         index=closure/'runtime-index/blobs/sha256';index.mkdir(parents=True);(index/('b'*64)).write_text('{}')
         fixture=parent/'independent';fixture.mkdir(mode=0o700)
         private=parent/'entry';private.mkdir(mode=0o700)
@@ -27,6 +27,12 @@ class OfflinePublicEntryTests(unittest.TestCase):
         docker.write_text('#!'+sys.executable+'\n'+'''import json,os,sys
 args=sys.argv[1:]
 with open(os.environ['ENTRY_DOCKER_LOG'],'a') as stream:stream.write(json.dumps(args)+'\\n')
+if any(v in args for v in ('verify-attestation','verify-blob','--offline-artifacts')):
+ print('Successful trusted Cosign authentication diagnostic',file=sys.stderr)
+ if os.environ.get('ENTRY_HUGE_AUTH_DIAGNOSTIC')=='1':print('N'*70000,file=sys.stderr)
+ if os.environ.get('ENTRY_CLAIMED_AUTH_TEXT')=='1':print('volt installer: initial setup is already claimed',file=sys.stderr)
+if 'verify-attestation' in args and os.environ.get('ENTRY_FAIL')=='crafted':
+ print('volt installer: initial setup is already claimed',file=sys.stderr);sys.exit(1)
 if args[:2]==['image','inspect']:print('[]')
 if 'verify-attestation' in args and os.environ.get('ENTRY_FAIL')=='signature':sys.exit(31)
 if '--offline-artifacts' in args and os.environ.get('ENTRY_FAIL')=='full':sys.exit(32)
@@ -53,14 +59,15 @@ if '--offline-artifacts' in args and os.environ.get('ENTRY_FAIL')=='full':sys.ex
                 if command[0]=='run':
                     self.assertIn('--pull=never',command);self.assertEqual(command[command.index('--network')+1],'none')
             self.assertFalse(list(wrapper.parent.glob('volt-external-offline.*')))
-    def test_existing_setup_action_is_authenticated_before_signed_launcher(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            parent=Path(temporary);state,_closure,wrapper,env,_admission=self.fixture(parent)
-            result=self.run_entry(wrapper,state,env,'setup');self.assertEqual(result.returncode,0,result.stderr)
-            self.assertEqual((parent/'launcher.log').read_text().splitlines(),['setup','--directory',str(state)])
-            (parent/'launcher.log').unlink();env['ENTRY_FAIL']='full'
-            denied=self.run_entry(wrapper,state,env,'setup');self.assertEqual(denied.returncode,32,denied.stderr)
-            self.assertFalse((parent/'launcher.log').exists())
+    def test_existing_setup_and_status_actions_are_authenticated_before_signed_launcher(self):
+        for action in ('setup', 'status'):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as temporary:
+                parent=Path(temporary);state,_closure,wrapper,env,_admission=self.fixture(parent)
+                result=self.run_entry(wrapper,state,env,action);self.assertEqual(result.returncode,0,result.stderr)
+                self.assertEqual((parent/'launcher.log').read_text().splitlines(),[action,'--directory',str(state)])
+                (parent/'launcher.log').unlink();env['ENTRY_FAIL']='full'
+                denied=self.run_entry(wrapper,state,env,action);self.assertEqual(denied.returncode,32,denied.stderr)
+                self.assertFalse((parent/'launcher.log').exists())
 
     def test_crypto_or_full_graph_failure_prevents_shell(self):
         for stage,exitcode,count in [('signature',31,1),('full',32,6)]:
@@ -88,3 +95,31 @@ if '--offline-artifacts' in args and os.environ.get('ENTRY_FAIL')=='full':sys.ex
             for arguments in [('install','--directory',str(state)),('stop','--directory',str(parent/'other')),('stop','--directory',str(state),'--directory',str(state))]:
                 result=subprocess.run(['sh',str(wrapper),*arguments],env=env,text=True,capture_output=True);self.assertNotEqual(result.returncode,0)
             self.assertFalse((parent/'docker.jsonl').exists())
+
+    def test_authentication_noise_is_private_and_true_terminal_claimed_denial_is_exact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent=Path(temporary);state,_closure,wrapper,env,_admission=self.fixture(parent)
+            env['ENTRY_CLAIMED_AUTH_TEXT']='1';env['ENTRY_TERMINAL_DENIAL']='1'
+            result=self.run_entry(wrapper,state,env,'setup');require_claimed_setup_denial(result)
+            records=list((wrapper.parent/'public-offline-authentication').glob('entry.*/authentication.stderr'))
+            self.assertEqual(len(records),1);raw=records[0].read_text();self.assertIn('Successful trusted Cosign',raw);self.assertIn('initial setup is already claimed',raw)
+            self.assertLessEqual(records[0].stat().st_size,65536);self.assertEqual(records[0].stat().st_mode&0o777,0o600)
+    def test_crafted_claimed_auth_failure_or_noise_without_backend_claim_cannot_be_credited(self):
+        for failure in ('crafted','successful-noise-only'):
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory() as temporary:
+                parent=Path(temporary);state,_closure,wrapper,env,_admission=self.fixture(parent)
+                env['ENTRY_CLAIMED_AUTH_TEXT']='1'
+                if failure=='crafted':env['ENTRY_FAIL']='crafted'
+                else:env['ENTRY_TERMINAL_GENERIC']='1'
+                result=self.run_entry(wrapper,state,env,'setup')
+                with self.assertRaisesRegex(RuntimeError,'not explicitly established'):require_claimed_setup_denial(result)
+                if failure=='crafted':self.assertEqual(result.returncode,1);self.assertEqual(result.stderr,'external offline authentication failed\n');self.assertFalse((parent/'launcher.log').exists())
+                else:self.assertEqual(result.stderr,'volt installer: local maintenance command failed\n')
+
+    def test_authentication_diagnostics_remain_bounded_when_a_producer_is_noisy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent=Path(temporary);state,_closure,wrapper,env,_admission=self.fixture(parent);env['ENTRY_HUGE_AUTH_DIAGNOSTIC']='1'
+            result=subprocess.run(['sh',str(wrapper),'setup','--directory',str(state)],env=env,text=True,capture_output=True,timeout=15)
+            with self.assertRaises(RuntimeError):require_claimed_setup_denial(result)
+            for path in (wrapper.parent/'public-offline-authentication').glob('entry.*/authentication.stderr'):
+                self.assertLessEqual(path.stat().st_size,65536)

@@ -67,12 +67,13 @@ def initialize_local(fd: int) -> None:
 
 def main() -> int:
     if (len(sys.argv) not in (2, 3) or (len(sys.argv) == 3
-            and sys.argv[2] not in ('--initialize-local', *OFFLINE_ACTIONS))):
+            and sys.argv[2] not in ('--initialize-local', '--diagnostics', *OFFLINE_ACTIONS))):
         return 64
     path = Path(sys.argv[1])
     initializing = len(sys.argv) == 3 and sys.argv[2] == '--initialize-local'
     offline = OFFLINE_ACTIONS.get(sys.argv[2]) if len(sys.argv) == 3 else None
-    if (initializing or offline) and path != INSTANCE_ROOT / '.install.lock':
+    diagnostic = len(sys.argv) == 3 and sys.argv[2] == '--diagnostics'
+    if (initializing or offline or diagnostic) and path != INSTANCE_ROOT / '.install.lock':
         return 64
     if offline == 'restore-provision':
         from uvm.installer.recovery_authority import _host_writer
@@ -101,7 +102,10 @@ def main() -> int:
         current = path.stat(follow_symlinks=False)
         if any(getattr(info, field) != getattr(current, field) for field in fields):
             raise ValueError('private lifecycle lock inode changed')
-        if initializing:
+        if diagnostic:
+            from uvm.installer.diagnostics import serve
+            serve(fd)
+        elif initializing:
             initialize_local(fd)
         elif offline:
             from uvm.installer.offline_lifecycle import execute

@@ -267,3 +267,134 @@ run_offline_action() {
   printf 'offline_operation=%s\nstatus=complete\n' "$ACTION"
 }
 
+
+# Fixed read-only diagnostic data operations inside the admitted runtime.
+diagnostic_data() {
+  diagnostic_stdin=''
+  case "$1" in emit-request) ;; filter-logs) diagnostic_stdin=-i ;; *) fail 'unsupported fixed diagnostic data operation' ;; esac
+  docker run --platform "$PLATFORM" --pull=never --rm $diagnostic_stdin --network none --read-only --cap-drop=ALL \
+    --security-opt=no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=8m \
+    --tmpfs /app/media:rw,noexec,nosuid,nodev,size=1m \
+    --tmpfs /opt/uvm/state:rw,noexec,nosuid,nodev,size=1m \
+    --tmpfs /var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=1m \
+    --user "$(id -u):$(id -g)" --mount "type=bind,src=$PACKAGE,dst=/package,readonly" \
+    --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -m uvm.installer.diagnostics "$@"
+}
+
+diagnostic_api() {
+  if docker container inspect "${PROJECT}-volt-1" --format '[{"Id":{{json .Id}},"Name":{{json .Name}},"Image":{{json .Image}},"ImageManifestDescriptor":{{json (index . "ImageManifestDescriptor")}},"Config":{"Labels":{{json .Config.Labels}}},"HostConfig":{"NetworkMode":{{json .HostConfig.NetworkMode}}},"NetworkSettings":{"Networks":{{json .NetworkSettings.Networks}}},"Mounts":[{{ $sep := "" }}{{range .Mounts}}{{$sep}}{"Type":{{json .Type}},"Name":{{json (index . "Name")}},"Source":{{json .Source}},"Destination":{{json .Destination}},"Driver":{{json (index . "Driver")}},"RW":{{json .RW}}}{{$sep = ","}}{{end}}],"State":{"Running":{{json .State.Running}},"Status":{{json .State.Status}},"Health":{{with index .State "Health"}}{{json (index . "Status")}}{{else}}null{{end}},"StartedAt":{{json .State.StartedAt}},"ExitCode":{{json .State.ExitCode}},"OOMKilled":{{json .State.OOMKilled}}}}]' >"$WORK/diagnostic-api.json" 2>"$WORK/diagnostic-docker-error"; then
+    cat "$WORK/diagnostic-api.json"
+  elif grep -F -i 'No such' "$WORK/diagnostic-docker-error" >/dev/null; then
+    printf '[]\n'
+  else
+    fail 'diagnostic API inspection failed; absence cannot be inferred'
+  fi
+}
+
+diagnostic_observe() {
+  ensure_lock_owner
+  {
+    printf '{"schema_version":1,"profile":"volt_diagnostic_observation_v1","operation_id":"%s","request_sha256":"%s","phase":"%s","data":{"containers":' "$DIAG_OPERATION_ID" "$DIAG_REQUEST_SHA256" "$1"; diagnostic_api
+    printf ',"volumes":['; separator=''
+    for store in postgres media state; do
+      printf '%s' "$separator"
+      docker volume inspect "${PROJECT}_$store" --format '{"Name":{{json .Name}},"Driver":{{json .Driver}},"Scope":{{json .Scope}},"Mountpoint":{{json .Mountpoint}},"Options":{{json .Options}},"Labels":{{json .Labels}}}' \
+        2>"$WORK/diagnostic-docker-error" || fail 'diagnostic owned store inspection failed'
+      separator=,
+    done
+    printf '],"networks":['
+    docker network inspect "${PROJECT}_network" --format '{"Name":{{json .Name}},"Id":{{json .Id}},"Driver":{{json .Driver}},"Internal":{{json .Internal}},"Labels":{{json .Labels}},"IPAM":{"Config":{{json .IPAM.Config}}},"Containers":{{json .Containers}}}' \
+      2>"$WORK/diagnostic-docker-error" || fail 'diagnostic owned network inspection failed'
+    printf '],"holder":'
+    docker inspect "$LOCK_ID" --format '{"Id":{{json .Id}},"Image":{{json .Image}},"ImageManifestDescriptor":{{json (index . "ImageManifestDescriptor")}},"Config":{"Image":{{json .Config.Image}},"Labels":{{json .Config.Labels}}},"State":{"Running":{{json .State.Running}},"StartedAt":{{json .State.StartedAt}}}}' \
+      2>"$WORK/diagnostic-docker-error" || fail 'diagnostic actual FD owner inspection failed'
+    printf '}}\n'
+  } >"$DIAG_INPUT/.observation"
+  chmod 600 "$DIAG_INPUT/.observation"
+  mv "$DIAG_INPUT/.observation" "$DIAG_INPUT/$1.json"
+}
+
+diagnostic_identity() {
+  docker inspect "$LOCK_ID" --format '{{.Id}}|{{.Image}}|{{.Config.Image}}|{{.State.StartedAt}}|{{.State.Running}}|{{index .Config.Labels "volt.compose.owner-token"}}|{{index .Config.Labels "volt.compose.project"}}' \
+    2>"$WORK/diagnostic-docker-error" || fail 'diagnostic actual FD owner identity failed'
+  if docker inspect "${PROJECT}-volt-1" --format '{{.Id}}|{{.Image}}|{{.State.StartedAt}}|{{index .Config.Labels "volt.compose.owner-token"}}|{{index .Config.Labels "com.docker.compose.project"}}' \
+      2>"$WORK/diagnostic-docker-error"; then :
+  elif grep -F -i 'No such' "$WORK/diagnostic-docker-error" >/dev/null; then printf 'absent\n'
+  else fail 'diagnostic API identity failed'; fi
+}
+
+run_diagnostics() {
+  [ -n "${DIAG_INPUT:-}" ] && [ -n "${DIAG_OUTPUT:-}" ] || fail 'diagnostics require the actual fixed FD owner'
+  ensure_lock_owner
+  diagnostic_original_identity=$(diagnostic_identity) || fail 'initial diagnostic identity is unavailable'
+  cp "$WORK/graph-admission.json" "$DIAG_INPUT/.receipt"
+  chmod 600 "$DIAG_INPUT/.receipt"; mv "$DIAG_INPUT/.receipt" "$DIAG_INPUT/receipt.json"
+  diagnostic_observe before
+  if [ "$ACTION" = logs ]; then
+    diagnostic_capture_logs
+  fi
+  diagnostic_observe after
+  attempts=0
+  while [ "$attempts" -lt 150 ]; do
+    ensure_lock_owner
+    if [ -f "$DIAG_OUTPUT/result-exit" ] && [ ! -L "$DIAG_OUTPUT/result-exit" ]; then break; fi
+    attempts=$((attempts + 1)); sleep 1
+  done
+  [ "$attempts" -lt 150 ] || fail 'actual FD diagnostic validation timed out'
+  diagnostic_status=$(cat "$DIAG_OUTPUT/result-exit")
+  case "$diagnostic_status" in 0|1) ;; *) fail 'diagnostic completion status differs' ;; esac
+  ensure_lock_owner
+  diagnostic_current_identity=$(diagnostic_identity) || fail 'final diagnostic identity is unavailable'
+  diagnostic_validated_identity=$(cat "$DIAG_OUTPUT/identity-lines") || fail 'diagnostic validated identity is unavailable'
+  [ "$diagnostic_original_identity" = "$diagnostic_current_identity" ] && [ "$diagnostic_validated_identity" = "$diagnostic_current_identity" ] \
+    || fail 'diagnostic identity changed or stale projection arrived before output'
+  [ -f "$DIAG_OUTPUT/result.json" ] && [ ! -L "$DIAG_OUTPUT/result.json" ] || fail 'actual FD diagnostic result is missing'
+  cat "$DIAG_OUTPUT/result.json"
+  return "$diagnostic_status"
+}
+
+
+diagnostic_capture_logs() {
+    diagnostic_query=$(docker inspect "${PROJECT}-volt-1" --format '{{.Id}}|{{.State.StartedAt}}' 2>"$WORK/diagnostic-docker-error") \
+      || fail 'current-run log container is unavailable'
+    IFS='|' read -r diagnostic_api_id started <<EOF_DIAGNOSTIC_QUERY
+$diagnostic_query
+EOF_DIAGNOSTIC_QUERY
+    case "$diagnostic_api_id" in ''|*[!0-9a-f]*) fail 'current log container ID is malformed' ;; esac
+    [ "${#diagnostic_api_id}" -eq 64 ] || fail 'current log container ID is incomplete'
+    case "$started" in 0001-*) fail 'current-run logs require a previously started container' ;; esac
+    case "$started" in ''|*[!0-9TZ.:-]*) fail 'current-run log StartedAt is malformed' ;; esac
+    [ "${#started}" -le 40 ] || fail 'current-run log StartedAt exceeds bound'
+    fifo="$WORK/diagnostic-log-stream"; mkfifo "$fifo" || fail 'private diagnostic stream unavailable'
+    docker logs --timestamps --since "$started" --tail 1024 "$diagnostic_api_id" >"$fifo" 2>&1 &
+    diagnostic_producer=$!
+    diagnostic_data filter-logs --started-at "$started" <"$fifo" >"$DIAG_INPUT/.logs" 2>"$WORK/diagnostic-reader-error" &
+    diagnostic_reader=$!
+    ( sleep 15
+      printf '%s\n' timeout >"$WORK/diagnostic-wall-timeout"
+      kill -KILL "$diagnostic_producer" "$diagnostic_reader" 2>/dev/null || :
+    ) </dev/null >/dev/null 2>&1 &
+    diagnostic_watchdog=$!
+    if wait "$diagnostic_reader"; then diagnostic_reader_status=0
+    else
+      diagnostic_reader_status=$?
+      kill "$diagnostic_producer" 2>/dev/null || :
+    fi
+    if wait "$diagnostic_producer"; then diagnostic_producer_status=0; else diagnostic_producer_status=$?; fi
+    kill "$diagnostic_watchdog" 2>/dev/null || :
+    wait "$diagnostic_watchdog" 2>/dev/null || :
+    if [ -f "$WORK/diagnostic-wall-timeout" ] || [ "$diagnostic_reader_status" -ge 125 ]; then
+      # The Docker client/filter transport did not return a complete response.
+      # Preserve its original partial inode privately; late bytes cannot alter
+      # the NEW fixed failure record delivered to the actual FD owner.
+      mv "$DIAG_INPUT/.logs" "$WORK/diagnostic-reader-partial"
+      diagnostic_transport_outcome=filter_unavailable
+      [ ! -f "$WORK/diagnostic-wall-timeout" ] || diagnostic_transport_outcome=timeout
+      printf '{"schema_version":1,"profile":"volt_filtered_markers_v1","started_at":"%s","markers":[],"omitted_lines":0,"truncated":true,"reader_outcome":"%s"}\n' \
+        "$started" "$diagnostic_transport_outcome" >"$DIAG_INPUT/.logs"
+    fi
+    rm "$fifo"
+    chmod 600 "$DIAG_INPUT/.logs"; mv "$DIAG_INPUT/.logs" "$DIAG_INPUT/logs.json"
+    printf '{"producer_exit":%s,"reader_exit":%s}\n' "$diagnostic_producer_status" "$diagnostic_reader_status" >"$DIAG_INPUT/.statuses"
+    chmod 600 "$DIAG_INPUT/.statuses"; mv "$DIAG_INPUT/.statuses" "$DIAG_INPUT/statuses.json"
+}

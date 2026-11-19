@@ -15,6 +15,11 @@ INSTANCE_ROOT = Path('/state')
 INITIAL_REQUEST = Path('/run/volt-initialization/request.json')
 INITIAL_SETUP = Path('/package/setup.py')
 MAX_REQUEST = 64 * 1024
+OFFLINE_ACTIONS = {
+    '--offline-backup-record': 'backup-record',
+    '--offline-restore-provision': 'restore-provision',
+    '--offline-restore-admit': 'restore-admit',
+}
 
 
 def _pairs(pairs):
@@ -42,7 +47,8 @@ def _bounded_file(path: Path, limit: int, *, private: bool) -> bytes:
 
 
 def initialize_local(fd: int) -> None:
-    document = json.loads(_bounded_file(INITIAL_REQUEST, MAX_REQUEST, private=True), object_pairs_hook=_pairs)
+    request_raw = _bounded_file(INITIAL_REQUEST, MAX_REQUEST, private=True)
+    document = json.loads(request_raw, object_pairs_hook=_pairs)
     if (not isinstance(document, dict) or set(document) != {'schema_version', 'profile', 'arguments', 'setup_sha256'}
             or type(document['schema_version']) is not int or document['schema_version'] != 1
             or document['profile'] != 'volt_local_runtime_init_v1'):
@@ -56,18 +62,26 @@ def initialize_local(fd: int) -> None:
     module.__file__ = str(INITIAL_SETUP)
     exec(compile(code, str(INITIAL_SETUP), 'exec'), module.__dict__)
     args = module.runtime_init_arguments(document, INSTANCE_ROOT)
-    module.init(args, lifecycle_lock_fd=fd)
+    module.init(args, lifecycle_lock_fd=fd, initial_request_raw=request_raw)
 
 
 def main() -> int:
-    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != '--initialize-local'):
+    if (len(sys.argv) not in (2, 3) or (len(sys.argv) == 3
+            and sys.argv[2] not in ('--initialize-local', *OFFLINE_ACTIONS))):
         return 64
     path = Path(sys.argv[1])
-    initializing = len(sys.argv) == 3
-    if initializing and path != INSTANCE_ROOT / '.install.lock':
+    initializing = len(sys.argv) == 3 and sys.argv[2] == '--initialize-local'
+    offline = OFFLINE_ACTIONS.get(sys.argv[2]) if len(sys.argv) == 3 else None
+    if (initializing or offline) and path != INSTANCE_ROOT / '.install.lock':
         return 64
+    if offline == 'restore-provision':
+        from uvm.installer.recovery_authority import _host_writer
+        _host_writer(INSTANCE_ROOT)
     try:
-        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW, 0o600)
+        flags = os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW
+        if initializing:
+            flags |= os.O_CREAT
+        fd = os.open(path, flags, 0o600)
     except OSError:
         print('lifecycle-lock-initialization-failed', file=sys.stderr, flush=True)
         return 70
@@ -89,12 +103,16 @@ def main() -> int:
             raise ValueError('private lifecycle lock inode changed')
         if initializing:
             initialize_local(fd)
+        elif offline:
+            from uvm.installer.offline_lifecycle import execute
+            execute(fd, offline)
         # Initialization, if selected, has succeeded on this actual held FD.
         print('locked=1', flush=True)
         while True:
             time.sleep(3600)
-    except (Exception, SystemExit):
-        print('lifecycle-lock-initialization-failed', file=sys.stderr, flush=True)
+    except (Exception, SystemExit) as exc:
+        message = 'offline-lifecycle-failed: ' + str(exc) if offline else 'lifecycle-lock-initialization-failed'
+        print(message, file=sys.stderr, flush=True)
         return 70
     finally:
         os.close(fd)

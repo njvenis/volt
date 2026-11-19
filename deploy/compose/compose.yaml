@@ -2,6 +2,7 @@ name: ${VOLT_PROJECT:-volt-compose}
 services:
   volt:
     image: ${VOLT_IMAGE:?initialize with an explicitly built compatible image}
+    pull_policy: never
     platform: ${VOLT_PLATFORM:?run setup first}
     restart: unless-stopped
     stop_grace_period: 10m

@@ -12,6 +12,7 @@ import re
 import secrets
 import select
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -346,15 +347,20 @@ def validate_admission_fixture(path: Path, *, image_id: str, source_snapshot: st
 def qualify_admission_negatives(command: list[str], bundle: Path, image_json: Path,
                                  index_json: Path, evidence: Path) -> None:
     """Exercise rejection by the independently admitted verifier before runtime execution."""
+    for original in (bundle, image_json, index_json):
+        if sum(f"src={original}," in argument for argument in command) != 1:
+            raise RuntimeError(f"negative input must match exactly one admitted bind mount: {original.name}")
     directory = evidence / "admission-negatives"
     directory.mkdir(mode=0o755)
     cases = []
+    verifier_arguments = command.index("--bundle")
+    verifier_platform = command.index("--platform", verifier_arguments)
     for name, option, value in (("source-revision", "--source-revision", "0" * 40),
                                 ("source-snapshot", "--source-snapshot", "sha256:" + "0" * 64),
                                 ("version", "--version", "0.1.0-rc.3"),
-                                ("platform", "--platform", "linux/arm64" if command[command.index("--platform") + 1] == "linux/amd64" else "linux/amd64")):
+                                ("platform", "--platform", "linux/arm64" if command[verifier_platform + 1] == "linux/amd64" else "linux/amd64")):
         candidate = list(command)
-        candidate[candidate.index(option) + 1] = value
+        candidate[candidate.index(option, verifier_arguments) + 1] = value
         cases.append((name, candidate))
     damaged_index = directory / "wrong-child-index.json"
     index = json.loads(index_json.read_text())
@@ -378,6 +384,10 @@ def qualify_admission_negatives(command: list[str], bundle: Path, image_json: Pa
         result = run("admission-negative-" + name, candidate, evidence, check=False)
         if result.returncode == 0:
             raise RuntimeError(f"independent verifier accepted negative {name}")
+        if name == "platform" and (result.returncode != 2 or
+                "verifier.py: error: selected runtime platform differs from the admitted engine platform"
+                not in result.stderr):
+            raise RuntimeError("platform negative did not reach the verifier's semantic platform rejection")
     (evidence / "admission-negatives.json").write_text(json.dumps({
         "status": "passed", "before_candidate_execution": True,
         "cases": [name for name, _ in cases]}, sort_keys=True, indent=2) + "\n")
@@ -391,6 +401,69 @@ def trusted_launcher_environment(bin_directory: Path, admission: dict) -> dict[s
         "VOLT_EXPECTED_VERSION": "0.1.0-rc.4", "VOLT_EXPECTED_SIGNER": SIGNER,
         "VOLT_EXPECTED_ISSUER": ISSUER, "VOLT_BOOTSTRAP_VERIFIER_VERIFIED": "1"})
     return environment
+
+
+def qualify_offline_fixture_entry(*, closure: Path, fixture: Path, verifier_reference: str,
+                                 platform: str, private: Path, evidence: Path) -> None:
+    """Exercise independent first-entry trust; never authorize a cached pass.
+
+    This maintainer-only fixture controller is separate from production bootstrap.
+    Expected verifier identity and trust directory come from its original external
+    admission, not from the downloaded closure. All actual host commands execute
+    with the existing restricted PATH and no implicit image pull.
+    """
+    if (not re.fullmatch(r'127\.0\.0\.1:46150/volt-installer-verifier@sha256:[0-9a-f]{64}', verifier_reference)
+            or platform not in SUPPORTED_PLATFORMS or fixture.resolve() in (closure.resolve(), *closure.resolve().parents)
+            or closure.resolve() in fixture.resolve().parents):
+        raise ValueError('offline fixture entry requires independently selected verifier and separate trust material')
+    for name in ('fixture.pub', 'trusted-root.json'):
+        if (fixture / name).is_symlink() or not (fixture / name).is_file():
+            raise ValueError('original independent fixture trust material is missing or unsafe')
+    policies = private / 'offline-entry-policies'
+    policies.mkdir(mode=0o700)
+    expected_digest = verifier_reference.split('@sha256:')[1]
+    signature_type = 'https://sigstore.dev/cosign/sign/v1'
+    slsa_type = 'https://slsa.dev/provenance/v1'
+    for name, predicate in (('signature', signature_type), ('slsa', slsa_type)):
+        # This fixed expectation is evaluated against cryptographically verified
+        # payloads INSIDE the externally pinned Cosign utility, before Python in
+        # the cached verifier may execute. No host JSON interpreter is required.
+        policy = f'predicateType: "{predicate}"\nsubject: [{{digest: {{sha256: "{expected_digest}"}}}}]\n'
+        destination = policies / (name + '.cue')
+        with destination.open('x') as stream:
+            stream.write(policy)
+        destination.chmod(0o600)
+    environment = launcher_minimal_environment(private / 'offline-minimal-path', registries=())
+    shutil.copyfile(private / 'minimal-host-tools.json', evidence / 'offline-entry-host-tools.json')
+    base = ['docker', 'run', '--rm', '--platform', platform, '--pull=never', '--network', 'none',
+        '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--tmpfs',
+        '/tmp:rw,noexec,nosuid,size=32m', '--env', 'HOME=/tmp', '--user', f'{os.getuid()}:{os.getgid()}']
+    cosign = [*base, '--mount', f'type=bind,src={closure},dst=/closure,readonly',
+        '--mount', f'type=bind,src={fixture},dst=/independent-trust,readonly',
+        '--mount', f'type=bind,src={policies},dst=/independent-policy,readonly', COSIGN_IMAGE]
+    for name, predicate in (('signature', signature_type), ('slsa', slsa_type)):
+        run('offline-first-entry-verifier-' + name, [*cosign, 'verify-attestation', '--type', predicate,
+            '--policy', '/independent-policy/' + name + '.cue', '--key', '/independent-trust/fixture.pub',
+            '--trusted-root', '/independent-trust/trusted-root.json', '--local-image', '/closure/verifier'],
+            evidence, env=environment)
+    for artifact, signature in (('launcher.sh', 'launcher.sigstore.json'),
+                                 ('installer.bundle.tar.gz', 'installer.bundle.sigstore.json')):
+        run('offline-first-entry-' + artifact.replace('.', '-'), [*cosign, 'verify-blob',
+            '--key', '/independent-trust/fixture.pub', '--trusted-root', '/independent-trust/trusted-root.json',
+            '--bundle', '/closure/package/' + signature, '/closure/package/' + artifact], evidence, env=environment)
+    # First verifier execution occurs only after its exact subject AND SLSA
+    # authentication and original launcher verification. Help is deliberately a
+    # bounded first-entry assertion, not offline graph/lifecycle qualification.
+    run('offline-first-entry-authenticated-verifier-execution', [*base, verifier_reference, '--help'],
+        evidence, env=environment)
+    (evidence / 'offline-first-entry.json').write_text(json.dumps({
+        'status': 'passed_fixture_first_entry', 'verifier_reference': verifier_reference,
+        'native_platform': platform, 'network': 'none', 'image_pull_policy': 'never',
+        'expected_subject_checked_inside_trusted_cosign': True,
+        'independent_verifier_execution': 'help_only_after_authentication',
+        'candidate_application_executed': False, 'offline_full_graph_qualified': False,
+        'offline_lifecycle_qualified': False, 'production_keyless_qualified': False,
+    }, sort_keys=True, indent=2) + '\n')
 
 
 def host_dependency_json(path: Path) -> dict:
@@ -436,7 +509,7 @@ def docker_credential_helper_selection(registries: tuple[str, ...]) -> dict:
 
 def launcher_minimal_environment(bin_directory: Path, *, registries: tuple[str, ...] = ()) -> dict[str, str]:
     """Expose POSIX/Docker plus its exact configured credential dependencies."""
-    allowed = ("sh", "docker", "tar", "gzip", "mktemp", "dirname", "mkdir", "chmod", "cp", "rm",
+    allowed = ("sh", "docker", "tar", "gzip", "mktemp", "mkfifo", "dirname", "mkdir", "chmod", "cp", "rm",
                "cat", "cut", "grep", "env", "id", "sleep", "mv")
     selection = docker_credential_helper_selection(registries)
     names = (*allowed, *sorted({item['executable'] for item in selection['selections']}))
@@ -585,6 +658,148 @@ fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     run('actual-nonroot-live-fence-restored', command, evidence)
 
 
+def matching_publication_commit(output: str, expected: dict) -> bool:
+    """Require the actual owner's exact post-parent-fsync marker, once."""
+    found = 0
+    for line in output.splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and 'offline_publication_committed' in value:
+            if value != expected:
+                raise RuntimeError('owner publication marker conflicts with the exact operation/capture')
+            found += 1
+    if found > 1:
+        raise RuntimeError('owner repeated the publication commit marker')
+    return found == 1
+
+
+def qualify_backup_owner_loss(*, setup: Path, launcher: Path | None, launcher_env: dict,
+                             state: Path, backup_parent: Path, evidence: Path) -> None:
+    """Kill only this test's real FD owner on each side of public publication.
+
+    The controller may observe private exchange paths; the target host still
+    executes only its admitted public command. No product fault switch exists.
+    """
+    info = json.loads((state / 'instance.json').read_text())
+    prefix = ([sys.executable, str(setup)] if launcher is None else ['sh', str(launcher)])
+    location = [str(state)] if launcher is None else ['--directory', str(state)]
+    for timing in ('before', 'after'):
+        name = 'backup-owner-loss-' + timing
+        destination = backup_parent / name
+        command = [*prefix, 'backup-record', *location, '--backup-directory', str(destination)]
+        (evidence / (name + '.argv.json')).write_text(json.dumps(command, indent=2) + '\n')
+        owner = None
+        process = None
+        with (evidence / (name + '.stdout')).open('x') as stdout, (evidence / (name + '.stderr')).open('x') as stderr:
+            try:
+                process = subprocess.Popen(command, env=launcher_env, stdout=stdout, stderr=stderr, start_new_session=True)
+                deadline = time.monotonic() + 180
+                while time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        raise RuntimeError(name + ' public controller ended before fault acquisition')
+                    listing = subprocess.run(['docker', 'ps', '-a', '--filter',
+                        'name=^/volt-offline-' + info['project'] + '-[0-9]+$',
+                        '--filter', 'label=volt.compose.owner-token=' + info['owner_token'],
+                        '--format', '{{.ID}}'], capture_output=True, text=True, check=True)
+                    ids = listing.stdout.split()
+                    if len(ids) > 1:
+                        raise RuntimeError('owner-loss test refuses ambiguous existing owners')
+                    if ids:
+                        inspected = json.loads(run(name + '-owner-mounts', ['docker', 'inspect', ids[0],
+                            '--format', '{"name":{{json .Name}},"mounts":{{json .Mounts}}}'], evidence).stdout)
+                        shell_pid = int(inspected['name'].rsplit('-', 1)[1])
+                        if os.getpgid(shell_pid) != process.pid:
+                            raise RuntimeError('fault target was not created by this public caller process group')
+                        owner = ids[0]
+                        mounts = inspected['mounts']
+                        incoming = [row['Source'] for row in mounts if row['Destination'] == '/run/volt-offline-input']
+                        outgoing = [row['Source'] for row in mounts if row['Destination'] == '/run/volt-offline-output']
+                        if len(incoming) != 1 or len(outgoing) != 1 or Path(incoming[0]).parent != Path(outgoing[0]).parent:
+                            raise RuntimeError('actual owner has contradictory fixed exchange mounts')
+                        break
+                    time.sleep(0.05)
+                if owner is None:
+                    raise RuntimeError('public backup did not create its actual FD owner')
+                target_phase = Path(incoming[0]) / 'captured.json' if timing == 'after' else Path(outgoing[0]) / 'capture.json'
+                while not target_phase.is_file():
+                    if process.poll() is not None or time.monotonic() >= deadline:
+                        raise RuntimeError(name + ' did not reach the required actual phase')
+                    time.sleep(0.005)
+                if timing == 'after':
+                    # Stop the host group AFTER it supplied capture evidence.
+                    # The independently running Docker FD owner can validate and
+                    # publish; the stopped caller cannot receive completion.
+                    os.killpg(process.pid, signal.SIGSTOP)
+                    while not destination.is_dir():
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError('owner did not publish after actual capture input')
+                        time.sleep(0.005)
+                    captured = json.loads(target_phase.read_text())
+                    identity_bytes = (json.dumps(captured['identity'], sort_keys=True, separators=(',', ':')) + '\n').encode()
+                    expected_marker = {'offline_publication_committed': destination.name,
+                        'operation_id': captured['operation_id'],
+                        'identity_sha256': 'sha256:' + hashlib.sha256(identity_bytes).hexdigest(),
+                        'completion_sha256': 'sha256:' + sha(destination / 'completion.json')}
+                    attempt = 0
+                    while True:
+                        attempt += 1
+                        logs = run(name + '-durable-owner-marker-' + str(attempt), ['docker', 'logs', owner], evidence)
+                        if matching_publication_commit(logs.stdout, expected_marker):
+                            break
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError('owner never confirmed matching durable post-fsync publication')
+                        time.sleep(0.05)
+                elif destination.exists():
+                    raise RuntimeError('prepublication fault was acquired too late')
+                run(name + '-kill-actual-owner', ['docker', 'kill', '--signal', 'KILL', owner], evidence)
+                if timing == 'after':
+                    os.killpg(process.pid, signal.SIGKILL)
+                code = process.wait(timeout=180)
+                (evidence / (name + '.exit')).write_text(str(code) + '\n')
+                if code == 0:
+                    raise RuntimeError('owner loss unexpectedly returned public success')
+            finally:
+                if process is not None and process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL); process.wait(timeout=30)
+                if process is not None and not (evidence / (name + '.exit')).exists():
+                    (evidence / (name + '.exit')).write_text(str(process.returncode) + '\n')
+                if owner is not None:
+                    # Exact ID selected above by the owned project/token/name;
+                    # no unrelated container is adopted or removed.
+                    run(name + '-owner-cleanup', ['docker', 'rm', '-f', owner], evidence, check=False)
+        output = (evidence / (name + '.stdout')).read_text()
+        correlation = {}
+        for key in ('operation_id', 'identity_sha256'):
+            matches = re.findall(r'(?m)^offline_' + key + r'=([^\r\n]+)$', output)
+            if len(matches) != 1:
+                raise RuntimeError('faulted public caller did not retain original correlation')
+            correlation[key] = matches[0]
+        if re.search(r'(?m)^status=complete$', output):
+            raise RuntimeError('owner-loss test did not prevent host completion receipt')
+        status_command = [*prefix, 'backup-status', *location, '--backup-directory', str(destination),
+            '--operation-id', correlation['operation_id'], '--identity-sha256', correlation['identity_sha256']]
+        result = run(name + '-public-readback', status_command, evidence, env=launcher_env, check=False)
+        if timing == 'before':
+            if destination.exists() or result.returncode == 0 or not list(backup_parent.glob('.' + name + '.partial.*')):
+                raise RuntimeError('precommit owner loss did not preserve private partial-only state')
+        else:
+            value = json.loads(result.stdout) if result.returncode == 0 else {}
+            if (not destination.is_dir() or value.get('status') != 'completed_capture'
+                    or any(value.get(key) != expected for key, expected in correlation.items())
+                    or value.get('host_response_acknowledgement') != 'not_inferred'
+                    or value.get('restore_authority') is not False):
+                raise RuntimeError('postcommit owner loss lost exact read-only completed capture')
+        (evidence / (name + '-outcome.json')).write_text(json.dumps({
+            'timing': ('after_durable_publication_before_host_response' if timing == 'after'
+                else 'after_capture_authorization_before_publication'),
+            'public_exit': code, 'original_correlation': correlation,
+            'published': destination.exists(), 'host_completion_received': False,
+            'readback_exit': result.returncode, 'scope': 'actual public-path owner loss; admission scope inherited from caller'},
+            indent=2) + '\n')
+
+
 def qualify_local_restore(*, setup: Path, launcher: Path | None, launcher_env: dict, state: Path,
                           private: Path, evidence: Path, admission: dict, project: str,
                           origin: str, password: str, consumed_capability: str,
@@ -596,23 +811,39 @@ def qualify_local_restore(*, setup: Path, launcher: Path | None, launcher_env: d
     # supplies its independently authenticated source-free launcher.
     stop = [*cli, 'stop', str(state)] if launcher is None else ['sh', str(launcher), 'stop', '--directory', str(state)]
     run('local-cold-stop', stop, evidence, env=launcher_env)
-    run('local-backup-record', [*cli, 'backup-record', str(state)], evidence)
+    backup_parent = private / 'backups'
+    backup_parent.mkdir(mode=0o700)
+    qualify_backup_owner_loss(setup=setup, launcher=launcher, launcher_env=launcher_env,
+        state=state, backup_parent=backup_parent, evidence=evidence)
+    backup = backup_parent / 'cold-backup'
+    capture = ([*cli, 'backup-record', str(state), '--backup-directory', str(backup)] if launcher is None
+        else ['sh', str(launcher), 'backup-record', '--directory', str(state), '--backup-directory', str(backup)])
+    captured = run('local-backup-record', capture, evidence, env=launcher_env)
+    correlation = {}
+    for key in ('operation_id', 'identity_sha256'):
+        values = re.findall(r'(?m)^offline_' + key + r'=([^\r\n]+)$', captured.stdout)
+        if len(values) != 1:
+            raise RuntimeError('backup did not retain one exact pre-publication ' + key)
+        correlation[key] = values[0]
+    status = ([*cli, 'backup-status', str(state)] if launcher is None else
+        ['sh', str(launcher), 'backup-status', '--directory', str(state)])
+    status += ['--backup-directory', str(backup), '--operation-id', correlation['operation_id'],
+        '--identity-sha256', correlation['identity_sha256']]
+    reconciled = json.loads(run('local-backup-status', status, evidence, env=launcher_env).stdout)
+    if (reconciled.get('status') != 'completed_capture'
+            or any(reconciled.get(key) != value for key, value in correlation.items())
+            or reconciled.get('read_only_reconciliation') is not True
+            or reconciled.get('restore_authority') is not False
+            or reconciled.get('host_response_acknowledgement') != 'not_inferred'):
+        raise RuntimeError('completed capture readback did not match the original operation')
+    wrong_status = status.copy()
+    wrong_status[wrong_status.index('--operation-id') + 1] = str(uuid.uuid4())
+    if run('local-backup-status-cross-operation-negative', wrong_status, evidence,
+            env=launcher_env, check=False).returncode == 0:
+        raise RuntimeError('capture readback accepted another operation UUID')
     inventory = json.loads((state / 'instance.json').read_text())['backup_inventory']
     (evidence / 'local-cold-store-inventories.json').write_text(json.dumps(inventory, sort_keys=True, indent=2) + '\n')
-    backup = private / 'cold-backup'
-    backup.mkdir(mode=0o700)
     image = admission['image_reference']
-    for store in ('postgres', 'media', 'state'):
-        run('local-backup-' + store, ['docker', 'run', '--rm', '--platform', admission['platform'], '--network', 'none',
-            '--mount', f'type=volume,src={project}_{store},dst=/source,readonly',
-            '--mount', f'type=bind,src={backup},dst=/backup', '--entrypoint', '/bin/bash', image,
-            '-c', f'tar --numeric-owner -cpf /backup/{store}.tar -C /source .'], evidence)
-    # Tar preserves the host UID/fixed fence GID and root-private capability
-    # files. A host copytree would silently replace that ownership mapping.
-    run('local-backup-instance', ['docker', 'run', '--rm', '--platform', admission['platform'], '--network', 'none',
-        '--mount', f'type=bind,src={state},dst=/source,readonly',
-        '--mount', f'type=bind,src={backup},dst=/backup', '--entrypoint', '/bin/bash', image,
-        '-c', 'tar --numeric-owner -cpf /backup/instance.tar -C /source .'], evidence)
     (evidence / 'local-backup-digests.json').write_text(json.dumps({
         name: sha(backup / (name + '.tar')) for name in ('postgres', 'media', 'state', 'instance')},
         sort_keys=True, indent=2) + '\n')
@@ -624,9 +855,13 @@ def qualify_local_restore(*, setup: Path, launcher: Path | None, launcher_env: d
         '--mount', f'type=bind,src={state},dst=/target',
         '--mount', f'type=bind,src={backup},dst=/backup,readonly', '--entrypoint', '/bin/bash', image,
         '-c', 'tar --numeric-owner -xpf /backup/instance.tar -C /target'], evidence)
-    run('local-restore-provision', [*cli, 'restore-provision', str(state)], evidence)
+    provision = ([*cli, 'restore-provision', str(state)] if launcher is None
+        else ['sh', str(launcher), 'restore-provision', '--directory', str(state)])
+    admit = ([*cli, 'restore-admit', str(state)] if launcher is None
+        else ['sh', str(launcher), 'restore-admit', '--directory', str(state)])
+    run('local-restore-provision', provision, evidence, env=launcher_env)
     expected = json.loads((state / 'instance.json').read_text())['local_recovery_custody']
-    negative = run('local-restore-empty-import-negative', [*cli, 'restore-admit', str(state)], evidence, check=False)
+    negative = run('local-restore-empty-import-negative', admit, evidence, env=launcher_env, check=False)
     if negative.returncode == 0:
         raise RuntimeError('local restore accepted empty stores')
     for store in ('postgres', 'media', 'state'):
@@ -638,13 +873,13 @@ def qualify_local_restore(*, setup: Path, launcher: Path | None, launcher_env: d
     run('local-restore-corrupt-state', ['docker', 'run', '--rm', '--platform', admission['platform'], '--network', 'none',
         '--mount', f'type=volume,src={project}_state,dst=/target', '--entrypoint', '/bin/bash', image,
         '-c', 'printf corrupt > /target/.volt-qualification-corruption'], evidence)
-    negative = run('local-restore-corruption-negative', [*cli, 'restore-admit', str(state)], evidence, check=False)
+    negative = run('local-restore-corruption-negative', admit, evidence, env=launcher_env, check=False)
     if negative.returncode == 0:
         raise RuntimeError('local restore accepted corrupted store')
     run('local-restore-remove-corruption', ['docker', 'run', '--rm', '--platform', admission['platform'], '--network', 'none',
         '--mount', f'type=volume,src={project}_state,dst=/target', '--entrypoint', '/bin/bash', image,
         '-c', 'rm /target/.volt-qualification-corruption'], evidence)
-    run('local-restore-admit', [*cli, 'restore-admit', str(state)], evidence)
+    run('local-restore-admit', admit, evidence, env=launcher_env)
     start = [*cli, 'start', str(state)] if launcher is None else ['sh', str(launcher), 'start', '--directory', str(state)]
     run('local-restore-start', start, evidence, env=launcher_env)
     qualify_restored_local_public_state(setup=setup, launcher=launcher, launcher_env=launcher_env,
@@ -790,7 +1025,8 @@ def qualify_local_runtime(*, package: Path, bundle: Path, admission: dict[str, s
         installation_id=local_config["installation_id"])
     (evidence / "local-auth-journey.json").write_text(json.dumps({
         "status": "passed",
-        "host_runtime": "POSIX shell and Docker/Compose only; Python/OpenSSL executed inside digest-admitted runtime",
+        "host_runtime": "Install/start/stop use restricted POSIX shell and Docker/Compose; offline backup/restore orchestration also uses host Python",
+        "minimal_host_cold_restore_qualified": False,
         "instance_outside_checkout": True,
         "source_revision": admission["source_commit"],
         "source_snapshot": admission["source_snapshot"],

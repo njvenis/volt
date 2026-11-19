@@ -38,7 +38,7 @@ class ComposeBundleTests(unittest.TestCase):
         from tools.build_compose_bundle import RC3_FILES, RC4_FILES, files_for_version
         self.assertEqual(files_for_version("0.1.0-rc.3"), RC3_FILES)
         self.assertNotIn("local.yaml", RC3_FILES)
-        self.assertTrue({"local.yaml", "local-restore.yaml", "launcher.sh", "release-image.ref"}.issubset(RC4_FILES))
+        self.assertTrue({"local.yaml", "local-restore.yaml", "launcher.sh", "offline-host.sh", "release-image.ref"}.issubset(RC4_FILES))
         self.assertEqual(files_for_version("0.1.0-rc.4"), RC4_FILES)
 
     def test_rc3_source_rejects_rc4_verifier_pin_with_clear_error(self):
@@ -124,7 +124,7 @@ class ComposeBundleTests(unittest.TestCase):
             result = subprocess.run(("python3", str(ROOT / "tools/build_compose_bundle.py"), "verify",
                                      "--archive", str(archive), "--source-root", str(ROOT),
                                      "--local-admission-fixture"), check=True, capture_output=True, text=True)
-            self.assertIn("verified_version=0.1.0-rc.4 files=14", result.stdout)
+            self.assertIn("verified_version=0.1.0-rc.4 files=15", result.stdout)
             self.assertTrue(Path(str(archive) + ".sha256").is_file())
 
     def test_extracted_bundle_contains_okta_files_and_selects_overlay_from_extracted_setup(self):
@@ -162,7 +162,7 @@ class ComposeBundleTests(unittest.TestCase):
             self.assertIn(str(overlay), setup.compose_files(info))
             info["okta_publisher_config_sha256"] = None
             self.assertNotIn(str(overlay), setup.compose_files(info))
-            self.assertIn("verified_version=0.1.0-rc.4 files=14", verified.stdout)
+            self.assertIn("verified_version=0.1.0-rc.4 files=15", verified.stdout)
 
     def test_release_bundle_binds_digest_pinned_image_into_manifest_and_instructions(self):
         image = "ghcr.io/njvenis/volt@sha256:" + "a" * 64

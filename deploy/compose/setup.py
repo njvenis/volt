@@ -390,6 +390,7 @@ RUNTIME_INIT_FIELDS = (
     'admitted_image_config_id', 'admitted_selected_descriptor', 'admitted_source_revision',
     'admitted_source_snapshot', 'admitted_version', 'owner_token', 'network_subnet',
     'network_gateway', 'runtime_compose_directory', 'host_instance_directory',
+    'admitted_installer_json', 'admitted_cache_stage',
 )
 
 
@@ -461,7 +462,7 @@ def validate_runtime_initial_root(root: Path, lifecycle_lock_fd: int | None) -> 
         raise SystemExit('initializing lock inode changed during ownership validation')
 
 
-def init(args, *, lifecycle_lock_fd: int | None = None) -> None:
+def init(args, *, lifecycle_lock_fd: int | None = None, initial_request_raw: bytes | None = None) -> None:
     if getattr(args, 'emit_runtime_init_request', False):
         print(json.dumps(runtime_init_request(args), sort_keys=True, separators=(',', ':')))
         return
@@ -496,8 +497,21 @@ def init(args, *, lifecycle_lock_fd: int | None = None) -> None:
             "version": args.admitted_version, "source_snapshot": args.admitted_source_snapshot,
             "platform": args.platform, "registry_digests": [image]}
     else:
+        if getattr(args, 'admitted_installer_json', None) is not None:
+            raise SystemExit('installed verification pins require the actual admitted initial FD owner')
         check_ports_available((args.http_port, args.recovery_port, args.oidc_port))
         admitted = inspect_image(image, args.mode, args.platform)
+    installer_pin = None
+    if args.runtime_prepare:
+        from uvm.installer.installed_artifacts import initial_pin, validate_pin, validate_stage, durable_stage
+        from uvm.installer.offline_artifacts import pairs
+        if not isinstance(initial_request_raw, bytes):
+            raise SystemExit('actual initial FD owner lacks its exact closed request bytes')
+        installer_pin = initial_pin(initial_request_raw, admitted=admitted, reference=image,
+            expected_pin=validate_pin(json.loads(args.admitted_installer_json, object_pairs_hook=pairs)))
+        validate_stage(host_instance_path, args.admitted_cache_stage)
+        durable_stage(host_instance_path, args.admitted_cache_stage)
+        validate_runtime_initial_root(root, lifecycle_lock_fd)
     okta_config, okta_private_key = None, None
     local_auth = None
     if args.mode == "external":
@@ -678,10 +692,20 @@ def init(args, *, lifecycle_lock_fd: int | None = None) -> None:
         metadata["installation_id"] = local_auth["installation_id"]
         metadata["local_recovery_journal_id"] = str(uuid.uuid4())
         metadata["local_auth_config_sha256"] = hashlib.sha256((root / "local-auth.json").read_bytes()).hexdigest()
-    metadata["env_sha256"] = hashlib.sha256((root / ".env").read_bytes()).hexdigest()
-    atomic_private_write(root / "instance.json", json.dumps(metadata, indent=2) + "\n")
+    if installer_pin is not None:
+        metadata['installer_contract_version'] = 2
+        metadata['installer_admission'] = installer_pin
+        metadata['installer_cache_stage'] = args.admitted_cache_stage
+        metadata['installer_phase'] = 'prepared'
+        from uvm.installer.offline_artifacts import digest
+        metadata['installer_initial_request_sha256'] = digest(initial_request_raw)
     private_write(root / ".project", project + "\n")
     private_write(root / ".owner-token", owner_token + "\n")
+    if installer_pin is not None:
+        from uvm.installer.installed_artifacts import initial_inventory
+        metadata['installer_initial_files'] = initial_inventory(root)
+    metadata["env_sha256"] = hashlib.sha256((root / ".env").read_bytes()).hexdigest()
+    atomic_private_write(root / "instance.json", json.dumps(metadata, indent=2) + "\n")
     print(f"instance={root}\nmode={args.mode}\nimage_id={admitted['id']}\nsource_revision={admitted['source_revision']}\nversion={admitted['version']}")
 
 
@@ -695,6 +719,14 @@ def load_instance(path: str, *, allow_restore_transition: bool = False) -> tuple
         raise SystemExit("instance is not initialized") from exc
     if metadata.get("format_version") != 1 or metadata.get("initialized") is not True:
         raise SystemExit("instance metadata is not recognized")
+    if 'installer_contract_version' in metadata or 'installer_admission' in metadata:
+        from uvm.installer.offline_artifacts import pairs
+        from uvm.installer.installed_artifacts import committed_pin
+        try:
+            metadata = json.loads((root / 'instance.json').read_text(), object_pairs_hook=pairs)
+            committed_pin(metadata)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            raise SystemExit('committed installer verification journal is missing, malformed or contradictory') from exc
     if (metadata.get("mode") != "local"
             and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", metadata.get("bootstrap_principal", ""))):
         raise SystemExit("instance bootstrap principal metadata is invalid")
@@ -1219,8 +1251,59 @@ def volume_inventory(info: dict, store: str) -> dict:
         "-c", INVENTORY_SCRIPT, capture=True))
 
 
+def offline_controller(args, root: Path, info: dict, operation: str) -> None:
+    """Manual/source CLI uses the SAME packaged POSIX controller and FD owner.
+
+    The easy-install launcher authenticates the package before sourcing it.
+    This existing manual CLI remains explicitly a host-Python development path;
+    it cannot confer signed-installer or minimal-host qualification.
+    """
+    if operation not in ('backup-record', 'restore-provision', 'restore-admit', 'backup-status'):
+        raise SystemExit('unknown fixed offline lifecycle action')
+    observed = inspect_image(info['image'], info['mode'], info['platform'])
+    if any(observed.get(key) != info['image_admission'].get(key)
+            for key in ('id', 'source_revision', 'source_snapshot', 'platform', 'version')):
+        raise SystemExit('offline image/source changed since initialization')
+    package = Path(__file__).resolve().parent
+    driver = package / 'offline-host.sh'
+    if driver.is_symlink() or not driver.is_file():
+        raise SystemExit('fixed packaged offline host controller is missing or unsafe')
+    environment = compose_environment()
+    environment.update({'STATE': str(root), 'PACKAGE': str(package), 'ACTION': operation,
+        'PROJECT': info['project'], 'OWNER_TOKEN': info['owner_token'], 'IMAGE_REF': info['image'],
+        'PLATFORM': info['platform'], 'BACKUP_DIRECTORY': getattr(args, 'backup_directory', None) or '',
+        'BACKUP_OPERATION_ID': getattr(args, 'operation_id', None) or '',
+        'BACKUP_IDENTITY_SHA256': getattr(args, 'identity_sha256', None) or ''})
+    script = '''set -eu
+umask 077
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/volt-offline-controller.XXXXXXXX")
+LOCK_NAME=''; LOCK_CREATED=0
+fail() { printf '%s\\n' "volt offline: $*" >&2; exit 1; }
+cleanup() {
+  if [ -n "$LOCK_NAME" ] && [ "$LOCK_CREATED" -eq 1 ]; then
+    actual=$(docker inspect "$LOCK_NAME" --format '{{index .Config.Labels "volt.compose.owner-token"}}|{{index .Config.Labels "volt.compose.project"}}' 2>/dev/null || :)
+    if [ "$actual" = "$OWNER_TOKEN|$PROJECT" ]; then docker rm -f "$LOCK_NAME" >/dev/null 2>&1 || :; fi
+  fi
+  rm -rf "$WORK"
+}
+trap cleanup 0 HUP INT TERM
+. "$1"
+if [ "$ACTION" = backup-status ]; then run_backup_status; else run_offline_action; fi
+'''
+    command('sh', '-c', script, 'volt-fixed-offline-controller', str(driver), env=environment)
+
+
+def read_backup_status(args) -> None:
+    root, info = load_instance(args.directory)
+    if info.get('mode') != 'local':
+        raise SystemExit('fixed offline capture readback requires local mode')
+    offline_controller(args, root, info, 'backup-status')
+
+
 def record_backup(args) -> None:
     root, info = load_instance(args.directory)
+    if info.get('mode') == 'local':
+        return offline_controller(args, root, info, 'backup-record')
     with exclusive_instance_lock(root):
         root, info = load_instance(args.directory)
         check_owned_resources(info, allow_missing=False)
@@ -1290,6 +1373,8 @@ def cleanup(args) -> None:
 
 def provision_restore(args) -> None:
     root, info = load_instance(args.directory, allow_restore_transition=True)
+    if info.get('mode') == 'local':
+        return offline_controller(args, root, info, 'restore-provision')
     with exclusive_instance_lock(root):
         root, info = load_instance(args.directory, allow_restore_transition=True)
         resuming = info.get('restore_pending') is True
@@ -1360,6 +1445,8 @@ def check_any_resource(info: dict) -> bool:
 
 def restore_admit(args) -> None:
     root, info = load_instance(args.directory)
+    if info.get('mode') == 'local':
+        return offline_controller(args, root, info, 'restore-admit')
     with exclusive_instance_lock(root):
         root, info = load_instance(args.directory)
         if not info.get("restore_pending") or info.get("restore_imported"):
@@ -1527,12 +1614,15 @@ def show_setup_capability(args) -> None:
 
 def host_validate(args) -> None:
     """Validate instance files inside the admitted runtime for the POSIX launcher."""
-    root, info = load_instance(args.directory)
+    root, info = load_instance(args.directory,
+        allow_restore_transition=getattr(args, 'allow_restore_transition', False))
     if info.get("mode") != "local" or info.get("image") != args.image:
         raise SystemExit("instance mode or immutable runtime image differs from this signed installer")
     if (info.get("image_admission", {}).get("version") != "0.1.0-rc.4"
             or info.get("platform") not in SUPPORTED_PLATFORMS):
         raise SystemExit("instance runtime version or platform is not admitted by this installer")
+    from uvm.installer.installed_artifacts import current_receipt
+    current_receipt(info)
     print(f"project={info['project']}\nowner_token={info['owner_token']}\nmode={info['mode']}\nplatform={info['platform']}\nhttp_port={info['ports'][0]}"
           f"\nstart_closed={int(not bool(info.get('local_recovery_acknowledgement')) or bool(info.get('restore_pending')))}"
           f"\nrestore_pending={int(bool(info.get('restore_pending')))}"
@@ -1593,6 +1683,8 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--admitted-source-revision", help=argparse.SUPPRESS)
     create.add_argument("--admitted-source-snapshot", help=argparse.SUPPRESS)
     create.add_argument("--admitted-version", help=argparse.SUPPRESS)
+    create.add_argument('--admitted-installer-json', help=argparse.SUPPRESS)
+    create.add_argument('--admitted-cache-stage', help=argparse.SUPPRESS)
     create.add_argument("--network-gateway", help=argparse.SUPPRESS)
     create.add_argument("--network-subnet", help=argparse.SUPPRESS)
     create.add_argument("--owner-token", help=argparse.SUPPRESS)
@@ -1602,6 +1694,8 @@ def parser() -> argparse.ArgumentParser:
     validate = sub.add_parser("host-validate")
     validate.add_argument("directory")
     validate.add_argument("--image", required=True)
+    validate.add_argument("--allow-restore-transition", action="store_true",
+                          help=argparse.SUPPRESS)
     validate.set_defaults(fn=host_validate)
     extract = sub.add_parser("extract-capability")
     extract.add_argument("directory")
@@ -1614,7 +1708,15 @@ def parser() -> argparse.ArgumentParser:
     remove.add_argument("directory"); remove.add_argument("--remove-data", action="store_true")
     remove.add_argument("--confirm-project"); remove.set_defaults(fn=cleanup)
     record = sub.add_parser("backup-record")
-    record.add_argument("directory"); record.set_defaults(fn=record_backup)
+    record.add_argument("directory")
+    record.add_argument("--backup-directory", help="new complete private backup destination for local mode")
+    record.set_defaults(fn=record_backup)
+    status = sub.add_parser('backup-status')
+    status.add_argument('directory')
+    status.add_argument('--backup-directory', required=True)
+    status.add_argument('--operation-id', required=True)
+    status.add_argument('--identity-sha256', required=True)
+    status.set_defaults(fn=read_backup_status)
     provision = sub.add_parser("restore-provision")
     provision.add_argument("directory"); provision.set_defaults(fn=provision_restore)
     admit = sub.add_parser("restore-admit")

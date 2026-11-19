@@ -12,7 +12,7 @@ import tarfile
 RC2_FILES = ("VERSION", "README.md", "backup-restore.md", "compose.yaml", "demo.yaml",
     "compose.env.example", "oidc.example.json", "setup.py")
 RC3_FILES = (*RC2_FILES, "okta-publisher.yaml", "okta-publisher.example.json")
-RC4_FILES = (*RC3_FILES, "local.yaml", "local-restore.yaml", "launcher.sh", "release-image.ref")
+RC4_FILES = (*RC3_FILES, "local.yaml", "local-restore.yaml", "launcher.sh", "offline-host.sh", "release-image.ref")
 PROVENANCE_TYPE = "https://volt.dev/attestation/easy-install/v1"
 SOURCE_REPOSITORY = "https://github.com/njvenis/volt"
 

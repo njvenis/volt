@@ -6,6 +6,7 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
+import sys
 import tarfile
 
 from uvm.installer.admission import RC4_FILES, sha256, verify_runtime
@@ -277,11 +278,109 @@ def verify(args: argparse.Namespace) -> dict:
     return {"bundle": bundle, "runtime": runtime}
 
 
+def offline_bundle(args: argparse.Namespace):
+    """Authenticate original cached bytes under ONLY this verifier's baked policy."""
+    from uvm.installer.offline_artifacts import Closure, SIGNATURE_TYPE, SLSA_TYPE
+    closure = Closure(fixture=FIXTURE_POLICY.is_file())
+    expected = {'version': args.version or '0.1.0-rc.4', 'signer': args.signer, 'issuer': args.issuer,
+        'verifier_reference': args.expected_verifier_reference}
+    if (not isinstance(args.expected_verifier_reference, str)
+            or any(closure.release[key] != value for key, value in expected.items())):
+        raise ValueError('offline closure differs from the externally expected verifier/release/publisher')
+    for path, name in ((args.bundle, 'installer.bundle.tar.gz'),
+                       (args.bundle_signature, 'installer.bundle.sigstore.json')):
+        if (path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_BUNDLE_BYTES
+                or path.read_bytes() != closure.files['package/' + name]):
+            raise ValueError('offline package inputs differ from original cached signed bytes')
+    closure.verify_statement(expected['verifier_reference'], SIGNATURE_TYPE, signer=args.signer, issuer=args.issuer)
+    closure.verify_statement(expected['verifier_reference'], SLSA_TYPE, signer=args.signer, issuer=args.issuer)
+    closure.verify_blob('launcher.sh', signer=args.signer, issuer=args.issuer)
+    closure.verify_blob('installer.bundle.tar.gz', signer=args.signer, issuer=args.issuer)
+    bundle = verify_closed_bundle(args.bundle, reference=closure.release['runtime_reference'])
+    with tarfile.open(args.bundle, 'r:gz') as archive:
+        launcher = [member for member in archive.getmembers() if PurePosixPath(member.name).name == 'launcher.sh'][0]
+        if archive.extractfile(launcher).read(MAX_MEMBER_BYTES + 1) != closure.files['package/launcher.sh']:
+            raise ValueError('original signed launcher differs from the signed bundle launcher')
+        if FIXTURE_POLICY.is_file():
+            manifest = [member for member in archive.getmembers() if PurePosixPath(member.name).name == 'manifest.json'][0]
+            if json.load(archive.extractfile(manifest)).get('verifier_reference') != expected['verifier_reference']:
+                raise ValueError('signed bundle differs from the independently expected verifier')
+    if 'sha256:' + bundle['bundle_sha256'] != closure.release['bundle_sha256']:
+        raise ValueError('signed offline bundle differs from declared original digest')
+    closure.assert_unchanged()
+    if getattr(args, 'require_installed_pin', False):
+        from uvm.installer.installed_artifacts import compare_journal_closure, validate_live_cache
+        from uvm.installer.lock import _bounded_file
+        from uvm.installer.offline_artifacts import pairs
+        info = json.loads(_bounded_file(Path('/run/volt-selected-journal/instance.json'),
+            1024 * 1024, private=True), object_pairs_hook=pairs)
+        compare_journal_closure(info, closure)
+        validate_live_cache(info)
+    return closure, bundle
+
+
+def verify_offline(args: argparse.Namespace) -> dict:
+    """Run the complete source/platform policy on freshly authenticated originals."""
+    from uvm.installer.offline_artifacts import SIGNATURE_TYPE, RUNTIME_TYPE
+    closure, bundle = offline_bundle(args)
+    for key, value in {'runtime_reference': args.reference, 'source_revision': args.source_revision,
+            'source_snapshot': args.source_snapshot, 'version': args.version}.items():
+        if closure.release[key] != value:
+            raise ValueError('offline closure differs from the exact selected source/image/version')
+    index = closure.blob(args.reference.split('@')[1])
+    if (args.index.is_symlink() or not args.index.is_file() or args.index.stat().st_size > MAX_MEMBER_BYTES
+            or args.index.read_bytes() != index or args.image_inspect.is_symlink()
+            or not args.image_inspect.is_file() or args.image_inspect.stat().st_size > MAX_MEMBER_BYTES):
+        raise ValueError('offline index or actual selected engine observation differs')
+    from uvm.installer.admission import platform_children
+    children = platform_children(index, args.reference)
+    for reference in (args.reference, *(args.reference.split('@')[0] + '@' + child for child in children.values())):
+        closure.verify_statement(reference, SIGNATURE_TYPE, signer=args.signer, issuer=args.issuer)
+    # Preserve the EXACT successful cryptographic DSSE output. Re-encoding a
+    # matching sidefile or a decoded statement is never verification evidence.
+    provenance = closure.verify_envelope(args.reference, RUNTIME_TYPE, signer=args.signer, issuer=args.issuer)
+    image_output = args.image_inspect.read_text()
+    runtime = verify_runtime(image_output=image_output, index_data=index, provenance_output=provenance,
+        reference=args.reference, source_revision=args.source_revision, source_snapshot=args.source_snapshot,
+        version=args.version, platform=args.platform, bundle_sha256=bundle['bundle_sha256'])
+
+    def cached_document(kind, value):
+        if kind not in ('manifests', 'blobs'):
+            raise ValueError('offline child/config request is outside the fixed graph')
+        for layout in ('runtime-index', 'runtime-amd64', 'runtime-arm64'):
+            name = layout + '/blobs/sha256/' + value.removeprefix('sha256:')
+            if name in closure.files:
+                return closure.blob(value, layout=layout)
+        raise ValueError('original offline child/config graph object is missing')
+
+    runtime['platform_configs'] = verify_platform_configs(runtime, reference=args.reference,
+        source_revision=args.source_revision, source_snapshot=args.source_snapshot, version=args.version,
+        index_data=index, fixture=FIXTURE_POLICY.is_file(), image_output=image_output, fetch=cached_document)
+    closure.assert_unchanged()
+    receipt = {'schema_version': 1, 'profile': 'volt_verified_installer_v1',
+        'closure_sha256': closure.hash, 'launcher_sha256': closure.release['launcher_sha256'],
+        'bundle_sha256': closure.release['bundle_sha256'],
+        'verifier_reference': closure.release['verifier_reference'], 'signer': args.signer, 'issuer': args.issuer}
+    return {'bundle': bundle, 'runtime': runtime, 'offline_artifacts': receipt}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--bundle-signature", type=Path, required=True)
     parser.add_argument("--bundle-only", action="store_true")
+    offline_mode = parser.add_mutually_exclusive_group()
+    offline_mode.add_argument('--offline-artifacts', action='store_true',
+        help='reverify the fixed original closure mount without registry access; not a trust-policy selector')
+    offline_mode.add_argument('--export-offline-artifacts', action='store_true',
+        help='export original metadata-only proof transport, then freshly reverify it; never publish installed state')
+    parser.add_argument('--expected-verifier-reference')
+    parser.add_argument('--bind-initial-request', action='store_true')
+    parser.add_argument('--publish-cache', action='store_true')
+    parser.add_argument('--cache-state')
+    parser.add_argument('--cache-stage-name')
+    parser.add_argument('--inspect-cache-intent', action='store_true')
+    parser.add_argument('--require-installed-pin', action='store_true')
     for name in ("image-inspect", "index", "output-dir"):
         parser.add_argument("--" + name, type=Path)
     for name in ("signer", "issuer"):
@@ -290,9 +389,47 @@ def main() -> int:
         parser.add_argument("--" + name)
     args = parser.parse_args()
     try:
+        if args.inspect_cache_intent:
+            if (not args.bundle_only or args.offline_artifacts or args.export_offline_artifacts
+                    or args.publish_cache or args.bind_initial_request or args.require_installed_pin
+                    or args.cache_stage_name is not None or any(value is None for value in
+                        (args.reference, args.expected_verifier_reference, args.source_revision,
+                         args.source_snapshot, args.version, args.platform, args.cache_state))):
+                parser.error('installed cache intent is fixed comparison data only')
+            from uvm.installer.installed_artifacts import journal_intent
+            from uvm.installer.lock import _bounded_file
+            from uvm.installer.offline_artifacts import pairs
+            info = json.loads(_bounded_file(Path('/run/volt-selected-journal/instance.json'),
+                1024 * 1024, private=True), object_pairs_hook=pairs)
+            intent = journal_intent(info, canonical_state=args.cache_state, reference=args.reference,
+                verifier_reference=args.expected_verifier_reference, source_revision=args.source_revision,
+                source_snapshot=args.source_snapshot, version=args.version, platform=args.platform)
+            for key, value in intent.items(): print(str(key) + '=' + str(value))
+            return 0
+        if args.require_installed_pin and not args.offline_artifacts:
+            parser.error('installed journal comparison requires fresh original cached verification')
+        if args.bind_initial_request and (not args.offline_artifacts or args.bundle_only):
+            parser.error('initial request binding requires fresh complete cached verification')
+        if args.publish_cache:
+            if not (args.offline_artifacts or args.export_offline_artifacts) or args.bundle_only:
+                parser.error('installed cache publication requires complete fresh original-graph verification')
+            if args.cache_state is None or args.cache_stage_name is None:
+                parser.error('cache publication requires the canonical selected state and exact staging intent')
+        elif (args.cache_state is not None or args.cache_stage_name is not None) and not args.export_offline_artifacts:
+            parser.error('cache destination data cannot select another verifier action')
+        if args.export_offline_artifacts and (args.cache_state is not None or args.cache_stage_name is not None):
+            if args.cache_state is None or args.cache_stage_name is None:
+                parser.error('durable initial staging requires its canonical state and exact staging intent')
         if args.bundle_only:
-            reference, digest = discover_signed_reference(args.bundle, args.bundle_signature,
-                                                           args.signer, args.issuer)
+            if args.export_offline_artifacts:
+                parser.error('offline artifact export requires complete normal graph admission first')
+            if args.offline_artifacts:
+                closure, bundle = offline_bundle(args)
+                reference, digest = closure.release['runtime_reference'], bundle['bundle_sha256']
+            else:
+                if args.expected_verifier_reference is not None:
+                    parser.error('offline verifier expectation cannot select online verification policy')
+                reference, digest = discover_signed_reference(args.bundle, args.bundle_signature, args.signer, args.issuer)
             print(f"reference={reference}\nbundle_sha256={digest}")
             return 0
         if any(getattr(args, key) is None for key in
@@ -302,7 +439,44 @@ def main() -> int:
                ("image-inspect", "index", "output-dir")):
             parser.error("full graph verification requires image inspection, index, and output paths")
         args.output_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        result = verify(args)
+        if not (args.offline_artifacts or args.export_offline_artifacts) and args.expected_verifier_reference is not None:
+            parser.error('offline verifier expectation cannot select online verification policy')
+        if args.export_offline_artifacts:
+            if args.expected_verifier_reference is None:
+                parser.error('offline artifact export requires the independent external verifier pin')
+            verify(args)
+            from uvm.installer.offline_export import export_originals
+            export_originals(args, fixture=FIXTURE_POLICY.is_file())
+            result = verify_offline(args)
+            if args.cache_state is not None:
+                from uvm.installer.installed_artifacts import durable_stage
+                durable_stage(args.cache_state, args.cache_stage_name)
+        else:
+            result = verify_offline(args) if args.offline_artifacts else verify(args)
+        if args.bind_initial_request:
+            from uvm.installer.lock import INITIAL_REQUEST, MAX_REQUEST, _bounded_file
+            from uvm.installer.offline_artifacts import digest, pairs
+            raw = _bounded_file(INITIAL_REQUEST, MAX_REQUEST, private=True)
+            request = json.loads(raw, object_pairs_hook=pairs)
+            if (not isinstance(request, dict) or set(request) != {'schema_version', 'profile', 'arguments', 'setup_sha256'}
+                    or type(request['schema_version']) is not int or request['schema_version'] != 1
+                    or request['profile'] != 'volt_local_runtime_init_v1' or not isinstance(request['arguments'], dict)
+                    or json.loads(request['arguments']['admitted_installer_json'], object_pairs_hook=pairs)
+                        != result['offline_artifacts']):
+                raise ValueError('initial request differs from the freshly authenticated cache admission')
+            with tarfile.open(args.bundle, 'r:gz') as archive:
+                setup = [item for item in archive.getmembers() if PurePosixPath(item.name).name == 'setup.py'][0]
+                if request['setup_sha256'] != digest(archive.extractfile(setup).read(MAX_MEMBER_BYTES + 1)):
+                    raise ValueError('initial request differs from the exact signed setup implementation')
+            result['initial_request_sha256'] = digest(raw)
+        if args.publish_cache:
+            from uvm.installer.installed_artifacts import publish_cache
+            from uvm.installer.lock import _bounded_file
+            from uvm.installer.offline_artifacts import pairs
+            observation = json.loads(_bounded_file(Path('/run/volt-cache-observation/mounts.json'),
+                8 * 1024 * 1024, private=True), object_pairs_hook=pairs)
+            published = publish_cache(args.cache_state, args.cache_stage_name, result['offline_artifacts'], observation)
+            print(json.dumps({'installed_cache_publication': published}, sort_keys=True), file=sys.stderr)
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError, tarfile.TarError) as exc:
         parser.error(str(exc))
     print(json.dumps(result, sort_keys=True))

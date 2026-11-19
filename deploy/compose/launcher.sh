@@ -18,6 +18,7 @@ BUNDLE="$SELF_DIR/installer.bundle.tar.gz"
 BUNDLE_SIG="$SELF_DIR/installer.bundle.sigstore.json"
 WORK=''
 LOCK_NAME=''
+LOCK_ID=''
 LOCK_CREATED=0
 CREATED_NETWORK=''
 INSTALLING=0
@@ -25,8 +26,8 @@ INSTALLING=0
 fail() { printf '%s\n' "volt installer: $*" >&2; exit 1; }
 cleanup() {
   if [ -n "$LOCK_NAME" ] && [ "$LOCK_CREATED" -eq 1 ]; then
-    lock_owner=$(docker container inspect "$LOCK_NAME" --format '{{index .Config.Labels "volt.compose.owner-token"}}|{{index .Config.Labels "volt.compose.project"}}' 2>/dev/null || :)
-    if [ "$lock_owner" = "$OWNER_TOKEN|$PROJECT" ]; then
+    lock_owner=$(docker container inspect "$LOCK_NAME" --format '{{.Id}}|{{index .Config.Labels "volt.compose.owner-token"}}|{{index .Config.Labels "volt.compose.project"}}' 2>/dev/null || :)
+    if [ "$lock_owner" = "$LOCK_ID|$OWNER_TOKEN|$PROJECT" ]; then
       docker rm -f "$LOCK_NAME" >/dev/null 2>&1 || :
     fi
   fi
@@ -85,17 +86,185 @@ ENGINE_PLATFORM=$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}') || 
 case "$ENGINE_PLATFORM" in linux/amd64|linux/arm64) ;; *) fail 'native Docker platform is unsupported' ;; esac
 PLATFORM=$ENGINE_PLATFORM
 
+OFFLINE_MODE=${VOLT_OFFLINE:-0}
+case "$OFFLINE_MODE" in 0|1) ;; *) fail 'offline transport mode must be exactly 0 or 1' ;; esac
+EARLY_ACTION=${1:-}
+EARLY_STATE=''; early_directory=0
+for argument do
+  if [ "$early_directory" -eq 1 ]; then EARLY_STATE=$argument; early_directory=0
+  elif [ "$argument" = --directory ]; then early_directory=1
+  fi
+done
+[ "$early_directory" -eq 0 ] || fail '--directory needs a path'
+CACHE_DIRECTORY=''; CACHE_STATE=''; CACHE_PARENT=''; CACHE_STAGE=''
+INITIAL_PREPARATION=0
+
+resolve_cache_location() {
+  selected_state=$EARLY_STATE
+  [ -n "$selected_state" ] || selected_state="$HOME/.local/share/volt/instance"
+  case "$selected_state" in /*) ;; *) selected_state="$PWD/$selected_state" ;; esac
+  while [ "$selected_state" != / ] && [ "${selected_state%/}" != "$selected_state" ]; do selected_state=${selected_state%/}; done
+  case "$selected_state" in *,*|*:* ) fail 'selected instance path contains unsupported bind separators' ;; esac
+  selected_parent=$(dirname -- "$selected_state")
+  if [ "$EARLY_ACTION" = install ] && [ "$OFFLINE_MODE" -eq 0 ]; then mkdir -p "$selected_parent"; fi
+  selected_parent=$(cd -P -- "$selected_parent" && pwd -P) || fail 'selected private instance parent is inaccessible'
+  selected_name=${selected_state##*/}
+  case "$selected_name" in ''|.|..) fail 'selected instance name is unsafe' ;; esac
+  CACHE_STATE="$selected_parent/$selected_name"
+  [ ! -L "$CACHE_STATE" ] || fail 'selected instance directory is linked'
+  CACHE_PARENT="$CACHE_STATE.installer-artifacts"
+  [ ! -L "$CACHE_PARENT" ] || fail 'dedicated verification anchor is linked'
+  CACHE_DIRECTORY="$CACHE_PARENT/originals"
+}
+
+run_verifier() {
+  verifier_operation=$1; shift
+  set -- "$VERIFIER_IMAGE" "$@"
+  case "$verifier_operation" in
+    online) ;;
+    offline|initial|publish) set -- --network none --mount "type=bind,src=$CACHE_DIRECTORY,dst=/run/volt-offline-artifacts,readonly" "$@" ;;
+    intent) set -- --network none "$@" ;;
+    export) set -- --mount "type=bind,src=$CACHE_DIRECTORY,dst=/run/volt-offline-artifacts" "$@" ;;
+    *) fail 'unknown fixed independent verifier operation' ;;
+  esac
+  if [ "$verifier_operation" = online ] || [ "$verifier_operation" = export ]; then
+    case "$VERIFIER_IMAGE" in 127.0.0.1:46150/*) set -- --network host "$@" ;; esac
+  fi
+  case "$verifier_operation" in
+    offline|publish|intent)
+      [ -f "$CACHE_STATE/instance.json" ] && [ ! -L "$CACHE_STATE/instance.json" ] \
+        || fail 'selected private installer journal is missing or linked'
+      set -- --mount "type=bind,src=$CACHE_STATE/instance.json,dst=/run/volt-selected-journal/instance.json,readonly" "$@" ;;
+  esac
+  if [ "$verifier_operation" = offline ]; then
+    set -- --mount "type=bind,src=$CACHE_PARENT,dst=/run/volt-cache-parent,readonly" "$@"
+  fi
+  if [ "$verifier_operation" = initial ]; then
+    set -- --mount "type=bind,src=$WORK/runtime-init-request.json,dst=/run/volt-initialization/request.json,readonly" "$@"
+  elif [ "$verifier_operation" = export ]; then
+    set -- --mount "type=bind,src=$CACHE_PARENT,dst=/run/volt-cache-parent,readonly" "$@"
+  elif [ "$verifier_operation" = publish ]; then
+    set -- --mount "type=bind,src=$CACHE_PARENT,dst=/run/volt-cache-parent" \
+      --mount "type=bind,src=$WORK/cache-mounts.json,dst=/run/volt-cache-observation/mounts.json,readonly" "$@"
+  fi
+  set -- docker run --platform "$PLATFORM" --pull=never --rm --read-only --cap-drop=ALL \
+    --security-opt=no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=32m --env HOME=/tmp \
+    --user "$(id -u):$(id -g)" --mount "type=bind,src=$SELF_DIR,dst=/package,readonly" \
+    --mount "type=bind,src=$WORK/runtime-image.json,dst=/admission/runtime-image.json,readonly" \
+    --mount "type=bind,src=$WORK/runtime-index.json,dst=/admission/runtime-index.json,readonly" "$@"
+  "$@"
+}
+
+graph_verifier() {
+  graph_operation=$1; shift
+  run_verifier "$graph_operation" --bundle /package/installer.bundle.tar.gz \
+    --bundle-signature /package/installer.bundle.sigstore.json \
+    --image-inspect /admission/runtime-image.json --index /admission/runtime-index.json \
+    --output-dir /tmp/verified --reference "$IMAGE_REF" --signer "$SIGNER" --issuer "$ISSUER" \
+    --source-revision "$SOURCE_REVISION" --source-snapshot "$SOURCE_SNAPSHOT" \
+    --version "$IMAGE_VERSION" --platform "$PLATFORM" "$@"
+}
+
+refresh_installer_admission() {
+  docker image inspect --platform "$PLATFORM" "$IMAGE_REF" >"$WORK/.next-runtime-image.json" \
+    || fail 'cached selected runtime image is unavailable; no implicit pull is permitted'
+  chmod 0400 "$WORK/.next-runtime-image.json"
+  mv "$WORK/.next-runtime-image.json" "$WORK/runtime-image.json"
+  graph_verifier offline --offline-artifacts --expected-verifier-reference "$VERIFIER_IMAGE" --require-installed-pin \
+    >"$WORK/.next-graph-admission.json" || fail 'fresh complete original cache verification failed'
+  chmod 600 "$WORK/.next-graph-admission.json"
+  mv "$WORK/.next-graph-admission.json" "$WORK/graph-admission.json"
+}
+
+load_installer_intent() {
+  intent=$(run_verifier intent --bundle /package/installer.bundle.tar.gz \
+    --bundle-signature /package/installer.bundle.sigstore.json --bundle-only --inspect-cache-intent \
+    --cache-state "$CACHE_STATE" --reference "$IMAGE_REF" --expected-verifier-reference "$VERIFIER_IMAGE" \
+    --signer "$SIGNER" --issuer "$ISSUER" --source-revision "$SOURCE_REVISION" --source-snapshot "$SOURCE_SNAPSHOT" \
+    --version "$IMAGE_VERSION" --platform "$PLATFORM") || fail 'durable selected installer intent is unavailable or contradictory'
+  while IFS='=' read -r key value; do
+    case "$key" in
+      cache_stage) CACHE_STAGE=$value ;;
+      project) PROJECT=$value ;;
+      owner_token) OWNER_TOKEN=$value ;;
+      initial_preparation) INITIAL_PREPARATION=$value ;;
+      *) fail 'unknown selected installer intent field' ;;
+    esac
+  done <<EOF_INSTALLER_INTENT
+$intent
+EOF_INSTALLER_INTENT
+  case "$INITIAL_PREPARATION" in 0|1) ;; *) fail 'initial preparation intent is malformed' ;; esac
+}
+
+# Fixed observation only: no Docker socket or daemon API reaches any helper.
+collect_cache_mounts() {
+  cache_containers=$(docker ps -aq --filter label=org.volt.compose-install.contract=1) \
+    || fail 'actual API container inventory is unavailable'
+  volume_names='|'
+  {
+    printf '{"containers":['; separator=''
+    for container_id in $cache_containers; do
+      case "$container_id" in *[!0-9a-f]*|'') fail 'Docker returned malformed API identity' ;; esac
+      printf '%s{"Mounts":' "$separator"
+      docker inspect "$container_id" --format '{{json .Mounts}}' || fail 'actual API mount inventory is unavailable'
+      printf '}'; separator=','
+    done
+    printf '],"volumes":['; separator=''
+    for container_id in $cache_containers; do
+      names=$(docker inspect "$container_id" --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\n"}}{{end}}{{end}}') \
+        || fail 'actual API named-volume inventory is unavailable'
+      for name in $names; do
+        case "$name" in *[!A-Za-z0-9_.-]*|'') fail 'Docker returned malformed named-volume identity' ;; esac
+        case "$volume_names" in *"|$name|"*) continue ;; esac
+        volume_names="$volume_names$name|"
+        printf '%s' "$separator"
+        docker volume inspect "$name" --format '{"Name":{{json .Name}},"Driver":{{json .Driver}},"Options":{{json .Options}},"Mountpoint":{{json .Mountpoint}}}' \
+          || fail 'actual API named-volume source cannot be established'
+        separator=','
+      done
+    done
+    printf ']}\n'
+  } >"$WORK/cache-mounts.json"
+  chmod 600 "$WORK/cache-mounts.json"
+}
+
+publish_installer_cache() {
+  ensure_lock_owner
+  collect_cache_mounts
+  graph_verifier publish --offline-artifacts --expected-verifier-reference "$VERIFIER_IMAGE" --require-installed-pin \
+    --publish-cache --cache-state "$CACHE_STATE" --cache-stage-name "$CACHE_STAGE" \
+    >"$WORK/.next-graph-admission.json" || fail 'verified cache publication failed; existing keys and private staging are preserved'
+  chmod 600 "$WORK/.next-graph-admission.json"
+  mv "$WORK/.next-graph-admission.json" "$WORK/graph-admission.json"
+  CACHE_DIRECTORY="$CACHE_PARENT/originals"
+  ensure_lock_owner
+}
+
+: >"$WORK/runtime-image.json"; : >"$WORK/runtime-index.json"
+if [ "$OFFLINE_MODE" -eq 1 ]; then
+  [ "$EARLY_ACTION" != install ] || fail 'a verification cache cannot authorize a new installation'
+  resolve_cache_location
+  [ -d "$CACHE_DIRECTORY" ] && [ ! -L "$CACHE_DIRECTORY" ] || fail 'complete original verification cache is missing or linked'
+fi
+
 # The trusted bootstrap has authenticated this exact verifier image and its
 # provenance before invoking the signed launcher. It verifies the bundle
 # without extracting it and returns the immutable runtime ref.
-docker pull --platform "$ENGINE_PLATFORM" "$VERIFIER_IMAGE" >/dev/null || fail 'could not fetch the independently pinned verifier image'
-docker run --platform "$PLATFORM" --rm ${VERIFIER_NETWORK:-} --read-only --cap-drop=ALL --security-opt=no-new-privileges \
-  --tmpfs /tmp:rw,noexec,nosuid,size=16m --env HOME=/tmp --user "$(id -u):$(id -g)" \
-  --mount "type=bind,src=$SELF_DIR,dst=/package,readonly" \
-  "$VERIFIER_IMAGE" --bundle /package/installer.bundle.tar.gz \
+if [ "$OFFLINE_MODE" -eq 0 ]; then
+  docker pull --platform "$ENGINE_PLATFORM" "$VERIFIER_IMAGE" >/dev/null || fail 'could not fetch the independently pinned verifier image'
+fi
+if [ "$OFFLINE_MODE" -eq 1 ]; then
+  verifier_transport=offline
+else
+  verifier_transport=online
+fi
+bundle_discovery() {
+  if [ "$OFFLINE_MODE" -eq 1 ]; then set -- --offline-artifacts --expected-verifier-reference "$VERIFIER_IMAGE" --require-installed-pin; else set --; fi
+  run_verifier "$verifier_transport" --bundle /package/installer.bundle.tar.gz \
   --bundle-signature /package/installer.bundle.sigstore.json --bundle-only \
-  --signer "$SIGNER" --issuer "$ISSUER" >"$WORK/bundle-admission.txt" \
-  || fail 'signed installer bundle or closed inventory did not verify'
+    --signer "$SIGNER" --issuer "$ISSUER" "$@"
+}
+bundle_discovery >"$WORK/bundle-admission.txt" || fail 'signed installer bundle or closed inventory did not verify'
 SIGNED_REFERENCE=''
 SIGNED_BUNDLE_SHA256=''
 while IFS='=' read -r key value; do
@@ -110,9 +279,17 @@ IMAGE_REF=$SIGNED_REFERENCE
 
 # Authenticate the exact runtime image and its signed SLSA provenance before
 # executing any Python/OpenSSL helper from it. No Docker socket is mounted.
-docker pull --platform "$ENGINE_PLATFORM" "$IMAGE_REF" >/dev/null || fail 'could not pull the authenticated runtime image'
+if [ "$OFFLINE_MODE" -eq 0 ]; then
+  docker pull --platform "$ENGINE_PLATFORM" "$IMAGE_REF" >/dev/null || fail 'could not pull the authenticated runtime image'
+fi
 docker image inspect --platform "$ENGINE_PLATFORM" "$IMAGE_REF" >"$WORK/runtime-image.json" || fail 'could not inspect the authenticated runtime image'
-docker buildx imagetools inspect --raw "$IMAGE_REF" >"$WORK/runtime-index.json" || fail 'could not inspect the authenticated runtime index'
+if [ "$OFFLINE_MODE" -eq 1 ]; then
+  # This is original cached data, not execution or trust from a cache pass.
+  cp "$CACHE_DIRECTORY/runtime-index/blobs/sha256/${IMAGE_REF##*@sha256:}" "$WORK/runtime-index.json" \
+    || fail 'original cached runtime index is missing'
+else
+  docker buildx imagetools inspect --raw "$IMAGE_REF" >"$WORK/runtime-index.json" || fail 'could not inspect the authenticated runtime index'
+fi
 IMAGE_INSPECT=$(docker image inspect --platform "$ENGINE_PLATFORM" --format '{{.Id}}|{{.Os}}/{{.Architecture}}|{{index .Config.Labels "org.volt.compose.source-snapshot"}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "org.opencontainers.image.version"}}|{{index .Config.Labels "org.volt.oidc-deployment-modes"}}|{{index .Config.Labels "org.volt.compose-install.contract"}}' "$IMAGE_REF")
 IFS='|' read -r IMAGE_ID PLATFORM SOURCE_SNAPSHOT SOURCE_REVISION IMAGE_VERSION MODES INSTALL_CONTRACT <<EOF_INSPECT
 $IMAGE_INSPECT
@@ -136,28 +313,46 @@ fi
 [ "$IMAGE_ENGINE_ID" = "$IMAGE_ID" ] || [ "$IMAGE_ENGINE_ID" = "${IMAGE_REF##*@}" ] \
   || fail 'engine parent image ID differs from the signed index or selected object'
 chmod 0400 "$WORK/runtime-image.json" "$WORK/runtime-index.json"
-docker run --platform "$PLATFORM" --rm ${VERIFIER_NETWORK:-} --read-only --cap-drop=ALL --security-opt=no-new-privileges \
-  --tmpfs /tmp:rw,noexec,nosuid,size=16m --env HOME=/tmp --user "$(id -u):$(id -g)" \
-  --mount "type=bind,src=$SELF_DIR,dst=/package,readonly" \
-  --mount "type=bind,src=$WORK,dst=/admission,readonly" \
-  "$VERIFIER_IMAGE" --bundle /package/installer.bundle.tar.gz \
-  --bundle-signature /package/installer.bundle.sigstore.json \
-  --image-inspect /admission/runtime-image.json --index /admission/runtime-index.json \
-  --output-dir /tmp/verified --reference "$IMAGE_REF" --signer "$SIGNER" --issuer "$ISSUER" \
-  --source-revision "$SOURCE_REVISION" --source-snapshot "$SOURCE_SNAPSHOT" \
-  --version "$IMAGE_VERSION" --platform "$PLATFORM" >"$WORK/graph-admission.json" \
-  || fail 'independent verifier rejected the signed source, provenance, index, child or platform graph'
+if [ "$OFFLINE_MODE" -eq 1 ]; then
+  load_installer_intent
+  refresh_installer_admission
+else
+  graph_verifier online >"$WORK/graph-admission.json" \
+    || fail 'independent verifier rejected the signed source, provenance, index, child or platform graph'
+  resolve_cache_location
+  if [ "$EARLY_ACTION" = install ]; then
+    [ ! -e "$CACHE_STATE" ] && [ ! -L "$CACHE_STATE" ] || fail 'refusing an existing instance directory'
+    [ ! -e "$CACHE_PARENT" ] && [ ! -L "$CACHE_PARENT" ] || fail 'retained verification anchor cannot recreate an installation'
+    mkdir -m 700 "$CACHE_PARENT" || fail 'dedicated private verification anchor could not be created'
+    CACHE_DIRECTORY=$(mktemp -d "$CACHE_PARENT/.originals.partial.XXXXXXXX") \
+      || fail 'private original-artifact staging could not be created'
+    CACHE_STAGE=${CACHE_DIRECTORY##*/}
+    graph_verifier export --export-offline-artifacts --expected-verifier-reference "$VERIFIER_IMAGE" \
+      --cache-state "$CACHE_STATE" --cache-stage-name "$CACHE_STAGE" \
+      >"$WORK/graph-admission.json" || fail 'complete original authentication transport could not be exported and reverified'
+  else
+    load_installer_intent
+    if [ ! -d "$CACHE_DIRECTORY" ]; then
+      CACHE_DIRECTORY="$CACHE_PARENT/$CACHE_STAGE"
+      [ -d "$CACHE_DIRECTORY" ] && [ ! -L "$CACHE_DIRECTORY" ] \
+        || fail 'both committed cache and exact durable original staging are missing; no new stage or identity is adopted'
+    fi
+    [ ! -L "$CACHE_DIRECTORY" ] || fail 'committed verification material is linked'
+    refresh_installer_admission
+  fi
+fi
 
 # Complete independent graph admission precedes this first candidate execution.
-docker run --platform "$PLATFORM" --rm -i --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
-  --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -c 'import json,sys; r=json.load(sys.stdin)["runtime"]; print("image_id_kind="+r["image_id_kind"]); print("image_config_id="+r["image_config_id"]); print("selected_descriptor="+json.dumps(r["selected_descriptor"],sort_keys=True,separators=(",",":")))' \
+docker run --platform "$PLATFORM" --pull=never --rm -i --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -c 'import json,sys; result=json.load(sys.stdin); r=result["runtime"]; print("image_id_kind="+r["image_id_kind"]); print("image_config_id="+r["image_config_id"]); print("selected_descriptor="+json.dumps(r["selected_descriptor"],sort_keys=True,separators=(",",":"))); print("installer_pin_json="+json.dumps(result["offline_artifacts"],sort_keys=True,separators=(",",":")))' \
   <"$WORK/graph-admission.json" >"$WORK/runtime-identity.txt" || fail 'admitted runtime identity inventory could not be decoded'
-IMAGE_ID_KIND=''; IMAGE_CONFIG_ID=''; SELECTED_DESCRIPTOR=''
+IMAGE_ID_KIND=''; IMAGE_CONFIG_ID=''; SELECTED_DESCRIPTOR=''; INSTALLER_PIN_JSON=''
 while IFS='=' read -r key value; do
   case "$key" in
     image_id_kind) IMAGE_ID_KIND=$value ;;
     image_config_id) IMAGE_CONFIG_ID=$value ;;
     selected_descriptor) SELECTED_DESCRIPTOR=$value ;;
+    installer_pin_json) INSTALLER_PIN_JSON=$value ;;
     *) fail 'unknown admitted runtime identity field' ;;
   esac
 done <"$WORK/runtime-identity.txt"
@@ -206,11 +401,14 @@ case "$IMAGE_DIGEST" in *[!0-9a-f]*|'') fail 'signed runtime digest is malformed
 helper() {
   state_dir=$1
   shift
-  docker run --platform "$PLATFORM" --rm --network none --read-only --cap-drop=ALL \
+  docker run --platform "$PLATFORM" --pull=never --rm --network none --read-only --cap-drop=ALL \
     --security-opt=no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=32m \
     --env HOME=/tmp --user "$(id -u):$(id -g)" \
     --mount "type=bind,src=$PACKAGE,dst=/package,readonly" \
     --mount "type=bind,src=$state_dir,dst=/state" \
+    --mount "type=bind,src=$CACHE_DIRECTORY,dst=/run/volt-offline-artifacts,readonly" \
+    --mount "type=bind,src=$CACHE_PARENT,dst=/run/volt-cache-parent,readonly" \
+    --mount "type=bind,src=$WORK/graph-admission.json,dst=/run/volt-independent-admission/receipt.json,readonly" \
     --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" /package/setup.py "$@"
 }
 
@@ -221,9 +419,12 @@ recovery_helper() {
   operation=$1
   case "$operation" in request|targets-request|prepare|validate|acknowledge|prepare-start) ;; *) fail 'invalid local recovery helper operation' ;; esac
   if [ "$operation" = request ] || [ "$operation" = targets-request ]; then
-    docker run --platform "$PLATFORM" --rm --network none --read-only --cap-drop=ALL \
+    docker run --platform "$PLATFORM" --pull=never --rm --network none --read-only --cap-drop=ALL \
       --security-opt=no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=16m \
       --user "$(id -u):$(id -g)" --mount "type=bind,src=$STATE,dst=/instance,readonly" \
+      --mount "type=bind,src=$CACHE_DIRECTORY,dst=/run/volt-offline-artifacts,readonly" \
+      --mount "type=bind,src=$CACHE_PARENT,dst=/run/volt-cache-parent,readonly" \
+      --mount "type=bind,src=$WORK/graph-admission.json,dst=/run/volt-independent-admission/receipt.json,readonly" \
       --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -m uvm.installer.recovery_authority \
       "$operation" --instance-root /instance
     return
@@ -234,9 +435,12 @@ recovery_helper() {
     helper_user=0:0; helper_capabilities='--cap-drop=ALL --cap-add=CHOWN --cap-add=SETUID --cap-add=DAC_OVERRIDE'
   fi
   case "$operation" in prepare|acknowledge|prepare-start) mount_access='' ;; validate) mount_access=',readonly' ;; esac
-  docker run --platform "$PLATFORM" --rm -i --network none --read-only $helper_capabilities \
+  docker run --platform "$PLATFORM" --pull=never --rm -i --network none --read-only $helper_capabilities \
     --security-opt=no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=16m \
     --user "$helper_user" --mount "type=bind,src=$STATE,dst=/instance$mount_access" \
+    --mount "type=bind,src=$CACHE_DIRECTORY,dst=/run/volt-offline-artifacts,readonly" \
+    --mount "type=bind,src=$CACHE_PARENT,dst=/run/volt-cache-parent,readonly" \
+    --mount "type=bind,src=$WORK/graph-admission.json,dst=/run/volt-independent-admission/receipt.json,readonly" \
     --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -m uvm.installer.recovery_authority \
     "$operation" --request-stdin --instance-root /instance
 }
@@ -274,7 +478,9 @@ locked_compose() {
 }
 
 read_instance() {
-  INFO=$(helper "$STATE" host-validate /state --image "$IMAGE_REF") || fail 'private instance state failed runtime validation'
+  set --
+  [ "${ACTION:-}" != restore-provision ] || set -- --allow-restore-transition
+  INFO=$(helper "$STATE" host-validate /state --image "$IMAGE_REF" "$@") || fail 'private instance state failed runtime validation'
   PROJECT=''; OWNER_TOKEN=''; MODE=''; INSTANCE_PLATFORM=''; HTTP_PORT=''
   START_CLOSED=1
   RESTORE_PENDING=0; RESTORE_IMPORTED=0; RESTORE_CAPABILITIES_REVOKED=0; RESTORE_SESSIONS_REVOKED=0
@@ -305,6 +511,8 @@ EOF_INFO
   done
 }
 
+. "$PACKAGE/offline-host.sh"
+
 check_owned_resources() {
   actual=$(docker network inspect "${PROJECT}_network" --format '{{index .Labels "volt.compose.owner-token"}}' 2>/dev/null) || fail 'owned network is missing; refusing to recreate it'
   [ "$actual" = "$OWNER_TOKEN" ] || fail 'network ownership does not match this instance'
@@ -334,7 +542,7 @@ verify_actual_mounts() {
     cat "$WORK/volume-inspect.json"
     printf '}\n'
   } >"$WORK/actual-container.json"
-  docker run --platform "$PLATFORM" --rm -i --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  docker run --platform "$PLATFORM" --pull=never --rm -i --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
     --tmpfs /tmp:rw,noexec,nosuid,size=16m --user "$(id -u):$(id -g)" \
     --mount "type=bind,src=$STATE,dst=/instance,readonly" \
     --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -m uvm.installer.runtime_mounts \
@@ -405,27 +613,40 @@ EOF_MOUNTS
     || fail 'actual VOLT container mount inventory is incomplete'
 }
 
+ensure_lock_owner() {
+  [ -n "$LOCK_NAME" ] && [ -n "$LOCK_ID" ] || fail 'actual lifecycle FD owner is unavailable'
+  owner=$(docker inspect "$LOCK_NAME" --format '{{.Id}}|{{.State.Running}}|{{index .Config.Labels "volt.compose.owner-token"}}|{{index .Config.Labels "volt.compose.project"}}|{{.Config.Image}}') \
+    || fail 'actual lifecycle FD owner disappeared'
+  [ "$owner" = "$LOCK_ID|true|$OWNER_TOKEN|$PROJECT|$IMAGE_REF" ] || fail 'actual lifecycle FD owner changed or stopped'
+}
+
 take_lock() {
-  [ -z "$LOCK_NAME" ] || return 0
+  if [ -n "$LOCK_NAME" ]; then ensure_lock_owner; return 0; fi
   LOCK_NAME="volt-lock-${PROJECT}-$$"
   init_request=${1:-}
-  set -- docker run --platform "$PLATFORM" -d --name "$LOCK_NAME" --restart=no --network none --read-only \
+  set -- docker run --platform "$PLATFORM" --pull=never -d --name "$LOCK_NAME" --restart=no --network none --read-only \
     --label "volt.compose.owner-token=$OWNER_TOKEN" --label "volt.compose.project=$PROJECT" \
     --cap-drop=ALL --security-opt=no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=8m \
     --user "$(id -u):$(id -g)" --mount "type=bind,src=$STATE,dst=/state" \
-    --mount "type=bind,src=$PACKAGE,dst=/package,readonly"
+    --mount "type=bind,src=$PACKAGE,dst=/package,readonly" \
+    --mount "type=bind,src=$CACHE_DIRECTORY,dst=/run/volt-offline-artifacts,readonly"
   if [ -n "$init_request" ]; then
     [ "$init_request" = "$WORK/runtime-init-request.json" ] || fail 'fixed initialization request path differs'
     set -- "$@" --mount "type=bind,src=$WORK/runtime-init-request.json,dst=/run/volt-initialization/request.json,readonly"
+    set -- "$@" --mount "type=bind,src=$WORK/init-admission.json,dst=/run/volt-initialization-admission/receipt.json,readonly"
+    set -- "$@" --mount "type=bind,src=$CACHE_PARENT,dst=/run/volt-cache-parent,readonly"
   fi
   set -- "$@" --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -m uvm.installer.lock /state/.install.lock
   if [ -n "$init_request" ]; then set -- "$@" --initialize-local; fi
-  "$@" >/dev/null || fail 'another lifecycle operation may already hold the private instance lock'
+  LOCK_ID=$("$@") || fail 'another lifecycle operation may already hold the private instance lock'
+  case "$LOCK_ID" in *[!0-9a-f]*|'') fail 'actual lifecycle container ID is malformed' ;; esac
+  [ "${#LOCK_ID}" -eq 64 ] || fail 'actual lifecycle container ID is malformed'
   LOCK_CREATED=1
   attempts=0
   while [ "$attempts" -lt 30 ]; do
-    if docker logs "$LOCK_NAME" 2>&1 | grep -q '^locked=1$'; then return; fi
-    if ! docker inspect "$LOCK_NAME" >/dev/null 2>&1; then LOCK_NAME=''; fail 'private instance lock could not be acquired'; fi
+    ensure_lock_owner
+    docker logs "$LOCK_NAME" >"$WORK/lock-owner.log" 2>&1 || fail 'actual lifecycle owner log command failed'
+    if grep -q '^locked=1$' "$WORK/lock-owner.log"; then return; fi
     attempts=$((attempts + 1)); sleep 1
   done
   fail 'private instance lock did not become ready'
@@ -554,7 +775,7 @@ run_scanner_recovery_approval() {
     <"$WORK/targets-request.json" >"$WORK/targets-response.json" \
     || fail 'local API did not return current scanner recovery targets'
   chmod 600 "$WORK/targets-response.json"
-  docker run --platform "$PLATFORM" --rm -i --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  docker run --platform "$PLATFORM" --pull=never --rm -i --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
     --tmpfs /tmp:rw,noexec,nosuid,size=16m --user "$(id -u):$(id -g)" \
     --mount "type=bind,src=$PACKAGE,dst=/package,readonly" \
     --mount "type=bind,src=$STATE,dst=/instance,readonly" \
@@ -568,7 +789,7 @@ run_scanner_recovery_approval() {
     <"$WORK/recovery-request.json" >"$WORK/approval-request.json" \
     || fail 'local API refused the fresh scanner recovery request'
   chmod 600 "$WORK/approval-request.json"
-  docker run --platform "$PLATFORM" --rm -i --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  docker run --platform "$PLATFORM" --pull=never --rm -i --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
     --tmpfs /tmp:rw,noexec,nosuid,size=16m --user "$(id -u):$(id -g)" \
     --mount "type=bind,src=$STATE/secrets/local-recovery-authority/operator.key,dst=/authority/operator.key,readonly" \
     --mount "type=bind,src=$STATE/secrets/local-recovery-authority/operator.pub,dst=/authority/operator.pub,readonly" \
@@ -586,7 +807,7 @@ run_scanner_recovery_approval() {
     <"$WORK/approval.json" >"$WORK/import-receipt.json" \
     || fail 'local API rejected the signed operator approval'
   chmod 600 "$WORK/import-receipt.json"
-  docker run --platform "$PLATFORM" --rm -i --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  docker run --platform "$PLATFORM" --pull=never --rm -i --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
     --tmpfs /tmp:rw,noexec,nosuid,size=16m --user "$(id -u):$(id -g)" \
     --mount "type=bind,src=$PACKAGE,dst=/package,readonly" \
     --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -m uvm.installer.recovery_authority \
@@ -622,6 +843,9 @@ OPERATION=''
 PROJECT_PREFIX='volt-easy'
 CONFIRM_PROJECT=''
 REMOVE_STATE=0
+BACKUP_DIRECTORY=''
+BACKUP_OPERATION_ID=''
+BACKUP_IDENTITY_SHA256=''
 RECOVERY_SOURCE=''
 RECOVERY_RATIONALE=''
 RECOVERY_EVIDENCE_REF=''
@@ -637,11 +861,17 @@ while [ "$#" -gt 0 ]; do
     --rationale) [ "$#" -ge 2 ] || fail '--rationale needs a value'; RECOVERY_RATIONALE=$2; shift 2 ;;
     --evidence-ref) [ "$#" -ge 2 ] || fail '--evidence-ref needs a value'; RECOVERY_EVIDENCE_REF=$2; shift 2 ;;
     --remove-state) REMOVE_STATE=1; shift ;;
+    --backup-directory) [ "$#" -ge 2 ] || fail '--backup-directory needs a new path'; BACKUP_DIRECTORY=$2; shift 2 ;;
+    --operation-id) [ "$#" -ge 2 ] || fail '--operation-id needs the original UUID'; BACKUP_OPERATION_ID=$2; shift 2 ;;
+    --identity-sha256) [ "$#" -ge 2 ] || fail '--identity-sha256 needs the original identity digest'; BACKUP_IDENTITY_SHA256=$2; shift 2 ;;
     prepare-setup|rotate-setup|create-account|issue-enrolment|issue-recovery|disable-account|revoke-capabilities)
       [ -z "$OPERATION" ] || fail 'only one maintenance operation is allowed'; OPERATION=$1; shift ;;
     *) fail "unsupported argument: $1" ;;
   esac
 done
+if [ "$ACTION" != backup-status ] && { [ -n "$BACKUP_OPERATION_ID" ] || [ -n "$BACKUP_IDENTITY_SHA256" ]; }; then
+  fail 'backup readback identities cannot select or authorize a writer'
+fi
 case "$HTTP_PORT" in ''|*[!0-9]*) fail 'HTTP port must be a numeric TCP port' ;; esac
 [ "$HTTP_PORT" -ge 1024 ] && [ "$HTTP_PORT" -le 65532 ] || fail 'HTTP port leaves no room for the recovery and reserved service ports'
 if [ -n "$STATE" ]; then
@@ -660,12 +890,13 @@ if [ "$ACTION" = install ]; then
   state_name=${STATE##*/}
   case "$state_name" in ''|.|..) fail 'instance directory name is unsafe' ;; esac
   STATE="$parent/$state_name"
+  [ "$STATE" = "$CACHE_STATE" ] || fail 'canonical selected instance changed during independent admission'
   [ ! -e "$STATE" ] && [ ! -L "$STATE" ] || fail 'refusing an existing instance directory'
   mkdir -m 700 "$STATE"
   INSTALLING=1
   mkdir -m 700 "$STATE/compose"
   cp "$PACKAGE/compose.yaml" "$PACKAGE/local.yaml" "$PACKAGE/local-restore.yaml" "$STATE/compose/"
-  OWNER_TOKEN=$(docker run --platform "$PLATFORM" --rm --network none --read-only --cap-drop=ALL \
+  OWNER_TOKEN=$(docker run --platform "$PLATFORM" --pull=never --rm --network none --read-only --cap-drop=ALL \
     --security-opt=no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=8m \
     --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -c 'import secrets; print(secrets.token_hex(32))')
   case "$OWNER_TOKEN" in *[!0-9a-f]*|'') fail 'runtime returned malformed resource ownership material' ;; esac
@@ -691,7 +922,7 @@ if [ "$ACTION" = install ]; then
   GATEWAY=$(docker network inspect "$NETWORK" --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}')
   case "$SUBNET" in *[!0-9./]*|'') fail 'Docker returned an invalid private network subnet' ;; esac
   case "$GATEWAY" in *[!0-9.]*|*..*|.*|*.|'') fail 'Docker returned an invalid private network gateway' ;; esac
-  docker run --platform "$PLATFORM" --rm --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  docker run --platform "$PLATFORM" --pull=never --rm --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
     --tmpfs /tmp:rw,noexec,nosuid,size=16m --user "$(id -u):$(id -g)" \
     --mount "type=bind,src=$PACKAGE,dst=/package,readonly" \
     --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" \
@@ -702,11 +933,16 @@ if [ "$ACTION" = install ]; then
     --admitted-image-config-id "$IMAGE_CONFIG_ID" --admitted-selected-descriptor "$SELECTED_DESCRIPTOR" \
     --admitted-source-revision "$SOURCE_REVISION" --admitted-source-snapshot "$SOURCE_SNAPSHOT" \
     --admitted-version "$IMAGE_VERSION" --owner-token "$OWNER_TOKEN" \
+    --admitted-installer-json "$INSTALLER_PIN_JSON" --admitted-cache-stage "$CACHE_STAGE" \
     --network-subnet "$SUBNET" --network-gateway "$GATEWAY" \
     --runtime-compose-directory "$STATE/compose" --host-instance-directory "$STATE" \
     >"$WORK/runtime-init-request.json" || fail 'fixed initialization request emission failed'
   chmod 600 "$WORK/runtime-init-request.json"
+  graph_verifier initial --offline-artifacts --expected-verifier-reference "$VERIFIER_IMAGE" --bind-initial-request \
+    >"$WORK/init-admission.json" || fail 'fresh original graph does not bind this exact initial request'
+  chmod 600 "$WORK/init-admission.json"
   take_lock "$WORK/runtime-init-request.json"
+  publish_installer_cache
   MODE=local
   prepare_local_custody
 else
@@ -715,11 +951,24 @@ else
   state_name=${STATE##*/}
   case "$state_name" in ''|.|..) fail 'instance directory name is unsafe' ;; esac
   STATE="$parent/$state_name"
+  [ "$STATE" = "$CACHE_STATE" ] || fail 'canonical selected instance changed during independent admission'
+  if [ "$INITIAL_PREPARATION" -eq 1 ] || [ "$CACHE_DIRECTORY" != "$CACHE_PARENT/originals" ]; then
+    take_lock
+    refresh_installer_admission
+    if [ "$CACHE_DIRECTORY" != "$CACHE_PARENT/originals" ]; then publish_installer_cache; fi
+    if [ "$INITIAL_PREPARATION" -eq 1 ]; then MODE=local; prepare_local_custody; fi
+  fi
   read_instance
 fi
 
 read_instance
+case "$ACTION" in
+  backup-status) run_backup_status; exit 0 ;;
+  backup-record|restore-provision|restore-admit) run_offline_action; exit 0 ;;
+esac
 take_lock
+refresh_installer_admission
+read_instance
 validate_local_custody
 check_owned_resources
 if [ "$ACTION" = install ]; then

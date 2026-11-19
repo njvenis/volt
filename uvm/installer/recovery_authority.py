@@ -781,6 +781,10 @@ def prepare(args) -> None:
             or metadata.get("local_recovery_journal_id") != request["journal_id"]
             or metadata.get("established") is not False):
         raise ValueError("instance identity does not match preparation request")
+    if metadata.get('installer_contract_version') == 2:
+        from uvm.installer.installed_artifacts import verify_initial_inventory, current_receipt
+        current_receipt(metadata)
+        verify_initial_inventory(root, metadata)
     tuple_value = {"schema_version": 1, "profile": PROFILE,
                    "installation_id": request["installation_id"],
                    "journal_id": request["journal_id"], "restore_generation": 0,

@@ -7,6 +7,11 @@ import sys
 
 
 def validate(root: Path, host_root: Path, info: dict, container: dict, volumes: list[dict]) -> None:
+    if info.get('installer_contract_version') == 2:
+        from uvm.installer.installed_artifacts import cache_name, reject_mount_overlap, validate_pin
+        validate_pin(info.get('installer_admission'))
+        reject_mount_overlap(str(host_root.parent / cache_name(str(host_root))),
+            {'containers': [container], 'volumes': volumes})
     if container.get('Image') != info['image_admission']['id']:
         witness = container.get('ImageManifestDescriptor') or {}
         expected = info['image_admission'].get('selected_descriptor') or {}

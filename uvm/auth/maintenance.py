@@ -22,6 +22,10 @@ from uvm.assessment.policy_lock import lock_policy
 UTC = timezone.utc
 
 
+class _SetupAlreadyClaimed(RuntimeError):
+    """Known setup-state denial with a safe, static CLI diagnostic."""
+
+
 def _private_write(path: str, document: dict):
     target = Path(path)
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -91,7 +95,7 @@ def run(operation: str, username: str | None = None, display_name: str | None = 
                 policy_revision = policy
             if operation in {"prepare-setup", "rotate-setup"}:
                 if install["claimed_at"] is not None:
-                    raise RuntimeError("initial setup is already claimed")
+                    raise _SetupAlreadyClaimed("initial setup is already claimed")
                 reuse_setup = False
                 if operation == "prepare-setup":
                     current = c.execute(sa.select(local_capabilities).where(
@@ -223,6 +227,9 @@ def main():
             if len(raw)>1_000_000:raise RuntimeError('recovery input too large')
             document=parse_document(raw)
         run(args.operation, args.username, args.display_name, args.config,input_document=document)
+    except _SetupAlreadyClaimed:
+        print("maintenance failed: setup_already_claimed", file=sys.stderr)
+        raise SystemExit(1)
     except Exception as exc:
         # Never print database URLs, submitted capabilities or verifier material.
         print(f"maintenance failed: {type(exc).__name__}", file=sys.stderr)

@@ -469,6 +469,7 @@ def qualify_offline_fixture_entry(*, closure: Path, fixture: Path, verifier_refe
 
 
 
+
 def create_offline_fixture_entry(*, state: Path, admission: dict, private: Path) -> Path:
     """Provision the maintainer's EXTERNAL fixed fixture entry, never package code.
 
@@ -516,7 +517,7 @@ def create_offline_fixture_entry(*, state: Path, admission: dict, private: Path)
         'fail() { printf "%s\\n" "external offline entry: $*" >&2; exit 1; }',
         '[ "$#" -ge 3 ] || fail "fixed action and selected directory required"',
         'action=$1; shift',
-        'case "$action" in verify-cache|stop|start|logs|diagnose|backup-record|backup-status|restore-provision|restore-admit|destroy) ;; *) fail "unsupported fixed lifecycle action" ;; esac',
+        'case "$action" in verify-cache|stop|start|logs|diagnose|setup|backup-record|backup-status|restore-provision|restore-admit|destroy) ;; *) fail "unsupported fixed lifecycle action" ;; esac',
         '[ "$1" = --directory ] || fail "selected directory is mandatory"',
         '[ "$2" = ' + shlex.quote(str(state)) + ' ] || fail "different instance refused"', 'shift 2',
         'for argument do [ "$argument" != --directory ] || fail "duplicate directory selector"; done',
@@ -1092,8 +1093,8 @@ def qualify_restored_local_public_state(*, setup: Path, launcher: Path | None, l
         else ['sh', str(launcher), 'setup', '--directory', str(state)])
     negative = run('local-restored-setup-maintenance-negative', setup_again,
         evidence, env=launcher_env, check=False)
-    if negative.returncode == 0:
-        raise RuntimeError('claimed restored installation allowed setup preparation')
+    if (negative.returncode != 1 or negative.stderr.strip() != 'volt installer: initial setup is already claimed'):
+        raise RuntimeError('claimed-state backend maintenance denial was not explicitly established')
     (evidence / 'local-restore-public-outcomes.json').write_text(json.dumps({'status': 'passed',
         'execution_scope': 'component_existing_setup' if launcher is None else 'source_free_signed_launcher',
         'exact_host_ack_before_ingress': 'passed',

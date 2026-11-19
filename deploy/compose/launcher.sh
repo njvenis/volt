@@ -917,8 +917,23 @@ run_scanner_recovery_approval() {
 
 run_maintenance() {
   operation=$1; shift
+  maintenance_exit=0
   locked_compose exec -T --user 0:0 volt /usr/local/bin/uvm-local-maintenance "$operation" --config /etc/volt/local-auth.json "$@" \
-    >/dev/null 2>"$WORK/maintenance.stderr" || fail 'local maintenance command failed'
+    >/dev/null 2>"$WORK/maintenance.stderr" || maintenance_exit=$?
+  if [ "$maintenance_exit" -ne 0 ]; then
+    maintenance_claimed=0
+    if [ "$maintenance_exit" -eq 1 ] && { [ "$operation" = prepare-setup ] || [ "$operation" = rotate-setup ]; }; then
+      {
+        if IFS= read -r maintenance_line && [ "$maintenance_line" = 'maintenance failed: setup_already_claimed' ]; then
+          # One complete static line only. Never echo arbitrary backend stderr.
+          if IFS= read -r maintenance_extra || [ -n "$maintenance_extra" ]; then :
+          else maintenance_claimed=1; fi
+        fi
+      } <"$WORK/maintenance.stderr"
+    fi
+    [ "$maintenance_claimed" -ne 1 ] || fail 'initial setup is already claimed'
+    fail 'local maintenance command failed'
+  fi
   case "$operation" in
     prepare-setup|rotate-setup|create-account|issue-enrolment|issue-recovery)
       copy_capability "$STATE/secrets/bootstrap-capability-output" "$operation"

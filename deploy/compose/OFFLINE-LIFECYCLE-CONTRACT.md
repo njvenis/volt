@@ -430,3 +430,12 @@ and never mounts the instance's business volumes. The current generic/initial
 owner retains its fixed /tmp tmpfs8m; its exact four-entry ephemeral map and
 complete bind shape are checked before exemption. Offline FD owners use their
 existing /tmp32m plus the same three empty bounded store tmpfs views.
+
+The documented fixed `setup` action remains inside the fully authenticated test
+entry whitelist. For prepare-setup/rotate-setup ONLY, backend exit1 and EXACTLY
+one complete static stderr line `maintenance failed: setup_already_claimed`
+map to the safe actionable `initial setup is already claimed`. Generic errors,
+extra/partial lines or any other operation retain the existing redacted generic
+failure. Arbitrary private maintenance.stderr is never forwarded. This closed
+backend discriminator requires its independently integrated product source;
+old9657 redacted RuntimeError cannot count as specific claimed-state proof.

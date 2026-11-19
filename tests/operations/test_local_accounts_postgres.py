@@ -613,6 +613,60 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
         update(True)
         self.assertEqual(operator.get("/api/v1/auth/session").status_code, 401)
 
+    def test_maintenance_cli_claimed_setup_has_static_diagnostic_and_no_mutation(self):
+        def invoke(operation):
+            argv=[sys.executable,'-m','uvm.auth.maintenance',operation,'--config',str(self.config_path)]
+            cwd=Path(__file__).resolve().parents[2]
+            result=subprocess.run(argv,cwd=cwd,text=True,capture_output=True,timeout=20)
+            # Only static success/denial output is expected; no capability bytes.
+            print(json.dumps({'maintenance_cli':{'argv':argv,'cwd':str(cwd),
+                'env':{'UVM_DB_URL':self.dsn,'UVM_LOCAL_AUTH_CONFIG_FILE':str(self.config_path)},
+                'exit':result.returncode,'stdout':result.stdout,'stderr':result.stderr}}))
+            return result
+        def snapshot():
+            with self.engine.connect() as c:
+                installation=dict(c.execute(sa.text('select * from local_auth_installation')).mappings().one())
+                counts=tuple(c.exec_driver_sql(query).scalar_one() for query in (
+                    'select count(*) from assessment_audit_events',
+                    'select count(*) from local_auth_capabilities',
+                    'select count(*) from assessment_command_receipts'))
+            import hashlib
+            delivered=self.delivery_path.read_bytes()
+            capability=json.loads(delivered)['capability'].encode()
+            return installation,counts,hashlib.sha256(capability).hexdigest(),hashlib.sha256(delivered).hexdigest()
+        before=snapshot()
+        unclaimed=invoke('prepare-setup')
+        self.assertEqual(unclaimed.returncode,0)
+        self.assertEqual(unclaimed.stderr,'')
+        self.assertEqual(unclaimed.stdout,'Capability written to configured private delivery file.\n')
+        # Re-emission legitimately refreshes expires_in_seconds; capability and
+        # durable state remain the same. Never include capability bytes in diffs.
+        self.assertEqual(snapshot()[:3],before[:3])
+        self._local_admin()  # A genuine public account/setup claim, no SQL claim.
+        claimed=snapshot()
+        for operation in ('prepare-setup','rotate-setup'):
+            denied=invoke(operation)
+            self.assertEqual(denied.returncode,1)
+            self.assertEqual(denied.stdout,'')
+            self.assertEqual(denied.stderr,'maintenance failed: setup_already_claimed\n')
+            self.assertEqual(snapshot(),claimed)
+
+    def test_maintenance_main_other_errors_keep_generic_redaction(self):
+        from contextlib import redirect_stderr,redirect_stdout
+        from uvm.auth.maintenance import main
+        sentinel=secrets.token_urlsafe(32)
+        # Matching the old human message must not impersonate the typed branch.
+        for failure in (RuntimeError('initial setup is already claimed '+sentinel),ValueError(sentinel)):
+            stderr=io.StringIO();stdout=io.StringIO()
+            with patch.object(sys,'argv',['uvm-local-auth','prepare-setup']), \
+                    patch('uvm.auth.maintenance.run',side_effect=failure), \
+                    redirect_stderr(stderr),redirect_stdout(stdout):
+                with self.assertRaises(SystemExit) as stopped:main()
+            self.assertEqual(stopped.exception.code,1)
+            self.assertEqual(stderr.getvalue(),'maintenance failed: '+type(failure).__name__+'\n')
+            self.assertEqual(stdout.getvalue(),'')
+            self.assertFalse(sentinel in stderr.getvalue())
+
     def test_prepare_setup_reemits_existing_capability_without_rotation(self):
         from uvm.auth.maintenance import run as maintain
         before = json.loads(self.delivery_path.read_text())["capability"]

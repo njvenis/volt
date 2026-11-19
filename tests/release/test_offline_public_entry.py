@@ -53,6 +53,15 @@ if '--offline-artifacts' in args and os.environ.get('ENTRY_FAIL')=='full':sys.ex
                 if command[0]=='run':
                     self.assertIn('--pull=never',command);self.assertEqual(command[command.index('--network')+1],'none')
             self.assertFalse(list(wrapper.parent.glob('volt-external-offline.*')))
+    def test_existing_setup_action_is_authenticated_before_signed_launcher(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent=Path(temporary);state,_closure,wrapper,env,_admission=self.fixture(parent)
+            result=self.run_entry(wrapper,state,env,'setup');self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual((parent/'launcher.log').read_text().splitlines(),['setup','--directory',str(state)])
+            (parent/'launcher.log').unlink();env['ENTRY_FAIL']='full'
+            denied=self.run_entry(wrapper,state,env,'setup');self.assertEqual(denied.returncode,32,denied.stderr)
+            self.assertFalse((parent/'launcher.log').exists())
+
     def test_crypto_or_full_graph_failure_prevents_shell(self):
         for stage,exitcode,count in [('signature',31,1),('full',32,6)]:
             with self.subTest(stage=stage),tempfile.TemporaryDirectory() as temporary:

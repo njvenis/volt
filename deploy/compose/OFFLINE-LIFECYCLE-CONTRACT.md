@@ -556,3 +556,44 @@ away from the selected input inode, then a NEW fixed timeout/filter_unavailable
 record is published; late child bytes cannot change it. Such transport failure
 is nonzero, never a successful reader or producer result. No host timeout
 binary/interpreter or generic command wrapper is introduced.
+
+## Maintainer signed initial-interruption proof (runner only)
+
+Pin before execution: original signed install runs in a registered new session.
+A private POSIX Docker observer forwards commands unchanged except the exact
+own-caller `docker logs INITIAL_LOCK_NAME` result is captured ONCE and held
+BEFORE its real `locked=1` line reaches the launcher. Initial helper fullCID,
+image/index-selected-child witness, owner/project, fixed --initialize-local
+command, networknone/readonly and exact state/request binds must match. Linux
+/proc caller PID/PGID/session guard prevents targeting another process group.
+A hard file-output bound applies to both captured streams; no readiness is
+credited from a failed/truncated command. Nonready original bytes/status are
+forwarded exactly. The held readiness barrier expires closed after120 seconds.
+This is explicit test instrumentation, not an unmodified-Docker host claim or
+production fault switch. It does not choose trust, keys or installation identity.
+
+Controller must observe REAL initialized/prepared/unestablished/noack metadata,
+the exact original named stage/pin/request digest and private-file inventory,
+absence of any API container, and actual exclusive FD via same-owner readonly
+/proc inspection BEFORE signalling only its registered own group/holder. Keep
+private original bytes and hashes before cleanup. A missed/contradictory boundary
+is a failure, not an interruption pass. Original stage remains outside WORK.
+Resume ONLY existing externally authenticated `start`; verify original UUID,
+request/pin/immutable key inventory, exact directory inode publication, existing
+CURRENT/PENDING env progression, backend acknowledgement and normal health.
+No SQL, account, capability or ack editing; no metadata reconstruction/cache
+adoption, key regeneration, upgraded image or weakened checks. Retain fixture
+for the smallest separately labelled reversible private-input negatives/review.
+
+
+### Retained-stage package binding after publication
+
+An offline launcher executing the exact authenticated retained stage/package
+must move ALL derived package references (`SELF_DIR`, `BUNDLE`, `BUNDLE_SIG`)
+to the fixed committed originals/package after the verified atomic rename.
+No fallback, path search, copied package, or retry-selected source is allowed.
+Online execution keeps its independently authenticated original package path.
+Both paths immediately run fresh complete original-graph verification against
+the committed destination under the SAME existing lifecycle FD, before custody
+preparation or workers. Missing/stale/substituted package bytes fail closed;
+publication never permits identity/key reconstruction or pin backfill.

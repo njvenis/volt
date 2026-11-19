@@ -319,6 +319,15 @@ EOF_CACHE_HELPER_MOUNTS
 }
 
 publish_installer_cache() {
+  # Offline execution began at the exact journal-bound retained stage. Its
+  # package directory moves with the atomic publication; never keep using a
+  # vanished source path or search for another package after the rename.
+  published_offline_package=0
+  if [ "$OFFLINE_MODE" -eq 1 ]; then
+    [ "$SELF_DIR" = "$CACHE_DIRECTORY/package" ] \
+      || fail 'offline package source differs from the exact admitted publication stage'
+    published_offline_package=1
+  fi
   ensure_lock_owner
   collect_cache_mounts
   graph_verifier publish --offline-artifacts --expected-verifier-reference "$VERIFIER_IMAGE" --require-installed-pin \
@@ -327,6 +336,14 @@ publish_installer_cache() {
   chmod 600 "$WORK/.next-graph-admission.json"
   mv "$WORK/.next-graph-admission.json" "$WORK/graph-admission.json"
   CACHE_DIRECTORY="$CACHE_PARENT/originals"
+  if [ "$published_offline_package" -eq 1 ]; then
+    SELF_DIR="$CACHE_DIRECTORY/package"
+    BUNDLE="$SELF_DIR/installer.bundle.tar.gz"
+    BUNDLE_SIG="$SELF_DIR/installer.bundle.sigstore.json"
+  fi
+  # Reauthenticate the committed originals against these exact package bytes
+  # under the SAME held FD before custody preparation or any workers.
+  refresh_installer_admission
   ensure_lock_owner
 }
 

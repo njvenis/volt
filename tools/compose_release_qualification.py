@@ -1506,6 +1506,275 @@ def qualify_claimed_setup_fixture(*, bundle: Path, fixture: Path, image_id: str,
     }, indent=2) + '\n')
 
 
+def initial_resume_observer_environment(*, capture: Path, state: Path, environment: dict,
+        admission: dict, engine_id: str, selected: dict, project_prefix: str) -> dict:
+    '''Private POSIX readiness barrier; no product fault flag or authority.
+
+    The ORIGINAL Docker logs result is captured once, then held BEFORE its
+    ready line reaches the signed launcher. Thus cache publication cannot race
+    the parent observation. Outside this single owned initial holder, commands,
+    arguments, streams and status are forwarded unchanged.
+    '''
+    capture.mkdir(mode=0o700)
+    real = Path(shutil.which('docker', path=environment['PATH'])).resolve(strict=True)
+    executable = capture/'docker'
+    constants = {'REAL_DOCKER':str(real),'CAPTURE':str(capture),'EXPECTED_STATE':str(state),
+        'EXPECTED_REF':admission['image_reference'],'EXPECTED_ID':admission['image_id'],
+        'EXPECTED_KIND':admission['image_id_kind'],'EXPECTED_ENGINE':engine_id,
+        'EXPECTED_CHILD':selected['digest'],'EXPECTED_MEDIA':selected['mediaType'],
+        'EXPECTED_SIZE':str(selected['size']),'EXPECTED_PLATFORM':admission['platform'],
+        'EXPECTED_PREFIX':project_prefix}
+    header='#!/bin/sh\nset -eu\numask 077\n'+''.join(key+'='+shlex.quote(value)+'\n' for key,value in constants.items())
+    body=r'''
+pass_original() { exec "$REAL_DOCKER" "$@"; }
+[ "$#" -eq 2 ] && [ "$1" = logs ] || pass_original "$@"
+[ -f "$CAPTURE/caller.pid" ] && [ ! -L "$CAPTURE/caller.pid" ] || pass_original "$@"
+IFS= read -r caller <"$CAPTURE/caller.pid"
+case "$caller" in ''|*[!0-9]*) pass_original "$@" ;; esac
+case "$2" in "volt-lock-${EXPECTED_PREFIX}-"*"-$caller") ;; *) pass_original "$@" ;; esac
+# This is a Linux test observer, not a new host product prerequisite.
+read -r actual_pid process_name process_state parent_pid group_id session_id rest <"/proc/$caller/stat"
+[ "$actual_pid|$group_id|$session_id" = "$caller|$caller|$caller" ] || exit 76
+identity=$("$REAL_DOCKER" inspect "$2" --format '{{.Id}}|{{.Name}}|{{.Config.Image}}|{{.State.Running}}|{{index .Config.Labels "volt.compose.owner-token"}}|{{index .Config.Labels "volt.compose.project"}}|{{json .Config.Entrypoint}}|{{json .Config.Cmd}}|{{.HostConfig.NetworkMode}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.Privileged}}|{{.Image}}|{{if .ImageManifestDescriptor}}{{.ImageManifestDescriptor.digest}}|{{.ImageManifestDescriptor.mediaType}}|{{.ImageManifestDescriptor.size}}|{{.ImageManifestDescriptor.platform.os}}/{{.ImageManifestDescriptor.platform.architecture}}{{end}}')
+IFS='|' read -r cid name reference running owner project entry command network readonly privileged image child media size platform <<EOF_RESUME_ID
+$identity
+EOF_RESUME_ID
+valid=1
+[ "$name|$reference|$running|$network|$readonly|$privileged" = "/volt-lock-$project-$caller|$EXPECTED_REF|true|none|true|false" ] || valid=0
+[ "$entry" = '["/opt/uvm/venv/bin/python"]' ] && [ "$command" = '["-m","uvm.installer.lock","/state/.install.lock","--initialize-local"]' ] || valid=0
+case "$owner:$cid" in *[!0-9a-f:]*) valid=0 ;; esac
+[ "${#owner}" -eq 64 ] && [ "${#cid}" -eq 64 ] || valid=0
+case "$project" in "$EXPECTED_PREFIX-"*) ;; *) valid=0 ;; esac
+if [ "$image" != "$EXPECTED_ID" ]; then
+ [ "$EXPECTED_KIND|$image|$child|$media|$size|$platform" = "selected_manifest|$EXPECTED_ENGINE|$EXPECTED_CHILD|$EXPECTED_MEDIA|$EXPECTED_SIZE|$EXPECTED_PLATFORM" ] || valid=0
+fi
+state_bind=$("$REAL_DOCKER" inspect "$cid" --format '{{range .Mounts}}{{if eq .Destination "/state"}}{{.Source}}|{{.RW}}{{end}}{{end}}')
+request=$("$REAL_DOCKER" inspect "$cid" --format '{{range .Mounts}}{{if eq .Destination "/run/volt-initialization/request.json"}}{{.Source}}{{end}}{{end}}')
+[ "$state_bind" = "$EXPECTED_STATE|true" ] || valid=0
+case "$request" in /tmp/volt-installer.????????/runtime-init-request.json) ;; *) valid=0 ;; esac
+if [ "$valid" -ne 1 ]; then printf '%s\n' contradiction >"$CAPTURE/guard.status"; exit 76; fi
+# The trusted fixed helper emits bounded initialization/readiness records.
+# A hard file limit bounds both streams; a limit failure cannot become ready.
+set +e
+( ulimit -f 64; "$REAL_DOCKER" "$@" ) >"$CAPTURE/owner.stdout" 2>"$CAPTURE/owner.stderr"
+original_exit=$?
+set -e
+printf '%s\n' "$original_exit" >"$CAPTURE/logs.exit"
+if [ "$original_exit" -eq 0 ] && grep -q '^locked=1$' "$CAPTURE/owner.stdout"; then
+ "$REAL_DOCKER" inspect "$cid" >"$CAPTURE/holder.json"
+ printf '%s\n' "$identity" >"$CAPTURE/identity"
+ printf '%s\n' "$request" >"$CAPTURE/request.path"
+ printf '%s\n' "$cid" >"$CAPTURE/gate.ready"
+ attempts=0
+ while [ "$attempts" -lt 120 ]; do
+  # Only a controller cleanup/release can end this test-only barrier. No
+  # readiness byte has yet been forwarded to the actual public launcher.
+  [ ! -f "$CAPTURE/release" ] || break
+  attempts=$((attempts + 1)); sleep 1
+ done
+ [ "$attempts" -lt 120 ] || { printf '%s\n' expired >"$CAPTURE/guard.status"; exit 75; }
+fi
+cat "$CAPTURE/owner.stdout"
+cat "$CAPTURE/owner.stderr" >&2
+exit "$original_exit"
+'''
+    executable.write_text(header+body);executable.chmod(0o700)
+    (capture/'observer-binding.json').write_text(json.dumps({'script_sha256':sha(executable),
+        'real_docker':str(real),'real_docker_sha256':sha(real),'state':str(state),
+        'runtime_reference':admission['image_reference'],'image_id':admission['image_id'],
+        'engine_id':engine_id,'selected_descriptor':selected,
+        'scope':'TEST observation/readiness hold only; original Docker result held before forwarding, Linux proc caller-group guard; not unmodified-Docker certification'},indent=2)+'\n')
+    return {**environment,'PATH':str(capture)+os.pathsep+environment['PATH'],'RESUME_CAPTURE':str(capture)}
+
+
+def initial_resume_fd_probe() -> str:
+    """Fixed read-only probe, separately compiled before any actual invocation."""
+    return "import os,json,stat\nfrom pathlib import Path\nroot=os.stat('/state/.install.lock'); found=[]\nfor p in Path('/proc/1/fd').iterdir():\n try:\n  if os.readlink(p)!='/state/.install.lock':continue\n  target=p.stat(); text=(Path('/proc/1/fdinfo')/p.name).read_text()\n  if (root.st_dev,root.st_ino)!=(target.st_dev,target.st_ino) or stat.S_IMODE(root.st_mode)!=0o600 or root.st_uid!=os.getuid() or root.st_size!=0:raise SystemExit('actual lock inode/custody differs')\n  if not any('FLOCK' in line.split() and 'WRITE' in line.split() for line in text.splitlines()):raise SystemExit('actual exclusive FD lock missing')\n  found.append({'fd':int(p.name),'inode':target.st_ino,'uid':root.st_uid,'mode':'0600','size':root.st_size,'fdinfo':text})\n except FileNotFoundError:continue\nif len(found)!=1:raise SystemExit('exactly one actual held lock FD required')\nprint(json.dumps({'actual_exclusive_fd':found}))\n\n"
+
+
+def qualify_initial_resume_fixture(*, bundle: Path, fixture: Path, image_id: str,
+        source_revision: str, source_snapshot: str, platform: str, private: Path,
+        evidence: Path) -> None:
+    """One real prepared/pre-publication interruption, then existing public start.
+
+    POSIX readiness withholding is TEST instrumentation, not a product fault
+    switch or an unmodified-Docker certification. Original initial authority,
+    journal, request, stage and keys come only from the actual signed producer.
+    """
+    from uvm.installer.lock import _bounded_file
+    from uvm.installer.offline_artifacts import Closure, digest
+    admission=validate_admission_fixture(fixture,image_id=image_id,source_snapshot=source_snapshot,
+        source_commit=source_revision,platform=platform,bundle=bundle,version='0.1.0-rc.4',evidence=evidence)
+    extracted=private/'extracted';extracted.mkdir(mode=0o700);shutil.unpack_archive(str(bundle),extracted,'gztar')
+    package=extracted/'volt-compose-0.1.0-rc.4';outer=private/'signed-package';outer.mkdir(mode=0o700)
+    launcher=outer/'launcher.sh';render_fixture_launcher(package/'launcher.sh',launcher,fixture)
+    shutil.copyfile(bundle,outer/'installer.bundle.tar.gz')
+    for name in ('installer.bundle.sigstore.json','launcher.sigstore.json'):shutil.copyfile(fixture/name,outer/name)
+    for path in outer.iterdir():path.chmod(0o600)
+    public=evidence/'fixture-trust-public'
+    run('resume-trusted-launcher-signature',['docker','run','--rm','--platform',platform,'--pull=never',
+        '--network','host','--read-only','--cap-drop=ALL','--security-opt=no-new-privileges',
+        '--tmpfs','/tmp:rw,noexec,nosuid,size=16m','--user',f'{os.getuid()}:{os.getgid()}',
+        '--mount',f'type=bind,src={public},dst=/fixture,readonly','--mount',f'type=bind,src={launcher},dst=/launcher,readonly',
+        COSIGN_IMAGE,'verify-blob','--key','/fixture/fixture.pub','--trusted-root','/fixture/trusted-root.json',
+        '--bundle','/fixture/launcher.sigstore.json','/launcher'],evidence)
+    environment=trusted_launcher_environment(private/'minimal-host-path',admission);state=private/'instance'
+    engine=run('resume-admitted-engine-id',['docker','image','inspect',admission['image_reference'],'--format','{{.Id}}'],evidence).stdout.strip()
+    if engine not in {admission['image_id'],admission['image_index_digest']}:raise RuntimeError('resume observer engine mapping differs from authenticated index/selected object')
+    selected=json.loads((evidence/'fixture-full-runtime-admission.stdout').read_text())['runtime']['selected_descriptor']
+    capture=private/'initial-observer';observed=initial_resume_observer_environment(capture=capture,state=state,
+        environment=environment,admission=admission,engine_id=engine,selected=selected,project_prefix='volt-easy-delivery')
+    original_command=['sh',str(launcher),'install','--directory',str(state),'--port','46180','--project-prefix','volt-easy-delivery']
+    wrapper='umask 077; printf "%s\\n" "$$" >"$RESUME_CAPTURE/caller.pid"; exec sh "$0" "$@"'
+    command=['sh','-c',wrapper,str(launcher),*original_command[2:]]
+    (evidence/'initial-install-invocation.json').write_text(json.dumps({'argv':command,'original_supported_argv':original_command,
+        'cwd':str(ROOT),'environment_PATH':observed['PATH'],'start_new_session':True,'instrumentation':'private POSIX actual-readiness withholding before publication; source unchanged'},indent=2))
+    (evidence/'retained-fixture.json').write_text(json.dumps({'private':str(private),'state':str(state),
+        'admission':admission,'runtime_source_revision':source_revision,'cleanup':'RETAIN initial/resumed fixture and private original material until review'},indent=2))
+    with (evidence/'initial-install.stdout').open('x')as stdout,(evidence/'initial-install.stderr').open('x')as stderr:
+        caller=subprocess.Popen(command,cwd=ROOT,env=observed,stdout=stdout,stderr=stderr,start_new_session=True)
+        (capture/'registered-caller.json').write_text(json.dumps({'pid':caller.pid,'pgid':os.getpgid(caller.pid),'sid':os.getsid(caller.pid)}))
+        try:
+            deadline=time.monotonic()+180
+            while time.monotonic()<deadline and not (capture/'gate.ready').exists():
+                if caller.poll() is not None:break
+                if (capture/'guard.status').exists():break
+                time.sleep(.05)
+            if not (capture/'gate.ready').exists():
+                if caller.poll()is None and os.getpgid(caller.pid)==caller.pid:os.killpg(caller.pid,signal.SIGTERM)
+                try:code=caller.wait(timeout=30)
+                except subprocess.TimeoutExpired:os.killpg(caller.pid,signal.SIGKILL);code=caller.wait()
+                (evidence/'initial-install.exit').write_text(str(code))
+                raise RuntimeError('actual prepared readiness boundary was not held; no interruption pass, preserve first failure')
+            if (capture/'caller.pid').read_text().strip()!=str(caller.pid) or os.getpgid(caller.pid)!=caller.pid or os.getsid(caller.pid)!=caller.pid:
+                raise RuntimeError('initial observer caller/process group differs; no signal authorised')
+            cid=(capture/'gate.ready').read_text().strip();row=json.loads((capture/'holder.json').read_text())[0]
+            if (row['Id']!=cid or row['Config']['Image']!=admission['image_reference'] or row['State']['Running']is not True
+                    or row['Config']['Cmd']!=['-m','uvm.installer.lock','/state/.install.lock','--initialize-local']):
+                raise RuntimeError('held initialization observer identity differs')
+            raw=_bounded_file(state/'instance.json',1024*1024,private=True);info=json.loads(raw)
+            project=info['project'];owner=info['owner_token'];anchor=private/'instance.installer-artifacts';stage=anchor/info['installer_cache_stage']
+            if (info.get('installer_phase')!='prepared' or info.get('initialized')is not True or info.get('established')is not False
+                    or info.get('local_recovery_acknowledgement')is not None or info.get('restore_pending')
+                    or set(p.name for p in anchor.iterdir())!={stage.name}
+                    or row['Config']['Labels'].get('volt.compose.owner-token')!=owner
+                    or row['Config']['Labels'].get('volt.compose.project')!=project):
+                raise RuntimeError('actual initial phase/publication/owner contradicts intended pre-ack boundary')
+            request_path=Path((capture/'request.path').read_text().strip());request=_bounded_file(request_path,65536,private=True)
+            document=json.loads(request)
+            if (digest(request)!=info['installer_initial_request_sha256'] or document['profile']!='volt_local_runtime_init_v1'
+                    or document['setup_sha256']!=digest((package/'setup.py').read_bytes())
+                    or document['arguments']['owner_token']!=owner):
+                raise RuntimeError('actual initial request differs from durable pin/selected producer')
+            (capture/'original-request.json').write_bytes(request);(capture/'original-request.json').chmod(0o600)
+            (capture/'original-journal.json').write_bytes(raw);(capture/'original-journal.json').chmod(0o600)
+            material=capture/'initial-material';material.mkdir(mode=0o700);files={}
+            for name,value in info['installer_initial_files'].items():
+                data=_bounded_file(state/name,1024*1024,private=False)
+                if digest(data)!=value['sha256'] or len(data)!=value['bytes']:raise RuntimeError('actual committed initial file changed before interruption')
+                destination=material/name;destination.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
+                for parent in destination.parents:
+                    if parent == material:break
+                    parent.chmod(0o700)
+                destination.write_bytes(data);destination.chmod(0o600)
+                files[name]={'sha256':digest(data),'bytes':len(data),'mode':stat.S_IMODE((state/name).stat().st_mode)}
+            closure=Closure(fixture=None,custody_root=stage)
+            if closure.hash!=info['installer_admission']['closure_sha256']:raise RuntimeError('actual retained initial stage differs from pin')
+            stage_identity=[stage.stat().st_dev,stage.stat().st_ino]
+            probe=run('initial-before-ack-api-absent',['docker','container','inspect',project+'-volt-1'],evidence,check=False)
+            if probe.returncode==0 or 'no such'not in probe.stderr.lower():raise RuntimeError('initial boundary did not precede API/worker creation')
+            proc_script=initial_resume_fd_probe()
+            run('actual-initial-holder-exclusive-fd',['docker','exec','--user',f'{os.getuid()}:{os.getgid()}',cid,
+                '/opt/uvm/venv/bin/python','-c',proc_script],evidence)
+            (evidence/'actual-prepared-boundary.json').write_text(json.dumps({'holder_id':cid,'caller_pid':caller.pid,
+                'project':project,'operation':'initialize-local','request_sha256':digest(request),'journal_sha256':digest(raw),
+                'installation_id':info['installation_id'],'initial_files':files,'stage_name':stage.name,
+                'stage_inode':stage_identity,'closure_sha256':closure.hash,'cache_published':False,'ack_present':False,
+                'API_present':False,'runtime_source':source_revision,'scope':'REAL signed producer/actual FD; private readiness result held BEFORE forwarding; no metadata editing'},indent=2))
+            os.killpg(caller.pid,signal.SIGTERM)
+            try:code=caller.wait(timeout=30)
+            except subprocess.TimeoutExpired:os.killpg(caller.pid,signal.SIGKILL);code=caller.wait()
+            (evidence/'initial-install.exit').write_text(str(code))
+        finally:
+            # This Popen is the registered private controller child. Never
+            # signal a process group learned from Docker or observed names.
+            if caller.poll() is None:
+                if os.getpgid(caller.pid) != caller.pid or os.getsid(caller.pid) != caller.pid:
+                    raise RuntimeError('registered caller session changed; no group signal authorised')
+                os.killpg(caller.pid, signal.SIGTERM)
+                try: caller.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    os.killpg(caller.pid, signal.SIGKILL); caller.wait()
+    remaining=run('initial-held-owner-after-interruption',['docker','inspect',cid],evidence,check=False)
+    if remaining.returncode==0:
+        current=json.loads(remaining.stdout)[0]
+        if current['Config']['Image']!=admission['image_reference'] or current['Config']['Labels'].get('volt.compose.owner-token')!=owner or current['Config']['Labels'].get('volt.compose.project')!=project:
+            raise RuntimeError('interrupted holder changed; no cleanup authorised')
+        run('initial-exact-owned-holder-remove',['docker','rm','-f',cid],evidence)
+    elif 'no such'not in remaining.stderr.lower():raise RuntimeError('interrupted holder absence is unproved')
+    resume_preserved_initial_fixture(private=private, evidence=evidence, admission=admission,
+        source_revision=source_revision, source_snapshot=source_snapshot)
+
+
+def resume_preserved_initial_fixture(*, private: Path, evidence: Path, admission: dict,
+        source_revision: str, source_snapshot: str) -> None:
+    """Continue ONLY this controller's original interrupted fixture; no init/reset.
+
+    Original captured bytes are comparison evidence, never admission authority.
+    The existing public start independently authenticates and validates the stage
+    and actual new lock FD before any transition. All originals stay private.
+    """
+    from uvm.installer.lock import _bounded_file
+    from uvm.installer.offline_artifacts import Closure, digest
+    capture=private/'initial-observer';state=private/'instance'
+    raw=_bounded_file(capture/'original-journal.json',1024*1024,private=True)
+    info=json.loads(raw);anchor=private/'instance.installer-artifacts';stage=anchor/info['installer_cache_stage']
+    if (info.get('installer_phase')!='prepared' or info.get('initialized')is not True
+            or info.get('established')is not False or info.get('local_recovery_acknowledgement')is not None
+            or info.get('restore_pending') or set(p.name for p in anchor.iterdir())!={stage.name}):
+        raise RuntimeError('retained original is not the exact interrupted initial phase')
+    files={}
+    for name,value in info['installer_initial_files'].items():
+        original=_bounded_file(capture/'initial-material'/name,1024*1024,private=True)
+        if digest(original)!=value['sha256'] or len(original)!=value['bytes']:
+            raise RuntimeError('retained original initial material contradicts its producer inventory')
+        files[name]={'sha256':digest(original),'bytes':len(original)}
+    closure=Closure(fixture=None,custody_root=stage)
+    if closure.hash!=info['installer_admission']['closure_sha256']:
+        raise RuntimeError('retained original stage contradicts producer pin')
+    stage_identity=[stage.stat().st_dev,stage.stat().st_ino]
+    environment=trusted_launcher_environment(private/'minimal-host-path',admission)
+    (evidence/'retained-before-public-resume.json').write_text(json.dumps({
+        'journal_sha256':digest(raw),'original_material_files':len(files),'stage_inode_observed_now':stage_identity,
+        'original_preinterruption_fd_probe_exit':(evidence/'actual-initial-holder-exclusive-fd.exit').read_text().strip(),
+        'scope':'CURRENT retained-state comparison before public resume; not retrospective pre-interruption FD proof'},indent=2))
+    if _bounded_file(state/'instance.json',1024*1024,private=True)!=raw or not stage.is_dir() or (anchor/'originals').exists():
+        raise RuntimeError('interruption did not preserve exact initial journal/stage before publication')
+    for name,value in files.items():
+        if digest(_bounded_file(state/name,1024*1024,private=False))!=value['sha256']:raise RuntimeError('interruption changed original private material')
+    offline=create_offline_fixture_entry(state=state,admission=admission,private=private)
+    run('supported-public-initial-resume',['sh',str(offline),'start','--directory',str(state)],evidence,env=environment)
+    wait_for_local('http://127.0.0.1:46180',evidence)
+    after=json.loads(_bounded_file(state/'instance.json',1024*1024,private=True));originals=anchor/'originals'
+    if (after['installation_id']!=info['installation_id'] or after['installer_initial_request_sha256']!=info['installer_initial_request_sha256']
+            or after['installer_admission']!=info['installer_admission'] or after['installer_initial_files']!=info['installer_initial_files']
+            or after.get('established')is not True or not after.get('local_recovery_acknowledgement')
+            or set(p.name for p in anchor.iterdir())!={'originals'} or [originals.stat().st_dev,originals.stat().st_ino]!=stage_identity
+            or Closure(fixture=None,custody_root=originals).hash!=closure.hash):
+        raise RuntimeError('supported resume changed initial identity/pin/stage or lacks exact establishment')
+    for name,value in files.items():
+        data=_bounded_file(state/name,1024*1024,private=False)
+        if name=='.env':
+            if hashlib.sha256(data).hexdigest()!=after['env_sha256']:raise RuntimeError('resumed environment differs from durable CURRENT transition')
+        elif digest(data)!=value['sha256']:raise RuntimeError('supported resume regenerated original private material')
+    run('resume-supported-controlled-stop',['sh',str(offline),'stop','--directory',str(state)],evidence,env=environment)
+    (evidence/'initial-resume-outcome.json').write_text(json.dumps({'status':'actual_prepared_prepublication_interruption_and_public_resume_passed',
+        'runtime_source':source_revision,'source_snapshot':source_snapshot,'installation_id':after['installation_id'],
+        'original_initial_private_bytes_preserved_except_existing_env_transition':True,'original_initial_request_and_pin_preserved':True,
+        'exact_stage_inode_renamed_to_originals':True,'normal_health':True,'stopped_retained_fixture':str(private),
+        'no_accounts_browser_or_SQL':True,'instrumentation':'private bounded readiness withholding; no production fault switch'},indent=2))
+
+
 def qualify_public_readonly_diagnostics(*, package: Path, bundle: Path, admission: dict[str, str],
                           state: Path, private: Path, evidence: Path,
                           http_port: int, project_prefix: str) -> tuple[str, Path, dict[str, str]]:
@@ -1559,7 +1828,6 @@ def qualify_public_readonly_diagnostics(*, package: Path, bundle: Path, admissio
     if not port.stdout.strip().startswith("127.0.0.1:"):
         raise RuntimeError("local VOLT application binding is not loopback-only")
     wait_for_local(origin, evidence)
-    qualify_runtime_custody(state=state, project=project, admission=admission, evidence=evidence)
     offline_entry = create_offline_fixture_entry(state=state, admission=admission, private=private)
     from uvm.installer.lock import _bounded_file
     paths = [state/'instance.json', state/'.env', state/'local-auth.json', state/'local-recovery.json']

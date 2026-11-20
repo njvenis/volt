@@ -132,39 +132,62 @@ offline_host_finish() {
   case "$stop_child:$stop_child_ticks:$stop_guard:$stop_guard_ticks:$stop_parent:$stop_parent_ticks:$stop_job_deadline" in *[!0-9:]*|'') return 1 ;; esac
   IFS=' ' read -r stop_actual_parent stop_rest </proc/self/stat || return 1
   [ "$stop_actual_parent" = "$stop_parent" ] && [ "$(offline_producer_ticks "$stop_parent")" = "$stop_parent_ticks" ] || return 1
-  stop_result=0
+  stop_result=0; stop_reason=completed
   while ! offline_host_dead "$stop_child"; do
     stop_current=$(offline_producer_ticks "$stop_child" 2>/dev/null) || stop_current=''
-    [ "$stop_current" = "$stop_child_ticks" ] || { stop_result=255; break; }
+    if [ -z "$stop_current" ]; then
+      stop_result=255; stop_reason=tick_read_unavailable; break
+    fi
+    [ "$stop_current" = "$stop_child_ticks" ] || { stop_result=255; stop_reason=identity_mismatch; break; }
     if ! offline_stop_clock || [ "$OFFLINE_NOW_CS" -ge "$stop_job_deadline" ]; then
-      stop_result=124
+      stop_result=124; stop_reason=deadline
       break
     fi
-    sleep .01 || { stop_result=255; break; }
+    sleep .01 || { stop_result=255; stop_reason=poll_interrupted; break; }
   done
   if offline_host_dead "$stop_child"; then
     stop_wait=0; wait "$stop_child" || stop_wait=$?
-    [ "$stop_result" -ne 0 ] || stop_result=$stop_wait
-  else stop_result=255; fi
-  printf 'cancel\n' >"$stop_finish_job/cancel" || stop_result=255
+    printf '%s\n' "$stop_wait" >"$stop_finish_job/child-wait" || { stop_result=255; stop_reason=record_io_failed; }
+    # A child can disappear after the live check and before its ticks read.
+    # Resolve ONLY that missing-read case using proved death and this parent's
+    # exact original-child wait. A different identity is never resolved here.
+    if [ "$stop_result" -eq 0 ] || [ "$stop_reason" = tick_read_unavailable ]; then
+      stop_result=$stop_wait
+      if [ "$stop_wait" -eq 127 ]; then stop_reason=wait_status_127
+      elif [ "$stop_wait" -ne 0 ]; then stop_reason=child_nonzero
+      elif [ "$stop_reason" = tick_read_unavailable ]; then stop_reason=completed_after_tick_read
+      fi
+    fi
+  elif [ "$stop_result" -ne 124 ]; then
+    stop_result=255
+    [ "$stop_reason" = identity_mismatch ] || stop_reason=child_live_uncertain
+  fi
+  printf 'cancel\n' >"$stop_finish_job/cancel" || { stop_result=255; stop_reason=record_io_failed; }
   # Finish polling is itself finite; no wait on a live/STOPPED guard.
-  offline_stop_clock || return 1
+  if ! offline_stop_clock; then
+    printf 'clock_unavailable\n' >"$stop_finish_job/reason" || :
+    printf '124\n' >"$stop_finish_job/result" || :
+    return 124
+  fi
   stop_guard_deadline=$((OFFLINE_NOW_CS + 20))
   [ "$stop_guard_deadline" -le "$stop_job_deadline" ] || stop_guard_deadline=$stop_job_deadline
   while ! offline_host_dead "$stop_guard"; do
     if ! offline_stop_clock || [ "$OFFLINE_NOW_CS" -ge "$stop_guard_deadline" ]; then
-      stop_result=124
+      stop_result=124; stop_reason=deadline
       break
     fi
-    sleep .01 || { stop_result=255; break; }
+    sleep .01 || { stop_result=255; stop_reason=poll_interrupted; break; }
   done
   if offline_host_dead "$stop_guard"; then
     stop_guard_wait=0; wait "$stop_guard" || stop_guard_wait=$?
-    [ "$stop_guard_wait" -eq 0 ] || stop_result=124
-  else stop_result=255; fi
-  [ ! -f "$stop_finish_job/timeout" ] || stop_result=124
-  offline_stop_clock && [ "$OFFLINE_NOW_CS" -lt "$stop_job_deadline" ] || stop_result=124
-  printf '%s\n' "$stop_result" >"$stop_finish_job/result"
+    printf '%s\n' "$stop_guard_wait" >"$stop_finish_job/guard-wait" || { stop_result=255; stop_reason=record_io_failed; }
+    [ "$stop_guard_wait" -eq 0 ] || { stop_result=124; stop_reason=guard_nonzero; }
+  elif [ "$stop_result" -ne 124 ]; then stop_result=255; stop_reason=guard_live_uncertain; fi
+  [ ! -f "$stop_finish_job/timeout" ] || { stop_result=124; stop_reason=deadline; }
+  if ! offline_stop_clock; then stop_result=124; stop_reason=clock_unavailable
+  elif [ "$OFFLINE_NOW_CS" -ge "$stop_job_deadline" ]; then stop_result=124; stop_reason=deadline; fi
+  printf '%s\n' "$stop_reason" >"$stop_finish_job/reason" || stop_result=255
+  printf '%s\n' "$stop_result" >"$stop_finish_job/result" || stop_result=255
   if [ "$stop_result" -ne 0 ]; then
     RETAIN_STOP_EVIDENCE=1
     printf '%s\n' 'readonly client completion uncertain; private original job records retained' >&2
@@ -184,10 +207,12 @@ offline_host_data() {
 offline_capture_stream() {
   STOP_PRODUCER_STATUS=255; STOP_FILTER_STATUS=255
   stop_kind=$1; stop_budget=$2; stop_output=$3; shift 3
+  case "$stop_kind:$stop_budget" in wait:50|tar:100|logs:1000|post:50) ;; *) return 1 ;; esac
   [ "$1" = docker ] || return 1; shift
   offline_stop_before || return 1
-  stop_phase_deadline=$((OFFLINE_NOW_CS + stop_budget))
-  [ "$stop_phase_deadline" -le "$OFFLINE_STOP_DEADLINE_CS" ] || stop_phase_deadline=$OFFLINE_STOP_DEADLINE_CS
+  # Parser limits begin inside the fixed filter after Docker startup. Host
+  # startup/tracking shares the ORIGINAL aggregate deadline, without reset.
+  stop_phase_deadline=$OFFLINE_STOP_DEADLINE_CS
   stop_fifo="$WORK/stopped-$stop_kind-stream"
   mkfifo "$stop_fifo" || return 1
   offline_host_start docker '' "$stop_fifo" "$stop_phase_deadline" "$@" || return 1
@@ -206,7 +231,7 @@ offline_capture_stream() {
 offline_capture_shutdown() {
   RETAIN_STOP_EVIDENCE=1
   offline_stop_clock || fail 'host stopped-acquisition clock is unavailable'
-  OFFLINE_STOP_DEADLINE_CS=$((OFFLINE_NOW_CS + 1300))
+  if [ -z "$OFFLINE_STOP_DEADLINE_CS" ]; then OFFLINE_STOP_DEADLINE_CS=$((OFFLINE_NOW_CS + 1300)); fi
   if [ -n "$OFFLINE_ORDINARY_STOP_DEADLINE_CS" ] && [ "$OFFLINE_ORDINARY_STOP_DEADLINE_CS" -lt "$OFFLINE_STOP_DEADLINE_CS" ]; then
     OFFLINE_STOP_DEADLINE_CS=$OFFLINE_ORDINARY_STOP_DEADLINE_CS
   fi

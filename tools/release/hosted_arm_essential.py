@@ -39,6 +39,10 @@ def validate_request(value,stage):
     path_fields=('source_checkout','evidence','db_source_directory')if stage=='prepare-db-context'else('source_checkout','evidence','public_policy')if stage=='build-q'else('source_checkout','evidence','bundle','fixture','private')
     for name in path_fields:
         if type(value[name])is not str or not value[name].startswith('/')or '\x00'in value[name]:raise ValueError('absolute owned input paths required')
+    source_path=Path(value['source_checkout']).resolve(strict=False)
+    for name in ('evidence','private')if stage=='essential'else('evidence',):
+        target=Path(value[name]).resolve(strict=False)
+        if target==source_path or source_path in target.parents or target in source_path.parents:raise ValueError('private output must not overlap source')
     if Path(value['evidence']).exists():raise ValueError('fresh evidence directory required')
     if stage=='essential'and Path(value['private']).exists():raise ValueError('fresh private fixture required')
     return value

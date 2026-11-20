@@ -21,6 +21,13 @@ class HostedArmTests(unittest.TestCase):
                     with self.assertRaises(ValueError):h.validate_request(bad,stage)
             (root/'new-evidence').mkdir()
             with self.assertRaises(ValueError):h.validate_request(self.request('essential',root),'essential')
+    def test_private_output_cannot_overlap_source(self):
+        with tempfile.TemporaryDirectory()as t:
+            root=Path(t);r=self.request('essential',root)
+            for name in ('evidence','private'):
+                bad=r|{name:str(root/'source'/'ignored-output')}
+                with self.assertRaises(ValueError):h.validate_request(bad,'essential')
+
     def test_fixed_native_q_has_no_signing_or_optional_platform(self):
         with tempfile.TemporaryDirectory()as t:
             c=h.q_command(self.request('build-q',Path(t)))

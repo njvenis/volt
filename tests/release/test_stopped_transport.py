@@ -26,6 +26,11 @@ def identity_program():
     return source.split("set -- -c '",1)[1].split("'\n",1)[0]
 
 
+def assembly_program():
+    source=(ROOT/'deploy/compose/offline-host.sh').read_text()
+    return source.split('    emit-stopped-observation|emit-observation)',1)[1].split("set -- -c '",1)[1].split("' \"$@\"",1)[0]
+
+
 def context():
     records,runtime,envelope=fixture.stopped_records('normal_local_loopback')
     tar=fixture.records_tar(records)
@@ -113,6 +118,66 @@ class StoppedTransportTests(unittest.TestCase):
 
 
 class PosixStoppedAcquisitionTests(unittest.TestCase):
+    def test_combined_assembly_matches_original_stop_backup_and_restore_bytes(self):
+        from contextlib import redirect_stdout
+        from uvm.installer import offline_lifecycle as data
+        import uuid
+        item,_info,tar,envelope,_runtime=context()
+        with tempfile.TemporaryDirectory()as temporary:
+            root=Path(temporary);output=root/'responses';output.mkdir(mode=0o700)
+            def write(name,value):
+                path=root/name;path.write_bytes(value if isinstance(value,bytes)else canonical(value));path.chmod(0o600)
+            observed={'image':[{}],'containers':[item],'volumes':[],'networks':[]}
+            write('docker.json',observed);write('stop-wait.stdout',b'0\n');write('stop-routing.tar',tar)
+            write('stop-envelope.json',envelope);write('stop-post-container.json',item)
+            statuses=dict.fromkeys(wire.ZERO_FIELDS,0);write('stop-producer-statuses.json',statuses)
+            write('inventories.json',{});write('independent-admission.json',{'unit_only':'not_crypto_authority'})
+            identity={key:'unit'for key in ('installation_id','journal_id','image_reference','image_id','image_id_kind','source_revision','source_snapshot','platform','recovery_epoch_id')}
+            identity['restore_generation']=0
+            for phase in ('plan','capture','provision'):
+                frame={'schema_version':1,'profile':data.PROFILE,'operation':'backup-record',
+                    'operation_id':str(uuid.uuid4()),'identity':identity,'phase':phase,'predecessor_sha256':None,'data':{}}
+                p=output/(phase+'.json');p.write_bytes(canonical(frame));p.chmod(0o600)
+            def assembled(arguments):
+                raw=io.BytesIO();stream=io.TextIOWrapper(raw,encoding='utf-8',write_through=True)
+                with patch.object(sys,'argv',['fixed-assembly',*arguments]),redirect_stdout(stream):
+                    exec(compile(assembly_program(),'fixed_combined_assembly','exec'),{})
+                stream.flush();return raw.getvalue()
+            with patch.object(data,'OBSERVATION',root),patch.object(data,'OUTPUT',output),patch.object(wire.route_check,'_shared',return_value=canonical_records):
+                for containers in ([item],[]):
+                    observed['containers']=containers;write('docker.json',observed)
+                    if containers:
+                        old_proof=wire.encode(item,b'0\n',tar,envelope,item,statuses)
+                        write('shutdown-evidence.json',old_proof.encode())
+                    expected_stop=canonical(data.observation_data())
+                    expected={}
+                    for phase in ('observed','captured','provisioned'):
+                        text=io.StringIO()
+                        with redirect_stdout(text):data.emit_observation(phase)
+                        expected[phase]=text.getvalue().encode()
+                    if(root/'shutdown-evidence.json').exists():(root/'shutdown-evidence.json').unlink()
+                    if containers:self.assertEqual(assembled(['emit-stopped-observation']),expected_stop)
+                    else:
+                        with self.assertRaises(ValueError):assembled(['emit-stopped-observation'])
+                    for phase,value in expected.items():
+                        self.assertEqual(assembled(['emit-observation','--phase',phase]),value)
+                observed['containers']=[item];write('docker.json',observed)
+                for bad in (17,False,0.0):
+                    failed=dict(statuses);failed['docker_wait_producer_exit']=bad;write('stop-producer-statuses.json',failed)
+                    with self.assertRaises(ValueError):assembled(['emit-stopped-observation'])
+                write('stop-producer-statuses.json',statuses)
+                changed=copy.deepcopy(item);changed['State']['StartedAt']='2026-11-20T00:00:00Z';write('stop-post-container.json',changed)
+                # Preserve the existing codec/final-validator separation: a
+                # well-formed changed post is carried, then the strict join
+                # must reject it before the four-argument reader is called.
+                changed_data=json.loads(assembled(['emit-stopped-observation']))
+                self.assertEqual(changed_data['logs'],wire.encode(item,b'0\n',tar,envelope,changed,statuses))
+                with patch.object(wire.route_check,'validate_stopped_snapshot')as reader,self.assertRaises(ValueError):
+                    wire.validate(_info,item,changed_data['logs'])
+                reader.assert_not_called()
+                for arguments in (['emit-stopped-observation','extra'],['emit-observation','--phase','unknown'],['arbitrary-module']):
+                    with self.assertRaises(ValueError):assembled(arguments)
+
     def test_single_saved_identity_projection_rejects_noncanonical_or_ambiguous_context(self):
         from contextlib import redirect_stdout
         from uvm.installer import offline_lifecycle as data
@@ -152,6 +217,9 @@ class PosixStoppedAcquisitionTests(unittest.TestCase):
                 (root/'tar').write_bytes(tar);(root/'envelope').write_bytes(envelope+b'\n')
                 (root/'post').write_bytes(json.dumps([item]).encode())
                 (obs/'docker.json').write_bytes(json.dumps({'image':[{}],'containers':[item],'volumes':[],'networks':[]}).encode());(obs/'docker.json').chmod(0o600)
+                for name,value in (('inventories.json',{}),('independent-admission.json',{'unit_only':'not_crypto_authority'})):
+                    path=obs/name;path.write_bytes(canonical(value));path.chmod(0o600)
+                (root/'info.json').write_bytes(canonical(_info))
                 stub=root/'docker';stub.write_text('#!'+sys.executable+'\n'+'''import json,os,sys
 from pathlib import Path
 root=Path(os.environ['FIXTURE']);args=sys.argv[1:]
@@ -174,32 +242,52 @@ _offline_data_exec() {
  if [ "$1" = queried-stopped-identity ];then
   exec "$UNIT_PYTHON" -c 'import os;from pathlib import Path;from uvm.installer import offline_lifecycle;offline_lifecycle.OBSERVATION=Path(os.environ["OFFLINE_OBSERVATION"]);exec(compile(os.environ["IDENTITY_PROGRAM"],"fixed_saved_identity","exec"))'
  fi
+ if [ "$1" = emit-stopped-observation ];then
+  exec "$UNIT_PYTHON" -c 'import os;from pathlib import Path;from uvm.installer import offline_lifecycle,route_check;from uvm.auth import route_check_records;route_check._shared=lambda:route_check_records;offline_lifecycle.OBSERVATION=Path(os.environ["OFFLINE_OBSERVATION"]);exec(compile(os.environ["ASSEMBLY_PROGRAM"],"fixed_combined_assembly","exec"))' "$@"
+ fi
  case "${1:-}" in filter-stop-*) sleep "$FILTER_START_DELAY" ;; esac
  exec "$UNIT_PYTHON" -c 'import os;from pathlib import Path;from uvm.installer import route_check,offline_lifecycle;from uvm.auth import route_check_records;route_check._shared=lambda:route_check_records;offline_lifecycle.OBSERVATION=Path(os.environ["OFFLINE_OBSERVATION"]);raise SystemExit(offline_lifecycle.main())' "$@"
+}
+_helper_command() {
+ [ "$#" = 3 ] && [ "$1" = "$STATE" ] && [ "$2" = host-stop-validate ] && [ "$3" = /state ] || return 95
+ sleep "$VALIDATOR_START_DELAY"
+ exec "$UNIT_PYTHON" -c 'import os,json,sys;from pathlib import Path;from uvm.installer import stopped_transport,route_check;from uvm.auth import route_check_records;route_check._shared=lambda:route_check_records;root=Path(os.environ["WORK"]);value=json.load(sys.stdin);item=json.loads((Path(os.environ["OFFLINE_OBSERVATION"])/"docker.json").read_bytes())["containers"][0];stopped_transport.validate(json.loads((root/"info.json").read_bytes()),item,value["logs"])'
 }
 if [ "$HOST_BUDGET_CS" != 0 ]; then
  offline_stop_clock
  OFFLINE_STOP_DEADLINE_CS=$((OFFLINE_NOW_CS + HOST_BUDGET_CS))
 fi
 offline_capture_shutdown
+captured_deadline=$OFFLINE_STOP_DEADLINE_CS
+offline_data emit-stopped-observation >"$WORK/full-observation.json"
+offline_host_start setup "$WORK/full-observation.json" '' "$OFFLINE_STOP_DEADLINE_CS"
+validator_job=$OFFLINE_JOB
+offline_host_finish "$validator_job"
+offline_stop_before || fail 'original cutoff expired'
+[ "$OFFLINE_STOP_DEADLINE_CS" = "$captured_deadline" ]
+printf '%s' "$((OFFLINE_STOP_DEADLINE_CS-OFFLINE_NOW_CS))" >"$WORK/remaining-centiseconds"
 '''
                 env={**os.environ,'PATH':str(root)+os.pathsep+os.environ['PATH'],'WORK':str(root),'OFFLINE_OBSERVATION':str(obs),
                     'DRIVER':str(ROOT/'deploy/compose/offline-host.sh'),'FIXTURE':str(root),'UNIT_PYTHON':sys.executable,
                     'FAILED':failed,'STARTED':item['State']['StartedAt'],'CID':item['Id'],
-                    'FILTER_START_DELAY':'1.4' if failed=='deadline' else '.65' if failed=='delayed-start' else '0',
-                    'HOST_BUDGET_CS':'100' if failed=='deadline' else '0','IDENTITY_PROGRAM':identity_program()}
+                    'FILTER_START_DELAY':'1.4' if failed=='deadline' else '1.2' if failed=='delayed-start' else '0',
+                    'VALIDATOR_START_DELAY':'1.8' if failed=='delayed-start' else '0','STATE':str(root/'unit-instance'),
+                    'HOST_BUDGET_CS':'100' if failed=='deadline' else '0','IDENTITY_PROGRAM':identity_program(),'ASSEMBLY_PROGRAM':assembly_program()}
                 result=subprocess.run(['sh','-c',script],env=env,capture_output=True,timeout=15)
                 self.assertEqual(result.returncode==0,failed in ('none','delayed-start'),result.stderr)
                 statuses=json.loads((obs/'stop-producer-statuses.json').read_bytes())
                 if failed in ('none','delayed-start'):
                     self.assertEqual(statuses,dict.fromkeys(wire.ZERO_FIELDS,0))
                     self.assertEqual((root/'owner-checks').read_text(),'checked'*4)
-                    proof=(obs/'shutdown-evidence.json').read_text()
+                    proof=json.loads((root/'full-observation.json').read_bytes())['logs']
                     with patch.object(wire.route_check,'_shared',return_value=canonical_records):wire.validate(_info,item,proof)
                     actions=(root/'data-actions').read_text().splitlines()
                     self.assertEqual(actions.count('queried-stopped-identity'),1)
                     self.assertNotIn('queried-started-at',actions)
                     self.assertNotIn('queried-container-id',actions)
+                    self.assertEqual(actions.count('emit-stopped-observation'),1)
+                    self.assertNotIn('encode-stopped-transport',actions)
+                    self.assertGreater(int((root/'remaining-centiseconds').read_text()),150)
                     for job in root.glob('stop-job-*'):
                         self.assertEqual((job/'child-wait').read_text().strip(),'0')
                         self.assertEqual((job/'guard-wait').read_text().strip(),'0')

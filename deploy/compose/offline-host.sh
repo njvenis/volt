@@ -27,6 +27,49 @@ if type(cid) is not str or re.fullmatch("[0-9a-f]{64}",cid) is None:
 started=data._started_at(item["State"]["StartedAt"])
 print(cid+"|"+started)'
       ;;
+    emit-stopped-observation|emit-observation)
+      # Assemble only existing closed data/phase frames, using the SAME codec.
+      # This removes encode -> host file -> second Docker startup. It never
+      # validates/seals an outcome; the independent final validator remains.
+      set -- -c 'import json,sys
+from uvm.installer import offline_lifecycle as data, stopped_transport as wire
+arguments=sys.argv[1:]
+if arguments==["emit-stopped-observation"]:
+    phase=None
+elif (len(arguments)==3 and arguments[:2]==["emit-observation","--phase"]
+      and arguments[2] in ("observed","captured","provisioned")):
+    phase=arguments[2]
+else:
+    raise ValueError("fixed observation assembly arguments required")
+def read(name,limit):
+    return data._bounded_file(data.OBSERVATION/name,limit,private=True)
+def document(name,limit):
+    return json.loads(read(name,limit),object_pairs_hook=data.pairs)
+data._directory(data.OBSERVATION)
+projected=data.project_observation(document("docker.json",data.MAX_INPUT))
+if phase is None and len(projected["containers"])!=1:
+    raise ValueError("one current stopped container required")
+if projected["containers"]:
+    item=projected["containers"][0]
+    logs=wire.encode(item,read("stop-wait.stdout",2),read("stop-routing.tar",131072),
+        read("stop-envelope.json",2048),document("stop-post-container.json",65536),
+        document("stop-producer-statuses.json",4096))
+    proof,_tar,_envelope=wire.decode(logs)
+    since=data._started_at(proof["queried_started_at"])
+else:
+    logs,since="",None
+projected.update(logs=logs,logs_since=since,inventories=document("inventories.json",65536),
+    independent_admission=document("independent-admission.json",1048576))
+if phase is None:
+    value=projected
+else:
+    previous,raw=data._response({"observed":"plan","captured":"capture","provisioned":"provision"}[phase])
+    value={**previous,"phase":phase,"predecessor_sha256":data.digest(raw),"data":projected}
+encoded=data.canonical(value)
+if len(encoded)>data.MAX_INPUT:
+    raise ValueError("closed observation exceeds bound")
+sys.stdout.buffer.write(encoded)' "$@"
+      ;;
     *) set -- -m uvm.installer.offline_lifecycle "$@" ;;
   esac
   exec docker run --platform "$PLATFORM" --pull=never --rm $stdin_flag --network none --read-only --cap-drop=ALL \
@@ -137,6 +180,9 @@ offline_host_start() {
   printf '%s|%s|%s|%s|%s|%s|%s\n' "$stop_child" "$stop_child_ticks" "$stop_guard" "$stop_guard_ticks" \
     "$stop_parent" "$stop_parent_ticks" "$stop_job_deadline" >"$stop_job/registered"
   offline_stop_clock && [ "$OFFLINE_NOW_CS" -lt "$stop_job_deadline" ] || return 124
+  # Private monotonic measurement only; never part of completion authority.
+  printf '%s\n' "$stop_job_kind" >"$stop_job/kind" || return 1
+  printf '%s\n' "$OFFLINE_NOW_CS" >"$stop_job/released-centiseconds" || return 1
   printf 'G\n' >"$stop_job/gate"
 }
 
@@ -211,6 +257,7 @@ offline_host_finish() {
   [ ! -f "$stop_finish_job/timeout" ] || { stop_result=124; stop_reason=deadline; }
   if ! offline_stop_clock; then stop_result=124; stop_reason=clock_unavailable
   elif [ "$OFFLINE_NOW_CS" -ge "$stop_job_deadline" ]; then stop_result=124; stop_reason=deadline; fi
+  printf '%s\n' "$OFFLINE_NOW_CS" >"$stop_finish_job/finished-centiseconds" || { stop_result=255; stop_reason=record_io_failed; }
   printf '%s\n' "$stop_reason" >"$stop_finish_job/reason" || stop_result=255
   printf '%s\n' "$stop_result" >"$stop_finish_job/result" || stop_result=255
   if [ "$stop_result" -ne 0 ]; then
@@ -288,10 +335,8 @@ offline_capture_shutdown() {
   done
   printf '}' >>"$stop_statuses"; chmod 600 "$stop_statuses"
   offline_stop_before || fail 'current stopped-acquisition deadline expired'
-  offline_data encode-stopped-transport >"$OFFLINE_OBSERVATION/shutdown-evidence.json" \
-    || fail 'closed current stopped transport encoding failed'
-  chmod 600 "$OFFLINE_OBSERVATION/shutdown-evidence.json"
-  offline_stop_before || fail 'current stopped-acquisition deadline expired'
+  # The fixed observation emitter encodes these exact raw inputs in-process;
+  # stop and backup share it, with no additional startup or cached-proof path.
 }
 
 offline_wait() {

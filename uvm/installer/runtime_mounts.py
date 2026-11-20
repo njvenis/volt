@@ -78,6 +78,21 @@ def validate(root: Path, host_root: Path, info: dict, container: dict, volumes: 
             raise ValueError('actual bind aliases or contains operator-private custody')
 
 
+def validate_start_context(info: dict, container: dict) -> None:
+    """Compare actual Config.Env to validated metadata, never self-witness it."""
+    raw = container.get('Config', {}).get('Env')
+    if (not isinstance(raw,list) or any(type(item) is not str or '=' not in item for item in raw)):
+        raise ValueError('actual start environment is missing or malformed')
+    rows = [item.split('=',1) for item in raw]
+    if len({key for key,_ in rows}) != len(rows):
+        raise ValueError('actual start environment has duplicate names')
+    values = dict(rows)
+    expected = {'UVM_LOCAL_START_IMAGE_ID':info['image_admission']['id'],
+        'UVM_LOCAL_START_RESOURCES_SHA256':(info.get('local_start_admission') or {}).get('resources_sha256','')}
+    if any(key not in values or values[key] != value for key,value in expected.items()):
+        raise ValueError('actual start environment differs from validated expected metadata')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--instance-root', required=True, type=Path)
@@ -91,6 +106,7 @@ def main():
     if not isinstance(containers, list) or len(containers) != 1:
         raise ValueError('one actual API container required')
     validate(args.instance_root, args.host_root, info, containers[0], document["volumes"])
+    validate_start_context(info, containers[0])
     print('actual_mounts=admitted')
 
 

@@ -3,6 +3,7 @@ set -eu
 source /usr/local/bin/uvm-g7-identity-runtime
 test -f /run/uvm-g7/ready
 test ! -e /run/uvm-g7/critical-failed
+test ! -e /run/uvm-g7/quiesce-failed
 mode=$(cat /run/uvm-g7/runtime-mode)
 case "$mode" in control|verification|runtime) ;; *) exit 1 ;; esac
 if [ "$mode" = control ]; then
@@ -13,6 +14,14 @@ if [ "$mode" = control ]; then
     'import os,socket; s=socket.create_connection(("127.0.0.1",int(os.environ["RECOVERY_CONTROL_PORT"])),timeout=1); s.close()'
   exit 0
 fi
+if [ "$mode" = verification ]; then
+  action=health-verification
+else
+  action=health-normal
+fi
+# Persisted canonical profile decides the purpose; no ambient boot exemption.
+/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C /usr/local/bin/python3.14 -I -S \
+  /usr/local/libexec/volt-route-check-control.py "$action"
 kill -0 "$(cat /run/uvm-g7/pid-api)"
 kill -0 "$(cat /run/uvm-g7/pid-ce-web)"
 if [ "$mode" = runtime ]; then

@@ -2,9 +2,9 @@
 # Authenticated package functions; sourced only after caller admission.
 # No standalone action, verifier selection or authority flag exists here.
 
-offline_data() {
-  stdin_flag=''; [ "$1" != filter-shutdown ] || stdin_flag=-i
-  docker run --platform "$PLATFORM" --pull=never --rm $stdin_flag --network none --read-only --cap-drop=ALL \
+_offline_data_exec() {
+  stdin_flag=''; case "$1" in filter-stop-*) stdin_flag=-i ;; esac
+  exec docker run --platform "$PLATFORM" --pull=never --rm $stdin_flag --network none --read-only --cap-drop=ALL \
     --security-opt=no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=32m \
     --user "$(id -u):$(id -g)" --mount "type=bind,src=$PACKAGE,dst=/package,readonly" \
     --mount "type=bind,src=$OFFLINE_OUTPUT,dst=/run/volt-offline-output,readonly" \
@@ -14,25 +14,230 @@ offline_data() {
     --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -m uvm.installer.offline_lifecycle "$@"
 }
 
-offline_capture_shutdown() {
-  started=$(offline_data queried-started-at) || fail 'actual StartedAt could not be decoded from saved inspection'
-  fifo="$WORK/shutdown-log-stream"
-  mkfifo "$fifo" || fail 'private bounded log stream could not be created'
-  docker logs --tail 256 --since "$started" "${PROJECT}-volt-1" >"$fifo" 2>&1 &
-  producer=$!
-  if offline_data filter-shutdown --started-at "$started" <"$fifo" >"$OFFLINE_OBSERVATION/shutdown-evidence.json"; then
-    filter_status=0
-  else
-    filter_status=$?
-    kill "$producer" 2>/dev/null || :
+offline_data() {
+  if [ -n "${OFFLINE_STOP_DEADLINE_CS:-}" ]; then offline_host_data "$@"
+  else ( _offline_data_exec "$@" ); fi
+}
+
+# Host clock only; no assumption that Desktop/daemon BOOTTIME equals this host.
+OFFLINE_STOP_DEADLINE_CS=''
+OFFLINE_ORDINARY_STOP_DEADLINE_CS=''
+offline_stop_clock() {
+  IFS=' ' read -r stop_uptime stop_unused </proc/uptime || return 1
+  stop_seconds=${stop_uptime%.*}; stop_fraction=${stop_uptime#*.}
+  case "$stop_seconds:$stop_fraction" in *[!0-9:]*|:*) return 1 ;; esac
+  [ "${#stop_fraction}" -eq 2 ] || return 1
+  OFFLINE_NOW_CS=$((stop_seconds * 100 + 1$stop_fraction - 100))
+}
+
+offline_stop_before() {
+  offline_stop_clock || return 1
+  [ "$OFFLINE_NOW_CS" -lt "$OFFLINE_STOP_DEADLINE_CS" ]
+}
+
+# The producer is an original Bash/POSIX child; ticks are comparison data only.
+# No process search, replacement/adoption, or numeric-PID kill after uncertainty.
+offline_producer_ticks() {
+  IFS= read -r stop_proc_line <"/proc/$1/stat" || return 1
+  stop_proc_tail=${stop_proc_line##*) }
+  [ "$stop_proc_tail" != "$stop_proc_line" ] || return 1
+  set -- $stop_proc_tail
+  [ "$#" -ge 20 ] || return 1
+  shift 19
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$1"
+}
+
+# Temporary gates and negative timeout files are host mechanics only. They are
+# never terminal proof, Store authority, or input to the nested wire.
+OFFLINE_JOB_SEQUENCE=0
+offline_host_start() {
+  RETAIN_STOP_EVIDENCE=1
+  stop_job_kind=$1; stop_job_input=$2; stop_job_output=$3; stop_job_deadline=$4; shift 4
+  case "$stop_job_kind" in
+    snapshot|report) [ "$#" -eq 0 ] || return 1 ;;
+    data) case "${1:-}" in queried-*|filter-stop-*|encode-stopped-transport|emit-stopped-observation|emit-observation|plan-lines) ;; *) return 1 ;; esac ;;
+    docker) case "${1:-}:${2:-}" in wait:*|cp:*|logs:*|inspect:*|image:inspect|container:inspect|volume:inspect|network:inspect|info:--format|context:inspect|context:show) ;; *) return 1 ;; esac ;;
+    setup) [ "$#" -eq 0 ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  offline_stop_clock || return 1
+  [ "$OFFLINE_NOW_CS" -lt "$stop_job_deadline" ] || return 1
+  IFS=' ' read -r stop_parent stop_parent_rest </proc/self/stat || return 1
+  stop_parent_ticks=$(offline_producer_ticks "$stop_parent") || return 1
+  OFFLINE_JOB_SEQUENCE=$((OFFLINE_JOB_SEQUENCE + 1))
+  OFFLINE_JOB="$WORK/stop-job-$stop_parent-$OFFLINE_JOB_SEQUENCE"
+  mkdir -m 700 "$OFFLINE_JOB" || return 1
+  stop_job=$OFFLINE_JOB
+  (
+    while [ ! -f "$stop_job/gate" ]; do
+      offline_stop_clock && [ "$OFFLINE_NOW_CS" -lt "$stop_job_deadline" ] || exit 124
+      sleep .01 || exit 124
+    done
+    [ ! -L "$stop_job/gate" ] || exit 124
+    IFS= read -r stop_gate <"$stop_job/gate" && [ "$stop_gate" = G ] || exit 124
+    ulimit -f 16384 || exit 125
+    if [ -n "$stop_job_input" ]; then exec 0<"$stop_job_input"; fi
+    if [ -n "$stop_job_output" ]; then exec 1>"$stop_job_output"; fi
+    offline_stop_clock && [ "$OFFLINE_NOW_CS" -lt "$stop_job_deadline" ] || exit 124
+    case "$stop_job_kind" in
+      snapshot) offline_snapshot_body >"$stop_job/stdout" 2>"$stop_job/stderr" ;;
+      report) exec cat "$stop_job_input" 2>"$stop_job/stderr" ;;
+      data) _offline_data_exec "$@" >"$stop_job/stdout" 2>"$stop_job/stderr" ;;
+      docker)
+        if [ -n "$stop_job_output" ]; then exec docker "$@" 2>&1
+        else exec docker "$@" >"$stop_job/stdout" 2>"$stop_job/stderr"; fi ;;
+      setup) HELPER_EXEC_ONLY=1 _helper_command "$STATE" host-stop-validate /state >"$stop_job/stdout" 2>"$stop_job/stderr" ;;
+    esac
+  ) &
+  stop_child=$!
+  stop_child_ticks=$(offline_producer_ticks "$stop_child") || return 1
+  (
+    exec </dev/null >/dev/null 2>&1
+    while :; do
+      [ ! -f "$stop_job/cancel" ] || exit 0
+      stop_current=$(offline_producer_ticks "$stop_child" 2>/dev/null) || stop_current=''
+      [ "$stop_current" = "$stop_child_ticks" ] || exit 0
+      if ! offline_stop_clock || [ "$OFFLINE_NOW_CS" -ge "$stop_job_deadline" ]; then
+        printf 'timeout\n' >"$stop_job/timeout" || :
+        # Shell cannot atomically signal a PID/proc-ticks tuple. Timeout is
+        # negative-only: retain exact RO client records, never signal by PID.
+        exit 124
+      fi
+      sleep .01 || exit 124
+    done
+  ) &
+  stop_guard=$!
+  stop_guard_ticks=$(offline_producer_ticks "$stop_guard") || return 1
+  printf '%s|%s|%s|%s|%s|%s|%s\n' "$stop_child" "$stop_child_ticks" "$stop_guard" "$stop_guard_ticks" \
+    "$stop_parent" "$stop_parent_ticks" "$stop_job_deadline" >"$stop_job/registered"
+  offline_stop_clock && [ "$OFFLINE_NOW_CS" -lt "$stop_job_deadline" ] || return 124
+  printf 'G\n' >"$stop_job/gate"
+}
+
+offline_host_dead() {
+  # Absence or an actual zombie is death; SIGSTOP/permission uncertainty is NOT.
+  if [ ! -e "/proc/$1/stat" ]; then return 0; fi
+  IFS= read -r stop_dead_stat <"/proc/$1/stat" || return 1
+  stop_dead_tail=${stop_dead_stat##*) }
+  case "$stop_dead_tail" in 'Z '*|'X '*) return 0 ;; *) return 1 ;; esac
+}
+
+offline_host_finish() {
+  RETAIN_STOP_EVIDENCE=1
+  stop_finish_job=$1
+  case "$stop_finish_job" in "$WORK"/stop-job-*) ;; *) return 1 ;; esac
+  [ -f "$stop_finish_job/registered" ] && [ ! -L "$stop_finish_job/registered" ] || return 1
+  IFS='|' read -r stop_child stop_child_ticks stop_guard stop_guard_ticks stop_parent stop_parent_ticks stop_job_deadline <"$stop_finish_job/registered"
+  case "$stop_child:$stop_child_ticks:$stop_guard:$stop_guard_ticks:$stop_parent:$stop_parent_ticks:$stop_job_deadline" in *[!0-9:]*|'') return 1 ;; esac
+  IFS=' ' read -r stop_actual_parent stop_rest </proc/self/stat || return 1
+  [ "$stop_actual_parent" = "$stop_parent" ] && [ "$(offline_producer_ticks "$stop_parent")" = "$stop_parent_ticks" ] || return 1
+  stop_result=0
+  while ! offline_host_dead "$stop_child"; do
+    stop_current=$(offline_producer_ticks "$stop_child" 2>/dev/null) || stop_current=''
+    [ "$stop_current" = "$stop_child_ticks" ] || { stop_result=255; break; }
+    if ! offline_stop_clock || [ "$OFFLINE_NOW_CS" -ge "$stop_job_deadline" ]; then
+      stop_result=124
+      break
+    fi
+    sleep .01 || { stop_result=255; break; }
+  done
+  if offline_host_dead "$stop_child"; then
+    stop_wait=0; wait "$stop_child" || stop_wait=$?
+    [ "$stop_result" -ne 0 ] || stop_result=$stop_wait
+  else stop_result=255; fi
+  printf 'cancel\n' >"$stop_finish_job/cancel" || stop_result=255
+  # Finish polling is itself finite; no wait on a live/STOPPED guard.
+  offline_stop_clock || return 1
+  stop_guard_deadline=$((OFFLINE_NOW_CS + 20))
+  [ "$stop_guard_deadline" -le "$stop_job_deadline" ] || stop_guard_deadline=$stop_job_deadline
+  while ! offline_host_dead "$stop_guard"; do
+    if ! offline_stop_clock || [ "$OFFLINE_NOW_CS" -ge "$stop_guard_deadline" ]; then
+      stop_result=124
+      break
+    fi
+    sleep .01 || { stop_result=255; break; }
+  done
+  if offline_host_dead "$stop_guard"; then
+    stop_guard_wait=0; wait "$stop_guard" || stop_guard_wait=$?
+    [ "$stop_guard_wait" -eq 0 ] || stop_result=124
+  else stop_result=255; fi
+  [ ! -f "$stop_finish_job/timeout" ] || stop_result=124
+  offline_stop_clock && [ "$OFFLINE_NOW_CS" -lt "$stop_job_deadline" ] || stop_result=124
+  printf '%s\n' "$stop_result" >"$stop_finish_job/result"
+  if [ "$stop_result" -ne 0 ]; then
+    RETAIN_STOP_EVIDENCE=1
+    printf '%s\n' 'readonly client completion uncertain; private original job records retained' >&2
   fi
-  if wait "$producer"; then producer_status=0; else producer_status=$?; fi
-  rm "$fifo"
+  return "$stop_result"
+}
+
+offline_host_data() {
+  offline_host_start data '' '' "$OFFLINE_STOP_DEADLINE_CS" "$@" || return 1
+  stop_data_job=$OFFLINE_JOB
+  offline_host_finish "$stop_data_job" || return $?
+  offline_host_start report "$stop_data_job/stdout" '' "$OFFLINE_STOP_DEADLINE_CS" || return 1
+  stop_data_report=$OFFLINE_JOB
+  offline_host_finish "$stop_data_report"
+}
+
+offline_capture_stream() {
+  STOP_PRODUCER_STATUS=255; STOP_FILTER_STATUS=255
+  stop_kind=$1; stop_budget=$2; stop_output=$3; shift 3
+  [ "$1" = docker ] || return 1; shift
+  offline_stop_before || return 1
+  stop_phase_deadline=$((OFFLINE_NOW_CS + stop_budget))
+  [ "$stop_phase_deadline" -le "$OFFLINE_STOP_DEADLINE_CS" ] || stop_phase_deadline=$OFFLINE_STOP_DEADLINE_CS
+  stop_fifo="$WORK/stopped-$stop_kind-stream"
+  mkfifo "$stop_fifo" || return 1
+  offline_host_start docker '' "$stop_fifo" "$stop_phase_deadline" "$@" || return 1
+  stop_producer_job=$OFFLINE_JOB
+  offline_host_start data "$stop_fifo" '' "$stop_phase_deadline" "filter-stop-$stop_kind" \
+    >"$OFFLINE_OBSERVATION/$stop_output" 2>/dev/null || return 1
+  stop_reader_job=$OFFLINE_JOB
+  STOP_FILTER_STATUS=0; offline_host_finish "$stop_reader_job" || STOP_FILTER_STATUS=$?
+  if [ "$STOP_FILTER_STATUS" -eq 0 ]; then cp "$stop_reader_job/stdout" "$OFFLINE_OBSERVATION/$stop_output" || STOP_FILTER_STATUS=1; fi
+  STOP_PRODUCER_STATUS=0; offline_host_finish "$stop_producer_job" || STOP_PRODUCER_STATUS=$?
+  rm "$stop_fifo" || STOP_FILTER_STATUS=1
+  chmod 600 "$OFFLINE_OBSERVATION/$stop_output" || STOP_FILTER_STATUS=1
+  [ "$STOP_PRODUCER_STATUS" -eq 0 ] && [ "$STOP_FILTER_STATUS" -eq 0 ]
+}
+
+offline_capture_shutdown() {
+  RETAIN_STOP_EVIDENCE=1
+  offline_stop_clock || fail 'host stopped-acquisition clock is unavailable'
+  OFFLINE_STOP_DEADLINE_CS=$((OFFLINE_NOW_CS + 1300))
+  if [ -n "$OFFLINE_ORDINARY_STOP_DEADLINE_CS" ] && [ "$OFFLINE_ORDINARY_STOP_DEADLINE_CS" -lt "$OFFLINE_STOP_DEADLINE_CS" ]; then
+    OFFLINE_STOP_DEADLINE_CS=$OFFLINE_ORDINARY_STOP_DEADLINE_CS
+  fi
+  started=$(offline_data queried-started-at) || fail 'actual StartedAt could not be decoded from saved inspection'
+  stopped_cid=$(offline_data queried-container-id) || fail 'actual full CID could not be decoded from saved inspection'
+  offline_stop_before || fail 'current stopped-acquisition deadline expired'
+  stop_statuses="$OFFLINE_OBSERVATION/stop-producer-statuses.json"
+  printf '{' >"$stop_statuses"
+  for stop_part in wait tar logs post; do
+    case "$stop_part" in
+      wait) set -- wait 50 stop-wait.stdout docker wait "$stopped_cid"; stop_keys=docker_wait ;;
+      tar) set -- tar 100 stop-routing.tar docker cp "$stopped_cid:/run/uvm-route-check/." -; stop_keys=routing_tar ;;
+      logs) set -- logs 1000 stop-envelope.json docker logs --tail 256 --since "$started" "$stopped_cid"; stop_keys=docker_logs ;;
+      post) set -- post 50 stop-post-container.json docker inspect "$stopped_cid"; stop_keys=post_inspect ;;
+    esac
+    stop_capture_status=0
+    offline_capture_stream "$@" || stop_capture_status=1
+    [ "$stop_part" = wait ] || printf ',' >>"$stop_statuses"
+    printf '"%s_producer_exit":%s,"%s_filter_exit":%s' "$stop_keys" "${STOP_PRODUCER_STATUS:-255}" "$stop_keys" "${STOP_FILTER_STATUS:-255}" >>"$stop_statuses"
+    if [ "$stop_capture_status" -ne 0 ]; then
+      printf '}' >>"$stop_statuses"; chmod 600 "$stop_statuses"
+      fail 'private current stopped acquisition failed; independent producer/reader outcomes retained'
+    fi
+    ensure_lock_owner
+  done
+  printf '}' >>"$stop_statuses"; chmod 600 "$stop_statuses"
+  offline_stop_before || fail 'current stopped-acquisition deadline expired'
+  offline_data encode-stopped-transport >"$OFFLINE_OBSERVATION/shutdown-evidence.json" \
+    || fail 'closed current stopped transport encoding failed'
   chmod 600 "$OFFLINE_OBSERVATION/shutdown-evidence.json"
-  printf 'offline_shutdown_query_started_at=%s\noffline_shutdown_producer_exit=%s\noffline_shutdown_filter_exit=%s\n' \
-    "$started" "$producer_status" "$filter_status"
-  [ "$producer_status" -eq 0 ] && [ "$filter_status" -eq 0 ] \
-    || fail 'bounded current-run shutdown evidence failed; Docker producer status was preserved'
+  offline_stop_before || fail 'current stopped-acquisition deadline expired'
 }
 
 offline_wait() {
@@ -134,8 +339,7 @@ offline_inventory() {
     --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -m uvm.installer.offline_backup inventory
 }
 
-offline_observe() {
-  phase=$1
+offline_snapshot_body() {
   ensure_lock_owner
   refresh_installer_admission
   ensure_lock_owner
@@ -167,9 +371,23 @@ offline_observe() {
     printf '}\n'
   } >"$OFFLINE_OBSERVATION/docker.json"
   chmod 600 "$OFFLINE_OBSERVATION/docker.json"
-  if [ "$ACTION" = backup-record ]; then
-    offline_capture_shutdown
+}
+
+offline_snapshot() {
+  RETAIN_STOP_EVIDENCE=1
+  offline_stop_clock || return 1
+  if [ -z "$OFFLINE_STOP_DEADLINE_CS" ]; then OFFLINE_STOP_DEADLINE_CS=$((OFFLINE_NOW_CS + 1300)); fi
+  if [ -n "$OFFLINE_ORDINARY_STOP_DEADLINE_CS" ] && [ "$OFFLINE_ORDINARY_STOP_DEADLINE_CS" -lt "$OFFLINE_STOP_DEADLINE_CS" ]; then
+    OFFLINE_STOP_DEADLINE_CS=$OFFLINE_ORDINARY_STOP_DEADLINE_CS
   fi
+  offline_host_start snapshot '' '' "$OFFLINE_STOP_DEADLINE_CS" || fail 'readonly snapshot could not be registered'
+  stop_snapshot_job=$OFFLINE_JOB
+  offline_host_finish "$stop_snapshot_job" || fail 'readonly snapshot incomplete; private workspace retained'
+}
+
+offline_observe() {
+  phase=$1
+  offline_snapshot
   {
     printf '{'; separator=''
     if [ "$ACTION" != restore-provision ]; then
@@ -183,9 +401,55 @@ offline_observe() {
     printf '}\n'
   } >"$OFFLINE_OBSERVATION/inventories.json"
   chmod 600 "$OFFLINE_OBSERVATION/inventories.json"
+  if [ "$ACTION" = backup-record ]; then offline_capture_shutdown; fi
   offline_data emit-observation --phase "$phase" >"$OFFLINE_INPUT/.next-phase" || fail 'closed offline observation emission failed'
   chmod 600 "$OFFLINE_INPUT/.next-phase"
   mv "$OFFLINE_INPUT/.next-phase" "$OFFLINE_INPUT/$phase.json"
+  OFFLINE_STOP_DEADLINE_CS=''
+}
+
+# Read-only validation under the existing original host lifecycle holder. This
+# adds no writer/issuer/mount: the same eight-key observation crosses stdin.
+run_public_local_stop() {
+  offline_stop_clock || fail 'host ordinary-stop clock is unavailable'
+  OFFLINE_ORDINARY_STOP_DEADLINE_CS=$((OFFLINE_NOW_CS + 60000))
+  verify_actual_mounts
+  locked_compose stop --timeout 600
+  offline_stop_clock || fail 'host ordinary-stop clock is unavailable'
+  [ "$OFFLINE_NOW_CS" -lt "$OFFLINE_ORDINARY_STOP_DEADLINE_CS" ] || fail 'ordinary stop deadline expired'
+  RETAIN_STOP_EVIDENCE=1
+  OFFLINE_OUTPUT="$WORK/stop-output"; OFFLINE_OBSERVATION="$WORK/stop-observation"
+  mkdir -m 700 "$OFFLINE_OUTPUT" "$OFFLINE_OBSERVATION"
+  offline_snapshot
+  offline_capture_shutdown
+  printf '{}' >"$OFFLINE_OBSERVATION/inventories.json"
+  chmod 600 "$OFFLINE_OBSERVATION/inventories.json"
+  offline_data emit-stopped-observation >"$WORK/stop-proof.json" \
+    || fail 'current stopped observation is unavailable'
+  chmod 600 "$WORK/stop-proof.json"
+  ensure_lock_owner
+  offline_host_start setup "$WORK/stop-proof.json" '' "$OFFLINE_STOP_DEADLINE_CS" || fail 'stopped helper could not be registered'
+  stop_validation_job=$OFFLINE_JOB
+  offline_host_finish "$stop_validation_job" \
+    || fail 'current stopped completion validation failed'
+  ensure_lock_owner
+  offline_stop_clock || fail 'host ordinary-stop clock is unavailable'
+  [ "$OFFLINE_NOW_CS" -lt "$OFFLINE_ORDINARY_STOP_DEADLINE_CS" ] || fail 'ordinary stop deadline expired'
+  RETAIN_STOP_EVIDENCE=0
+}
+
+offline_final_report() {
+  offline_stop_clock || fail 'completion report clock is unavailable'
+  OFFLINE_STOP_DEADLINE_CS=$((OFFLINE_NOW_CS + 1000))
+  offline_host_start docker '' '' "$OFFLINE_STOP_DEADLINE_CS" logs "$LOCK_ID" || fail 'completion report could not be registered'
+  stop_report_job=$OFFLINE_JOB
+  offline_host_finish "$stop_report_job" || fail 'offline owner completion evidence is unavailable'
+  offline_host_start report "$stop_report_job/stdout" '' "$OFFLINE_STOP_DEADLINE_CS" || fail 'completion output could not be registered'
+  stop_report_output=$OFFLINE_JOB
+  offline_host_finish "$stop_report_output" || fail 'offline owner completion output failed'
+  ensure_lock_owner
+  printf 'offline_operation=%s\nstatus=complete\n' "$ACTION"
+  RETAIN_STOP_EVIDENCE=0
 }
 
 run_offline_action() {
@@ -231,6 +495,7 @@ run_offline_action() {
   case "$LOCK_ID" in *[!0-9a-f]*|'') fail 'actual offline owner ID is malformed' ;; esac
   [ "${#LOCK_ID}" -eq 64 ] || fail 'actual offline owner ID is malformed'
   LOCK_CREATED=1
+  pin_lock_owner
   offline_plan plan
   offline_observe observed
   if [ "$ACTION" = backup-record ]; then
@@ -263,8 +528,8 @@ run_offline_action() {
     offline_observe provisioned
   fi
   offline_plan complete
-  docker logs "$LOCK_NAME" || fail 'offline owner completion evidence is unavailable'
-  printf 'offline_operation=%s\nstatus=complete\n' "$ACTION"
+  offline_final_report
+
 }
 
 

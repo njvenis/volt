@@ -166,28 +166,9 @@ def load_local_config() -> dict:
         config = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise RuntimeError("local authentication configuration is unavailable or invalid") from exc
-    keys = {"schema_version", "installation_id", "public_origin", "secret_source",
-        "bootstrap_delivery", "session_policy", "trusted_ingress"}
-    if not isinstance(config, dict) or set(config) != keys or config.get("schema_version") != 1:
-        raise RuntimeError("local authentication configuration schema is invalid")
     try:
-        config["installation_id"] = str(uuid.UUID(config["installation_id"]))
-        origin = urlsplit(config["public_origin"])
-        if (origin.scheme not in {"http", "https"} or not origin.hostname or not origin.netloc or origin.path not in ("", "/")
-                or origin.query or origin.fragment):
-            raise ValueError
-        ingress = config["trusted_ingress"]
-        if not isinstance(ingress, dict):
-            raise ValueError
-        loopback = origin.hostname in {"localhost", "127.0.0.1", "::1"}
-        if ingress.get("mode") == "loopback" and not (origin.scheme == "http" and loopback):
-            raise ValueError
-        if ingress.get("mode") == "https" and origin.scheme != "https":
-            raise ValueError
-        if (not isinstance(config["secret_source"], dict) or set(config["secret_source"]) !=
-                {"kind", "secret_source_id", "key_path"} or config["secret_source"]["kind"] != "encrypted_local_v1"):
-            raise ValueError
-        config["secret_source"]["secret_source_id"] = str(uuid.UUID(config["secret_source"]["secret_source_id"]))
+        from uvm.auth.route_check_records import validate_local_config
+        config = validate_local_config(config)
         key_path = config["secret_source"]["key_path"]
         fd = os.open(key_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         try:
@@ -198,25 +179,7 @@ def load_local_config() -> dict:
             os.close(fd)
         os.environ.setdefault("UVM_CONNECTOR_LOCAL_KEY_ID", config["secret_source"]["secret_source_id"])
         os.environ.setdefault("UVM_CONNECTOR_LOCAL_KEY_FILE", key_path)
-        delivery = config["bootstrap_delivery"]
-        if not isinstance(delivery, dict) or set(delivery) != {"kind", "path"} or delivery["kind"] != "private_file":
-            raise ValueError
-        if not isinstance(config["session_policy"], dict) or set(config["session_policy"]) != {"ttl_seconds"}:
-            raise ValueError
-        ttl = config["session_policy"]["ttl_seconds"]
-        if type(ttl) is not int or ttl != 3600:
-            raise ValueError
         ingress = config["trusted_ingress"]
-        if (set(ingress) != {"mode", "allowed_hosts", "allowed_peer_cidrs"}
-                or ingress["mode"] not in {"loopback", "https"} or not isinstance(ingress["allowed_hosts"], list)
-                or not ingress["allowed_hosts"] or any(not isinstance(host, str) or not host for host in ingress["allowed_hosts"])
-                or not isinstance(ingress["allowed_peer_cidrs"], list) or not ingress["allowed_peer_cidrs"]
-                or any(not isinstance(cidr, str) or not cidr for cidr in ingress["allowed_peer_cidrs"])):
-            raise ValueError
-        if origin.hostname not in {host.lower().split(":", 1)[0] for host in ingress["allowed_hosts"]}:
-            raise ValueError
-        # Preserve the existing socket-peer plus exact-Host ingress guard; do
-        # not derive peer trust from Origin, Host, or forwarded headers.
         os.environ.setdefault("UVM_INGRESS_ALLOWED_PEER_CIDRS", ",".join(ingress["allowed_peer_cidrs"]))
         os.environ.setdefault("UVM_INGRESS_ALLOWED_HOSTS", ",".join(ingress["allowed_hosts"]))
     except (ValueError, TypeError, KeyError, OSError):
@@ -335,10 +298,12 @@ class LocalAuth:
 
     def install_routes(self, app: FastAPI):
         @app.get("/api/v1/auth/config", response_model=LocalAuthConfigDTO)
-        def auth_config():
+        def auth_config(request: Request):
             try:
                 with self.engine.connect() as c:
                     row = c.execute(sa.select(local_auth_installation).where(local_auth_installation.c.singleton_id == 1)).mappings().one()
+                    from uvm.auth.route_check import observe_config
+                    observe_config(request, local_auth=self, connection=c, installation_row=row)
                 state = "claimed" if row["claimed_at"] else "required"
             except sa.exc.SQLAlchemyError:
                 state = "unavailable"

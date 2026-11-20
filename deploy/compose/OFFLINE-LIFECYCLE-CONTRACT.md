@@ -597,3 +597,202 @@ Both paths immediately run fresh complete original-graph verification against
 the committed destination under the SAME existing lifecycle FD, before custody
 preparation or workers. Missing/stale/substituted package bytes fail closed;
 publication never permits identity/key reconstruction or pin backfill.
+
+
+### Maintainer same-fixture private-input negatives (runner only)
+
+After the accepted initial resume is healthy and publicly stopped, the fixed
+TEST cases are missing local key, changed 32-byte local key, byte-changed local
+configuration, missing journal, missing installed pin, and missing originals.
+No arbitrary path, command, authority field or upgrade selector is accepted.
+The controller moves each exact original inode into a dedicated private0700
+retention directory outside state/cache, fsyncs both parents, and temporarily
+creates only the fixed changed input when needed. A host-controller flock is
+test isolation, not a claimed product-FD admission. The public target still
+obtains its own fresh crypto and normal lifecycle checks.
+
+Each existing signed public start must reach the exact documented terminal or
+private bounded authentication diagnostic line; generic nonzero/unsupported
+wrapper is not credit. Full owned API identity/Stopped/StartedAt and every other
+observed host-readable key/config/journal fingerprint must remain unchanged.
+Restore the exact original inode/UID/GID/mode/bytes under the host test guard;
+never overwrite an unexpected recreated/replaced target or rebuild from cache.
+Missing-pin test removes ONLY installer_admission in the temporary journal;
+original acknowledgement/capability/account/SQL state is never modified.
+Preserve raw failure and partial restoration evidence on any contradiction.
+Runtime-owned capability bytes are excluded and complete private coverage is
+not claimed. No new native runtime or product fault switch is introduced.
+
+### Maintainer fixed resource/preflight/action negatives (runner only)
+
+Reuse ONLY the exact reviewed stopped instance. Public status is the existing
+read-only route to actual mount/network attachment validation. One new
+qualification-labelled bridge network must be internal/no-egress, with its
+fullID/owner/project/testUUID and sole allowed API fullCID rechecked before
+connect/disconnect/remove. Connect only if the engine permits a stopped API;
+otherwise report that specific unsupported precondition, never start/recreate
+an original container merely for this test. Disconnect only the added network
+and remove only that empty exact owned test network. Original resources and
+all observed private fingerprints/inodes/modes must remain unchanged.
+
+The private-mode case retains the original key inode privately and uses a
+same-byte temporary key with0640 inside the existing private0700 parent;
+public status must reach the existing exact unsafe-key validator. Restore the
+original0600 inode, never widen original private file access or adopt a newly
+created target. Unconfirmed destroy must reach the signed exact confirmation
+guard. Unsupported literal upgrade is admitted ONLY through a test-entry
+whitelist after unchanged full external authentication, to reach the signed
+launcher's unsupported-command terminal. This proves no upgrade capability.
+
+For synthetic nonnetwork-context/missing-Docker preflight only, authenticate
+the exact original cache/Q/launcher normally BEFORE direct signed launcher
+execution. Never pass an invalid endpoint to the authentication wrapper.
+The context value is fixed blocked-nonnetwork-context://sentinel; a private
+Docker observer must record ZERO calls. Missing Docker uses only the existing
+minimal utilities with the docker executable omitted. Neither case contacts
+or demonstrates a real remote engine; no Docker context/daemon mutation.
+
+Occupied-port, foreign-owner and bind-backed-volume public tests require a
+separately traced legitimate initial request/resource order and separate clean
+namespace when needed. No invented journal, cache-derived identity, replacement
+of original resources, or feature implementation solely to green a negative.
+
+
+Observed Docker engine qualification-network options are accepted ONLY as
+empty/null or the EXACT pair com.docker.network.enable_ipv4="true" and
+com.docker.network.enable_ipv6="false", with Internal=true/driver=bridge and
+all fixed fullID/name/three labels/allowed API attachment guards unchanged.
+No extra option, alternate boolean or IPv6-enabled variant is accepted. This
+is a TEST cleanup/attachment guard, not a relaxation of production volume or
+resource policy. A failed guard before attachment remains failed evidence;
+continue only that exact retained test network without replaying completed
+private/preflight/action cases or creating another resource.
+
+
+### Focused extra-network causal replay (runner only)
+
+The public runtime_mounts CLI intentionally emits the generic fixed custody
+failure; do not expect a ValueError detail or change product output for a test.
+One focused replay may capture actual full container and three-volume JSON
+privately0600 in a dedicated0700 ROI BEFORE status/removal (each stream max2MiB,
+20-second Docker observation deadline, actual producer status retained). Never
+put environment/config values into review evidence: only hashes, byte counts
+and a bounded field-only difference. Require unique mount destinations/volume
+names before canonicalizing those two unordered lists; preserve every other
+validator input, API identity/State/StartedAt, image/witness and original mount.
+
+Authenticate the original cache/Q/launcher normally first. The SAME signed
+native image may run the EXISTING read-only validate function against that
+SAME fixed private snapshot using networknone/capdrop/read-only state+input ROI,
+fixed static stdout whitelist, pull-never and bounded unused datastore tmpfs.
+Record original-snapshot admission and fault-snapshot attachment mismatch as
+SEPARATE component evidence. Public status must independently reach its fixed
+GENERIC custody failure; no per-field public diagnostic is claimed. Capture
+again before cleanup and require unchanged faulted inputs/35 host fingerprints.
+Guard disconnect/removal of only the exact injected empty internal network;
+restore original API/projection/private fingerprints and require public status0.
+Retain earlier failed guard/assertion runs unchanged, never invent a historical
+full snapshot or repeat the completed unrelated first five negatives.
+
+### Separate legitimate namespace ONE-volume producer races (runner only)
+
+Foreign-owner and bind-options each use a NEW private unclaimed supported
+public install. The POSIX/Linux observer is bound to its registered caller
+PID/PGID/session/ancestry, exact actual owner/project/postgres-name relationship,
+ONE exact original volume-create argv and genuine preceding local absence1/[]/
+no-such-volume result. Recheck absence immediately; inject ONLY absent, with an
+independent test-owner UUID label. Never replace an existing object. Forward
+original create argv/stdout/stderr/exit unchanged and retain actual engine layer.
+
+Bind device is a fresh canonical owned0700 EMPTY sibling directory with pinned
+inode/UID/GID, outside instance/cache/protected ancestors; fixed stat/proc
+instrumentation is recorded and is not a new product-host dependency. Inspect
+injected exact name/CreatedAt/Mountpoint/labels/local driver/options immediately;
+retain private metadata unchanged after failure. A later real fixed initial
+helper's exact image/platform/user/networknone/readonly/owner/project/name/tail
+and request-file mode/owner/path are checked before retaining that bounded
+actual request. The product's real closed request, Q binding, actual FD writer
+and journal must agree; never manufacture a journal or authority from cache.
+
+Require exact signed owner/options diagnostic and NO API creation for comparison
+credit. If original Docker create rejects earlier, retain that engine boundary
+without claiming later product comparison. Initial keys/custody may already
+exist; no pre-key/pre-ack/pre-worker blanket claim. No accounts/SQL/browser.
+Retain each separate irreconcilable failed namespace, original request/resources
+and test-device identity until review; do not repair/adopt it or replace a
+volume to reuse it as another case. Cleanup only exact registered objects with
+unchanged metadata/test marker and no users/aliases, never global prune.
+
+### Occupied-port namespace prerequisite and late public failure (runner only)
+
+A separate fresh case first authenticates the original P/Q/graph/launcher.
+Register ONE exclusive host127.0.0.1:46180/TCP binder with its real childPID,
+PGID/SID/starttime, host network-namespace link, FD/socketinode and reuseflags0.
+Recheck its live proc identity and EADDRINUSE from a second same-host bind.
+Keep that SAME binder held through any credited public failure, then release
+ONLY that registered child and retain its actual exit/private logs.
+
+Before initial install, one explicitly owned internal/no-egress network and
+no-state/no-HTTP-route sleep-only publisher helper from the SAME authenticated
+native image may test the exact127.0.0.1:46180 publish. Guard fullCID/name/image
+and selected-child/config witness, labels, fixed command/entrypoint/user/RO/
+no-privilege/port bindings before removal; mask UNUSED datastore image VOLUMEs
+with bounded tmpfs. No source/authority mount or implicit pull. Delete only this
+registered probe and its empty guarded network before any installation action.
+Only an endpoint-specific actual Docker daemon bind error while the host socket
+remains held establishes the prerequisite. If absent, stop with precise Desktop/
+WSL publishing-namespace dependency: NO public install/state/product denial credit,
+no daemon/context modification and no repeated probing loop.
+
+If proven, ONE separate legitimate unclaimed public install may reach a late
+configured Dockerstart failure. Retain exact public stderr plus actual owned
+configured container State.Error and binding metadata, real journal/keys/ack
+phase and held-binder identity. Keys/migrations/ack and initial closed-runtime
+WORKERS may already exist; NEVER claim pre-key/pre-ack/pre-worker denial. No
+account/browser/SQL operation, arbitrary upgrade or production fault switch.
+Retain original namespaces until review, then exact guarded cleanup only.
+
+
+### ONE after-release publisher control
+
+Preserve the original occupied728controllerEXIT1 and empty State.Error; Desktop
+may return a real endpoint-specific daemon ports-unavailable/forward-expose500
+without persisting State.Error. Do not invent it or treat500alone as EADDRINUSE.
+After original registered binder release0, one separately frozen sleep-only,
+no-state/no-HTTP-route publisher control may prove HOST namespace causality:
+host free bind0, exact admitted guarded Dockerpublisher start0, HOST bind errno
+EADDRINUSE while that publisher is alive, exact probe/network removal, host free
+bind0 again. Record actual controllerPID/start/netns/socketinodes and unchanged
+original binder namespace. Fresh external original-cache authentication precedes
+helper execution. No public install/migrations/workers are repeated. If Docker
+start fails again or HOST bind succeeds while published, STOP this approach with
+precise Desktop publisher-namespace/environment dependency; no retries/fallback
+or daemon/context changes. Keep the earlier real public phase and daemon error
+separately labelled; never claim pre-key/pre-ack/pre-worker denial.
+
+### Materially different Docker-daemon reserved endpoint case
+
+The HOST-kernel collision class remains BLOCKED and its old true-field/raw
+qualification is never rehabilitated. A separately authorised daemon-reservation
+case may reuse ONLY retained728port B through existing authenticated status/start
+with unchanged normal state; never original1002/C6, no repair/new namespace.
+
+Register A's same-daemon ServerID/local Unix endpoint/fullCID/name/CreatedAt/
+testUUID/role/admitted image+typedconfig/child witness/fixed sleep-only command,
+entrypoint/user/RO/no-privilege/no-state tmpfs mounts. Own internal/no-egress
+network and pull-never platform pin are mandatory. Record requested AND effective
+published127.0.0.1:46180→8000 mappings and keep exact A Running/StartedAt/mapping
+through ONE B conflict. A is a managed DAEMON reservation, not a physical HOST
+socket-inode proof. Context/daemon must match before/inside/after producer.
+
+Bounded POSIX/Linux observation captures ONE exact compose-start argv/results
+from registered B PID/PGID/SID/ancestry, forwarding original bytes/status. Exact
+endpoint-specific ALREADYALLOCATED/ADDRESSINUSE daemon producer error plus
+signed terminal is required; generic ports-unavailable/proxy500 is insufficient.
+Any missing mapping/drift/genericfailure stops UNPROVEN with no further probes.
+Release ONLY guarded A+empty owned network. If exact conflict is proved, ONE
+existing public B start0→health0→controlledstop0 is required sensitivity, preserving
+installation identity/key material/pin/fence tuple and immutable fingerprints;
+normal durable journal/CURRENT env/start-record resource transitions only.
+No account/browser/SQL/full journey or pre-key/pre-ack/pre-worker claim. B remains
+retained for review; original host-route728/control failures remain unchanged.

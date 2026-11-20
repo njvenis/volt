@@ -1127,8 +1127,10 @@ def release_local_start(root: Path, info: dict) -> dict:
     local_host_helper(root, info, "acknowledge", bootstrap_acknowledgement(info))
     refreshed = load_instance(str(root))[1]
     record = (root / "secrets/local-start-admission/admission.json").read_text()
-    command("docker", "exec", "-i", "--user", "0:0", f"{info['project']}-volt-1", "/opt/uvm/venv/bin/python",
-        "-m", "uvm.installer.start_admission", "release", input_data=record)
+    command("docker", "exec", "-i", "--user", "0:0", f"{info['project']}-volt-1", "/usr/bin/env", "-i",
+        "PATH=/usr/bin:/bin", "LC_ALL=C", f"UVM_LOCAL_START_IMAGE_ID={refreshed['image_admission']['id']}",
+        f"UVM_LOCAL_START_RESOURCES_SHA256={refreshed['local_start_admission']['resources_sha256']}",
+        "/usr/local/bin/python3.14", "-I", "-S", "/usr/local/libexec/volt-start-admission.py", "release", input_data=record)
     wait_until_ready(refreshed)
     return refreshed
 
@@ -1625,10 +1627,31 @@ def host_validate(args) -> None:
     current_receipt(info)
     print(f"project={info['project']}\nowner_token={info['owner_token']}\nmode={info['mode']}\nplatform={info['platform']}\nhttp_port={info['ports'][0]}"
           f"\nstart_closed={int(not bool(info.get('local_recovery_acknowledgement')) or bool(info.get('restore_pending')))}"
+          f"\nlocal_start_resources_sha256={(info.get('local_start_admission') or {}).get('resources_sha256', '')}"
           f"\nrestore_pending={int(bool(info.get('restore_pending')))}"
           f"\nrestore_imported={int(bool(info.get('restore_imported')))}"
           f"\nrestore_capabilities_revoked={int(bool(info.get('restore_capabilities_revoked')))}"
           f"\nrestore_sessions_revoked={int(bool(info.get('restore_sessions_revoked')))}")
+
+
+def host_stop_validate(args) -> None:
+    """Read-only data comparison; caller retains the original lifecycle FD."""
+    try:
+        from uvm.installer import offline_lifecycle, stopped_capture
+        import time
+        root, info = load_instance(args.directory)
+        if info.get('mode') != 'local':
+            raise ValueError('local stopped comparison required')
+        raw = stopped_capture._bounded_bytes(sys.stdin.buffer, offline_lifecycle.MAX_INPUT,
+            time.monotonic() + 10)
+        data = json.loads(raw, object_pairs_hook=offline_lifecycle.pairs)
+        if offline_lifecycle.canonical(data) != raw:
+            raise ValueError('canonical stopped observation required')
+        offline_lifecycle.ROOT = root
+        offline_lifecycle.validate_observation(info, data, container=True, complete=True)
+    except (Exception, SystemExit):
+        raise SystemExit('current stopped completion validation failed') from None
+    print('controlled shutdown verified')
 
 
 def extract_capability(args) -> None:
@@ -1697,6 +1720,8 @@ def parser() -> argparse.ArgumentParser:
     validate.add_argument("--allow-restore-transition", action="store_true",
                           help=argparse.SUPPRESS)
     validate.set_defaults(fn=host_validate)
+    stop_validation = sub.add_parser('host-stop-validate', help=argparse.SUPPRESS)
+    stop_validation.add_argument('directory'); stop_validation.set_defaults(fn=host_stop_validate)
     extract = sub.add_parser("extract-capability")
     extract.add_argument("directory")
     extract.add_argument("--operation", choices=("prepare-setup", "rotate-setup", "create-account",

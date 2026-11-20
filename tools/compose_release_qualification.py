@@ -954,6 +954,778 @@ print(json.dumps({'session':'local_session','protected_admin':True,'deployment':
         raise RuntimeError("protected browser session did not produce deployment readback evidence")
 
 
+
+
+
+def qualify_terminal_bash_job_component(*, image: str, image_digest: str, source_revision: str,
+        source_snapshot: str, evidence: Path, registered_poll: bool = False) -> None:
+    """Fixed no-state native-Bash job semantics; never a lifecycle assertion."""
+    if evidence.is_symlink() or stat.S_IMODE(evidence.stat().st_mode)!=0o700 or evidence.stat().st_uid!=os.getuid():
+        raise RuntimeError('private owned evidence required')
+    if (not re.fullmatch(r'volt-easy-delivery-route-component:[0-9a-f]{12}',image)
+            or not re.fullmatch(r'sha256:[0-9a-f]{64}',image_digest)
+            or not re.fullmatch(r'[0-9a-f]{40}',source_revision)
+            or not re.fullmatch(r'sha256:[0-9a-f]{64}',source_snapshot)):
+        raise RuntimeError('exact component image/source required')
+    if type(registered_poll)is not bool:raise RuntimeError('closed component case required')
+    old=os.umask(0o077)
+    def capture(name,argv):
+        (evidence/(name+'.invocation.json')).write_text(json.dumps({'argv':argv,'cwd':str(ROOT),
+            'before_invocation':True,'timeout':15,'max_each_stream_bytes':131072},indent=2))
+        import resource
+        with(evidence/(name+'.stdout')).open('xb')as a,(evidence/(name+'.stderr')).open('xb')as b:
+            r=subprocess.run(argv,cwd=ROOT,stdout=a,stderr=b,timeout=15,
+                preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_FSIZE,(131072,131072)))
+        (evidence/(name+'.exit')).write_text(str(r.returncode)+'\n')
+        if r.returncode:raise RuntimeError('fixed Bash component producer failed')
+        return (evidence/(name+'.stdout')).read_bytes()
+    def document(name,argv):return json.loads(capture(name,argv))
+    try:
+        endpoint=capture('endpoint',['docker','context','inspect','--format','{{.Endpoints.docker.Host}}']).decode().strip()
+        if not endpoint.startswith('unix://'):raise RuntimeError('local Unix daemon required')
+        server=capture('server',['docker','info','--format','{{.ID}}']).decode().strip()
+        selected=document('selected',['docker','image','inspect','--platform','linux/amd64',image])[0]
+        labels=selected['Config']['Labels'];immutable=image.split(':')[0]+'@'+image_digest
+        if (selected['Os']!='linux' or selected['Architecture']!='amd64' or immutable not in selected['RepoDigests']
+                or labels.get('org.opencontainers.image.revision')!=source_revision
+                or labels.get('org.volt.compose.source-snapshot')!=source_snapshot):raise RuntimeError('source/image differs')
+        common=r'''
+set -u
+printf 'bash_version=%s\n' "$BASH_VERSION"
+scenario() (
+  mode=$1
+  parent=$BASHPID
+  interrupted=0
+  trap 'interrupted=1' TERM
+  LAUNCH
+  (sleep .8;exit 0) 9>&- &
+  other=$!
+  if [[ $mode == signal ]];then (sleep .1;kill -TERM "$parent") 9>&- & signaler=$!;fi
+  # Match startup's separately registered/reaped input producer.
+  coproc INPUT { printf G; }
+  input_pid=$INPUT_PID
+  exec {reader}<&"${INPUT[0]}"
+  exec {INPUT[0]}<&-
+  exec {INPUT[1]}>&-
+  read -r -N 1 value <&"$reader"
+  exec {reader}<&-
+  wait "$input_pid"
+  if [[ $mode == completed ]];then sleep .6;fi
+  for attempt in 1 2;do
+    completed=''
+    if wait -n -p completed "$broker" "$other";then result=0;else result=$?;fi
+    actor=unknown
+    if [[ ${completed:-} == "$broker" ]];then actor=broker;elif [[ ${completed:-} == "$other" ]];then actor=other;fi
+    printf 'scenario=%s attempt=%s actor=%s status=%s interrupted=%s\n' "$mode" "$attempt" "$actor" "$result" "$interrupted"
+    [[ $actor != broker ]] || break
+    [[ $result == 143 && $interrupted == 1 ]] || break
+  done
+  exec 9>&-
+  if wait "$broker";then result=0;else result=$?;fi
+  printf 'scenario=%s exact_broker_wait=%s\n' "$mode" "$result"
+  wait "$other" || :
+  if [[ $mode == signal ]];then wait "$signaler" || :;fi
+)
+scenario live
+scenario completed
+scenario signal
+'''
+        recipes={'process-substitution':r'''exec 9> >(sleep .4;exit 7)
+  broker=$!''', 'coproc-final-exec':r'''coproc BROKER { exec /bin/bash --noprofile --norc -c 'sleep .4;exit 7'; }
+  broker=$BROKER_PID
+  exec 9>&"${BROKER[1]}"
+  exec {BROKER[0]}<&-
+  exec {BROKER[1]}>&-'''}
+        scripts={role:common.replace('LAUNCH',recipe)for role,recipe in recipes.items()}
+        if registered_poll:
+            entry=(ROOT/'docker/g7/entrypoint.sh').read_text()
+            handlers=entry[entry.index('record_api_stop_receipt() {'):entry.index('\ncleanup_on_exit() {')]
+            begin=entry.index("trap 'handle_shutdown' TERM INT\nexited_child_pid=")
+            loop=entry[begin:entry.index('\napi_remove_ready || { api_cleanup_poisoned=1; shutdown_status=1; }',begin)]
+            script='''set -Eeuo pipefail
+printf 'bash_version=%s\\n' "$BASH_VERSION"
+'''+handlers+'''
+scenario() (
+  mode=$1;code=$2;parent=$BASHPID
+  CHILD_PIDS=();declare -A REAPED_CHILDREN=() CHILD_EXIT_STATUS=() UNRESOLVED_CHILDREN=()
+  shutdown_requested=0;quiesce_requested=0;quiesce_failed_latched=0;shutdown_status=0
+  api_report() { printf '%s\\n' "$1" >&2; }
+  if [[ $mode == unavailable ]];then
+    (sleep .05;exit 0)& broker=$!
+    builtin wait "$broker"
+    builtin wait
+  else
+    exec 9> >(sleep .05;exit "$code")
+    broker=$!
+  fi
+  CHILD_PIDS=("$broker")
+  if [[ $mode == completed ]];then sleep .1;fi
+  if [[ $mode == term-race ]];then
+    wait() { local rc=0;builtin wait "$@" || rc=$?;kill -TERM "$parent";return "$rc"; }
+  fi
+'''+loop+'''
+  if [[ $mode == unavailable ]];then
+    [[ $wait_bookkeeping_failed == 1 && $api_cleanup_poisoned == 1 && ! ${exited_child_pid:-} ]]
+    printf 'scenario=unavailable unresolved=1\\n'
+  else
+    [[ $exited_child_pid == "$broker" && $child_status == "$code" && $api_cleanup_poisoned == 1 ]]
+    [[ $wait_bookkeeping_failed == 0 && ${CHILD_EXIT_STATUS[$broker]} == "$code" ]]
+    if [[ $mode == term-race ]];then [[ $shutdown_requested == 1 ]];fi
+    printf 'scenario=%s actual_broker_wait=%s sticky=1 term=%s\\n' "$mode" "$child_status" "$shutdown_requested"
+    exec 9>&-
+  fi
+)
+for mode in live completed term-race;do for code in 0 7;do scenario "$mode" "$code";done;done
+scenario unavailable 0
+'''
+            scripts={'registered-poll':script}
+        for role,code in scripts.items():
+            token=uuid.uuid4().hex;name='volt-terminal-bash-'+token[:16]
+            tmpfs={destination:'rw,noexec,nosuid,nodev,size=1m'for destination in
+                ('/app/media','/opt/uvm/state','/var/lib/postgresql/data','/tmp')}
+            command=['-i','PATH=/usr/bin:/bin','LC_ALL=C','/bin/bash','--noprofile','--norc','-c',code]
+            argv=['docker','create','--platform','linux/amd64','--pull=never','--name',name,'--restart=no',
+                '--network','none','--read-only','--cap-drop=ALL','--security-opt=no-new-privileges','--user','0:0',
+                '--label','volt.delivery.test-uuid='+token,'--label','volt.delivery.role=terminal-bash-'+role]
+            for destination,options in tmpfs.items():argv+=['--tmpfs',destination+':'+options]
+            argv+=['--entrypoint','/usr/bin/env',immutable,*command]
+            cid=capture(role+'-create',argv).decode().strip()
+            if not re.fullmatch('[0-9a-f]{64}',cid):raise RuntimeError('full component CID required')
+            def guard(label):
+                rows=document(role+'-'+label,['docker','inspect',cid])
+                if len(rows)!=1:raise RuntimeError('ambiguous component')
+                r=rows[0];h=r['HostConfig'];c=r['Config'];w=r.get('ImageManifestDescriptor')or{}
+                if (r['Id']!=cid or r['Name']!='/'+name or c['Image']!=immutable or c['User']!='0:0'
+                        or c['Entrypoint']!=['/usr/bin/env'] or c['Cmd']!=command
+                        or c['Labels'].get('volt.delivery.test-uuid')!=token
+                        or c['Labels'].get('volt.delivery.role')!='terminal-bash-'+role
+                        or h['NetworkMode']!='none' or h['ReadonlyRootfs']is not True or h['Privileged']is not False
+                        or h.get('CapAdd')not in(None,[]) or h.get('CapDrop')!=['ALL']
+                        or h.get('PortBindings')not in(None,{}) or h['RestartPolicy']['Name']!='no'
+                        or h.get('Tmpfs')!=tmpfs or h.get('SecurityOpt')not in(['no-new-privileges'],['no-new-privileges:true'])
+                        or any(m['Type']!='tmpfs' or m['Destination']not in tmpfs for m in r['Mounts'])
+                        or r['Image']!=selected['Id']and(r['Image']!=image_digest or any(w.get(k)!=(selected.get('Descriptor')or{}).get(k)for k in('digest','mediaType','size','platform')))):
+                    raise RuntimeError('registered component recipe/image/custody differs; retain')
+                return r
+            guard('created')
+            try:
+                capture(role+'-actual',['docker','start','-a',cid])
+            finally:
+                current=guard('cleanup-guard')
+                if current['State']['Running']is not False:raise RuntimeError('component unexpectedly alive; retain')
+                if (capture(role+'-cleanup-server',['docker','info','--format','{{.ID}}']).decode().strip()!=server
+                        or capture(role+'-cleanup-endpoint',['docker','context','inspect','--format','{{.Endpoints.docker.Host}}']).decode().strip()!=endpoint):
+                    raise RuntimeError('component daemon changed; retain')
+                capture(role+'-exact-remove',['docker','rm',cid])
+    finally:os.umask(old)
+
+
+def qualify_terminal_lifecycle_component(*, image: str, image_digest: str, source_revision: str,
+        source_snapshot: str, private: Path, evidence: Path, image_config_id: str, continuation_evidence: Path | None = None,
+        custody_retry_evidence: Path | None = None) -> None:
+    """ONE legitimate unclaimed LOCAL development CLI journey, not signed admission.
+
+    Host Python is this controller; no minimum-host or public offline-backup
+    acceptance. Retain state/resources on any assertion failure for exact review.
+    """
+    import resource
+    from uvm.auth import route_check_records as wire
+    from uvm.installer import route_check as delivery
+    from uvm.installer.runtime_mounts import validate, validate_start_context
+    if (not re.fullmatch(r'volt-easy-delivery-route-component:[0-9a-f]{12}',image)
+            or not re.fullmatch(r'sha256:[0-9a-f]{64}',image_digest)
+            or not re.fullmatch(r'[0-9a-f]{40}',source_revision)
+            or not re.fullmatch(r'sha256:[0-9a-f]{64}',source_snapshot)
+            or not re.fullmatch(r'sha256:[0-9a-f]{64}',image_config_id)):
+        raise RuntimeError('fixed local component source/image required')
+    for directory in (private,evidence):
+        value=directory.lstat()
+        if not stat.S_ISDIR(value.st_mode) or directory.is_symlink() or value.st_uid!=os.getuid() or stat.S_IMODE(value.st_mode)!=0o700:
+            raise RuntimeError('new private component custody required')
+    state=private/'instance'
+    if custody_retry_evidence is not None and continuation_evidence is None:
+        raise RuntimeError('custody retry requires the exact original initial failure')
+    if continuation_evidence is None and (state.exists() or state.is_symlink()):raise RuntimeError('component must not adopt any prior instance')
+    previous_umask=os.umask(0o077);last_step='preflight';cid=None;info=None
+    def capture(name,argv,*,timeout=30,limit=4*1024*1024,check=True,input_bytes=None):
+        nonlocal last_step
+        last_step=name
+        (evidence/(name+'.invocation.json')).write_text(json.dumps({'argv':argv,'cwd':str(ROOT),
+            'timeout_seconds':timeout,'max_each_stream_bytes':limit,'before_invocation':True,
+            'stdin_sha256':None if input_bytes is None else hashlib.sha256(input_bytes).hexdigest()},indent=2))
+        with(evidence/(name+'.stdout')).open('xb')as stdout,(evidence/(name+'.stderr')).open('xb')as stderr:
+            process=subprocess.Popen(argv,cwd=ROOT,stdin=subprocess.PIPE if input_bytes is not None else None,
+                stdout=stdout,stderr=stderr,start_new_session=True,
+                preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_FSIZE,(limit,limit)))
+            start_fd_observed=False
+            if name=='supported-start':
+                deadline=time.monotonic()+8
+                lock=state/'.install.lock';identity=lock.stat(follow_symlinks=False)
+                device=f'{os.major(identity.st_dev):02x}:{os.minor(identity.st_dev):02x}:{identity.st_ino}'
+                while process.poll() is None and time.monotonic()<deadline:
+                    with open('/proc/locks','r')as locks:
+                        rows=locks.read(1024*1024+1)
+                    if len(rows)>1024*1024:break
+                    for line in rows.splitlines():
+                        fields=line.split()
+                        if len(fields)>=8 and fields[1:5]==['FLOCK','ADVISORY','WRITE',str(process.pid)] and fields[5]==device:
+                            start_fd_observed=True
+                            (evidence/'actual-public-start-new-owned-FD.json').write_text(json.dumps({
+                                'producer':wire.validated_proc_identity(process.pid),'kernel_lock_row':line,
+                                'inode':identity.st_ino,'device':identity.st_dev,
+                                'scope':'observed new public-start owner at acquisition; not continuous liveness'},indent=2))
+                            break
+                    if start_fd_observed:break
+                    time.sleep(.01)
+            try:
+                if input_bytes is not None:process.communicate(input_bytes,timeout=timeout);code=process.returncode
+                else:code=process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid,signal.SIGKILL);process.wait(timeout=10);code=124
+            stdout.flush();stderr.flush();os.fsync(stdout.fileno());os.fsync(stderr.fileno())
+        (evidence/(name+'.exit')).write_text(str(code)+'\n')
+        if check and code:raise RuntimeError('owned component command failed; retained private raw')
+        if name=='supported-start' and not start_fd_observed:
+            raise RuntimeError('new public-start kernel FD ownership was not observed')
+        return (evidence/(name+'.stdout')).read_bytes(),code
+    def document(name,argv):
+        raw,_=capture(name,argv);return json.loads(raw)
+    try:
+        context=os.environ.get('DOCKER_CONTEXT')
+        endpoint=os.environ.get('DOCKER_HOST')
+        if not endpoint:
+            if not context:context=capture('context',['docker','context','show'])[0].decode().strip()
+            endpoint=capture('endpoint',['docker','context','inspect',context,'--format','{{(index .Endpoints "docker").Host}}'])[0].decode().strip()
+        if not endpoint.startswith('unix://'):raise RuntimeError('component requires the unchanged local Unix daemon')
+        server=capture('server',['docker','info','--format','{{.ID}}'])[0].decode().strip()
+        image_rows=document('selected-image',['docker','image','inspect','--platform','linux/amd64',image])
+        if len(image_rows)!=1:raise RuntimeError('one selected native component image required')
+        selected=image_rows[0];labels=selected.get('Config',{}).get('Labels')or{}
+        immutable='volt-easy-delivery-route-component@'+image_digest
+        if (selected.get('Os')!='linux' or selected.get('Architecture')!='amd64'
+                or labels.get('org.opencontainers.image.revision')!=source_revision
+                or labels.get('org.volt.compose.source-snapshot')!=source_snapshot
+                or selected.get('RepoDigests',[]).count(immutable)!=1):
+            raise RuntimeError('component immutable source/native selection differs')
+        retained=None
+        if continuation_evidence is not None:
+            if continuation_evidence.is_symlink() or continuation_evidence.resolve()!=continuation_evidence:
+                raise RuntimeError('retained first evidence path linked')
+            retained=json.loads((continuation_evidence/'plan-before-init.json').read_bytes())
+            if ((continuation_evidence/'supported-init.exit').read_text().strip()!='0'
+                    or (continuation_evidence/'supported-start.exit').read_text().strip()!='1'
+                    or (continuation_evidence/'supported-start.stderr').read_bytes()!=b'local recovery custody journal is missing or inconsistent\n'
+                    or any(retained[key]!=expected for key,expected in
+                        (('state',str(state)),('image_reference',immutable),('source_revision',source_revision),
+                         ('source_snapshot',source_snapshot),('daemon',server),('endpoint',endpoint)))):
+                raise RuntimeError('continuation differs from the original bounded initial failure')
+            project=retained['project']
+        else:project='volt-terminal-'+uuid.uuid4().hex[:16]
+        cli=[sys.executable,str(ROOT/'deploy/compose/setup.py')]
+        plan={'scope':'LOCAL AMD64 development full-entrypoint component; NOT signed/minimal-host/full-backup',
+            'image_reference':immutable,'selected_image':selected,'source_revision':source_revision,
+            'source_snapshot':source_snapshot,'daemon':server,'endpoint':endpoint,'project':project,
+            'state':str(state),'no_accounts_or_browser':True,'retain_fixture':True}
+        (evidence/'plan-before-init.json').write_text(json.dumps(plan,indent=2))
+        if retained is None:
+            capture('supported-init',[*cli,'init',str(state),'--mode','local','--project',project,
+                '--image',immutable,'--platform','linux/amd64','--http-port','46180','--recovery-port','46181','--oidc-port','46182'],timeout=120)
+        info=json.loads((state/'instance.json').read_bytes())
+        if info['project']!=project or info['image']!=immutable or info['mode']!='local':raise RuntimeError('new legitimate namespace differs')
+        owner=info['owner_token'];expected_name=project+'-volt-1'
+        def guard(name):
+            nonlocal cid,info
+            rows=document(name,['docker','inspect',expected_name])
+            if len(rows)!=1:raise RuntimeError('exact registered API absent')
+            row=rows[0]
+            if (not re.fullmatch('[0-9a-f]{64}',row['Id']) or cid is not None and cid!=row['Id']
+                    or row['Name']!='/'+expected_name or row['Config']['Image']!=immutable
+                    or row['Config']['Labels'].get('volt.compose.owner-token')!=owner
+                    or row['Config']['Labels'].get('com.docker.compose.project')!=project):
+                raise RuntimeError('component API identity/ownership changed')
+            cid=row['Id'];info=json.loads((state/'instance.json').read_bytes())
+            volumes=document(name+'-volumes',['docker','volume','inspect',*[project+'_'+store for store in ('postgres','media','state')]])
+            validate(state,state,info,row,volumes);validate_start_context(info,row)
+            for store in ('postgres','media','state'):
+                users=capture(name+'-users-'+store,['docker','ps','-a','--filter','volume='+project+'_'+store,'--format','{{.ID}}','--no-trunc'])[0].decode().splitlines()
+                if set(users)!={cid}:raise RuntimeError('owned store has a foreign attachment; retain')
+            return row
+        if retained is not None or info.get('local_recovery_custody') is None:
+            # This is ONLY the specifically authorised 21-file unestablished
+            # development continuation, never general instance/cache adoption.
+            import fcntl
+            from uvm.installer.lock import _bounded_file
+            from uvm.installer import recovery_authority
+            prior_custody=None
+            if custody_retry_evidence is not None:
+                if custody_retry_evidence.is_symlink() or custody_retry_evidence.resolve()!=custody_retry_evidence:
+                    raise RuntimeError('prior custody evidence path linked')
+                prior_custody=json.loads((custody_retry_evidence/'actual-initial-custody-host-FD.json').read_bytes())
+                previous_plan=json.loads((custody_retry_evidence/'plan-before-init.json').read_bytes())
+                failure=json.loads((custody_retry_evidence/'failure.json').read_bytes())
+                if (failure.get('failed_step')!='custody-prepare-created' or previous_plan!=plan
+                        or (custody_retry_evidence/'custody-request-actual.exit').read_text().strip()!='0'
+                        or (custody_retry_evidence/'custody-prepare-actual.invocation.json').exists()):
+                    raise RuntimeError('not the exact rejected unstarted helper continuation')
+            before={}
+            public_certs={'secrets/recovery-ca.crt','secrets/recovery-server.crt','secrets/recovery-client.crt'}
+            for file in state.rglob('*'):
+                if file.is_symlink():raise RuntimeError('initial development input linked')
+                if file.is_file():
+                    relative=str(file.relative_to(state))
+                    if relative=='.install.lock' and prior_custody is not None:continue
+                    raw=_bounded_file(file,1024*1024,private=relative not in public_certs);st=file.stat()
+                    if stat.S_IMODE(st.st_mode)!=(0o644 if relative in public_certs else 0o600):raise RuntimeError('original initial file mode differs')
+                    before[relative]={'sha256':hashlib.sha256(raw).hexdigest(),
+                        'bytes':len(raw),'device':st.st_dev,'inode':st.st_ino,'uid':st.st_uid,'gid':st.st_gid,'mode':stat.S_IMODE(st.st_mode)}
+            if (len(before)!=21 or '.install.lock'in before or info.get('established')is not False
+                    or info.get('local_recovery_acknowledgement')is not None or info.get('local_recovery_custody')is not None
+                    or info.get('local_recovery_inventory')is not None or info.get('installer_contract_version')is not None):
+                raise RuntimeError('not the exact fresh pre-custody development boundary')
+            if prior_custody is not None and before!=json.loads((custody_retry_evidence/'before-initial-custody-current-21-files.json').read_bytes()):
+                raise RuntimeError('original 21-file fingerprints differ from the failed guarded attempt')
+            (evidence/'before-initial-custody-current-21-files.json').write_text(json.dumps(before,indent=2))
+            with tarfile.open(evidence/'before-initial-custody-21-files.tar','x')as saved:
+                for name in sorted(before):saved.add(state/name,arcname=name,recursive=False)
+            for kind,names in (('container',[expected_name]),('volume',[project+'_'+v for v in ('postgres','media','state')]),('network',[project+'_network'])):
+                for number,name in enumerate(names):
+                    raw,code=capture('initial-absence-'+kind+'-'+str(number),['docker',kind,'inspect',name],check=False)
+                    error=(evidence/('initial-absence-'+kind+'-'+str(number)+'.stderr')).read_text()
+                    if code==0 or not re.search(r'no such|not found',error,re.I):raise RuntimeError('initial exact namespace absence unproved')
+            lock=state/'.install.lock'
+            flags=os.O_RDWR|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC
+            if prior_custody is None:flags|=os.O_CREAT|os.O_EXCL
+            fd=os.open(lock,flags,0o600)
+            fields=('st_dev','st_ino','st_uid','st_gid','st_mode','st_nlink','st_size','st_mtime_ns','st_ctime_ns')
+            identity=os.fstat(fd)
+            def held():
+                current=lock.stat(follow_symlinks=False)
+                if (not stat.S_ISREG(current.st_mode) or stat.S_IMODE(current.st_mode)!=0o600
+                        or current.st_uid!=os.getuid() or current.st_nlink!=1 or current.st_size!=0
+                        or any(getattr(current,key)!=getattr(identity,key)for key in fields)):
+                    raise RuntimeError('original host lifecycle inode changed')
+                fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            try:
+                if prior_custody is not None and any(getattr(identity,key)!=prior_custody['inode'][key]for key in fields):
+                    raise RuntimeError('recorded original lock inode/custody changed')
+                held();os.fsync(fd)
+                parent=os.open(state,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+                try:os.fsync(parent)
+                finally:os.close(parent)
+                (evidence/'actual-initial-custody-host-FD.json').write_text(json.dumps({
+                    'owner_process':wire.validated_proc_identity(os.getpid()),'uid':os.getuid(),'gid':os.getgid(),
+                    'fd':fd,'inode':{key:getattr(identity,key)for key in fields},
+                    'kernel_fdinfo':Path(f'/proc/self/fdinfo/{fd}').read_text(),
+                    'held_only_through_request_prepare_validate':'not continuous through subsequent public start'},indent=2))
+                for name,value in before.items():
+                    file=state/name;current=file.stat(follow_symlinks=False)
+                    if (hashlib.sha256(_bounded_file(file,1024*1024,private=name not in public_certs)).hexdigest()!=value['sha256']
+                            or (current.st_dev,current.st_ino,current.st_uid,current.st_gid,stat.S_IMODE(current.st_mode))!=
+                            tuple(value[key]for key in('device','inode','uid','gid','mode'))):
+                        raise RuntimeError('original 21-file input changed before actual-FD initialization')
+                def helper(action,body=None):
+                    name=project+'-custody-'+action
+                    capabilities=['CHOWN','SETUID','DAC_OVERRIDE']if action=='prepare'else[]
+                    user='0:0'if action=='prepare'else f'{os.getuid()}:{os.getgid()}'
+                    target=['docker','create','--platform','linux/amd64','--pull=never','--name',name,'--restart=no',
+                        '--network','none','--read-only','--cap-drop=ALL','--security-opt=no-new-privileges',
+                        '--label','volt.delivery.test-owner='+owner,'--label','volt.delivery.project='+project,
+                        '--label','volt.delivery.role=development-initial-custody','--user',user,
+                        '--tmpfs','/tmp:rw,noexec,nosuid,size=16m','--tmpfs','/app/media:rw,noexec,nosuid,nodev,size=1m',
+                        '--tmpfs','/opt/uvm/state:rw,noexec,nosuid,nodev,size=1m','--tmpfs','/var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=1m',
+                        '--mount',f'type=bind,src={state},dst=/instance'+(''if action=='prepare'else',readonly')]
+                    for capability in capabilities:target+=['--cap-add='+capability]
+                    if body is not None:target+=['-i']
+                    target+=['--entrypoint','/opt/uvm/venv/bin/python',immutable,'-m','uvm.installer.recovery_authority',action]
+                    if action!='request':target+=['--request-stdin']
+                    target+=['--instance-root','/instance']
+                    helper_id=None
+                    def observed(label):
+                        rows=document('custody-'+action+'-'+label,['docker','inspect',helper_id]);item=rows[0]
+                        h=item['HostConfig'];c=item['Config'];mounts=item['Mounts']
+                        binds=[m for m in mounts if m['Type']=='bind']
+                        expected_command=['-m','uvm.installer.recovery_authority',action]+([]if action=='request'else['--request-stdin'])+['--instance-root','/instance']
+                        expected_tmpfs={'/tmp':'rw,noexec,nosuid,size=16m','/app/media':'rw,noexec,nosuid,nodev,size=1m',
+                            '/opt/uvm/state':'rw,noexec,nosuid,nodev,size=1m','/var/lib/postgresql/data':'rw,noexec,nosuid,nodev,size=1m'}
+                        if (len(rows)!=1 or item['Id']!=helper_id or item['Name']!='/'+name or c['Image']!=immutable
+                                or c['User']!=user or c['Entrypoint']!=['/opt/uvm/venv/bin/python']
+                                or c['Cmd']!=expected_command
+                                or c['Labels'].get('volt.delivery.test-owner')!=owner or c['Labels'].get('volt.delivery.project')!=project
+                                or c['Labels'].get('volt.delivery.role')!='development-initial-custody'
+                                or h['NetworkMode']!='none' or h['ReadonlyRootfs']is not True or h['Privileged']is not False
+                                or sorted(h.get('CapAdd')or[])!=sorted('CAP_'+value for value in capabilities) or h.get('CapDrop')!=['ALL']
+                                or h.get('PortBindings')not in(None,{}) or h['RestartPolicy']['Name']!='no'
+                                or h.get('Tmpfs')!=expected_tmpfs
+                                or h.get('SecurityOpt')not in(['no-new-privileges'],['no-new-privileges:true'])
+                                or len(binds)!=1 or binds[0]['Source']!=str(state)or binds[0]['Destination']!='/instance'
+                                or binds[0]['RW']is not(action=='prepare')or any(m['Type']not in('bind','tmpfs')
+                                    or m['Type']=='tmpfs'and m['Destination']not in expected_tmpfs for m in mounts)):
+                            raise RuntimeError('exact initial custody helper recipe/ROI differs')
+                        witness=item.get('ImageManifestDescriptor')or{}
+                        if item['Image']!=selected['Id']and(item['Image']!=image_digest or any(witness.get(k)!=(selected.get('Descriptor')or{}).get(k)for k in('digest','mediaType','size','platform'))):
+                            raise RuntimeError('custody helper selected image witness differs')
+                        return item
+                    if action=='prepare' and prior_custody is not None:
+                        prior_rows=json.loads((custody_retry_evidence/'custody-prepare-created.stdout').read_bytes())
+                        prior_argv=json.loads((custody_retry_evidence/'custody-prepare-create.invocation.json').read_bytes())['argv']
+                        if len(prior_rows)!=1 or prior_argv!=target:raise RuntimeError('registered Created helper recipe changed')
+                        original=prior_rows[0];helper_id=original['Id']
+                        if not re.fullmatch('[0-9a-f]{64}',helper_id):raise RuntimeError('registered helper full CID malformed')
+                        current=observed('retry-registered-created');held()
+                        zero='0001-01-01T00:00:00Z'
+                        if (any(current.get(key)!=original.get(key)for key in
+                                ('Id','Name','Created','Config','HostConfig','Mounts','NetworkSettings','Image','ImageManifestDescriptor','Platform','Path','Args','State'))
+                                or current['State']['Status']!='created' or current['State']['Running']is not False
+                                or current['State']['Pid']!=0 or current['State']['StartedAt']!=zero
+                                or current['State']['FinishedAt']!=zero or current['State']['ExitCode']!=0):
+                            raise RuntimeError('registered helper no longer exact unstarted Created identity')
+                        capture('custody-prepare-retry-exact-created-remove',['docker','rm',helper_id])
+                    helper_id=capture('custody-'+action+'-create',target)[0].decode().strip()
+                    if not re.fullmatch('[0-9a-f]{64}',helper_id):raise RuntimeError('custody helper full CID malformed')
+                    observed('created');held()
+                    output,code=capture('custody-'+action+'-actual',['docker','start','-a',*(['-i']if body is not None else[]),helper_id],input_bytes=body,check=False,timeout=60)
+                    result=observed('completed');held()
+                    if code!=0 or result['State']['Running']is not False or result['State']['ExitCode']!=0:
+                        if result['State']['Running']is True:
+                            # Bound only this already registered exact helper;
+                            # no further instance writes may outlive host FD.
+                            observed('before-uncertain-helper-termination')
+                            capture('custody-'+action+'-uncertain-stop',['docker','kill','--signal','KILL',helper_id],check=False)
+                        raise RuntimeError('initial custody helper rejected; retain exact layer without repair')
+                    observed('before-exact-remove')
+                    capture('custody-'+action+'-exact-remove',['docker','rm',helper_id])
+                    return output
+                request=helper('request')
+                (evidence/'initial-request-sha256.txt').write_text(hashlib.sha256(request).hexdigest()+'\n')
+                helper('prepare',request)
+                helper('validate',request)
+                held()
+                after=json.loads((state/'instance.json').read_bytes())
+                if set(after)!=set(info)|{'local_recovery_custody','local_recovery_inventory'}or any(after[key]!=value for key,value in info.items()):
+                    raise RuntimeError('initial helper changed unexpected authority metadata')
+                for name,value in before.items():
+                    if name!='instance.json'and hashlib.sha256(_bounded_file(state/name,1024*1024,private=name not in public_certs)).hexdigest()!=value['sha256']:
+                        raise RuntimeError('initial helper changed pre-existing key/config bytes')
+                (evidence/'initial-custody-commit.json').write_text(json.dumps({'existing_21_files_preserved_except_legitimate_journal_commit':True,
+                    'actual_original_host_FD_still_held':True,'no_established_backfill':True,'request_sha256':hashlib.sha256(request).hexdigest()},indent=2))
+                info=after
+            finally:os.close(fd)
+            (evidence/'initial-host-FD-released-before-public-start.json').write_text(json.dumps({'released':True,
+                'next_supported_start_must_acquire_its_own_FD':True},indent=2))
+        capture('supported-start',[*cli,'start',str(state)],timeout=1200)
+        running=guard('running-current');started=running['State']['StartedAt']
+        if not running['State']['Running'] or running['State'].get('Health',{}).get('Status')!='healthy':raise RuntimeError('actual global health unavailable')
+        public_config=document('actual-unclaimed-three-field-config',['docker','exec','--user','1800:1800',cid,
+            'curl','--fail','--silent','--show-error','http://127.0.0.1:8000/api/v1/auth/config'])
+        if public_config!={'schema_version':1,'mode':'local','setup_state':'required'}:
+            raise RuntimeError('legitimate fresh unclaimed public state was not observed')
+        capture('protected-root-copy',['docker','exec','--user','0:0',cid,'/usr/bin/env','-i','PATH=/usr/bin:/bin','LC_ALL=C',
+            '/usr/local/bin/python3.14','-I','-S','/usr/local/libexec/volt-check-protected-python.py'])
+        script='import json,os,sys;sys.path.insert(0,"/usr/local/lib/volt-private");import volt_route_check_records as r\nwith r.locked_store(role="root") as s:\n l=s.read_launch();t=s.read_launch_status();v=s.read_supervisor();r.validate_launch_processes(l)\n assert l["readiness_profile"]=="normal_local_loopback" and s.read_broker_ready() and not s.read_verification_health() and s.read_boot() is None and s.read_seen() is None\n print(json.dumps({"launch":l,"status":t,"supervisor":v,"broker_ready":True,"verification_health":False,"boot_absent":True},sort_keys=True))'
+        active=document('actual-original-launch',['docker','exec','--user','0:0',cid,'/usr/bin/env','-i','PATH=/usr/bin:/bin','LC_ALL=C',
+            '/usr/local/bin/python3.14','-I','-S','-c',script])
+        uid_script='import hashlib,json,os;from pathlib import Path;from uvm.auth.route_check import _load_records;r=_load_records();p=Path(r.__file__);assert os.geteuid()==1800;print(json.dumps({"uid":os.geteuid(),"file":str(p),"sha256":hashlib.sha256(p.read_bytes()).hexdigest()}))'
+        physical=document('actual-API-UID-protected-copy',['docker','exec','--user','1800:1800',cid,'/opt/uvm/venv/bin/python','-c',uid_script])
+        if physical['file']!='/usr/local/lib/volt-private/volt_route_check_records.py' or physical['sha256']!=sha(ROOT/'uvm/auth/route_check_records.py'):
+            raise RuntimeError('API/root canonical physical bytes differ')
+        capture('supported-controlled-stop',[*cli,'stop',str(state)],timeout=650)
+        stopped=guard('stopped-current')
+        if (stopped['State']['Running']is not False or stopped['State']['StartedAt']!=started
+                or stopped['State']['ExitCode']!=0 or stopped['State']['OOMKilled']is not False or stopped['State']['Error']):
+            raise RuntimeError('current controlled container completion failed')
+        waited,_=capture('actual-current-Docker-wait',['docker','wait',cid],timeout=15)
+        if waited!=b'0\n':raise RuntimeError('current Docker kernel completion is not zero')
+        tar_raw,_=capture('stopped-private-records',['docker','cp',cid+':/run/uvm-route-check/.','-'],timeout=10,limit=128*1024)
+        records=delivery.stopped_tar_records(tar_raw)
+        launch=wire.validate_record('launch',records['launch.json']);status=wire.validate_record('launch_status',records['launch-status.json'])
+        if launch!=active['launch'] or any(wire.canonical(v)!=records[n] for n,v in (('launch.json',launch),('launch-status.json',status))):raise RuntimeError('stopped launch/canonical identity changed')
+        log_raw,_=capture('bounded-current-private-logs',['docker','logs','--tail','256','--since',started,cid],timeout=10,limit=1024*1024)
+        matches=[]
+        for line in log_raw.splitlines(keepends=True):
+            if b'volt_main_api_completion_v1' not in line:continue
+            if not line.endswith(b'\n') or len(line)>2049:raise RuntimeError('private completion line truncated/oversized')
+            raw=line[:-1];envelope=wire.validate_completion_envelope(raw,launch=launch,status=status)
+            matches.append(envelope)
+        if len(matches)!=1:raise RuntimeError('exactly ONE current private completion required')
+        # This comparison executes in the SAME immutable image's protected
+        # module, not a source-tree shared-module substitution. Independent
+        # expected config comes from the pre-recorded local build metadata.
+        from uvm.installer.offline_lifecycle import project_observation
+        from uvm.installer.stopped_transport import encode as encode_stop
+        after=guard('cold-proof-post-current')
+        initial_projection=project_observation({'image':[selected],'containers':[stopped],'volumes':[],'networks':[]})['containers'][0]
+        post_projection=project_observation({'image':[selected],'containers':[after],'volumes':[],'networks':[]})['containers'][0]
+        outcomes=dict.fromkeys(('docker_wait_producer_exit','docker_wait_filter_exit','routing_tar_producer_exit',
+            'routing_tar_filter_exit','docker_logs_producer_exit','docker_logs_filter_exit','post_inspect_producer_exit','post_inspect_filter_exit'),0)
+        # Actual producers above all exited0; actual parser/shared shape checks
+        # above completed. No boolean-only candidate can replace those records.
+        proof=encode_stop(initial_projection,waited,tar_raw,wire.canonical(matches[0]),post_projection,outcomes).encode()
+        runtime={'container_id':cid,'started_at':started,'image':{'kind':info['image_admission']['id_kind'],
+            'id':info['image_admission']['id'],'config_id':image_config_id},
+            'resources_sha256':info['local_start_admission']['resources_sha256']}
+        code='import sys,json;from uvm.installer import stopped_transport as t,route_check as r\nvalue,tar,envelope=t.decode(sys.stdin.buffer.read(262145).decode("utf-8"))\nexpected='+repr(runtime)+'\nassert value["queried_container_id"]==expected["container_id"] and value["queried_started_at"]==expected["started_at"]\nprint(json.dumps(r.validate_stopped_snapshot(tar,expected,envelope,0),sort_keys=True))'
+        name=project+'-cold-reader'
+        target=['docker','create','--platform','linux/amd64','--pull=never','--name',name,'--restart=no','--network','none',
+            '--read-only','--cap-drop=ALL','--security-opt=no-new-privileges','--user',f'{os.getuid()}:{os.getgid()}',
+            '--label','volt.delivery.test-owner='+owner,'--label','volt.delivery.project='+project,'--label','volt.delivery.role=development-cold-reader',
+            '--tmpfs','/tmp:rw,noexec,nosuid,size=16m','--tmpfs','/app/media:rw,noexec,nosuid,nodev,size=1m',
+            '--tmpfs','/opt/uvm/state:rw,noexec,nosuid,nodev,size=1m','--tmpfs','/var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=1m',
+            '-i','--entrypoint','/opt/uvm/venv/bin/python',immutable,'-c',code]
+        reader_id=capture('native-cold-reader-create',target)[0].decode().strip()
+        if not re.fullmatch('[0-9a-f]{64}',reader_id):raise RuntimeError('full cold-reader CID malformed')
+        def cold_reader_guard(label):
+            rows=document('native-cold-reader-'+label,['docker','inspect',reader_id])
+            if len(rows)!=1:raise RuntimeError('cold-reader identity ambiguous')
+            r=rows[0];h=r['HostConfig'];c=r['Config']
+            if (r['Id']!=reader_id or r['Name']!='/'+name or c['Image']!=immutable
+                    or c['User']!=f'{os.getuid()}:{os.getgid()}' or c['Entrypoint']!=['/opt/uvm/venv/bin/python'] or c['Cmd']!=['-c',code]
+                    or c['Labels'].get('volt.delivery.test-owner')!=owner or c['Labels'].get('volt.delivery.project')!=project
+                    or c['Labels'].get('volt.delivery.role')!='development-cold-reader'
+                    or h['NetworkMode']!='none' or h['ReadonlyRootfs']is not True or h['Privileged']is not False
+                    or h.get('CapAdd')not in(None,[]) or h.get('CapDrop')!=['ALL'] or h.get('PortBindings')not in(None,{})
+                    or h['RestartPolicy']['Name']!='no' or h.get('SecurityOpt')not in(['no-new-privileges'],['no-new-privileges:true'])
+                    or h.get('Tmpfs')!={'/tmp':'rw,noexec,nosuid,size=16m','/app/media':'rw,noexec,nosuid,nodev,size=1m',
+                        '/opt/uvm/state':'rw,noexec,nosuid,nodev,size=1m','/var/lib/postgresql/data':'rw,noexec,nosuid,nodev,size=1m'}
+                    or any(m['Type']!='tmpfs'for m in r['Mounts'])):
+                raise RuntimeError('cold-reader fixed no-state recipe differs')
+            witness=r.get('ImageManifestDescriptor')or{}
+            if r['Image']!=selected['Id']and(r['Image']!=image_digest or any(witness.get(k)!=(selected.get('Descriptor')or{}).get(k)for k in('digest','mediaType','size','platform'))):
+                raise RuntimeError('cold-reader selected image witness differs')
+            return r
+        cold_reader_guard('created')
+        capture('native-cold-reader-actual',['docker','start','-a','-i',reader_id],input_bytes=proof,timeout=20)
+        cold=cold_reader_guard('completed')
+        if cold['State']['Running']is not False or cold['State']['ExitCode']!=0:raise RuntimeError('native cold-reader rejected current completion')
+        cold_reader_guard('before-exact-remove');capture('native-cold-reader-exact-remove',['docker','rm',reader_id])
+        if capture('final-server',['docker','info','--format','{{.ID}}'])[0].decode().strip()!=server:raise RuntimeError('daemon changed')
+        (evidence/'outcome.json').write_text(json.dumps({'scope':plan['scope'],'actual_global_health':True,
+            'actual_current_container_wait':0,'same_launch_and_started_at':True,'canonical_private_completion':matches[0],
+            'installation_unclaimed':True,'state_and_resources_retained':str(state),
+            'candidate_files_alone_not_authority':True,'public_offline_backup_not_executed':True,'same_image_strict_four_argument_cold_reader':True,
+            'development_CLI_marker_gate_not_public_installer_acceptance':True},indent=2))
+    except BaseException as error:
+        (evidence/'failure.json').write_text(json.dumps({'failed_step':last_step,'error_type':type(error).__name__,
+            'private_state_retained':str(state),'no_acceptance':True},indent=2))
+        # No force removal, state repair or adoption. Preserve the first failure
+        # and attempt ONLY the supported stop after exact registered guards.
+        if info is not None:
+            try:
+                guard('failure-before-supported-stop')
+                capture('failure-supported-stop',[*cli,'stop',str(state)],timeout=650,check=False)
+                capture('failure-bounded-logs',['docker','logs','--tail','256',cid],timeout=10,check=False)
+            except BaseException:
+                (evidence/'cleanup-retained.txt').write_text('supported guarded stop unavailable; retain exact fixture\n')
+        raise
+    finally:os.umask(previous_umask)
+
+
+def qualify_protected_launch_component(*, image: str, image_digest: str, source_revision: str,
+        source_snapshot: str, component: Path, evidence: Path) -> None:
+    """Maintained fresh local IMAGE exec/COPY component, never signed admission."""
+    if not re.fullmatch(r'volt-easy-delivery-route-component:[0-9a-f]{12}', image):
+        raise RuntimeError('only registered fresh local component image allowed')
+    endpoint = os.environ.get('DOCKER_HOST')
+    if not endpoint:
+        context = os.environ.get('DOCKER_CONTEXT') or run('protected-component-context',
+            ['docker','context','show'], evidence).stdout.strip()
+        endpoint = run('protected-component-endpoint',['docker','context','inspect',context,
+            '--format','{{(index .Endpoints "docker").Host}}'],evidence).stdout.strip()
+    if not endpoint.startswith('unix://'):
+        raise RuntimeError('fresh component requires local Unix daemon')
+    server=run('protected-component-server',['docker','info','--format','{{.ID}}'],evidence).stdout.strip()
+    rows=json.loads(run('protected-component-image',['docker','image','inspect','--platform','linux/amd64',image],evidence).stdout)
+    if len(rows)!=1 or rows[0]['Os']!='linux'or rows[0]['Architecture']!='amd64':
+        raise RuntimeError('fresh component platform differs')
+    labels=rows[0].get('Config',{}).get('Labels')or{}
+    if labels.get('org.opencontainers.image.revision')!=source_revision or labels.get('org.volt.compose.source-snapshot')!=source_snapshot:
+        raise RuntimeError('fresh component image source differs')
+    if not re.fullmatch(r'sha256:[0-9a-f]{64}',image_digest):
+        raise RuntimeError('fresh build index digest malformed')
+    immutable='volt-easy-delivery-route-component@'+image_digest
+    if rows[0].get('RepoDigests',[]).count(immutable)!=1:
+        raise RuntimeError('fresh build immutable repository digest absent/contradictory')
+    selected=rows[0].get('Descriptor')or{}
+    if (selected.get('digest')!=rows[0]['Id'] or selected.get('mediaType')!='application/vnd.oci.image.manifest.v1+json'
+            or selected.get('platform')!={'os':'linux','architecture':'amd64'} or type(selected.get('size'))is not int or selected['size']<=0):
+        raise RuntimeError('fresh build selected child descriptor unavailable')
+    token=uuid.uuid4().hex;name='volt-easy-delivery-protected-launch-'+token
+    command=['docker','create','--platform','linux/amd64','--pull=never','--name',name,
+        '--network','none','--user','0:0','--security-opt','no-new-privileges',
+        '--label','volt.delivery.test-owner='+token,'--label','volt.delivery.role=protected-launch-component',
+        '--tmpfs','/tmp:rw,noexec,nosuid,size=8m','--tmpfs','/app/media:rw,noexec,nosuid,nodev,size=1m',
+        '--tmpfs','/opt/uvm/state:rw,noexec,nosuid,nodev,size=1m','--tmpfs','/var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=1m',
+        '--mount',f'type=bind,src={component},dst=/run/component/driver.py,readonly',
+        '--entrypoint','/usr/bin/env',immutable,'-i','PATH=/usr/bin:/bin','LC_ALL=C',
+        '/usr/local/bin/python3.14','-I','-S','/run/component/driver.py']
+    cid=run('protected-component-create',command,evidence).stdout.strip()
+    if not re.fullmatch('[0-9a-f]{64}',cid):raise RuntimeError('registered component CID malformed')
+    def inspect(label):
+        row=json.loads(run(label,['docker','inspect',cid,'--format',
+            '{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Config.Image}},"engine_image":{{json .Image}},"descriptor":{{json (index . "ImageManifestDescriptor")}},"labels":{{json .Config.Labels}},"owner":{{json (index .Config.Labels "volt.delivery.test-owner")}},"role":{{json (index .Config.Labels "volt.delivery.role")}},"state":{{json .State}},"mounts":{{json .Mounts}},"tmpfs":{{json .HostConfig.Tmpfs}},"network":{{json .HostConfig.NetworkMode}},"privileged":{{json .HostConfig.Privileged}},"caps_add":{{json .HostConfig.CapAdd}},"caps_drop":{{json .HostConfig.CapDrop}},"ports":{{json .HostConfig.PortBindings}}}'],evidence).stdout)
+        if (row['id']!=cid or row['name']!='/'+name or row['image']!=immutable or row['owner']!=token
+                or row['role']!='protected-launch-component' or row['network']!='none' or row['privileged']is not False
+                or row['descriptor']!=selected or row['engine_image']not in(image_digest,selected['digest'])
+                or row['labels'].get('org.opencontainers.image.revision')!=source_revision
+                or row['labels'].get('org.volt.compose.source-snapshot')!=source_snapshot
+                or row['caps_add']not in(None,[])or row['caps_drop']not in(None,[])or row['ports']not in(None,{})
+                or len(row['mounts'])!=1 or row['mounts'][0]['Type']!='bind'
+                or row['mounts'][0]['Source']!=str(component)or row['mounts'][0]['Destination']!='/run/component/driver.py'
+                or row['mounts'][0]['RW']is not False):
+            raise RuntimeError('fresh component identity/no-state/capability shape differs')
+        _validate_route_visibility_tmpfs({'mounts':[],'tmpfs':row['tmpfs']})
+        return row
+    try:
+        inspect('protected-component-before')
+        run('protected-component-start',['docker','start','-a',cid],evidence,check=False)
+        stopped=inspect('protected-component-after')
+        if stopped['state']['Running']or stopped['state']['ExitCode']!=0:
+            raise RuntimeError('fresh protected component assertion failed; original output retained')
+        value=json.loads((evidence/'protected-component-start.stdout').read_text())
+        (evidence/'protected-component-outcome.json').write_text(json.dumps(value,indent=2))
+    finally:
+        inspect('protected-component-before-exact-cleanup')
+        if run('protected-component-final-server',['docker','info','--format','{{.ID}}'],evidence).stdout.strip()!=server:
+            raise RuntimeError('fresh component daemon changed before cleanup')
+        run('protected-component-exact-remove',['docker','rm','-f',cid],evidence)
+
+def _validate_route_visibility_tmpfs(value: dict) -> None:
+    expected = {'/tmp':'rw,noexec,nosuid,size=8m', '/app/media':'rw,noexec,nosuid,nodev,size=1m',
+        '/opt/uvm/state':'rw,noexec,nosuid,nodev,size=1m',
+        '/var/lib/postgresql/data':'rw,noexec,nosuid,nodev,size=1m'}
+    mounts = value['mounts']
+    if (value['tmpfs'] != expected or not isinstance(mounts, list)
+            or len({m.get('Destination') for m in mounts}) != len(mounts)
+            or any(m.get('Type') != 'tmpfs' or m.get('Destination') not in expected for m in mounts)):
+        raise RuntimeError('component tmpfs mask/actual mount shape differs')
+
+def qualify_route_process_visibility(*, admission: dict, selected: dict, evidence: Path,
+                                     retained_evidence: Path | None = None) -> None:
+    """Actual Linux permission prerequisite ONLY; no app/DB/TLS or route claim.
+
+    Uses the retained independently admitted native runtime, default runtime
+    capabilities, no state/ports/network and a fixed own UID1800 sleep child.
+    New controller source and OLD runtime source are recorded separately.
+    """
+    endpoint = os.environ.get('DOCKER_HOST')
+    if not endpoint:
+        context = os.environ.get('DOCKER_CONTEXT') or run('route-visibility-context',
+            ['docker', 'context', 'show'], evidence).stdout.strip()
+        endpoint = run('route-visibility-endpoint', ['docker', 'context', 'inspect', context,
+            '--format', '{{(index .Endpoints "docker").Host}}'], evidence).stdout.strip()
+    if not endpoint.startswith('unix://'):
+        raise RuntimeError('route process prerequisite requires local Unix daemon')
+    server = run('route-visibility-server', ['docker', 'info', '--format', '{{.ID}}'], evidence).stdout.strip()
+    image = admission['image_reference']; platform = admission['platform']
+    if platform != 'linux/amd64' or not re.fullmatch(r'127\.0\.0\.1:46150/volt@sha256:[0-9a-f]{64}', image):
+        raise RuntimeError('route process prerequisite requires owned admitted AMD64 runtime')
+    rows = json.loads(run('route-visibility-native-image',
+        ['docker', 'image', 'inspect', '--platform', platform, image], evidence).stdout)
+    if len(rows) != 1:
+        raise RuntimeError('native image is ambiguous')
+    row = rows[0]; descriptor = row.get('Descriptor') or {}; labels = row.get('Config', {}).get('Labels') or {}
+    if (row.get('Id') not in (admission['image_config_id'], admission['image_reference'].split('@')[1])
+            and descriptor.get('digest') != admission['image_id']):
+        raise RuntimeError('native runtime lacks selected object witness')
+    if (labels.get('org.opencontainers.image.revision') != admission['source_commit']
+            or labels.get('org.volt.compose.source-snapshot') != admission['source_snapshot']
+            or row.get('Os') != 'linux' or row.get('Architecture') != 'amd64'):
+        raise RuntimeError('native runtime source/platform mismatch')
+    script = r'''import os,subprocess,time,signal,json
+signal.alarm(15)
+expected=['/opt/uvm/venv/bin/python','-c','import time;time.sleep(30)']
+child=subprocess.Popen(['setpriv','--reuid=1800','--regid=1800','--init-groups',*expected],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+result={'root_uid':os.geteuid(),'child_uid_gid':None,'exact_argv':False,'exact_executable':False,'exe_observation':'not_attempted','own_child_cleanup':False}
+try:
+ deadline=time.monotonic()+5
+ while time.monotonic()<deadline:
+  if child.poll()is not None:raise RuntimeError('own child exited')
+  status=open('/proc/'+str(child.pid)+'/status').read()
+  ids={line.split(':',1)[0]:line.split(':',1)[1].split()for line in status.splitlines()if ':'in line}
+  if ids.get('Uid')==['1800']*4 and ids.get('Gid')==['1800']*4:break
+  time.sleep(.01)
+ else:raise RuntimeError('own child did not reach fixed UID')
+ result['child_uid_gid']=[1800,1800]
+ result['cap_eff']=next(line.split(':',1)[1].strip()for line in open('/proc/self/status')if line.startswith('CapEff:'))
+ argv=[x.decode()for x in open('/proc/'+str(child.pid)+'/cmdline','rb').read(8193).split(b'\0')if x]
+ result['exact_argv']=argv==expected
+ try:
+  actual=os.stat('/proc/'+str(child.pid)+'/exe');declared=os.stat('/opt/uvm/venv/bin/python')
+  result['exact_executable']=(actual.st_dev,actual.st_ino)==(declared.st_dev,declared.st_ino)
+  result['exe_observation']='readable'
+ except PermissionError:result['exe_observation']='permission_denied'
+ except OSError:result['exe_observation']='unavailable'
+finally:
+ if child.poll()is None:child.terminate()
+ try:child.wait(timeout=5)
+ except subprocess.TimeoutExpired:child.kill();child.wait(timeout=2)
+ result['own_child_cleanup']=True
+print(json.dumps(result,sort_keys=True))
+raise SystemExit(0 if result['root_uid']==0 and result['child_uid_gid']==[1800,1800]and result['exact_argv']and result['exact_executable']else 2)
+'''
+    token = uuid.uuid4().hex
+    if retained_evidence is not None:
+        original = json.loads((retained_evidence / 'route-visibility-create.argv.json').read_text())
+        labels = [original[i+1] for i, arg in enumerate(original[:-1]) if arg == '--label']
+        owners = [value.split('=',1)[1] for value in labels if value.startswith('volt.delivery.test-owner=')]
+        if len(owners) != 1 or not re.fullmatch('[0-9a-f]{32}', owners[0]):
+            raise RuntimeError('exact registered component owner unavailable')
+        token = owners[0]
+    name = 'volt-easy-delivery-route-visibility-' + token
+    create = ['docker', 'create', '--platform', platform, '--pull=never', '--name', name,
+        '--network', 'none', '--read-only', '--security-opt', 'no-new-privileges', '--user', '0:0',
+        '--label', 'volt.delivery.test-owner=' + token, '--label', 'volt.delivery.role=route-process-visibility',
+        '--tmpfs', '/tmp:rw,noexec,nosuid,size=8m',
+        '--tmpfs', '/app/media:rw,noexec,nosuid,nodev,size=1m',
+        '--tmpfs', '/opt/uvm/state:rw,noexec,nosuid,nodev,size=1m',
+        '--tmpfs', '/var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=1m',
+        '--entrypoint', '/opt/uvm/venv/bin/python', image, '-c', script]
+    if retained_evidence is None:
+        cid = run('route-visibility-create', create, evidence).stdout.strip()
+    else:
+        if original != create or (retained_evidence / 'route-visibility-server.stdout').read_text().strip() != server:
+            raise RuntimeError('registered original component argv/daemon differs')
+        cid = (retained_evidence / 'route-visibility-create.stdout').read_text().strip()
+        (evidence / 'registered-original-binding.json').write_text(json.dumps({
+            'original_evidence': str(retained_evidence), 'original_argv_sha256': sha(retained_evidence / 'route-visibility-create.argv.json'),
+            'fullCID': cid, 'same_original_create_argv': True, 'same_daemon': True}, indent=2))
+    if not re.fullmatch(r'[0-9a-f]{64}', cid):
+        raise RuntimeError('registered component fullCID unavailable')
+    def inspect(label):
+        value = json.loads(run(label, ['docker', 'inspect', cid, '--format',
+            '{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Config.Image}},"descriptor":{{json (index . "ImageManifestDescriptor")}},"owner":{{json (index .Config.Labels "volt.delivery.test-owner")}},"role":{{json (index .Config.Labels "volt.delivery.role")}},"state":{{json .State}},"mounts":{{json .Mounts}},"network":{{json .HostConfig.NetworkMode}},"readonly":{{json .HostConfig.ReadonlyRootfs}},"privileged":{{json .HostConfig.Privileged}},"cap_add":{{json .HostConfig.CapAdd}},"cap_drop":{{json .HostConfig.CapDrop}},"ports":{{json .HostConfig.PortBindings}},"tmpfs":{{json .HostConfig.Tmpfs}},"entrypoint":{{json .Config.Entrypoint}},"command":{{json .Config.Cmd}},"user":{{json .Config.User}}}'], evidence).stdout)
+        if (value['id'] != cid or value['name'] != '/' + name or value['image'] != image
+                or value['owner'] != token or value['role'] != 'route-process-visibility'
+                or value['descriptor'] != selected or selected.get('digest') != admission['image_id']
+                or value['network'] != 'none' or value['readonly'] is not True or value['privileged'] is not False
+                or value['cap_add'] not in (None, []) or value['cap_drop'] not in (None, [])
+                or value['ports'] not in (None, {})
+                or value['user'] != '0:0' or value['entrypoint'] != ['/opt/uvm/venv/bin/python']
+                or value['command'] != ['-c', script]
+):
+            raise RuntimeError('component ownership/default-capability/no-state shape differs')
+        _validate_route_visibility_tmpfs(value)
+        return value
+    try:
+        before = inspect('route-visibility-before-start')
+        if before['state']['Status'] != 'created' or before['state']['Running'] or before['state']['Pid'] != 0:
+            raise RuntimeError('ONLY never-started registered component may execute once')
+        run('route-visibility-start-attached', ['docker', 'start', '-a', cid], evidence, check=False)
+        stopped = inspect('route-visibility-after')
+        if stopped['state']['Running'] or stopped['state']['ExitCode'] not in (0, 2):
+            raise RuntimeError('component failed outside exact visibility assertion')
+        result = json.loads((evidence / 'route-visibility-start-attached.stdout').read_text())
+        result.update(runtime_source=admission['source_commit'], runtime_snapshot=admission['source_snapshot'],
+            claim='Linux permission prerequisite only; not new root-helper/API/backend/TLS or installed-state qualification',
+            outcome='VISIBLE' if stopped['state']['ExitCode']==0 else 'BLOCKED_PERMISSION_PREREQUISITE')
+        (evidence / 'route-process-visibility-outcome.json').write_text(json.dumps(result, indent=2))
+    finally:
+        inspect('route-visibility-before-exact-cleanup')
+        if run('route-visibility-final-server', ['docker', 'info', '--format', '{{.ID}}'], evidence).stdout.strip() != server:
+            raise RuntimeError('component daemon changed before cleanup')
+        run('route-visibility-exact-remove', ['docker', 'rm', '-f', cid], evidence)
+    if result['outcome'] != 'VISIBLE':
+        raise RuntimeError('root publisher cannot prove the admitted executable with normal runtime permissions')
+
 def qualify_runtime_custody(*, state: Path, project: str, admission: dict, evidence: Path) -> None:
     """Prove the real API UID reads only the live, read-only, host-owned fence."""
     container = project + '-volt-1'
@@ -1773,6 +2545,1064 @@ def resume_preserved_initial_fixture(*, private: Path, evidence: Path, admission
         'original_initial_private_bytes_preserved_except_existing_env_transition':True,'original_initial_request_and_pin_preserved':True,
         'exact_stage_inode_renamed_to_originals':True,'normal_health':True,'stopped_retained_fixture':str(private),
         'no_accounts_browser_or_SQL':True,'instrumentation':'private bounded readiness withholding; no production fault switch'},indent=2))
+
+
+@contextmanager
+def initial_resume_private_fault(*, state: Path, retention: Path, case: str):
+    """TEST ONLY fixed reversible faults; originals are moved, never recreated."""
+    import fcntl
+    from uvm.installer.lock import _bounded_file
+    choices={'missing-key':('secrets/local-auth-key',None),
+        'changed-key':('secrets/local-auth-key','key'),
+        'changed-config':('local-auth.json','config'),
+        'unsafe-key-mode':('secrets/local-auth-key','mode'),
+        'missing-journal':('instance.json',None),
+        'missing-pin':('instance.json','pin'),
+        'missing-originals':(None,None)}
+    if case not in choices:raise ValueError('unsupported fixed initial-resume private fault')
+    relative,alter=choices[case]
+    target=state/relative if relative else state.parent/(state.name+'.installer-artifacts')/'originals'
+    held=retention/'original';replacement=None
+    # This host controller guard is test isolation, not a product admission.
+    # The subsequent public command obtains its own actual product lock FD.
+    @contextmanager
+    def controller_guard():
+        fd=os.open(state/'.install.lock',os.O_RDWR|os.O_NONBLOCK|os.O_NOFOLLOW)
+        try:
+            info=os.fstat(fd);current=(state/'.install.lock').lstat()
+            if (not stat.S_ISREG(info.st_mode)or info.st_nlink!=1 or info.st_uid!=os.getuid()
+                    or stat.S_IMODE(info.st_mode)!=0o600 or info.st_size!=0
+                    or (info.st_dev,info.st_ino)!=(current.st_dev,current.st_ino)):
+                raise RuntimeError('test controller lock custody differs')
+            fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            yield
+        finally:os.close(fd)
+    with controller_guard():
+        info=target.lstat()
+        if (target.is_symlink()or info.st_uid!=os.getuid()or stat.S_IMODE(info.st_mode)!=(0o600 if relative else 0o700)
+                or (relative and(not stat.S_ISREG(info.st_mode)or info.st_nlink!=1))
+                or (not relative and not stat.S_ISDIR(info.st_mode))):
+            raise RuntimeError('original fixed test input custody differs')
+        original=_bounded_file(target,1024*1024,private=True)if relative else None
+        identity=(info.st_dev,info.st_ino,info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode))
+        changed=None
+        if alter:
+            if alter=='key':
+                if len(original)!=32:raise RuntimeError('original local key size differs')
+                changed=bytes([original[0]^1])+original[1:]
+            elif alter=='config':changed=original+b'\n'
+            elif alter=='mode':changed=original
+            else:
+                value=json.loads(original);del value['installer_admission']
+                changed=json.dumps(value,sort_keys=True).encode()+b'\n'
+        retention.mkdir(mode=0o700)
+        os.rename(target,held)
+        if alter:
+            fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+            with os.fdopen(fd,'wb')as stream:stream.write(changed);stream.flush();os.fsync(stream.fileno())
+            if alter=='mode':target.chmod(0o640)
+            changed_info=target.lstat();replacement=(changed_info.st_dev,changed_info.st_ino,digest_bytes(changed),stat.S_IMODE(changed_info.st_mode))
+        for parent in (target.parent,retention):
+            fd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            try:os.fsync(fd)
+            finally:os.close(fd)
+    try:
+        yield {'case':case,'original_inode':identity[:2],'original_mode':oct(identity[4]),
+            'original_sha256':digest_bytes(original)if relative else None,
+            'changed_sha256':replacement[2]if replacement else None}
+    finally:
+        with controller_guard():
+            current=held.lstat()
+            if (current.st_dev,current.st_ino,current.st_uid,current.st_gid,stat.S_IMODE(current.st_mode))!=identity:
+                raise RuntimeError('retained original changed; no restoration/adoption authorised')
+            if replacement is None:
+                if target.exists()or target.is_symlink():raise RuntimeError('missing input was recreated; never overwrite/adopt it')
+            else:
+                current=target.lstat()
+                if ((current.st_dev,current.st_ino)!=(replacement[0],replacement[1])or
+                        stat.S_IMODE(current.st_mode)!=replacement[3] or
+                        digest_bytes(_bounded_file(target,1024*1024,private=False))!=replacement[2]):
+                    raise RuntimeError('test replacement changed; never remove an unexpected input')
+                target.unlink()
+            os.rename(held,target)
+            restored=target.lstat()
+            if ((restored.st_dev,restored.st_ino,restored.st_uid,restored.st_gid,stat.S_IMODE(restored.st_mode))!=identity
+                    or relative and _bounded_file(target,1024*1024,private=True)!=original):
+                raise RuntimeError('original input restoration differs')
+            for parent in (target.parent,retention):
+                fd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+                try:os.fsync(fd)
+                finally:os.close(fd)
+
+
+def digest_bytes(raw: bytes) -> str:
+    return 'sha256:'+hashlib.sha256(raw).hexdigest()
+
+
+def qualify_initial_private_denials(*, private: Path, evidence: Path, admission: dict) -> None:
+    """Six fixed authority-input boundaries on the SAME stopped resumed fixture.
+
+    No new install/account, ack/capability edits, image change or pin backfill.
+    Controller Python performs deliberate reversible TEST faults only. Target
+    commands remain the existing externally authenticated minimal-host start.
+    """
+    from uvm.installer.lock import _bounded_file
+    state=private/'instance';raw=_bounded_file(state/'instance.json',1024*1024,private=True);info=json.loads(raw)
+    if (info.get('established')is not True or not info.get('local_recovery_acknowledgement')
+            or info['image']!=admission['image_reference']):raise RuntimeError('same established resumed fixture required')
+    entry=private/'trusted-offline-entry.sh'
+    if entry.is_symlink()or not entry.is_file():raise RuntimeError('existing independent fixed entry missing')
+    environment=trusted_launcher_environment(private/'minimal-host-path',admission)
+    paths=set(info['installer_initial_files'])|set(info['local_recovery_inventory'])|{'instance.json','secrets/local-start-admission/admission.json','secrets/local-restore-fence/fence.json'}
+    def fingerprints():
+        return {name:{'sha256':digest_bytes(_bounded_file(state/name,1024*1024,private=False)),
+            'inode':[(state/name).lstat().st_dev,(state/name).lstat().st_ino],
+            'mode':stat.S_IMODE((state/name).lstat().st_mode)}for name in sorted(paths)}
+    def observed(name, expected_identity=None):
+        template='{"id":{{json .Id}},"reference":{{json .Config.Image}},"owner":{{json (index .Config.Labels "volt.compose.owner-token")}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"state":{{json .State}}}'
+        row=json.loads(run(name,['docker','inspect',info['project']+'-volt-1','--format',template],evidence).stdout)
+        if (row['reference']!=admission['image_reference']or row['owner']!=info['owner_token']
+                or row['project']!=info['project']):
+            raise RuntimeError('exact resumed owned API identity differs')
+        if row['state']['Running']is not False:
+            if expected_identity and row['id']==expected_identity['id']:
+                run(name+'-unexpected-exact-owned-stop',['docker','stop','--time','10',row['id']],evidence,check=False)
+            raise RuntimeError('exact resumed owned API unexpectedly started; negative is NOT accepted')
+        return {key:row[key]for key in ('id','reference')}|{'StartedAt':row['state']['StartedAt'],'Running':False}
+    before=fingerprints();identity=observed('private-denials-before-stopped')
+    expected={'missing-key':('terminal','local auth configuration, encryption key or bootstrap delivery directory is missing or unsafe'),
+        'changed-key':('terminal','local recovery committed fingerprints changed'),
+        'changed-config':('terminal','local recovery committed fingerprints changed'),
+        'missing-journal':('authentication','external offline entry: current selected journal missing'),
+        'missing-pin':('authentication','verifier.py: error: closed original installed-artifact pin is missing or contradicts fixed publisher expectations'),
+        'missing-originals':('terminal','external offline entry: single exact retained stage required')}
+    retention=private/'private-input-test-originals';retention.mkdir(mode=0o700)
+    outcomes=[];auth=private/'public-offline-authentication'
+    for case,(layer,message)in expected.items():
+        if fingerprints()!=before or observed(case+'-before-stopped')!=identity:raise RuntimeError('fixture changed before deliberate test fault')
+        prior=set(auth.iterdir())
+        with initial_resume_private_fault(state=state,retention=retention/case,case=case)as fault:
+            result=run('private-denial-'+case,['sh',str(entry),'start','--directory',str(state)],evidence,env=environment,check=False)
+            after=observed(case+'-after-stopped',identity)
+            new=set(auth.iterdir())-prior
+            diagnostics=result.stderr
+            if layer=='authentication':
+                if len(new)!=1:raise RuntimeError('exact new private authentication record required')
+                record=next(iter(new));diagnostics=_bounded_file(record/'authentication.stderr',65536,private=True).decode()
+            if(result.returncode==0 or after!=identity or message not in diagnostics.splitlines()):
+                raise RuntimeError('private-input denial did not reach exact documented boundary before workers')
+            # The target is still deliberately missing/changed here; all other
+            # observed originals must match before restoring its exact inode.
+            excluded={'missing-key':'secrets/local-auth-key','changed-key':'secrets/local-auth-key',
+                'changed-config':'local-auth.json','missing-journal':'instance.json','missing-pin':'instance.json'}.get(case)
+            for name,value in before.items():
+                if name==excluded:continue
+                data=_bounded_file(state/name,1024*1024,private=False)
+                if digest_bytes(data)!=value['sha256']:raise RuntimeError('public denial mutated another original private input')
+            outcomes.append({**fault,'exit':result.returncode,'actual_failure_layer':layer,
+                'exact_complete_diagnostic_line':message,'API_identity_and_StartedAt_unchanged':True})
+        if fingerprints()!=before:raise RuntimeError('exact original bytes/modes/inodes not restored')
+    (evidence/'initial-private-denials-outcome.json').write_text(json.dumps({'status':'passed','cases':outcomes,
+        'observed_fingerprints':before,'same_stopped_API':identity,'original_bytes_modes_inodes_restored':True,
+        'scope':'six deliberately reversible TEST faults, actual signed minimal-host public start denials; fixed host-readable inputs only, runtime capability coverage NOT claimed; no account/SQL/ack/cap changes'},indent=2))
+
+
+def guard_extra_qualification_network(row: dict, *, network_id: str, owner: str,
+        project: str, test_id: str, api_id: str) -> None:
+    """TEST cleanup guard: never disconnect/remove foreign or original resources."""
+    if (row.get('Id')!=network_id or row.get('Name')!='volt-easy-delivery-extra-'+test_id
+            or row.get('Driver')!='bridge' or row.get('Internal')is not True
+            or row.get('Options')not in(None,{}, {'com.docker.network.enable_ipv4':'true','com.docker.network.enable_ipv6':'false'})
+            or row.get('Labels')!={'volt.compose.owner-token':owner,
+                'volt.delivery.project':project,'volt.delivery.test':test_id}
+            or not isinstance(row.get('Containers'),dict)
+            or not set(row['Containers']).issubset({api_id})):
+        raise RuntimeError('extra qualification network identity/ownership/attachments differ; no mutation authorised')
+
+
+def unsupported_upgrade_test_entry(original: Path, destination: Path) -> None:
+    """TEST entry permits ONE unsupported literal through to signed CLI denial.
+
+    No product launcher, trust, source, image, arguments or authentication changes.
+    This cannot establish any upgrade capability or schema-upgrade coverage.
+    """
+    from uvm.installer.lock import _bounded_file
+    source=_bounded_file(original,256*1024,private=False).decode()
+    guard='case "$action" in verify-cache|stop|start|status|logs|diagnose|setup|backup-record|backup-status|restore-provision|restore-admit|destroy) ;; *) fail "unsupported fixed lifecycle action" ;; esac'
+    if source.count(guard)!=1:raise RuntimeError('exact original test-entry whitelist is absent/ambiguous')
+    changed=source.replace(guard,guard.replace('|destroy)', '|destroy|upgrade)'))
+    with destination.open('x')as stream:stream.write(changed)
+    destination.chmod(0o700)
+
+
+def qualify_public_failclosed_checks(*, private: Path, evidence: Path, admission: dict) -> None:
+    """Existing signed resource/preflight/action checks; no original recreation."""
+    from uvm.installer.lock import _bounded_file
+    state=private/'instance';raw=_bounded_file(state/'instance.json',1024*1024,private=True);info=json.loads(raw)
+    if info.get('established')is not True or info['image']!=admission['image_reference']:
+        raise RuntimeError('same established reviewed1002 fixture required')
+    entry=private/'trusted-offline-entry.sh';environment=trusted_launcher_environment(private/'minimal-host-path',admission)
+    paths=set(info['installer_initial_files'])|set(info['local_recovery_inventory'])|{'instance.json','secrets/local-start-admission/admission.json','secrets/local-restore-fence/fence.json'}
+    def fingerprints():
+        return {name:(digest_bytes(_bounded_file(state/name,1024*1024,private=False)),
+            (state/name).lstat().st_dev,(state/name).lstat().st_ino,stat.S_IMODE((state/name).lstat().st_mode))for name in sorted(paths)}
+    def observed(name):
+        template='{"id":{{json .Id}},"reference":{{json .Config.Image}},"owner":{{json (index .Config.Labels "volt.compose.owner-token")}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"running":{{json .State.Running}},"started":{{json .State.StartedAt}},"networks":{{json .NetworkSettings.Networks}}}'
+        row=json.loads(run(name,['docker','inspect',info['project']+'-volt-1','--format',template],evidence).stdout)
+        if(row['reference']!=admission['image_reference']or row['owner']!=info['owner_token']
+                or row['project']!=info['project']or row['running']is not False):
+            raise RuntimeError('exact owned stopped original API required; no mutation authorised')
+        return row
+    baseline=fingerprints();original=observed('failclosed-original-stopped')
+    if set(original['networks'])!={info['project']+'_network'}:raise RuntimeError('original API already has contradictory attachments')
+    def intact(name):
+        if fingerprints()!=baseline or observed(name)!=original:
+            raise RuntimeError('original API/networks/private bytes/inodes/modes changed')
+    results=[]
+    # Existing wrapper performs independent Q/launcher/fullgraph authentication.
+    run('failclosed-initial-original-auth',['sh',str(entry),'verify-cache','--directory',str(state)],evidence,env=environment)
+    with initial_resume_private_fault(state=state,retention=private/'unsafe-key-mode-original',case='unsafe-key-mode')as fault:
+        result=run('failclosed-private-key-mode',['sh',str(entry),'status','--directory',str(state)],evidence,env=environment,check=False)
+        message='local auth configuration, encryption key or bootstrap delivery directory is missing or unsafe'
+        if result.returncode!=1 or message not in result.stderr.splitlines():raise RuntimeError('private-mode test missed actual signed instance validator')
+        results.append({'case':'private-key-mode','exit':1,'layer':'signed host-validate','exact_line':message,'fault':fault})
+    intact('private-mode-restored-stopped')
+    for name,command,message in [('unconfirmed-destroy','destroy','volt installer: destroy requires --confirm-project with the exact owned project name'),
+            ('unsupported-upgrade','upgrade','volt installer: supported commands are install, start, stop, status, diagnose, logs, setup, account, recovery, and explicit destroy')]:
+        selected=entry
+        if command=='upgrade':
+            selected=private/'trusted-negative-upgrade-entry.sh';unsupported_upgrade_test_entry(entry,selected)
+            (evidence/'negative-upgrade-entry-binding.json').write_text(json.dumps({'original_sha256':sha(entry),
+                'test_entry_sha256':sha(selected),'change':'ONLY literal upgrade passes closed TEST guard, original full authentication unchanged',
+                'scope':'current signedCLI unsupported-action denial ONLY, not upgrade capability'},indent=2))
+        result=run('failclosed-'+name,['sh',str(selected),command,'--directory',str(state)],evidence,env=environment,check=False)
+        if result.returncode!=1 or message not in result.stderr.splitlines():raise RuntimeError(name+' missed exact signed product boundary')
+        intact(name+'-unchanged-stopped');results.append({'case':name,'exit':1,'layer':'signed launcher terminal','exact_line':message})
+    # Original launcher/Q/cache are authenticated BEFORE either direct preflight.
+    # A synthetic NON-NETWORK scheme is never given to the normal auth wrapper.
+    launcher=state.parent/(state.name+'.installer-artifacts')/'originals/package/launcher.sh'
+    direct={**environment,'VOLT_OFFLINE':'1'}
+    capture=private/'nonnetwork-context-observation';capture.mkdir(mode=0o700);shim=capture/'docker'
+    shim.write_text('#!/bin/sh\nset -eu\numask 077\nprintf "%s\\n" attempted >>'+shlex.quote(str(capture/'calls'))+'\nexit 97\n');shim.chmod(0o700)
+    invalid={**direct,'PATH':str(capture)+os.pathsep+environment['PATH'],'DOCKER_HOST':'blocked-nonnetwork-context://sentinel'}
+    result=run('failclosed-synthetic-nonnetwork-context',['sh',str(launcher),'status','--directory',str(state)],evidence,env=invalid,check=False)
+    message='volt installer: remote Docker contexts are unsupported because instance bind paths must exist on this host'
+    if result.returncode!=1 or message not in result.stderr.splitlines()or(capture/'calls').exists():
+        raise RuntimeError('synthetic context preflight did not reject before ZERO Docker calls')
+    intact('nonnetwork-context-unchanged-stopped')
+    results.append({'case':'synthetic-nonnetwork-context','exit':1,'layer':'authenticated original signed launcher preflight',
+        'exact_line':message,'Docker_calls':0,'scope':'synthetic nonnetwork endpoint observation ONLY, not real remote-engine integration'})
+    missing=private/'minimal-path-without-docker';missing.mkdir(mode=0o700)
+    for utility in Path(environment['PATH']).iterdir():
+        if utility.name=='docker':continue
+        if not utility.is_symlink()or not utility.resolve().is_file():raise RuntimeError('minimal utility source differs')
+        (missing/utility.name).symlink_to(utility.resolve())
+    result=run('failclosed-missing-docker',['sh',str(launcher),'status','--directory',str(state)],evidence,
+        env={**direct,'PATH':str(missing)},check=False)
+    message='volt installer: required host command is missing: docker'
+    if result.returncode!=1 or message not in result.stderr.splitlines():raise RuntimeError('missing Docker test missed signed preflight')
+    intact('missing-docker-unchanged-stopped');results.append({'case':'missing-docker','exit':1,
+        'layer':'authenticated original signed launcher preflight','exact_line':message,'scope':'minimal PATH dependency absence; no daemon change'})
+    test_id=uuid.uuid4().hex;name='volt-easy-delivery-extra-'+test_id
+    argv=['docker','network','create','--internal','--driver','bridge','--label','volt.compose.owner-token='+info['owner_token'],
+        '--label','volt.delivery.project='+info['project'],'--label','volt.delivery.test='+test_id,name]
+    network_id=run('extra-owned-network-create',argv,evidence).stdout.strip()
+    if re.fullmatch(r'[0-9a-f]{64}',network_id)is None:raise RuntimeError('created extra-network full identity unavailable')
+    result=qualify_retained_extra_network_denial(private=private,evidence=evidence,admission=admission,
+        network_id=network_id,test_id=test_id,expected_original=original,expected_fingerprints=baseline)
+    results.append(result)
+    (evidence/'public-failclosed-outcome.json').write_text(json.dumps({'status':'completed','cases':results,
+        'observed_host_files':len(baseline),'original_private_bytes_modes_inodes_unchanged':True,
+        'original_API_and_resources_preserved':True,'no_start_or_original_recreation':True,
+        'scope':'AMD64 developmentfixture1002; explicit TEST mode/context/PATH/unsupported-action instrumentation; no real remote endpoint, new accounts/SQL or broader upgrade capability'},indent=2))
+
+
+def qualify_retained_extra_network_denial(*, private: Path, evidence: Path, admission: dict,
+        network_id: str, test_id: str, expected_original: dict, expected_fingerprints: dict) -> dict:
+    """Continue ONLY a retained explicitly owned test network; no new creation.
+
+    Expected snapshots are comparison evidence, never product authority. All
+    actual owner/project/image/fullCID/closed test labels are checked again.
+    """
+    from uvm.installer.lock import _bounded_file
+    state=private/'instance';info=json.loads(_bounded_file(state/'instance.json',1024*1024,private=True))
+    if (re.fullmatch(r'[0-9a-f]{64}',network_id)is None or re.fullmatch(r'[0-9a-f]{32}',test_id)is None
+            or info['image']!=admission['image_reference']or info.get('established')is not True):
+        raise RuntimeError('retained fixed network/instance admission differs')
+    name='volt-easy-delivery-extra-'+test_id;entry=private/'trusted-offline-entry.sh'
+    environment=trusted_launcher_environment(private/'minimal-host-path',admission)
+    original=expected_original;baseline={key:tuple(value)for key,value in expected_fingerprints.items()}
+    paths=set(info['installer_initial_files'])|set(info['local_recovery_inventory'])|{'instance.json','secrets/local-start-admission/admission.json','secrets/local-restore-fence/fence.json'}
+    def fingerprints():
+        return {key:(digest_bytes(_bounded_file(state/key,1024*1024,private=False)),
+            (state/key).lstat().st_dev,(state/key).lstat().st_ino,stat.S_IMODE((state/key).lstat().st_mode))for key in sorted(paths)}
+    def observed(label):
+        template='{"id":{{json .Id}},"reference":{{json .Config.Image}},"owner":{{json (index .Config.Labels "volt.compose.owner-token")}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"running":{{json .State.Running}},"started":{{json .State.StartedAt}},"networks":{{json .NetworkSettings.Networks}}}'
+        row=json.loads(run(label,['docker','inspect',info['project']+'-volt-1','--format',template],evidence).stdout)
+        if(row['reference']!=admission['image_reference']or row['owner']!=info['owner_token']
+                or row['project']!=info['project']or row['running']is not False or row['id']!=original['id']):
+            raise RuntimeError('original exact owned API changed; no mutation authorised')
+        return row
+    def intact(label):
+        if fingerprints()!=baseline or observed(label)!=original:raise RuntimeError('retained original resources/private state changed')
+    results=[]
+    def network_row(label):
+        row=json.loads(run(label,['docker','network','inspect',network_id],evidence).stdout)[0]
+        guard_extra_qualification_network(row,network_id=network_id,owner=info['owner_token'],
+            project=info['project'],test_id=test_id,api_id=original['id'])
+        return row
+    try:
+        network_row('extra-owned-network-before-connect');intact('extra-network-before-original-stopped')
+        connected=run('extra-network-connect-stopped',['docker','network','connect',network_id,original['id']],evidence,check=False)
+        after=observed('extra-network-after-connect-stopped')
+        if connected.returncode!=0:
+            if after!=original:raise RuntimeError('failed stopped attach has uncertain side effects')
+            results.append({'case':'extra-network','status':'BLOCKED stopped attachment unsupported','exit':connected.returncode,
+                'scope':'no actual network-attachment rejection coverage'})
+        else:
+            if (set(after['networks'])!=set(original['networks'])|{name}
+                    or any(after[k]!=original[k]for k in original if k!='networks')
+                    or after['networks'][info['project']+'_network']!=original['networks'][info['project']+'_network']):
+                raise RuntimeError('actual stopped attachment preconditions differ')
+            result=run('failclosed-extra-network-status',['sh',str(entry),'status','--directory',str(state)],evidence,env=environment,check=False)
+            message='ValueError: actual network attachment inventory differs'
+            if result.returncode!=1 or message not in result.stderr.splitlines():raise RuntimeError('extra network did not reach actual signed attachment rejection')
+            if fingerprints()!=baseline or observed('extra-network-after-denial-stopped')!=after:raise RuntimeError('attachment denial changed original state')
+            results.append({'case':'extra-network','exit':1,'layer':'signed runtime_mounts actual container validator','exact_line':message})
+    finally:
+        row=network_row('extra-owned-network-before-cleanup');current=observed('extra-network-cleanup-original-stopped')
+        if name in current['networks']:
+            disconnected=run('extra-exact-owned-network-disconnect',['docker','network','disconnect',network_id,original['id']],evidence,check=False)
+            if disconnected.returncode!=0:
+                network_row('extra-owned-network-before-forced-disconnect')
+                run('extra-exact-owned-network-forced-disconnect',['docker','network','disconnect','--force',network_id,original['id']],evidence)
+        intact('extra-network-original-restored-stopped')
+        if network_row('extra-owned-network-empty-before-remove')['Containers']:
+            raise RuntimeError('extra network still attached; never remove it')
+        run('extra-exact-owned-network-remove',['docker','network','rm',network_id],evidence)
+    intact('all-failclosed-checks-original-stopped')
+    return results[0]
+
+
+def network_snapshot_projection(container: dict, volumes: list[dict]) -> dict:
+    """TEST projection of EVERY input read by the signed mount validator.
+
+    Mount/volume lists alone are semantically unordered; require uniqueness
+    before sorting. Preserve all other values and list ordering exactly.
+    """
+    mounts=container.get('Mounts')
+    if(not isinstance(mounts,list)or len(mounts)>128 or any(not isinstance(m,dict)or not isinstance(m.get('Destination'),str)for m in mounts)
+            or len({m['Destination']for m in mounts})!=len(mounts)
+            or not isinstance(volumes,list)or len(volumes)!=3 or len({v.get('Name')for v in volumes})!=3):
+        raise RuntimeError('private observed mount/volume snapshot is malformed or ambiguous')
+    return {'Image':container.get('Image'),'ImageManifestDescriptor':container.get('ImageManifestDescriptor'),
+        'Labels':container.get('Config',{}).get('Labels'),'Mounts':sorted(mounts,key=lambda m:m['Destination']),
+        'NetworkMode':container.get('HostConfig',{}).get('NetworkMode'),
+        'Networks':container.get('NetworkSettings',{}).get('Networks'),
+        'State':container.get('State'),'Id':container.get('Id'),
+        'volumes':sorted(volumes,key=lambda v:v['Name'])}
+
+
+def qualify_network_causal_replay(*, private: Path, evidence: Path, admission: dict,
+        expected_fingerprints: dict) -> None:
+    """ONE guarded replay: public generic denial + separate signed cause proof."""
+    import resource
+    from uvm.installer.lock import _bounded_file
+    state=private/'instance';info=json.loads(_bounded_file(state/'instance.json',1024*1024,private=True))
+    entry=private/'trusted-offline-entry.sh';environment=trusted_launcher_environment(private/'minimal-host-path',admission)
+    if info['image']!=admission['image_reference']or info.get('established')is not True:raise RuntimeError('same admitted established fixture required')
+    expected={name:tuple(value)for name,value in expected_fingerprints.items()}
+    def fingerprints():
+        return {name:(digest_bytes(_bounded_file(state/name,1024*1024,private=False)),(state/name).stat().st_dev,
+            (state/name).stat().st_ino,stat.S_IMODE((state/name).stat().st_mode))for name in expected}
+    if fingerprints()!=expected:raise RuntimeError('original private inputs changed before replay')
+    run('network-replay-fresh-external-auth',['sh',str(entry),'verify-cache','--directory',str(state)],evidence,env=environment)
+    snapshots=private/'network-causal-replay-snapshots';snapshots.mkdir(mode=0o700)
+    def capture(label, fault):
+        directory=snapshots/label;directory.mkdir(mode=0o700);binding={}
+        for name,argv in [('container',['docker','inspect',info['project']+'-volt-1']),
+                ('volumes',['docker','volume','inspect',*[info['project']+'_'+s for s in ('postgres','media','state')]])]:
+            destination=directory/(name+'.json');errors=directory/(name+'.stderr')
+            (evidence/(label+'-'+name+'-capture.json')).write_text(json.dumps({'argv':argv,'private_capture':True,
+                'max_each_stream_bytes':2*1024*1024,'timeout_seconds':20,'recorded_before_invocation':True},indent=2))
+            with destination.open('xb')as stdout,errors.open('xb')as stderr:
+                destination.chmod(0o600);errors.chmod(0o600)
+                try:
+                    result=subprocess.run(argv,stdout=stdout,stderr=stderr,env=environment,timeout=20,
+                        preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_FSIZE,(2*1024*1024,2*1024*1024)))
+                    code=result.returncode
+                except subprocess.TimeoutExpired:code=124
+                stdout.flush();stderr.flush();os.fsync(stdout.fileno());os.fsync(stderr.fileno())
+            binding[name]={'exit':code,'sha256':sha(destination),'bytes':destination.stat().st_size,
+                'stderr_sha256':sha(errors),'stderr_bytes':errors.stat().st_size,'private_raw_retained':True}
+            (evidence/(label+'-private-capture-binding.json')).write_text(json.dumps(binding,indent=2))
+            if code!=0:raise RuntimeError('bounded private Docker observation failed; no snapshot credit')
+        rows=json.loads(_bounded_file(directory/'container.json',2*1024*1024,private=True));volumes=json.loads(_bounded_file(directory/'volumes.json',2*1024*1024,private=True))
+        if not isinstance(rows,list)or len(rows)!=1:raise RuntimeError('one actual original API required')
+        row=rows[0]
+        if(row['Config']['Image']!=admission['image_reference']or row['Config']['Labels'].get('volt.compose.owner-token')!=info['owner_token']
+                or row['Config']['Labels'].get('com.docker.compose.project')!=info['project']or row['State']['Running']is not False):
+            raise RuntimeError('actual owned API must remain stopped')
+        return directory,row,volumes
+    original_dir,original,original_volumes=capture('baseline',False)
+    original_projection=network_snapshot_projection(original,original_volumes)
+    if set(original_projection['Networks'])!={info['project']+'_network'}:raise RuntimeError('baseline already has extra attachments')
+    code="""import json,sys
+from pathlib import Path
+from uvm.installer.runtime_mounts import validate
+rows=json.loads(Path('/input/container.json').read_text());volumes=json.loads(Path('/input/volumes.json').read_text());info=json.loads(Path('/instance/instance.json').read_text())
+try: validate(Path('/instance'),Path(sys.argv[1]),info,rows[0],volumes)
+except ValueError as exc:
+ if str(exc)=='actual network attachment inventory differs':print('component_actual_mounts=network_attachment_mismatch');raise SystemExit(2)
+ print('component_actual_mounts=unexpected_rejection');raise SystemExit(3)
+print('component_actual_mounts=admitted')
+"""
+    def component(label,directory):
+        return run(label,['docker','run','--rm','--platform',admission['platform'],'--pull=never','--network','none','--read-only',
+            '--cap-drop=ALL','--security-opt=no-new-privileges','--tmpfs','/tmp:rw,noexec,nosuid,size=16m',
+            '--tmpfs','/var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=1m',
+            '--tmpfs','/app/media:rw,noexec,nosuid,nodev,size=1m','--tmpfs','/opt/uvm/state:rw,noexec,nosuid,nodev,size=1m',
+            '--user',f'{os.getuid()}:{os.getgid()}',
+            '--mount',f'type=bind,src={state},dst=/instance,readonly','--mount',f'type=bind,src={directory},dst=/input,readonly',
+            '--entrypoint','/opt/uvm/venv/bin/python',admission['image_reference'],'-c',code,str(state)],evidence,check=False)
+    valid=component('signed-native-original-snapshot-component',original_dir)
+    if valid.returncode!=0 or valid.stdout!='component_actual_mounts=admitted\n':raise RuntimeError('baseline signed-native validator did not admit exact observed inputs')
+    test_id=uuid.uuid4().hex;name='volt-easy-delivery-extra-'+test_id
+    network_id=run('causal-extra-owned-network-create',['docker','network','create','--internal','--driver','bridge',
+        '--label','volt.compose.owner-token='+info['owner_token'],'--label','volt.delivery.project='+info['project'],
+        '--label','volt.delivery.test='+test_id,name],evidence).stdout.strip()
+    def network(label):
+        row=json.loads(run(label,['docker','network','inspect',network_id],evidence).stdout)[0]
+        guard_extra_qualification_network(row,network_id=network_id,owner=info['owner_token'],project=info['project'],test_id=test_id,api_id=original['Id']);return row
+    try:
+        network('causal-extra-network-before-connect')
+        run('causal-extra-connect-stopped',['docker','network','connect',network_id,original['Id']],evidence)
+        fault_dir,fault,fault_volumes=capture('fault',True)
+        projection=network_snapshot_projection(fault,fault_volumes)
+        without_network={k:v for k,v in projection.items()if k!='Networks'}
+        if(without_network!={k:v for k,v in original_projection.items()if k!='Networks'}
+                or set(projection['Networks'])!=set(original_projection['Networks'])|{name}
+                or any(projection['Networks'][key]!=value for key,value in original_projection['Networks'].items())):
+            raise RuntimeError('observed validator inputs changed beyond one exact network attachment')
+        (evidence/'actual-snapshot-redacted-difference.json').write_text(json.dumps({'field':'NetworkSettings.Networks',
+            'added_attachment_count':1,'removed_attachment_count':0,'original_entries_exact':True,
+            'ALL_other_validator_inputs_exact':True,'mount_destinations_unique_and_only_mountlist_sorted':True,
+            'volume_names_unique_and_only_volumelist_sorted':True,'environment_and_private_values_excluded':True,
+            'snapshot_scope':'actual bounded private snapshots captured BEFORE public status/removal'},indent=2))
+        causal=component('signed-native-fault-snapshot-component',fault_dir)
+        if causal.returncode!=2 or causal.stdout!='component_actual_mounts=network_attachment_mismatch\n':raise RuntimeError('same actual snapshot did not yield exact signed-native component cause')
+        denied=run('causal-public-extra-network-status',['sh',str(entry),'status','--directory',str(state)],evidence,env=environment,check=False)
+        expected_lines=['actual API container custody admission failed','volt installer: actual API mounts violate host custody exclusions']
+        if denied.returncode!=1 or any(line not in denied.stderr.splitlines()for line in expected_lines):raise RuntimeError('public generic custody boundary not reached')
+        if fingerprints()!=expected:raise RuntimeError('public custody denial changed observed original private inputs')
+        denied_dir,denied_container,denied_volumes=capture('after-public',True)
+        if network_snapshot_projection(denied_container,denied_volumes)!=projection:
+            raise RuntimeError('public denial changed actual faulted validator inputs')
+    finally:
+        row=network('causal-extra-network-before-cleanup')
+        if original['Id']in row['Containers']or name in json.loads(run('causal-extra-network-actual-attachments',['docker','inspect',original['Id'],'--format','{{json .NetworkSettings.Networks}}'],evidence).stdout):
+            run('causal-extra-exact-disconnect',['docker','network','disconnect',network_id,original['Id']],evidence)
+        if network('causal-extra-network-empty-before-remove')['Containers']:raise RuntimeError('injected network still has attachments; no removal')
+        run('causal-extra-exact-remove',['docker','network','rm',network_id],evidence)
+    restored_dir,restored,restored_volumes=capture('restored',False)
+    if network_snapshot_projection(restored,restored_volumes)!=original_projection or fingerprints()!=expected:
+        raise RuntimeError('original private/actual API state was not restored')
+    run('restored-public-status-after-network',['sh',str(entry),'status','--directory',str(state)],evidence,env=environment)
+    if fingerprints()!=expected:raise RuntimeError('restored public status changed original private inputs')
+    (evidence/'network-causal-replay-outcome.json').write_text(json.dumps({'status':'passed','public_status_exit':1,
+        'public_failure_layer':'GENERIC actual container custody admission ONLY; no per-field public diagnostic claimed',
+        'separate_signed_native_component_exit':2,'component_reason':'actual network attachment inventory differs',
+        'same_actual_private_snapshot':True,'all_other_validator_inputs_unchanged':True,'restored_public_status_exit':0,
+        'observed_host_fingerprints_unchanged':len(expected),'API_original_identity_and_StartedAt_unchanged':True,
+        'injected_network_disconnected_removed':True,'private_snapshot_max_each_stream_bytes':2*1024*1024,
+        'scope':'ONE focused extra-attachment replay; public generic denial + separately labelled signed-native readonly function cause; no product output/authority change'},indent=2))
+
+
+def volume_fault_observer_environment(*, capture: Path, state: Path, environment: dict,
+        admission: dict, case: str, device: Path | None) -> dict:
+    """Linux TEST producer race; ONE exact absent-volume create, original result."""
+    if case not in ('foreign-owner','bind-options'):raise ValueError('only fixed producer volume faults supported')
+    capture.mkdir(mode=0o700);real=Path(shutil.which('docker',path=environment['PATH'])).resolve(strict=True)
+    stat_exe=Path(shutil.which('stat')).resolve(strict=True);test_id=uuid.uuid4().hex
+    device_meta='';device_path=''
+    if case=='bind-options':
+        if device is None or device.is_symlink()or device.resolve()!=device or list(device.iterdir()):raise RuntimeError('fresh canonical empty test device required')
+        info=device.lstat()
+        if not stat.S_ISDIR(info.st_mode)or info.st_uid!=os.getuid()or stat.S_IMODE(info.st_mode)!=0o700:raise RuntimeError('test bind device custody differs')
+        cache=state.parent/(state.name+'.installer-artifacts')
+        if any(device==p or device in p.parents or p in device.parents for p in (state,cache)):raise RuntimeError('test device overlaps instance/cache authority')
+        device_path=str(device);device_meta=f'{info.st_dev}:{info.st_ino}:{info.st_uid}:{info.st_gid}:700'
+    values={'REAL_DOCKER':str(real),'STAT_EXE':str(stat_exe),'CAPTURE':str(capture),'EXPECTED_STATE':str(state),
+        'IMAGE_REF':admission['image_reference'],'PLATFORM':admission['platform'],'EXPECTED_USER':f'{os.getuid()}:{os.getgid()}',
+        'EXPECTED_UID':str(os.getuid()),'PREFIX':'volt-easy-delivery','TEST_CASE':case,'TEST_ID':test_id,
+        'FOREIGN_OWNER':secrets.token_hex(32),'DEVICE':device_path,'DEVICE_META':device_meta,
+        'BIND_OPTIONS':json.dumps({'device':device_path,'o':'bind','type':'none'},sort_keys=True,separators=(',',':'))}
+    script='#!/bin/sh\nset -eu\numask 077\n'+''.join(k+'='+shlex.quote(v)+'\n'for k,v in values.items())+r'''
+pass_original() { exec "$REAL_DOCKER" "$@"; }
+guard_session() {
+ [ -f "$CAPTURE/caller.pid" ] && [ ! -L "$CAPTURE/caller.pid" ] || exit 76
+ IFS= read -r caller <"$CAPTURE/caller.pid"
+ case "$caller" in ''|*[!0-9]*) exit 76 ;; esac
+ read -r actual comm state parent group session rest <"/proc/$caller/stat"
+ [ "$actual|$group|$session" = "$caller|$caller|$caller" ] || exit 76
+ ancestor=$PPID; steps=0
+ while [ "$ancestor" != "$caller" ] && [ "$steps" -lt 8 ]; do
+  read -r actual comm state parent group session rest <"/proc/$ancestor/stat"
+  [ "$group|$session" = "$caller|$caller" ] || exit 76
+  ancestor=$parent; steps=$((steps+1))
+ done
+ [ "$ancestor" = "$caller" ] || exit 76
+}
+owned_name() {
+ case "$1" in "$PREFIX-"????????????_postgres) ;; *) return 1 ;; esac
+ project=${1%_postgres}; suffix=${project#"$PREFIX-"}
+ case "$suffix" in *[!0-9a-f]*) return 1 ;; esac
+}
+original_result() {
+ label=$1; shift; set +e
+ (ulimit -f 64; "$REAL_DOCKER" "$@") >"$CAPTURE/$label.stdout" 2>"$CAPTURE/$label.stderr"
+ result=$?; set -e; printf '%s\n' "$result" >"$CAPTURE/$label.exit"
+ cat "$CAPTURE/$label.stdout"; cat "$CAPTURE/$label.stderr" >&2
+ return "$result"
+}
+if [ "$#" -eq 3 ] && [ "$1|$2" = 'volume|inspect' ] && owned_name "$3" && [ ! -e "$CAPTURE/injected" ]; then
+ guard_session
+ set +e
+ (ulimit -f 64; "$REAL_DOCKER" "$@") >"$CAPTURE/absence.stdout" 2>"$CAPTURE/absence.stderr"
+ result=$?; set -e; printf '%s\n' "$result" >"$CAPTURE/absence.exit"
+ if [ "$result" -eq 1 ] && [ "$(cat "$CAPTURE/absence.stdout")" = '[]' ] \
+   && [ "$(cat "$CAPTURE/absence.stderr")" = "Error response from daemon: get $3: no such volume" ]; then
+  printf '%s\n' "$3" >"$CAPTURE/absence.name"
+ fi
+ cat "$CAPTURE/absence.stdout";cat "$CAPTURE/absence.stderr" >&2;exit "$result"
+fi
+if [ "$#" -eq 9 ] && [ "$1|$2|$3|$5|$7" = 'volume|create|--label|--label|--label' ] && owned_name "$9"; then
+ guard_session
+ [ ! -e "$CAPTURE/injected" ] || exit 76
+ name=$9; project=${name%_postgres}; owner=${4#volt.compose.owner-token=}
+ case "$owner" in ''|*[!0-9a-f]*) exit 76 ;; esac
+ [ "${#owner}" -eq 64 ] && [ "$4" = "volt.compose.owner-token=$owner" ] || exit 76
+ [ "$project" = "$PREFIX-$(printf '%s' "$owner" | cut -c 1-12)" ] || exit 76
+ [ "$6|$8" = "com.docker.compose.project=$project|com.docker.compose.volume=postgres" ] || exit 76
+ [ "$(cat "$CAPTURE/absence.name")" = "$name" ] && [ "$(cat "$CAPTURE/absence.exit")" = 1 ] || exit 76
+ [ -d "$EXPECTED_STATE/compose" ] && [ ! -e "$EXPECTED_STATE/instance.json" ] && [ ! -e "$EXPECTED_STATE/secrets" ] || exit 76
+ [ "$("$STAT_EXE" -c '%u:%a' "$EXPECTED_STATE")" = "$EXPECTED_UID:700" ] || exit 76
+ set +e
+ "$REAL_DOCKER" volume inspect "$name" >"$CAPTURE/recheck.stdout" 2>"$CAPTURE/recheck.stderr"
+ absent=$?;set -e
+ [ "$absent" -eq 1 ] && [ "$(cat "$CAPTURE/recheck.stdout")" = '[]' ] \
+  && [ "$(cat "$CAPTURE/recheck.stderr")" = "Error response from daemon: get $name: no such volume" ] || exit 76
+ printf '%s\n' "$@" >"$CAPTURE/original-create.argv-lines"
+ printf '%s\n' "$owner" >"$CAPTURE/original-owner";printf '%s\n' "$project" >"$CAPTURE/project"
+ injected_owner=$owner
+ if [ "$TEST_CASE" = foreign-owner ]; then
+  [ "$FOREIGN_OWNER" != "$owner" ] || exit 76;injected_owner=$FOREIGN_OWNER
+ else
+  [ -d "$DEVICE" ] && [ ! -L "$DEVICE" ] && [ "$(cd -P "$DEVICE" && pwd -P)" = "$DEVICE" ] || exit 76
+  [ "$("$STAT_EXE" -c '%d:%i:%u:%g:%a' "$DEVICE")" = "$DEVICE_META" ] || exit 76
+  for child in "$DEVICE"/* "$DEVICE"/.[!.]* "$DEVICE"/..?*; do
+   if [ -e "$child" ] || [ -L "$child" ]; then exit 76;fi
+  done
+ fi
+ if [ "$TEST_CASE" = foreign-owner ]; then
+  "$REAL_DOCKER" volume create --label "volt.compose.owner-token=$injected_owner" --label "$6" --label "$8" \
+    --label "volt.delivery.test-owner=$TEST_ID" --label "volt.delivery.case=$TEST_CASE" "$name" \
+    >"$CAPTURE/injection.stdout" 2>"$CAPTURE/injection.stderr" || exit 76
+ else
+  "$REAL_DOCKER" volume create --label "volt.compose.owner-token=$injected_owner" --label "$6" --label "$8" \
+    --label "volt.delivery.test-owner=$TEST_ID" --label "volt.delivery.case=$TEST_CASE" \
+    --opt type=none --opt o=bind --opt "device=$DEVICE" "$name" \
+    >"$CAPTURE/injection.stdout" 2>"$CAPTURE/injection.stderr" || exit 76
+ fi
+ (ulimit -f 64; "$REAL_DOCKER" volume inspect "$name") >"$CAPTURE/injected-volume.json" 2>"$CAPTURE/injected-inspect.stderr" || exit 76
+ identity=$("$REAL_DOCKER" volume inspect "$name" --format '{{.Name}}|{{.Driver}}|{{index .Labels "volt.compose.owner-token"}}|{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.volume"}}|{{index .Labels "volt.delivery.test-owner"}}|{{index .Labels "volt.delivery.case"}}|{{json .Options}}')
+ base="$name|local|$injected_owner|$project|postgres|$TEST_ID|$TEST_CASE"
+ if [ "$TEST_CASE" = foreign-owner ];then
+  [ "$identity" = "$base|{}" ] || [ "$identity" = "$base|null" ] || exit 76
+ else [ "$identity" = "$base|$BIND_OPTIONS" ] || exit 76;fi
+ printf '%s\n' "$identity" >"$CAPTURE/injected-identity";printf '%s\n' "$TEST_ID" >"$CAPTURE/injected"
+ set +e;original_result original-create "$@";result=$?;set -e;exit "$result"
+fi
+if [ "$#" -gt 5 ] && [ "$1" = run ] && [ -f "$CAPTURE/injected" ]; then
+ t0=;t1=;t2=;t3=;t4=;request=;seen_state=0;seen_image=0;previous=;entry=;network=;user=;platform=;holder=;detached=0;readonly=0;owner_labels=0;project_labels=0;roles=0
+ expected_owner=$(cat "$CAPTURE/original-owner");expected_project=$(cat "$CAPTURE/project")
+ for argument do
+  case "$previous" in --entrypoint) entry=$argument ;; --network) network=$argument ;; --user) user=$argument ;; --platform) platform=$argument ;; --name) holder=$argument ;; esac
+  case "$argument" in -d) detached=$((detached+1)) ;; --read-only) readonly=$((readonly+1)) ;; --privileged|--privileged=*) exit 76 ;; esac
+  [ "$argument" != "volt.compose.owner-token=$expected_owner" ] || owner_labels=$((owner_labels+1))
+  [ "$argument" != "volt.compose.project=$expected_project" ] || project_labels=$((project_labels+1))
+  [ "$argument" != org.volt.compose-install.role=host-lifecycle-lock ] || roles=$((roles+1))
+  previous=$argument
+  t4=$t3;t3=$t2;t2=$t1;t1=$t0;t0=$argument
+  [ "$argument" != "$IMAGE_REF" ] || seen_image=$((seen_image+1))
+  [ "$argument" != "type=bind,src=$EXPECTED_STATE,dst=/state" ] || seen_state=$((seen_state+1))
+  case "$argument" in type=bind,src=/tmp/volt-installer.????????/runtime-init-request.json,dst=/run/volt-initialization/request.json,readonly)
+   [ -z "$request" ] || exit 76;request=${argument#type=bind,src=};request=${request%,dst=/run/volt-initialization/request.json,readonly} ;;
+  esac
+ done
+ if [ "$t0" = --initialize-local ];then
+  guard_session
+  [ "$t4|$t3|$t2|$t1|$t0" = "$IMAGE_REF|-m|uvm.installer.lock|/state/.install.lock|--initialize-local" ] || exit 76
+  [ "$seen_state|$seen_image|$detached|$readonly|$owner_labels|$project_labels|$roles" = '1|1|1|1|1|1|1' ] || exit 76
+  [ "$entry|$network|$user|$platform|$holder" = "/opt/uvm/venv/bin/python|none|$EXPECTED_USER|$PLATFORM|volt-lock-$expected_project-$caller" ] || exit 76
+  [ -n "$request" ] && [ ! -L "$request" ] || exit 76
+  [ "$("$STAT_EXE" -c '%u:%a' "$request")" = "$EXPECTED_UID:600" ] || exit 76
+  size=$("$STAT_EXE" -c '%s' "$request");[ "$size" -le 65536 ] || exit 76
+  dd if="$request" of="$CAPTURE/runtime-init-request.json" bs=1 count=65537 2>"$CAPTURE/request-copy.stderr"
+  chmod 600 "$CAPTURE/runtime-init-request.json";printf '%s\n' "$@" >"$CAPTURE/actual-initial-owner.argv-lines"
+ fi
+fi
+pass_original "$@"
+'''
+    destination=capture/'docker';destination.write_text(script);destination.chmod(0o700)
+    binding={'script_sha256':sha(destination),'real_docker':str(real),'real_docker_sha256':sha(real),
+        'stat_observer':str(stat_exe),'stat_observer_sha256':sha(stat_exe),'case':case,'test_id':test_id,
+        'device':device_path,'device_identity':device_meta,'expected_state':str(state),'expected_image':admission['image_reference'],
+        'scope':'POSIX/Linux TEST producer race, stat/proc observation explicit; original commands/results forwarded; not unmodified-Docker certification'}
+    (capture/'observer-binding.json').write_text(json.dumps(binding,indent=2));return {**environment,'PATH':str(capture)+os.pathsep+environment['PATH'],'VOLUME_CAPTURE':str(capture)}
+
+
+def qualify_initial_volume_fault(*, bundle: Path, fixture: Path, image_id: str, source_revision: str,
+        source_snapshot: str, platform: str, private: Path, evidence: Path, case: str) -> None:
+    """One legitimate fresh public install + one absent-volume TEST race."""
+    from uvm.installer.lock import _bounded_file
+    import resource
+    admission=validate_admission_fixture(fixture,image_id=image_id,source_snapshot=source_snapshot,
+        source_commit=source_revision,platform=platform,bundle=bundle,version='0.1.0-rc.4',evidence=evidence)
+    extracted=private/'extracted';extracted.mkdir(mode=0o700);shutil.unpack_archive(str(bundle),extracted,'gztar')
+    package=extracted/'volt-compose-0.1.0-rc.4';outer=private/'signed-package';outer.mkdir(mode=0o700)
+    launcher=outer/'launcher.sh';render_fixture_launcher(package/'launcher.sh',launcher,fixture)
+    shutil.copyfile(bundle,outer/'installer.bundle.tar.gz')
+    for name in ('installer.bundle.sigstore.json','launcher.sigstore.json'):shutil.copyfile(fixture/name,outer/name)
+    for path in outer.iterdir():path.chmod(0o600)
+    public=evidence/'fixture-trust-public'
+    run('volume-fault-original-launcher-auth',['docker','run','--rm','--platform',platform,'--pull=never','--network','host','--read-only',
+        '--cap-drop=ALL','--security-opt=no-new-privileges','--tmpfs','/tmp:rw,noexec,nosuid,size=16m','--user',f'{os.getuid()}:{os.getgid()}',
+        '--mount',f'type=bind,src={public},dst=/fixture,readonly','--mount',f'type=bind,src={launcher},dst=/launcher,readonly',COSIGN_IMAGE,
+        'verify-blob','--key','/fixture/fixture.pub','--trusted-root','/fixture/trusted-root.json','--bundle','/fixture/launcher.sigstore.json','/launcher'],evidence)
+    environment=trusted_launcher_environment(private/'minimal-host-path',admission);state=private/'instance';capture=private/'volume-observer'
+    device=None
+    if case=='bind-options':device=private/'bind-device';device.mkdir(mode=0o700)
+    observed=volume_fault_observer_environment(capture=capture,state=state,environment=environment,admission=admission,case=case,device=device)
+    command=['sh','-c','umask 077; printf "%s\\n" "$$" >"$VOLUME_CAPTURE/caller.pid"; exec sh "$0" "$@"',str(launcher),
+        'install','--directory',str(state),'--port','46180','--project-prefix','volt-easy-delivery']
+    (evidence/'retained-fixture.json').write_text(json.dumps({'private':str(private),'state':str(state),'case':case,'admission':admission,'retained':True},indent=2))
+    (evidence/'volume-fault-install-invocation.json').write_text(json.dumps({'argv':command,'cwd':str(ROOT),'environment_PATH':observed['PATH'],'start_new_session':True,'before_invocation':True},indent=2))
+    with(evidence/'volume-fault-install.stdout').open('x')as stdout,(evidence/'volume-fault-install.stderr').open('x')as stderr:
+        caller=subprocess.Popen(command,cwd=ROOT,env=observed,stdout=stdout,stderr=stderr,start_new_session=True,
+            preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_FSIZE,(2*1024*1024,2*1024*1024)))
+        (capture/'registered-caller.json').write_text(json.dumps({'pid':caller.pid,'pgid':os.getpgid(caller.pid),'sid':os.getsid(caller.pid)}))
+        try:code=caller.wait(timeout=300)
+        except subprocess.TimeoutExpired:
+            if os.getpgid(caller.pid)!=caller.pid or os.getsid(caller.pid)!=caller.pid:raise RuntimeError('case caller session differs; no signal authorised')
+            os.killpg(caller.pid,signal.SIGTERM)
+            try:caller.wait(timeout=30)
+            except subprocess.TimeoutExpired:os.killpg(caller.pid,signal.SIGKILL);caller.wait()
+            code=124
+    (evidence/'volume-fault-install.exit').write_text(str(code))
+    if not(capture/'injected').exists():raise RuntimeError('fixed volume race did not inject; preserve precise failed instrumentation layer')
+    project=(capture/'project').read_text().strip();owner=(capture/'original-owner').read_text().strip()
+    injected=json.loads(_bounded_file(capture/'injected-volume.json',65536,private=True))[0]
+    current=json.loads(run('fault-volume-after-public-failure',['docker','volume','inspect',injected['Name']],evidence).stdout)[0]
+    if current!=injected:raise RuntimeError('injected volume metadata changed; no repair/adoption or comparison credit')
+    api=run('volume-fault-api-absence',['docker','container','inspect',project+'-volt-1','--format',
+        '{"id":{{json .Id}},"image":{{json .Config.Image}},"owner":{{json (index .Config.Labels "volt.compose.owner-token")}},"project":{{json (index .Config.Labels "com.docker.compose.project")}}}'],evidence,check=False)
+    if api.returncode==0:
+        row=json.loads(api.stdout)
+        if row['image']==admission['image_reference']and row['owner']==owner and row['project']==project:
+            run('unexpected-exact-owned-new-API-stop',['docker','stop','--time','10',row['id']],evidence,check=False)
+        raise RuntimeError('unexpected API creation; comparison NOT credited, retain exact owned fixture')
+    if 'no such'not in api.stderr.lower():raise RuntimeError('API absence unproved')
+    request_present=(capture/'runtime-init-request.json').exists();journal_present=(state/'instance.json').exists()
+    if code==1 and int((capture/'original-create.exit').read_text())!=0:
+        (evidence/'volume-fault-outcome.json').write_text(json.dumps({'status':'prior_engine_volume_create_rejection','case':case,
+            'product_owner_or_options_comparison_credit':False,'closed_request_present':request_present,'journal_present':journal_present,
+            'actual_layer':'original Docker volume create failed before later signed comparison; no waiver','retained_fixture':str(private)},indent=2));return
+    expected='volt installer: postgres volume ownership does not match this instance'if case=='foreign-owner'else'volt installer: owned volume uses an unapproved host bind driver'
+    if code!=1 or expected not in(evidence/'volume-fault-install.stderr').read_text().splitlines():raise RuntimeError('volume fault did not reach exact signed owner/options boundary')
+    request=_bounded_file(capture/'runtime-init-request.json',65536,private=True);document=json.loads(request);journal_raw=_bounded_file(state/'instance.json',1024*1024,private=True);info=json.loads(journal_raw)
+    if(document['arguments']['project']!=project or document['arguments']['owner_token']!=owner
+            or document['arguments']['admitted_image_id']!=admission['image_id']or info['owner_token']!=owner
+            or info['project']!=project or info['installer_initial_request_sha256']!=digest_bytes(request)):
+        raise RuntimeError('actual legitimate closed request/initial identity binding differs')
+    if device and(list(device.iterdir())or device.is_symlink()):raise RuntimeError('fresh bind test device changed')
+    (evidence/'volume-fault-outcome.json').write_text(json.dumps({'status':'passed','case':case,'exact_signed_diagnostic':expected,
+        'original_create_exit':int((capture/'original-create.exit').read_text()),'public_install_exit':code,'API_created':False,
+        'request_sha256':digest_bytes(request),'journal_sha256':digest_bytes(journal_raw),'installation_id':info['installation_id'],
+        'legitimate_initial_keys_already_created':True,'prekey_denial_claimed':False,'initial_private_files':info['installer_initial_files'],
+        'injected_metadata_unchanged':True,'retained_fixture':str(private),'scope':'separate legitimate public initial intent with ONE explicitly labelled absent-volume TEST race; no original replacement/repair/adoption/account/SQL'},indent=2))
+
+
+def occupied_port_daemon_error(text: str) -> bool:
+    """Fixed observed endpoint + daemon bind semantics, never generic failure."""
+    for line in text.splitlines():
+        value=line.lower()
+        if ('127.0.0.1:46180'in value and any(reason in value for reason in
+                ('address already in use','port is already allocated','ports are not available'))
+                and any(context in value for context in ('failed to set up container networking',
+                    'failed programming external connectivity','failed to bind host port','ports are not available',
+                    'bind for 127.0.0.1:46180 failed','listen tcp 127.0.0.1:46180'))):return True
+    return False
+
+
+def occupied_port_binder_program() -> str:
+    return "import os,socket,json,sys,time,signal\nfrom pathlib import Path\ns=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.bind(('127.0.0.1',46180));s.listen(1)\nvalue={'pid':os.getpid(),'start':Path('/proc/self/stat').read_text().split()[21],'netns':os.readlink('/proc/self/ns/net'),'fd':s.fileno(),'inode':os.fstat(s.fileno()).st_ino,'endpoint':list(s.getsockname()),'reuseaddr':s.getsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR),'reuseport':s.getsockopt(socket.SOL_SOCKET,socket.SO_REUSEPORT)}\np=Path(sys.argv[1]);temporary=p.with_suffix('.temporary');fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)\nwith os.fdopen(fd,'w')as f:json.dump(value,f);f.flush();os.fsync(f.fileno())\nos.rename(temporary,p)\ndef stop(signum,frame):s.close();raise SystemExit(0)\nsignal.signal(signal.SIGTERM,stop)\nend=time.monotonic()+900\nwhile time.monotonic()<end:time.sleep(1)\ns.close()\n"
+
+
+def qualify_initial_occupied_port(*, bundle: Path, fixture: Path, image_id: str, source_revision: str,
+        source_snapshot: str, platform: str, private: Path, evidence: Path) -> None:
+    """One held exclusive host socket; prove Docker publishing conflict FIRST.
+
+    If Desktop does not expose a matching daemon bind failure, no public install
+    runs and no namespace-sharing or product port-denial credit is claimed.
+    """
+    import errno
+    import socket
+    import resource
+    from uvm.installer.lock import _bounded_file
+    admission=validate_admission_fixture(fixture,image_id=image_id,source_snapshot=source_snapshot,
+        source_commit=source_revision,platform=platform,bundle=bundle,version='0.1.0-rc.4',evidence=evidence)
+    extracted=private/'extracted';extracted.mkdir(mode=0o700);shutil.unpack_archive(str(bundle),extracted,'gztar')
+    package=extracted/'volt-compose-0.1.0-rc.4';outer=private/'signed-package';outer.mkdir(mode=0o700)
+    launcher=outer/'launcher.sh';render_fixture_launcher(package/'launcher.sh',launcher,fixture)
+    shutil.copyfile(bundle,outer/'installer.bundle.tar.gz')
+    for name in ('installer.bundle.sigstore.json','launcher.sigstore.json'):shutil.copyfile(fixture/name,outer/name)
+    for path in outer.iterdir():path.chmod(0o600)
+    public=evidence/'fixture-trust-public'
+    run('occupied-original-launcher-auth',['docker','run','--rm','--platform',platform,'--pull=never','--network','host','--read-only',
+        '--cap-drop=ALL','--security-opt=no-new-privileges','--tmpfs','/tmp:rw,noexec,nosuid,size=16m','--user',f'{os.getuid()}:{os.getgid()}',
+        '--mount',f'type=bind,src={public},dst=/fixture,readonly','--mount',f'type=bind,src={launcher},dst=/launcher,readonly',COSIGN_IMAGE,
+        'verify-blob','--key','/fixture/fixture.pub','--trusted-root','/fixture/trusted-root.json','--bundle','/fixture/launcher.sigstore.json','/launcher'],evidence)
+    environment=trusted_launcher_environment(private/'minimal-host-path',admission);state=private/'instance'
+    (evidence/'retained-fixture.json').write_text(json.dumps({'private':str(private),'state':str(state),'admission':admission,
+        'scope':'occupied-port CASE; no installation state unless same-host publisher conflict proven'},indent=2))
+    record=private/'binder.json';program=occupied_port_binder_program();compile(program,'<fixed-binder>','exec')
+    command=[sys.executable,'-c',program,str(record)]
+    (evidence/'binder-invocation.json').write_text(json.dumps({'argv':command,'before_invocation':True,'start_new_session':True,
+        'socket':'exclusive127.0.0.1:46180/TCP, no reuse, no accept/read/HTTP route','program_sha256':digest_bytes(program.encode())},indent=2))
+    with(private/'binder.stdout').open('x')as stdout,(private/'binder.stderr').open('x')as stderr:
+        binder=subprocess.Popen(command,stdout=stdout,stderr=stderr,start_new_session=True)
+    try:
+        deadline=time.monotonic()+10
+        while not record.exists()and time.monotonic()<deadline and binder.poll()is None:time.sleep(.01)
+        if not record.exists():raise RuntimeError('owned exclusive binder did not start; no occupied-port attribution')
+        bound=json.loads(_bounded_file(record,16384,private=True))
+        def held(label):
+            if(binder.poll()is not None or bound['pid']!=binder.pid or os.getpgid(binder.pid)!=binder.pid or os.getsid(binder.pid)!=binder.pid
+                    or Path(f'/proc/{binder.pid}/stat').read_text().split()[21]!=bound['start']
+                    or os.readlink(f'/proc/{binder.pid}/fd/{bound["fd"]}')!=f'socket:[{bound["inode"]}]'
+                    or os.readlink(f'/proc/{binder.pid}/ns/net')!=bound['netns']
+                    or bound['endpoint']!=['127.0.0.1',46180]or bound['reuseaddr']!=0 or bound['reuseport']!=0):
+                raise RuntimeError('registered binder PID/start/socket identity changed; no port credit')
+            with socket.socket(socket.AF_INET,socket.SOCK_STREAM)as check:
+                try:check.bind(('127.0.0.1',46180))
+                except OSError as exc:
+                    if exc.errno!=errno.EADDRINUSE:raise
+                else:raise RuntimeError('registered binder is not exclusive in controller host namespace')
+            (evidence/(label+'.json')).write_text(json.dumps({'PID':binder.pid,'start':bound['start'],'netns':bound['netns'],
+                'socket_inode':bound['inode'],'endpoint':bound['endpoint'],'reuseaddr':0,'reuseport':0,'second_host_bind_errno':errno.EADDRINUSE},indent=2))
+        test_id=uuid.uuid4().hex;test_owner=secrets.token_hex(32);test_project='volt-port-proof-'+test_id[:12]
+        network_id='';probe_id='';sharing=False
+        held('exclusive-binder-before-Docker-probe')
+        network_id=run('port-proof-internal-network-create',['docker','network','create','--internal','--driver','bridge',
+            '--label','volt.compose.owner-token='+test_owner,'--label','volt.delivery.project='+test_project,
+            '--label','volt.delivery.test='+test_id,'volt-easy-delivery-extra-'+test_id],evidence).stdout.strip()
+        probe_name='volt-easy-delivery-port-proof-'+test_id
+        args=['docker','create','--platform',platform,'--pull=never','--name',probe_name,'--network',network_id,
+            '--label','volt.delivery.test-owner='+test_id,'--label','volt.delivery.role=occupied-port-namespace-proof',
+            '--publish','127.0.0.1:46180:8000','--read-only','--cap-drop=ALL','--security-opt=no-new-privileges',
+            '--tmpfs','/tmp:rw,noexec,nosuid,size=8m','--tmpfs','/app/media:rw,noexec,nosuid,nodev,size=1m',
+            '--tmpfs','/opt/uvm/state:rw,noexec,nosuid,nodev,size=1m','--tmpfs','/var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=1m',
+            '--user',f'{os.getuid()}:{os.getgid()}','--entrypoint','/opt/uvm/venv/bin/python',admission['image_reference'],'-c','import time;time.sleep(90)']
+        probe_id=run('port-proof-container-create',args,evidence).stdout.strip()
+        if re.fullmatch(r'[0-9a-f]{64}',probe_id)is None:raise RuntimeError('namespace-proof exact fullCID missing')
+        def probe(label):
+            template='{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Config.Image}},"object":{{json .Image}},"descriptor":{{json .ImageManifestDescriptor}},"labels":{{json .Config.Labels}},"bindings":{{json .HostConfig.PortBindings}},"command":{{json .Config.Cmd}},"entrypoint":{{json .Config.Entrypoint}},"user":{{json .Config.User}},"readonly":{{json .HostConfig.ReadonlyRootfs}},"privileged":{{json .HostConfig.Privileged}},"state":{{json .State}}}'
+            row=json.loads(run(label,['docker','inspect',probe_id,'--format',template],evidence).stdout)
+            selected=json.loads((evidence/'fixture-full-runtime-admission.stdout').read_text())['runtime']['selected_descriptor']
+            engine=run(label+'-engine-identity',['docker','image','inspect',admission['image_reference'],'--format','{{.Id}}'],evidence).stdout.strip()
+            witnessed=(row['object']==admission['image_id']or(admission['image_id_kind']=='selected_manifest'and
+                engine in(admission['image_id'],admission['image_index_digest'])and row['object']==engine
+                and isinstance(row['descriptor'],dict)and all(row['descriptor'].get(k)==selected.get(k)for k in ('digest','mediaType','size','platform'))))
+            if(not witnessed or row['id']!=probe_id or row['name']!='/'+probe_name or row['image']!=admission['image_reference']
+                    or row['labels'].get('volt.delivery.test-owner')!=test_id or row['labels'].get('volt.delivery.role')!='occupied-port-namespace-proof'
+                    or row['bindings']!={'8000/tcp':[{'HostIp':'127.0.0.1','HostPort':'46180'}]}
+                    or row['command']!=['-c','import time;time.sleep(90)']or row['entrypoint']!=['/opt/uvm/venv/bin/python']
+                    or row['user']!=f'{os.getuid()}:{os.getgid()}'or row['readonly']is not True or row['privileged']is not False):
+                raise RuntimeError('exact admitted publisher proof identity differs; no mutation authorised')
+            return row
+        try:
+            probe('port-proof-before-start');started=run('port-proof-actual-Docker-start',['docker','start',probe_id],evidence,check=False)
+            held('exclusive-binder-after-Docker-probe');after=probe('port-proof-after-start')
+            sharing=(started.returncode!=0 and occupied_port_daemon_error(started.stderr+'\n'+after['state'].get('Error','')))
+            (evidence/'port-namespace-precondition.json').write_text(json.dumps({'Docker_start_exit':started.returncode,
+                'endpoint_specific_daemon_bind_failure':sharing,'owned_host_socket_held':True,'same_host_publishing_conflict_proven':sharing,
+                'scope':'admitted image sleep-only no-state/no-HTTP-route helper; not publicinstaller port-denial proof'},indent=2))
+        finally:
+            probe('port-proof-before-exact-remove');run('port-proof-exact-container-remove',['docker','rm','-f',probe_id],evidence)
+            network=json.loads(run('port-proof-network-before-remove',['docker','network','inspect',network_id],evidence).stdout)[0]
+            guard_extra_qualification_network(network,network_id=network_id,owner=test_owner,project=test_project,test_id=test_id,api_id=probe_id)
+            if network['Containers']:raise RuntimeError('proof network still has users; no removal')
+            run('port-proof-exact-network-remove',['docker','network','rm',network_id],evidence)
+        if not sharing:
+            (evidence/'occupied-port-outcome.json').write_text(json.dumps({'status':'BLOCKED_environment_same_host_publisher_namespace_unproved',
+                'public_install_attempted':False,'state_created':state.exists(),'precise_dependency':'exclusive registered HOST socket was held but Docker publisher provided no endpoint-specific daemon bind failure; do not infer Desktop/WSL namespace sharing or product denial',
+                'no_generic_timeout_credit':True,'probe_cleaned':True},indent=2));return
+        held('exclusive-binder-before-public-install')
+        args=['sh',str(launcher),'install','--directory',str(state),'--port','46180','--project-prefix','volt-easy-delivery']
+        with(evidence/'occupied-public-install.stdout').open('x')as stdout,(evidence/'occupied-public-install.stderr').open('x')as stderr:
+            (evidence/'occupied-public-install-invocation.json').write_text(json.dumps({'argv':args,'before_invocation':True,'start_new_session':True,'cwd':str(ROOT),'environment_PATH':environment['PATH']},indent=2))
+            caller=subprocess.Popen(args,cwd=ROOT,env=environment,stdout=stdout,stderr=stderr,start_new_session=True,
+                preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_FSIZE,(2*1024*1024,2*1024*1024)))
+            (evidence/'occupied-public-caller.json').write_text(json.dumps({'PID':caller.pid,'PGID':os.getpgid(caller.pid),'SID':os.getsid(caller.pid)}))
+            try:code=caller.wait(timeout=780)
+            except subprocess.TimeoutExpired:
+                if os.getpgid(caller.pid)!=caller.pid:raise RuntimeError('owned public caller identity changed')
+                os.killpg(caller.pid,signal.SIGTERM);caller.wait(timeout=30);code=124
+        (evidence/'occupied-public-install.exit').write_text(str(code));held('exclusive-binder-after-public-failure')
+        info=json.loads(_bounded_file(state/'instance.json',1024*1024,private=True))
+        template='{"id":{{json .Id}},"image":{{json .Config.Image}},"owner":{{json (index .Config.Labels "volt.compose.owner-token")}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"state":{{json .State}},"bindings":{{json .HostConfig.PortBindings}}}'
+        row=json.loads(run('occupied-failed-configured-API',['docker','inspect',info['project']+'-volt-1','--format',template],evidence).stdout)
+        if(row['image']!=admission['image_reference']or row['owner']!=info['owner_token']or row['project']!=info['project']):raise RuntimeError('actual failed public API identity differs')
+        actual_error=row['state'].get('Error','')
+        if code!=1 or row['state']['Running']is not False or (actual_error and not occupied_port_daemon_error(actual_error))or not occupied_port_daemon_error((evidence/'occupied-public-install.stderr').read_text()):
+            if row['state']['Running']:run('unexpected-exact-owned-portcase-stop',['docker','stop','--time','10',row['id']],evidence,check=False)
+            raise RuntimeError('occupied public action lacks actual same-endpoint daemon bind failure; no product credit')
+        (evidence/'occupied-port-outcome.json').write_text(json.dumps({'status':'observed_late_public_failure_pending_unheld_namespace_control','public_install_exit':code,'same_host_namespace_precondition_requires_control':True,
+            'endpoint_specific_actual_Docker_state_error':actual_error,'registered_binder_held_through_failure':True,'initial_keys_already_created':True,
+            'backend_ack_present':bool(info.get('local_recovery_acknowledgement')),'established':info.get('established'),
+            'prekey_preack_preworker_denial_claimed':False,'scope':'separate legitimate unclaimed publicinstall, late configured port failure; no account/browser/SQL or repaired/adopted resources'},indent=2))
+    finally:
+        if binder.poll()is None:
+            if os.getpgid(binder.pid)!=binder.pid or os.getsid(binder.pid)!=binder.pid:
+                raise RuntimeError('registered binder session changed; no release signal authorised')
+            os.kill(binder.pid,signal.SIGTERM)
+            try:binder.wait(timeout=10)
+            except subprocess.TimeoutExpired:os.kill(binder.pid,signal.SIGKILL);binder.wait()
+        (evidence/'owned-binder.exit').write_text(str(binder.returncode))
+
+
+def qualify_unheld_port_control(*, private: Path, evidence: Path, admission: dict,
+        selected: dict, original_port_evidence: Path) -> None:
+    """ONE A/B/A host socket control, never another public installation."""
+    import socket
+    import errno
+    from uvm.installer.lock import _bounded_file
+    if(original_port_evidence/'owned-binder.exit').read_text().strip()!='0':raise RuntimeError('original registered binder release0 required')
+    prior=json.loads(_bounded_file(private/'binder.json',16384,private=True))
+    if prior['netns']!=os.readlink('/proc/self/ns/net'):raise RuntimeError('controller host namespace differs from original binder; no control inference')
+    state=private/'instance';entry=create_offline_fixture_entry(state=state,admission=admission,private=private)
+    environment=trusted_launcher_environment(private/'minimal-host-path',admission)
+    run('unheld-control-fresh-external-cache-auth',['sh',str(entry),'verify-cache','--directory',str(state)],evidence,env=environment)
+    def host_bind(label):
+        with socket.socket(socket.AF_INET,socket.SOCK_STREAM)as check:
+            try:check.bind(('127.0.0.1',46180));code=0
+            except OSError as exc:
+                if exc.errno!=errno.EADDRINUSE:raise
+                code=exc.errno
+            (evidence/(label+'.json')).write_text(json.dumps({'actual_errno':code,'endpoint':['127.0.0.1',46180],
+                'controller_PID':os.getpid(),'controller_start':Path('/proc/self/stat').read_text().split()[21],
+                'controller_netns':os.readlink('/proc/self/ns/net'),'socket_inode':os.fstat(check.fileno()).st_ino,
+                'reuseaddr':check.getsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR),
+                'scope':'actual HOST bind observation, no connection/HTTP/account operation'},indent=2))
+            return code
+    if host_bind('unheld-before-publish-host-free')!=0:raise RuntimeError('host endpoint not free after old binder release; stop control, no retries')
+    test_id=uuid.uuid4().hex;owner=secrets.token_hex(32);project='volt-unheld-proof-'+test_id[:12]
+    network_id=run('unheld-owned-internal-network-create',['docker','network','create','--internal','--driver','bridge',
+        '--label','volt.compose.owner-token='+owner,'--label','volt.delivery.project='+project,'--label','volt.delivery.test='+test_id,
+        'volt-easy-delivery-extra-'+test_id],evidence).stdout.strip()
+    name='volt-easy-delivery-unheld-proof-'+test_id
+    args=['docker','create','--platform',admission['platform'],'--pull=never','--name',name,'--network',network_id,
+        '--label','volt.delivery.test-owner='+test_id,'--label','volt.delivery.role=unheld-port-control',
+        '--publish','127.0.0.1:46180:8000','--read-only','--cap-drop=ALL','--security-opt=no-new-privileges',
+        '--tmpfs','/tmp:rw,noexec,nosuid,size=8m','--tmpfs','/app/media:rw,noexec,nosuid,nodev,size=1m',
+        '--tmpfs','/opt/uvm/state:rw,noexec,nosuid,nodev,size=1m','--tmpfs','/var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=1m',
+        '--user',f'{os.getuid()}:{os.getgid()}','--entrypoint','/opt/uvm/venv/bin/python',admission['image_reference'],'-c','import time;time.sleep(90)']
+    cid=run('unheld-owned-publisher-create',args,evidence).stdout.strip()
+    if re.fullmatch(r'[0-9a-f]{64}',cid)is None:raise RuntimeError('unheld exact owned fullCID unavailable')
+    def observed(label):
+        template='{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Config.Image}},"object":{{json .Image}},"descriptor":{{json .ImageManifestDescriptor}},"labels":{{json .Config.Labels}},"command":{{json .Config.Cmd}},"entrypoint":{{json .Config.Entrypoint}},"user":{{json .Config.User}},"readonly":{{json .HostConfig.ReadonlyRootfs}},"privileged":{{json .HostConfig.Privileged}},"bindings":{{json .HostConfig.PortBindings}},"mounts":{{json .Mounts}},"state":{{json .State}}}'
+        row=json.loads(run(label,['docker','inspect',cid,'--format',template],evidence).stdout)
+        engine=run(label+'-engine',['docker','image','inspect',admission['image_reference'],'--format','{{.Id}}'],evidence).stdout.strip()
+        witness=(row['object']==admission['image_id']or(admission['image_id_kind']=='selected_manifest'
+            and engine in(admission['image_id'],admission['image_index_digest'])and row['object']==engine
+            and isinstance(row['descriptor'],dict)and all(row['descriptor'].get(k)==selected.get(k)for k in('digest','mediaType','size','platform'))))
+        if(not witness or row['id']!=cid or row['name']!='/'+name or row['image']!=admission['image_reference']
+                or row['labels'].get('volt.delivery.test-owner')!=test_id or row['labels'].get('volt.delivery.role')!='unheld-port-control'
+                or row['command']!=['-c','import time;time.sleep(90)']or row['entrypoint']!=['/opt/uvm/venv/bin/python']
+                or row['user']!=f'{os.getuid()}:{os.getgid()}'or row['readonly']is not True or row['privileged']is not False
+                or row['bindings']!={'8000/tcp':[{'HostIp':'127.0.0.1','HostPort':'46180'}]}
+                or any(m.get('Type')!='tmpfs'or m.get('Source')not in('',None)for m in row['mounts'])):
+            raise RuntimeError('unheld exact admitted no-state publisher guard differs')
+        return row
+    started=None;during=None
+    try:
+        observed('unheld-before-start')
+        started=run('unheld-actual-Docker-start',['docker','start',cid],evidence,check=False)
+        row=observed('unheld-after-start')
+        if started.returncode==0 and row['state']['Running']is True:during=host_bind('unheld-while-Docker-published-host-bind')
+    finally:
+        observed('unheld-before-exact-remove');run('unheld-exact-publisher-remove',['docker','rm','-f',cid],evidence)
+        row=json.loads(run('unheld-network-before-exact-remove',['docker','network','inspect',network_id],evidence).stdout)[0]
+        guard_extra_qualification_network(row,network_id=network_id,owner=owner,project=project,test_id=test_id,api_id=cid)
+        if row['Containers']:raise RuntimeError('unheld owned network has users; no removal')
+        run('unheld-exact-network-remove',['docker','network','rm',network_id],evidence)
+    restored=host_bind('unheld-after-remove-host-free')
+    proven=started is not None and started.returncode==0 and during==errno.EADDRINUSE and restored==0
+    info=json.loads(_bounded_file(state/'instance.json',1024*1024,private=True))
+    (evidence/'unheld-port-control-outcome.json').write_text(json.dumps({'status':'same_host_publisher_namespace_proven'if proven else'BLOCKED_Desktop_host_publisher_namespace_unproven',
+        'Docker_start_exit':started.returncode if started else None,'host_bind_while_published_errno':during,
+        'host_bind_after_cleanup_errno':restored,'same_host_namespace_as_original_registered_binder':True,
+        'no_public_install_or_DB_repeat':True,'no_HTTP_route_or_state_mounted':True,'probe_and_network_cleanup':0,
+        'earlier_public_phase':{'journal_established':info.get('established'),'backend_ack_present':bool(info.get('local_recovery_acknowledgement')),
+            'initial_keys_already_created':True,'prekey_preack_preworker_denial_claimed':False},
+        'scope':'ONE unheld A/B/A HOST socket control. Original728controllerEXIT1/State.Error-empty and daemon/publicfailure preserved; no invented State.Error. If unproven, STOP port approach without loops/daemon change.'},indent=2))
+
+
+def exact_daemon_reservation_error(text: str) -> bool:
+    return any('127.0.0.1:46180'in line and any(reason in line.lower()for reason in
+        ('port is already allocated','address already in use'))for line in text.splitlines())
+
+
+def qualify_daemon_reserved_port(*, private: Path, evidence: Path, admission: dict, selected: dict) -> None:
+    """Materially different daemon-reservation case; NEVER host-kernel credit."""
+    from uvm.installer.lock import _bounded_file
+    state=private/'instance';before=json.loads(_bounded_file(state/'instance.json',1024*1024,private=True))
+    if private.is_symlink()or private.resolve()!=private or private.parent!=Path('/tmp')or not private.name.startswith('volt-easy-delivery-occupied-port-'):
+        raise RuntimeError('ONLY retained728port B allowed, never original1002/C6')
+    if before.get('established')is not True or not before.get('local_recovery_acknowledgement')or before.get('restore_pending')or before['image']!=admission['image_reference']:
+        raise RuntimeError('retained728 B is not normally established; no repair or new namespace permitted')
+    entry=private/'trusted-offline-entry.sh'
+    if not entry.is_file()or entry.is_symlink():raise RuntimeError('existing independent fixed entry absent')
+    environment=trusted_launcher_environment(private/'minimal-host-path',admission)
+    def daemon(label):
+        endpoint=environment.get('DOCKER_HOST')
+        if not endpoint:
+            context=environment.get('DOCKER_CONTEXT')or run(label+'-context',['docker','context','show'],evidence,env=environment).stdout.strip()
+            endpoint=run(label+'-endpoint',['docker','context','inspect',context,'--format','{{(index .Endpoints "docker").Host}}'],evidence,env=environment).stdout.strip()
+        if not endpoint.startswith('unix://'):raise RuntimeError('only unchanged local Unix daemon allowed')
+        server=run(label+'-server-ID',['docker','info','--format','{{.ID}}'],evidence,env=environment).stdout.strip()
+        if not re.fullmatch(r'[A-Za-z0-9:-]{8,128}',server):raise RuntimeError('exact daemon ServerID unavailable')
+        return endpoint,server
+    original_daemon=daemon('daemon-holder-initial')
+    ready=run('retained-B-normal-public-status',['sh',str(entry),'status','--directory',str(state)],evidence,env=environment,check=False)
+    if ready.returncode!=0:raise RuntimeError('retained B cannot normally admit unchanged state; stop before holder, never repair')
+    immutable=((set(before['installer_initial_files'])|set(before['local_recovery_inventory']))-{'.env'})|{'secrets/local-restore-fence/fence.json'}
+    keys={name:(digest_bytes(_bounded_file(state/name,1024*1024,private=False)),(state/name).stat().st_ino,stat.S_IMODE((state/name).stat().st_mode))for name in sorted(immutable)}
+    def preserved():
+        current=json.loads(_bounded_file(state/'instance.json',1024*1024,private=True))
+        for field in ('installation_id','owner_token','project','installer_admission','installer_initial_request_sha256','local_recovery_custody'):
+            if current[field]!=before[field]:raise RuntimeError('existing B identity/key/pin/fence tuple changed')
+        for name,value in keys.items():
+            path=state/name
+            if(digest_bytes(_bounded_file(path,1024*1024,private=False)),path.stat().st_ino,stat.S_IMODE(path.stat().st_mode))!=value:
+                raise RuntimeError('immutable B key/configuration changed or regenerated')
+        if hashlib.sha256((state/'.env').read_bytes()).hexdigest()!=current['env_sha256']:raise RuntimeError('B environment differs from durable CURRENT transition')
+        record=json.loads(_bounded_file(state/'secrets/local-start-admission/admission.json',16384,private=True))
+        if record!=current['local_start_admission']or record['initial_preparation']is not False:raise RuntimeError('B start record differs from normal durable journal projection')
+        return current
+    token=uuid.uuid4().hex;owner=secrets.token_hex(32);project='volt-daemon-holder-'+token[:12]
+    network_id=run('holder-A-internal-network-create',['docker','network','create','--internal','--driver','bridge',
+        '--label','volt.compose.owner-token='+owner,'--label','volt.delivery.project='+project,'--label','volt.delivery.test='+token,
+        'volt-easy-delivery-extra-'+token],evidence,env=environment).stdout.strip()
+    name='volt-easy-delivery-daemon-holder-'+token
+    args=['docker','create','--platform',admission['platform'],'--pull=never','--name',name,'--restart=no','--no-healthcheck','--network',network_id,
+        '--label','volt.delivery.test-owner='+token,'--label','volt.delivery.role=daemon-reservation-holder',
+        '--publish','127.0.0.1:46180:8000','--read-only','--cap-drop=ALL','--security-opt=no-new-privileges',
+        '--tmpfs','/tmp:rw,noexec,nosuid,size=8m','--tmpfs','/app/media:rw,noexec,nosuid,nodev,size=1m',
+        '--tmpfs','/opt/uvm/state:rw,noexec,nosuid,nodev,size=1m','--tmpfs','/var/lib/postgresql/data:rw,noexec,nosuid,nodev,size=1m',
+        '--user',f'{os.getuid()}:{os.getgid()}','--entrypoint','/opt/uvm/venv/bin/python',admission['image_reference'],'-c','import time;time.sleep(600)']
+    cid=run('holder-A-exact-create',args,evidence,env=environment).stdout.strip()
+    if re.fullmatch(r'[0-9a-f]{64}',cid)is None:raise RuntimeError('holder registered fullCID missing')
+    def holder(label, running=False):
+        template='{"id":{{json .Id}},"name":{{json .Name}},"created":{{json .Created}},"image":{{json .Config.Image}},"object":{{json .Image}},"descriptor":{{json .ImageManifestDescriptor}},"labels":{{json .Config.Labels}},"command":{{json .Config.Cmd}},"entrypoint":{{json .Config.Entrypoint}},"user":{{json .Config.User}},"readonly":{{json .HostConfig.ReadonlyRootfs}},"privileged":{{json .HostConfig.Privileged}},"requested":{{json .HostConfig.PortBindings}},"effective":{{json .NetworkSettings.Ports}},"mounts":{{json .Mounts}},"state":{{json .State}}}'
+        row=json.loads(run(label,['docker','inspect',cid,'--format',template],evidence,env=environment).stdout)
+        engine=run(label+'-engine',['docker','image','inspect',admission['image_reference'],'--format','{{.Id}}'],evidence,env=environment).stdout.strip()
+        witness=(row['object']==admission['image_id']or(admission['image_id_kind']=='selected_manifest'and engine in(admission['image_id'],admission['image_index_digest'])and row['object']==engine
+            and isinstance(row['descriptor'],dict)and all(row['descriptor'].get(k)==selected.get(k)for k in('digest','mediaType','size','platform'))))
+        mapping={'8000/tcp':[{'HostIp':'127.0.0.1','HostPort':'46180'}]}
+        effective={k:v for k,v in(row['effective']or{}).items()if v}
+        if(not witness or row['id']!=cid or row['name']!='/'+name or row['image']!=admission['image_reference']
+                or row['labels'].get('volt.delivery.test-owner')!=token or row['labels'].get('volt.delivery.role')!='daemon-reservation-holder'
+                or row['command']!=['-c','import time;time.sleep(600)']or row['entrypoint']!=['/opt/uvm/venv/bin/python']
+                or row['user']!=f'{os.getuid()}:{os.getgid()}'or row['readonly']is not True or row['privileged']is not False
+                or row['requested']!=mapping or any(m.get('Type')!='tmpfs'or m.get('Source')not in('',None)for m in row['mounts'])
+                or running and(row['state']['Running']is not True or effective!=mapping)):
+            raise RuntimeError('registered A identity/image/no-state/effective port mapping drift; STOP unproven')
+        return row
+    capture=private/'daemon-reservation-observer';capture.mkdir(mode=0o700);real=Path(shutil.which('docker',path=environment['PATH'])).resolve(strict=True)
+    constants={'REAL':str(real),'CAPTURE':str(capture),'STATE':str(state),'PROJECT':before['project'],'SERVER':original_daemon[1],'ENDPOINT':original_daemon[0],'HOLDER':cid}
+    script='#!/bin/sh\nset -eu\numask 077\n'+''.join(k+'='+shlex.quote(v)+'\n'for k,v in constants.items())+r'''
+pass_original() { exec "$REAL" "$@"; }
+[ "$#" -eq 10 ] && [ "$1|$2|$3|$4|$5|$6|$7|$8|$9|${10}" = "compose|-f|$STATE/compose/compose.yaml|-f|$STATE/compose/local.yaml|--env-file|$STATE/.env|-p|$PROJECT|start" ] || pass_original "$@"
+IFS= read -r caller <"$CAPTURE/caller.pid";case "$caller" in ''|*[!0-9]*)exit 76;;esac
+read -r pid comm status parent group session rest <"/proc/$caller/stat"
+[ "$pid|$group|$session" = "$caller|$caller|$caller" ] || exit 76
+ancestor=$PPID;steps=0
+while [ "$ancestor" != "$caller" ] && [ "$steps" -lt 8 ];do
+ read -r pid comm status parent group session rest <"/proc/$ancestor/stat"
+ [ "$group|$session" = "$caller|$caller" ] || exit 76;ancestor=$parent;steps=$((steps+1))
+done
+[ "$ancestor" = "$caller" ] && [ ! -e "$CAPTURE/producer.exit" ] || exit 76
+[ "$("$REAL" info --format '{{.ID}}')" = "$SERVER" ] || exit 76
+endpoint=${DOCKER_HOST:-}
+if [ -z "$endpoint" ];then context=${DOCKER_CONTEXT:-};[ -n "$context" ] || context=$("$REAL" context show);endpoint=$("$REAL" context inspect "$context" --format '{{(index .Endpoints "docker").Host}}');fi
+[ "$endpoint" = "$ENDPOINT" ] || exit 76
+[ "$("$REAL" inspect "$HOLDER" --format '{{.Id}}|{{.State.Running}}')" = "$HOLDER|true" ] || exit 76
+printf '%s\n' "$@" >"$CAPTURE/producer.argv-lines"
+set +e
+(ulimit -f 128; "$REAL" "$@") >"$CAPTURE/producer.stdout" 2>"$CAPTURE/producer.stderr"
+code=$?;set -e;printf '%s\n' "$code" >"$CAPTURE/producer.exit"
+cat "$CAPTURE/producer.stdout";cat "$CAPTURE/producer.stderr" >&2;exit "$code"
+'''
+    shim=capture/'docker';shim.write_text(script);shim.chmod(0o700)
+    run('holder-compose-observer-shell',['sh','-n',str(shim)],evidence)
+    conflict=False
+    try:
+        holder('holder-A-before-start');run('holder-A-start',['docker','start',cid],evidence,env=environment)
+        live=holder('holder-A-reserved-before-B',True)
+        if daemon('daemon-before-B')!=original_daemon:raise RuntimeError('daemon/context changed before conflict')
+        argv=['sh','-c','umask 077; printf "%s\\n" "$$" >"$DAEMON_CAPTURE/caller.pid"; exec sh "$0" "$@"',str(entry),'start','--directory',str(state)]
+        observed={**environment,'PATH':str(capture)+os.pathsep+environment['PATH'],'DAEMON_CAPTURE':str(capture)}
+        (evidence/'public-B-conflict-invocation.json').write_text(json.dumps({'argv':argv,'before_invocation':True,'cwd':str(ROOT),'start_new_session':True,'source_observer_sha256':sha(shim),'PATH':observed['PATH']},indent=2))
+        with(evidence/'public-B-conflict.stdout').open('x')as stdout,(evidence/'public-B-conflict.stderr').open('x')as stderr:
+            caller=subprocess.Popen(argv,cwd=ROOT,env=observed,stdout=stdout,stderr=stderr,start_new_session=True)
+            (capture/'registered-caller.json').write_text(json.dumps({'PID':caller.pid,'PGID':os.getpgid(caller.pid),'SID':os.getsid(caller.pid)}))
+            try:code=caller.wait(timeout=300)
+            except subprocess.TimeoutExpired:
+                if os.getpgid(caller.pid)!=caller.pid:raise RuntimeError('registered B caller changed')
+                os.killpg(caller.pid,signal.SIGTERM);caller.wait(timeout=30);code=124
+        (evidence/'public-B-conflict.exit').write_text(str(code))
+        after=holder('holder-A-still-reserved-after-B',True)
+        if after['created']!=live['created']or after['state']['StartedAt']!=live['state']['StartedAt']or daemon('daemon-after-B')!=original_daemon:raise RuntimeError('holder/daemon changed through conflict')
+        terminal=(evidence/'public-B-conflict.stderr').read_text()
+        producer=_bounded_file(capture/'producer.stderr',65536,private=True).decode()
+        conflict=(code==1 and(capture/'producer.exit').read_text().strip()=='1'and exact_daemon_reservation_error(producer)
+            and 'volt installer: bootstrap maintenance container start failed'in terminal.splitlines())
+        preserved()
+        (evidence/'daemon-conflict-layer.json').write_text(json.dumps({'public_exit':code,'producer_exit':(capture/'producer.exit').read_text().strip(),
+            'exact_allocated_or_address_in_use':exact_daemon_reservation_error(producer),'generic_ports_unavailable_500_insufficient':True,
+            'holder_running_with_exact_effective_mapping_through_failure':True,'same_daemon_context':True,'daemon_reservation_credit_pending_control':conflict},indent=2))
+    finally:
+        holder('holder-A-before-exact-remove');run('holder-A-exact-remove',['docker','rm','-f',cid],evidence,env=environment)
+        row=json.loads(run('holder-A-network-before-remove',['docker','network','inspect',network_id],evidence,env=environment).stdout)[0]
+        guard_extra_qualification_network(row,network_id=network_id,owner=owner,project=project,test_id=token,api_id=cid)
+        if row['Containers']:raise RuntimeError('holder network has users; no removal')
+        run('holder-A-exact-network-remove',['docker','network','rm',network_id],evidence,env=environment)
+    if not conflict:
+        (evidence/'daemon-reservation-outcome.json').write_text(json.dumps({'status':'STOP_UNPROVEN_conflict_layer','no_more_start_or_probes':True,
+            'host_kernel_class_remains_BLOCKED':True,'holder_cleanup':0},indent=2));return
+    run('B-after-holder-release-supported-start',['sh',str(entry),'start','--directory',str(state)],evidence,env=environment)
+    wait_for_local('http://127.0.0.1:46180',evidence)
+    preserved()
+    run('B-after-control-supported-stop',['sh',str(entry),'stop','--directory',str(state)],evidence,env=environment)
+    final=preserved()
+    if daemon('daemon-after-control')!=original_daemon:raise RuntimeError('daemon changed during sensitivity control')
+    (evidence/'daemon-reservation-outcome.json').write_text(json.dumps({'status':'passed','scope':'ONE Docker-daemon reserved published endpoint ONLY, not HOST kernel socket collision',
+        'same_daemon_context':original_daemon,'exact_conflicting_start_exit':1,'after_release_supported_start_exit':0,'normal_health_exit':0,'controlled_stop_exit':0,
+        'same_installation_identity_keys_pin':True,'immutable_observed_key_config_count':len(keys),'normal_journal_CURRENT_environment_transitions_only':True,
+        'backend_ack_present':bool(final.get('local_recovery_acknowledgement')),'prekey_preack_preworker_denial_claimed':False,
+        'host_kernel_class_remains_BLOCKED':True,'holder_exact_cleanup':0,'retained_B_fixture':str(private)},indent=2))
 
 
 def qualify_public_readonly_diagnostics(*, package: Path, bundle: Path, admission: dict[str, str],

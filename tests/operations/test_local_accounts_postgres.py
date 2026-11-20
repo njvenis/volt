@@ -667,6 +667,75 @@ class LocalAccountsPostgreSQLTests(unittest.TestCase):
             self.assertEqual(stdout.getvalue(),'')
             self.assertFalse(sentinel in stderr.getvalue())
 
+    def test_private_route_observation_real_uid_app_current_db_fence_and_public_wire(self):
+        """Actual PG/app/UID1800; root Python supervisor fixture, no Docker/TLS."""
+        import shutil
+        import sysconfig
+        from uvm.auth import route_check_records as route
+        from tests.operations.test_route_check import ProcessFixture
+        self._local_admin()
+        config=json.loads(self.config_path.read_text())
+        config['public_origin']='https://127.0.0.1'
+        config['trusted_ingress']['mode']='https'
+        self.config_path.write_text(json.dumps(config));self.config_path.chmod(0o600)
+        # Owned interpreter copy admits UID1800 without altering /home privacy.
+        runtime=Path(self.temp.name)/'cpython-fixture'
+        shutil.copytree(sys.base_prefix,runtime,symlinks=False)
+        fence_paths={self.recovery_fence_path,self.recovery_fence_path.parent}
+        for parent,dirs,files in os.walk(self.temp.name):
+            for name in [parent,*[str(Path(parent)/x) for x in files]]:
+                path=Path(name)
+                if path not in fence_paths:os.chown(path,1800,1800)
+        fixture=ProcessFixture(Path(self.temp.name)/'route',self.config_path,
+            python=str(runtime/'bin'/'python3.13'),environment={
+                'PYTHONHOME':str(runtime),'PYTHONPATH':str(Path(__file__).resolve().parents[2])+os.pathsep+sysconfig.get_paths()['purelib']})
+        try:
+            fixture.start()
+            fence=json.loads(self.recovery_fence_path.read_text())
+            arm=fixture.arm(installation=self.installation_id,journal=fence['journal_id'])
+            expected={'schema_version':1,'mode':'local','setup_state':'claimed'}
+            def get(headers=()):
+                result=fixture.command('config',headers=list(headers))
+                self.assertEqual(result['status'],200)
+                self.assertEqual(result['body'],expected)
+                self.assertEqual(result['headers']['cache-control'],'no-store')
+                self.assertFalse(any(arm['challenge'] in str(value) for value in result.values()))
+                return result
+            before=get()
+            for headers in ([['X-Volt-Route-Challenge','invalid']],
+                    [['X-Volt-Route-Challenge',route.new_nonce()]],
+                    [['X-Volt-Route-Challenge',arm['challenge']],['x-volt-route-challenge',arm['challenge']]]):
+                get(headers)
+                with route.locked_store(role='root') as store:self.assertIsNone(store.read_seen())
+            # Wrong-request quota never consumes the valid operation's chance.
+            for _ in range(12):get([['X-Volt-Route-Challenge','wrong']])
+            get([['X-Volt-Route-Challenge',arm['challenge']]])
+            with route.locked_store(role='root') as store:
+                seen=store.read_seen();route.validate_observation(arm,seen)
+            get([['X-Volt-Route-Challenge',arm['challenge']]])
+            with route.locked_store(role='root') as store:self.assertEqual(store.read_seen(),seen)
+            fixture.disarm()
+            # A changed persisted installation cannot be mistaken for this config.
+            arm=fixture.arm(installation=self.installation_id,journal=fence['journal_id'])
+            with self.engine.begin() as c:
+                c.exec_driver_sql('update local_auth_installation set installation_id=%s',(str(uuid.uuid4()),))
+            try:
+                get([['X-Volt-Route-Challenge',arm['challenge']]])
+                with route.locked_store(role='root') as store:self.assertIsNone(store.read_seen())
+            finally:
+                with self.engine.begin() as c:c.exec_driver_sql('update local_auth_installation set installation_id=%s',(self.installation_id,))
+            # A forward UNAPPLIED fence must not produce an observation either.
+            original=json.loads(self.recovery_fence_path.read_text())
+            try:
+                self._replace_recovery_fence({**original,'restore_generation':1,'recovery_epoch_id':str(uuid.uuid4())})
+                get([['X-Volt-Route-Challenge',arm['challenge']]])
+                with route.locked_store(role='root') as store:self.assertIsNone(store.read_seen())
+            finally:self._replace_recovery_fence(original)
+            get([['X-Volt-Route-Challenge',arm['challenge']]])
+            with route.locked_store(role='root') as store:route.validate_observation(arm,store.read_seen())
+            fixture.disarm()
+        finally:fixture.close()
+
     def test_prepare_setup_reemits_existing_capability_without_rotation(self):
         from uvm.auth.maintenance import run as maintain
         before = json.loads(self.delivery_path.read_text())["capability"]

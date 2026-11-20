@@ -937,6 +937,9 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
         # include restore mutations, projection recovery and external pollers.
         app.router.on_startup.clear()
         app.router.on_shutdown.clear()
+    # Last wrapper: private routing boot follows every earlier lifespan entry.
+    from uvm.auth.route_check import install_main_route_check
+    install_main_route_check(app, auth_service)
     return app
 
 

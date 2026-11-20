@@ -150,6 +150,10 @@ COPY --from=valkey-bin /usr/lib/libcrypto.so.3 /opt/valkey/lib/libcrypto.so.3
 WORKDIR /opt/uvm/app
 COPY --from=uvm-build --chown=uvm:uvm /opt/uvm/venv /opt/uvm/venv
 COPY --from=uvm-build --chown=uvm:uvm /build/uvm ./uvm
+# Installer helpers run as the host UID as well as the API UID. Archive-based
+# build contexts may carry0700 directory modes; public application code must
+# remain traversable without changing ownership or private runtime custody.
+RUN find /opt/uvm/app/uvm -type d -exec chmod 0755 '{}' +
 COPY --chown=1001:1337 docker/g7/beat_progress_scheduler.py /app/beat_progress_scheduler.py
 COPY --chown=1001:1337 docker/g7/verification_middleware.py /app/g7_verification_middleware.py
 COPY --chown=uvm:uvm tools/g7_container_audit_export.py /opt/uvm/app/tools/g7_container_audit_export.py
@@ -176,6 +180,24 @@ COPY docker/g7/healthcheck.sh /usr/local/bin/uvm-g7-healthcheck
 COPY docker/g7/valkey-server /usr/local/bin/valkey-server
 COPY docker/g7/valkey-cli /usr/local/bin/valkey-cli
 RUN chmod 0755 /usr/local/bin/uvm-local-maintenance /usr/local/bin/uvm-g7-entrypoint /usr/local/bin/uvm-g7-identity-runtime /usr/local/bin/uvm-g7-healthcheck /usr/local/bin/valkey-server /usr/local/bin/valkey-cli
+# ONE canonical protected routing implementation, shared physically by ROOT
+# isolated control and the UID1800 API bridge. API-owned package imports are
+# forbidden in the broker/control closure.
+COPY --chown=0:0 uvm/auth/route_check_records.py /usr/local/lib/volt-private/volt_route_check_records.py
+COPY --chown=0:0 uvm/installer/route_check.py /usr/local/lib/volt-private/volt_route_check_control.py
+COPY --chown=0:0 docker/g7/main_api_launcher.py /usr/local/libexec/volt-main-api-launcher.py
+COPY --chown=0:0 docker/g7/route_check_control.py /usr/local/libexec/volt-route-check-control.py
+COPY --chown=0:0 uvm/installer/terminal_write.py /usr/local/libexec/volt-terminal-write.py
+COPY --chown=0:0 uvm/installer/terminal_completion.py /usr/local/libexec/volt-main-api-completion.py
+COPY --chown=0:0 uvm/installer/start_admission.py /usr/local/libexec/volt-start-admission.py
+COPY --chown=0:0 docker/g7/check_protected_python.py /usr/local/libexec/volt-check-protected-python.py
+RUN chown root:root /opt/uvm /opt/uvm/venv /opt/uvm/venv/bin /opt/uvm/venv/bin/python-uvm /opt/uvm/venv/pyvenv.cfg \
+    && chmod 0755 /opt/uvm /opt/uvm/venv /opt/uvm/venv/bin /opt/uvm/venv/bin/python-uvm \
+    && chmod 0644 /opt/uvm/venv/pyvenv.cfg \
+    && install -d -o root -g root -m 0755 /usr/local/lib/volt-private /usr/local/libexec \
+    && chmod 0644 /usr/local/lib/volt-private/volt_route_check_records.py /usr/local/lib/volt-private/volt_route_check_control.py \
+    && chmod 0755 /usr/local/libexec/volt-start-admission.py /usr/local/libexec/volt-main-api-launcher.py /usr/local/libexec/volt-route-check-control.py /usr/local/libexec/volt-terminal-write.py /usr/local/libexec/volt-main-api-completion.py /usr/local/libexec/volt-check-protected-python.py \
+    && env -i PATH=/usr/bin:/bin LC_ALL=C /usr/local/bin/python3.14 -I -S /usr/local/libexec/volt-check-protected-python.py
 RUN valkey-server --version && valkey-cli --version
 # pip is retained in the build stage for uv installation only. The final CE
 # runtime installs no packages dynamically; remove its installer and vendored

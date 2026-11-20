@@ -57,7 +57,8 @@ class RecoveryAuthorityPreparationTests(unittest.TestCase):
     def arm_start(self, root: Path, journal: dict, *, initial=False):
         journal["image_admission"] = {"id": "sha256:" + "d" * 64}
         resources = {"unit_fixture": "owned-resource-inspection"}
-        record = {**journal["local_recovery_custody"], "document_type": "local_start_admission",
+        record = {**journal["local_recovery_custody"], "document_type": "local_start_admission_v2",
+            "local_auth_config_sha256": journal["local_auth_config_sha256"],
             "image_id": journal["image_admission"]["id"],
             "resources_sha256": hashlib.sha256(_canonical(resources)).hexdigest(),
             "initial_preparation": initial}

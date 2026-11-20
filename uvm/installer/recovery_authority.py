@@ -534,6 +534,10 @@ def prepare_start(args) -> None:
     request = _request_for_instance(root)
     _resume(root, request)
     metadata = json.loads(_private_file(root / "instance.json"), object_pairs_hook=_pairs)
+    expected_config = metadata.get('local_auth_config_sha256')
+    if (type(expected_config) is not str or re.fullmatch(r'[0-9a-f]{64}', expected_config) is None
+            or hashlib.sha256(_private_file(root / 'local-auth.json')).hexdigest() != expected_config):
+        raise ValueError('expected local config changed before start resource admission')
     document = _read_document(sys.stdin)
     if set(document) != {"containers", "volumes", "networks"} or len(document["containers"]) != 1 or len(document["networks"]) != 1:
         raise ValueError("closed actual start resource inspection required")
@@ -569,7 +573,8 @@ def prepare_start(args) -> None:
         and not metadata.get("restore_pending") and metadata["local_recovery_custody"]["restore_generation"] == 0
         and (prior is None or prior["initial_preparation"]))
     custody = metadata["local_recovery_custody"]
-    record = {**custody, "document_type": "local_start_admission", "image_id": metadata["image_admission"]["id"],
+    record = {**custody, "document_type": "local_start_admission_v2", "image_id": metadata["image_admission"]["id"],
+        "local_auth_config_sha256": metadata["local_auth_config_sha256"],
         "resources_sha256": hashlib.sha256(_canonical(resources)).hexdigest(), "initial_preparation": initial}
     raw_env = _private_file(root / ".env")
     if hashlib.sha256(raw_env).hexdigest() not in {metadata["env_sha256"], metadata.get("local_start_environment_pending_sha256")}:

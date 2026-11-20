@@ -19,16 +19,25 @@ BUNDLE_SIG="$SELF_DIR/installer.bundle.sigstore.json"
 WORK=''
 LOCK_NAME=''
 LOCK_ID=''
+LOCK_STARTED_AT=''
+LOCK_SHAPE=''
 LOCK_CREATED=0
 CREATED_NETWORK=''
 INSTALLING=0
+HELPER_EXEC_ONLY=0
+RETAIN_STOP_EVIDENCE=0
 
 fail() { printf '%s\n' "volt installer: $*" >&2; exit 1; }
 cleanup() {
-  if [ -n "$LOCK_NAME" ] && [ "$LOCK_CREATED" -eq 1 ]; then
-    lock_owner=$(docker container inspect "$LOCK_NAME" --format '{{.Id}}|{{index .Config.Labels "volt.compose.owner-token"}}|{{index .Config.Labels "volt.compose.project"}}' 2>/dev/null || :)
-    if [ "$lock_owner" = "$LOCK_ID|$OWNER_TOKEN|$PROJECT" ]; then
-      docker rm -f "$LOCK_NAME" >/dev/null 2>&1 || :
+  cleanup_original_status=$?
+  if [ -n "$LOCK_NAME" ]; then
+    if [ "$LOCK_CREATED" -ne 1 ] || ! remove_lock_owner; then
+      printf '%s\n' 'volt installer: lifecycle owner cleanup uncertain; all registered resources and workspace retained' >&2
+      # EXIT cleanup is part of the operation's result. Uncertainty must not
+      # turn a nominal success into exit0, nor erase an earlier failure code.
+      trap - 0 HUP INT TERM
+      [ "$cleanup_original_status" -ne 0 ] || cleanup_original_status=1
+      exit "$cleanup_original_status"
     fi
   fi
   if [ "$INSTALLING" -eq 1 ] && [ -n "$CREATED_NETWORK" ] && [ -n "$OWNER_TOKEN" ] \
@@ -41,7 +50,7 @@ cleanup() {
     owner=$(docker network inspect "$CREATED_NETWORK" --format '{{index .Labels "volt.compose.owner-token"}}' 2>/dev/null || :)
     if [ "$owner" = "$OWNER_TOKEN" ]; then docker network rm "$CREATED_NETWORK" >/dev/null 2>&1 || :; fi
   fi
-  if [ -n "$WORK" ]; then rm -rf "$WORK"; fi
+  if [ -n "$WORK" ] && [ "${RETAIN_STOP_EVIDENCE:-0}" -eq 0 ]; then rm -rf "$WORK"; fi
 }
 trap cleanup 0 HUP INT TERM
 
@@ -524,24 +533,35 @@ case "$IMAGE_DIGEST" in *[!0-9a-f]*|'') fail 'signed runtime digest is malformed
 
 # Runtime helper invocation: read-only authenticated image, no network, no
 # Docker socket, exact package + private state binds, and only a data CLI.
-helper() {
+_helper_command() {
   state_dir=$1
   shift
-  docker run --platform "$PLATFORM" --pull=never --rm --network none --read-only --cap-drop=ALL \
+  helper_stdin_flag=''; helper_state_mount="type=bind,src=$state_dir,dst=/state"
+  if [ "${1:-}" = host-stop-validate ]; then helper_stdin_flag=-i; helper_state_mount="$helper_state_mount,readonly"; fi
+  set -- docker run --platform "$PLATFORM" --pull=never --rm $helper_stdin_flag --network none --read-only --cap-drop=ALL \
     --security-opt=no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=32m \
     --env HOME=/tmp --user "$(id -u):$(id -g)" \
     --mount "type=bind,src=$PACKAGE,dst=/package,readonly" \
-    --mount "type=bind,src=$state_dir,dst=/state" \
+    --mount "$helper_state_mount" \
     --mount "type=bind,src=$CACHE_DIRECTORY,dst=/run/volt-offline-artifacts,readonly" \
     --mount "type=bind,src=$CACHE_PARENT,dst=/run/volt-cache-parent,readonly" \
     --mount "type=bind,src=$WORK/graph-admission.json,dst=/run/volt-independent-admission/receipt.json,readonly" \
     --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" /package/setup.py "$@"
+  if [ "${HELPER_EXEC_ONLY:-0}" = 1 ]; then exec "$@"; else "$@"; fi
+}
+
+helper() {
+  check_managed_holder
+  helper_status=0
+  _helper_command "$@" || helper_status=$?
+  check_managed_holder
+  return "$helper_status"
 }
 
 # Recovery preparation/validation runs in the admitted image with no network,
 # Docker socket, or operator key exposed to the API container. JSON crosses the
 # boundary as data on stdin/stdout; it is never evaluated as shell.
-recovery_helper() {
+_recovery_helper_command() {
   operation=$1
   case "$operation" in request|targets-request|prepare|validate|acknowledge|prepare-start) ;; *) fail 'invalid local recovery helper operation' ;; esac
   if [ "$operation" = request ] || [ "$operation" = targets-request ]; then
@@ -571,6 +591,14 @@ recovery_helper() {
     "$operation" --request-stdin --instance-root /instance
 }
 
+recovery_helper() {
+  ensure_lock_owner
+  recovery_status=0
+  _recovery_helper_command "$@" || recovery_status=$?
+  ensure_lock_owner
+  return "$recovery_status"
+}
+
 prepare_local_custody() {
   [ "$MODE" = local ] || return 0
   recovery_helper request >"$WORK/recovery-request.json" || fail 'could not create closed local recovery request'
@@ -588,7 +616,7 @@ validate_local_custody() {
     || fail 'local recovery custody validation failed'
 }
 
-locked_compose() {
+_locked_compose_command() {
   clean_path="PATH=$PATH" clean_home="HOME=$HOME" clean_config="DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}"
   clean_host="DOCKER_HOST=${DOCKER_HOST-}" clean_context="DOCKER_CONTEXT=${DOCKER_CONTEXT-}"
   clean_tls="DOCKER_TLS_VERIFY=${DOCKER_TLS_VERIFY-}" clean_certs="DOCKER_CERT_PATH=${DOCKER_CERT_PATH-}"
@@ -603,11 +631,19 @@ locked_compose() {
   fi
 }
 
+locked_compose() {
+  ensure_lock_owner
+  compose_status=0
+  _locked_compose_command "$@" || compose_status=$?
+  ensure_lock_owner
+  return "$compose_status"
+}
+
 read_instance() {
   set --
   [ "${ACTION:-}" != restore-provision ] || set -- --allow-restore-transition
   INFO=$(helper "$STATE" host-validate /state --image "$IMAGE_REF" "$@") || fail 'private instance state failed runtime validation'
-  PROJECT=''; OWNER_TOKEN=''; MODE=''; INSTANCE_PLATFORM=''; HTTP_PORT=''
+  PROJECT=''; OWNER_TOKEN=''; MODE=''; INSTANCE_PLATFORM=''; HTTP_PORT=''; LOCAL_START_RESOURCES_SHA256=''
   START_CLOSED=1
   RESTORE_PENDING=0; RESTORE_IMPORTED=0; RESTORE_CAPABILITIES_REVOKED=0; RESTORE_SESSIONS_REVOKED=0
   while IFS='=' read -r key value; do
@@ -618,6 +654,7 @@ read_instance() {
       platform) INSTANCE_PLATFORM=$value ;;
       http_port) HTTP_PORT=$value ;;
       start_closed) START_CLOSED=$value ;;
+      local_start_resources_sha256) LOCAL_START_RESOURCES_SHA256=$value ;;
       restore_pending) RESTORE_PENDING=$value ;;
       restore_imported) RESTORE_IMPORTED=$value ;;
       restore_capabilities_revoked) RESTORE_CAPABILITIES_REVOKED=$value ;;
@@ -739,11 +776,49 @@ EOF_MOUNTS
     || fail 'actual VOLT container mount inventory is incomplete'
 }
 
+lock_owner_shape() {
+  docker inspect "$LOCK_NAME" --format '{{json .Config.Entrypoint}}|{{json .Config.Cmd}}|{{json .HostConfig.Mounts}}|{{json .HostConfig.Tmpfs}}|{{.HostConfig.NetworkMode}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.Privileged}}|{{json .HostConfig.CapAdd}}|{{json .HostConfig.CapDrop}}|{{json .HostConfig.PortBindings}}|{{.Image}}'
+}
+
+pin_lock_owner() {
+  LOCK_STARTED_AT=$(docker inspect "$LOCK_NAME" --format '{{.State.StartedAt}}') \
+    || fail 'actual lifecycle FD owner start identity unavailable'
+  case "$LOCK_STARTED_AT" in ''|0001-*|*[!0-9TZ.:-]*) fail 'actual lifecycle FD owner start identity malformed' ;; esac
+  [ "${#LOCK_STARTED_AT}" -le 40 ] || fail 'actual lifecycle FD owner start identity exceeds bound'
+  printf '%s\n' "$LOCK_STARTED_AT" | grep -Eq '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]{1,9})?Z$' \
+    || fail 'actual lifecycle FD owner start identity malformed'
+  LOCK_SHAPE=$(lock_owner_shape) || fail 'actual lifecycle FD owner recipe unavailable'
+  [ -n "$LOCK_SHAPE" ] || fail 'actual lifecycle FD owner recipe absent'
+  ensure_lock_owner
+}
+
 ensure_lock_owner() {
-  [ -n "$LOCK_NAME" ] && [ -n "$LOCK_ID" ] || fail 'actual lifecycle FD owner is unavailable'
-  owner=$(docker inspect "$LOCK_NAME" --format '{{.Id}}|{{.State.Running}}|{{index .Config.Labels "volt.compose.owner-token"}}|{{index .Config.Labels "volt.compose.project"}}|{{.Config.Image}}') \
+  [ -n "$LOCK_NAME" ] && [ -n "$LOCK_ID" ] && [ -n "$LOCK_STARTED_AT" ] && [ -n "$LOCK_SHAPE" ] \
+    || fail 'actual lifecycle FD owner is unavailable'
+  owner=$(docker inspect "$LOCK_NAME" --format '{{.Id}}|{{.State.Running}}|{{index .Config.Labels "volt.compose.owner-token"}}|{{index .Config.Labels "volt.compose.project"}}|{{.Config.Image}}|{{.State.StartedAt}}|{{.State.Paused}}|{{.State.Restarting}}|{{index .Config.Labels "org.volt.compose-install.role"}}') \
     || fail 'actual lifecycle FD owner disappeared'
-  [ "$owner" = "$LOCK_ID|true|$OWNER_TOKEN|$PROJECT|$IMAGE_REF" ] || fail 'actual lifecycle FD owner changed or stopped'
+  [ "$owner" = "$LOCK_ID|true|$OWNER_TOKEN|$PROJECT|$IMAGE_REF|$LOCK_STARTED_AT|false|false|host-lifecycle-lock" ] \
+    || fail 'actual lifecycle FD owner changed or stopped'
+  observed_shape=$(lock_owner_shape) || fail 'actual lifecycle FD owner recipe unavailable'
+  [ "$observed_shape" = "$LOCK_SHAPE" ] || fail 'actual lifecycle FD owner recipe changed'
+}
+
+remove_lock_owner() {
+  # EXIT may follow the very guard that rejected this owner. Reuse the FULL
+  # pinned observation without letting fail() abort or bypass the exit trap.
+  # An unknown/restarted/paused/replaced holder is retained, never adopted.
+  if (ensure_lock_owner) >/dev/null 2>&1; then
+    docker rm -f "$LOCK_ID" >/dev/null 2>&1 || return 1
+    LOCK_NAME=''; LOCK_CREATED=0
+  else
+    return 1
+  fi
+}
+
+check_managed_holder() {
+  # Pre-lock discovery is read-only. Once registered, no critical operation may
+  # silently continue after owner loss or adopt another holder.
+  if [ -n "$LOCK_NAME" ]; then ensure_lock_owner; fi
 }
 
 take_lock() {
@@ -787,6 +862,7 @@ take_lock() {
   case "$LOCK_ID" in *[!0-9a-f]*|'') fail 'actual lifecycle container ID is malformed' ;; esac
   [ "${#LOCK_ID}" -eq 64 ] || fail 'actual lifecycle container ID is malformed'
   LOCK_CREATED=1
+  pin_lock_owner
   attempts=0
   while [ "$attempts" -lt 30 ]; do
     ensure_lock_owner
@@ -811,8 +887,9 @@ take_lock() {
 wait_healthy() {
   tries=0
   while [ "$tries" -lt 180 ]; do
+    ensure_lock_owner
     health=$(docker container inspect "${PROJECT}-volt-1" --format '{{.State.Health.Status}}' 2>/dev/null || :)
-    [ "$health" = healthy ] && return
+    if [ "$health" = healthy ]; then ensure_lock_owner; return; fi
     [ "$health" != unhealthy ] || fail 'VOLT container health check failed'
     tries=$((tries + 1)); sleep 2
   done
@@ -841,6 +918,7 @@ collect_start_resources() {
 }
 
 prepare_start_container() {
+  ensure_lock_owner
   locked_compose create --force-recreate || fail 'local container preparation failed'
   verify_actual_mounts
   collect_start_resources
@@ -852,11 +930,14 @@ prepare_start_container() {
   collect_start_resources
   recovery_helper prepare-start <"$WORK/start-resources.json" >"$WORK/prepare-start.txt" \
     || fail 'recreated local container differs from start admission'
+  ensure_lock_owner
 }
 
 release_start() {
+  ensure_lock_owner
   tries=0
   while [ "$tries" -lt 360 ]; do
+    ensure_lock_owner
     if docker exec --user 0:0 "${PROJECT}-volt-1" cat /run/uvm-maintenance/applied.json >"$WORK/applied.json" 2>/dev/null \
         && [ -s "$WORK/applied.json" ]; then break; fi
     state=$(docker inspect "${PROJECT}-volt-1" --format '{{.State.Status}}')
@@ -869,10 +950,15 @@ release_start() {
   recovery_helper acknowledge <"$WORK/applied.json" >"$WORK/acknowledgement.txt" \
     || fail 'backend acknowledgement differs from independent host custody'
   read_instance
-  docker exec -i --user 0:0 "${PROJECT}-volt-1" /opt/uvm/venv/bin/python \
-    -m uvm.installer.start_admission release <"$STATE/secrets/local-start-admission/admission.json" \
+  case "$LOCAL_START_RESOURCES_SHA256" in ''|*[!0-9a-f]*) fail 'expected start resource context is missing or malformed' ;; esac
+  [ "${#LOCAL_START_RESOURCES_SHA256}" -eq 64 ] || fail 'expected start resource context exceeds bound'
+  ensure_lock_owner
+  docker exec -i --user 0:0 "${PROJECT}-volt-1" /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C \
+    "UVM_LOCAL_START_IMAGE_ID=$IMAGE_ID" "UVM_LOCAL_START_RESOURCES_SHA256=$LOCAL_START_RESOURCES_SHA256" \
+    /usr/local/bin/python3.14 -I -S /usr/local/libexec/volt-start-admission.py release <"$STATE/secrets/local-start-admission/admission.json" \
     >"$WORK/host-release.txt" || fail 'host could not release the exact disarmed start'
   wait_healthy
+  ensure_lock_owner
 }
 
 start_local_instance() {
@@ -888,6 +974,7 @@ start_local_instance() {
 }
 
 copy_capability() {
+  ensure_lock_owner
   destination=$1
   operation=$2
   document="$STATE/secrets/bootstrap-capability-document.json"
@@ -992,7 +1079,9 @@ run_maintenance() {
   case "$operation" in
     prepare-setup|rotate-setup|create-account|issue-enrolment|issue-recovery)
       copy_capability "$STATE/secrets/bootstrap-capability-output" "$operation"
-      show_capability "$STATE/secrets/bootstrap-capability-output" ;;
+      ensure_lock_owner
+  show_capability "$STATE/secrets/bootstrap-capability-output"
+  ensure_lock_owner ;;
   esac
 }
 
@@ -1151,7 +1240,10 @@ if [ "$ACTION" = install ]; then
   locked_compose config --quiet || fail 'resolved local Compose configuration failed validation'
   start_local_instance
   copy_capability "$STATE/secrets/bootstrap-capability-output" prepare-setup
+  ensure_lock_owner
   show_capability "$STATE/secrets/bootstrap-capability-output"
+  ensure_lock_owner
+  ensure_lock_owner
   printf 'instance=%s\n' "$STATE"
 elif [ "$ACTION" = start ]; then
   if [ "$RESTORE_PENDING" -eq 1 ]; then
@@ -1159,8 +1251,7 @@ elif [ "$ACTION" = start ]; then
   fi
   start_local_instance
 elif [ "$ACTION" = stop ]; then
-  verify_actual_mounts
-  locked_compose stop --timeout 600
+  run_public_local_stop
 elif [ "$ACTION" = status ]; then
   verify_actual_mounts
   locked_compose ps --all
@@ -1181,7 +1272,7 @@ elif [ "$ACTION" = destroy ]; then
   locked_compose down --timeout 600 --volumes
   if [ "$REMOVE_STATE" -eq 1 ]; then
     [ -n "$STATE" ] && [ "$STATE" != / ] || fail 'refusing unsafe private-state removal'
-    if [ -n "$LOCK_NAME" ]; then docker rm -f "$LOCK_NAME" >/dev/null; LOCK_NAME=''; fi
+    if [ -n "$LOCK_NAME" ]; then remove_lock_owner || fail 'lifecycle owner cleanup uncertain; private instance retained'; fi
     rm -rf "$STATE"
   fi
 else

@@ -35,11 +35,6 @@ STORES = ('postgres', 'media', 'state')
 MAX_INPUT = 8 * 1024 * 1024
 MAX_WAIT = 900
 FILE_IDENTITY = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
-SHUTDOWN_MARKERS = ('G7_STOP_PHASE=writers status=0', 'G7_STOP_PHASE=workers status=0',
-    'G7_STOP_DATABASE_STOPPED service=postgresql', 'G7_STOP_PHASE=databases status=0',
-    'G7_SHUTDOWN=controlled service_cleanup_status=0')
-
-
 def _started_at(value: str) -> str:
     if (not isinstance(value, str) or len(value) > 40
             or re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z', value) is None
@@ -47,37 +42,6 @@ def _started_at(value: str) -> str:
         raise ValueError('actual queried container StartedAt is malformed')
     return value
 
-
-def shutdown_evidence(stream, started_at: str) -> dict:
-    """Stream the fixed Docker log tail with bounded memory, even for huge lines."""
-    _started_at(started_at)
-    needles = tuple(marker.encode() for marker in (*SHUTDOWN_MARKERS, 'G7_STOP_ERROR'))
-    keep = max(map(len, needles)) - 1
-    found, tail, count = set(), b'', 0
-    while True:
-        block = stream.read(65536)
-        if not block:
-            break
-        count += len(block)
-        combined = tail + block
-        found.update(needle for needle in needles if needle in combined)
-        tail = combined[-keep:]
-    return {'schema_version': 1, 'profile': 'volt_controlled_stop_evidence_v1',
-        'queried_started_at': started_at, 'markers': [marker for marker in SHUTDOWN_MARKERS if marker.encode() in found],
-        'stop_error': b'G7_STOP_ERROR' in found, 'bytes_seen': count}
-
-
-def read_shutdown_evidence(path: Path, actual_started_at: str) -> dict:
-    raw = _bounded_file(path, 65536, private=True)
-    value = json.loads(raw, object_pairs_hook=pairs)
-    if (not isinstance(value, dict) or set(value) != {'schema_version', 'profile', 'queried_started_at', 'markers', 'stop_error', 'bytes_seen'}
-            or canonical(value) != raw or type(value['schema_version']) is not int or value['schema_version'] != 1
-            or value['profile'] != 'volt_controlled_stop_evidence_v1'
-            or value['queried_started_at'] != _started_at(actual_started_at)
-            or value['markers'] != list(SHUTDOWN_MARKERS) or value['stop_error'] is not False
-            or type(value['bytes_seen']) is not int or value['bytes_seen'] < 0):
-        raise ValueError('bounded current-run shutdown evidence is incomplete, failed or bound to another StartedAt')
-    return value
 
 
 def owned_fd(fd: int) -> None:
@@ -304,8 +268,8 @@ def validate_observation(info: dict, data: dict, *, container: bool, complete: b
                 or type(state.get('ExitCode')) is not int or state.get('ExitCode') != 0 or state.get('Error') or not state.get('StartedAt')
                 or state['StartedAt'].startswith('0001-') or data['logs_since'] != state['StartedAt']):
             raise ValueError('offline backup requires current successful controlled stop')
-        if not isinstance(data['logs'], str) or any(marker not in data['logs'] for marker in SHUTDOWN_MARKERS) or 'G7_STOP_ERROR' in data['logs']:
-            raise ValueError('current controlled shutdown markers are missing or failed')
+        from uvm.installer.stopped_transport import validate as validate_stopped_transport
+        validate_stopped_transport(info, item, data['logs'])
     elif data['logs'] != '' or data['logs_since'] is not None:
         raise ValueError('restore observation must not carry runtime logs')
 
@@ -588,18 +552,15 @@ def project_observation(value: dict) -> dict:
     return projected
 
 
-def emit_observation(phase: str) -> None:
-    previous_phase = {'observed': 'plan', 'captured': 'capture', 'provisioned': 'provision'}.get(phase)
-    if previous_phase is None:
-        raise ValueError('unknown fixed offline observation phase')
-    previous, raw = _response(previous_phase)
+def observation_data() -> dict:
     _directory(OBSERVATION)
     observed = json.loads(_bounded_file(OBSERVATION / 'docker.json', MAX_INPUT, private=True), object_pairs_hook=pairs)
     data = project_observation(observed)
     if data['containers']:
-        proof = read_shutdown_evidence(OBSERVATION / 'shutdown-evidence.json', data['containers'][0]['State']['StartedAt'])
-        logs = '\n'.join(proof['markers'])
-        since = proof['queried_started_at']
+        from uvm.installer.stopped_transport import decode as decode_stopped_transport
+        logs = _bounded_file(OBSERVATION / 'shutdown-evidence.json', 262144, private=True).decode('utf-8')
+        proof, _tar, _envelope = decode_stopped_transport(logs)
+        since = _started_at(proof['queried_started_at'])
     else:
         logs, since = '', None
     inventory_file = OBSERVATION / 'inventories.json'
@@ -607,6 +568,15 @@ def emit_observation(phase: str) -> None:
         inventories=json.loads(_bounded_file(inventory_file, 65536, private=True), object_pairs_hook=pairs),
         independent_admission=json.loads(_bounded_file(OBSERVATION / 'independent-admission.json',
             1024 * 1024, private=True), object_pairs_hook=pairs))
+    return data
+
+
+def emit_observation(phase: str) -> None:
+    previous_phase = {'observed': 'plan', 'captured': 'capture', 'provisioned': 'provision'}.get(phase)
+    if previous_phase is None:
+        raise ValueError('unknown fixed offline observation phase')
+    previous, raw = _response(previous_phase)
+    data = observation_data()
     value = {**previous, 'phase': phase, 'predecessor_sha256': digest(raw), 'data': data}
     print(canonical(value).decode(), end='')
 
@@ -649,7 +619,7 @@ def plan_lines(phase: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description='Fixed data-only offline lifecycle adapters')
-    parser.add_argument('action', choices=('emit-request', 'emit-observation', 'plan-lines', 'queried-started-at', 'filter-shutdown', 'backup-status'))
+    parser.add_argument('action', choices=('emit-request', 'emit-observation', 'plan-lines', 'queried-started-at', 'queried-container-id', 'filter-stop-wait', 'filter-stop-tar', 'filter-stop-logs', 'filter-stop-post', 'encode-stopped-transport', 'emit-stopped-observation', 'backup-status'))
     parser.add_argument('--phase', choices=('plan', 'capture', 'provision', 'complete', 'observed', 'captured', 'provisioned'))
     parser.add_argument('--backup-name')
     parser.add_argument('--started-at')
@@ -658,33 +628,56 @@ def main() -> int:
     args = parser.parse_args()
     if args.action != 'backup-status' and (args.operation_id is not None or args.identity_sha256 is not None):
         parser.error('capture readback identity is not an execution capability')
-    if args.action not in ('filter-shutdown', 'queried-started-at') and args.started_at is not None:
+    if args.started_at is not None:
         parser.error('query StartedAt is not a lifecycle selector')
     if args.action == 'backup-status':
         if args.phase is not None or args.started_at is not None:
             parser.error('readback cannot select a phase or query')
         print(json.dumps(backup_status(args.operation_id, args.identity_sha256, args.backup_name), sort_keys=True))
-    elif args.action == 'filter-shutdown':
+    elif args.action in ('filter-stop-wait','filter-stop-tar','filter-stop-logs','filter-stop-post'):
         if args.phase is not None or args.backup_name is not None:
-            parser.error('shutdown filtering has only its actual query StartedAt')
-        def timed_out(_number, _frame):
-            raise TimeoutError('bounded shutdown evidence acquisition timed out')
-        old = signal.signal(signal.SIGALRM, timed_out)
-        signal.alarm(120)
-        try:
-            value = shutdown_evidence(sys.stdin.buffer, args.started_at)
-        finally:
-            signal.alarm(0); signal.signal(signal.SIGALRM, old)
-        print(canonical(value).decode(), end='')
-        if value['markers'] != list(SHUTDOWN_MARKERS) or value['stop_error']:
-            parser.error('current-run shutdown evidence is missing or failed')
-    elif args.action == 'queried-started-at':
-        if any(value is not None for value in (args.phase, args.backup_name, args.started_at)):
-            parser.error('current StartedAt comes only from the saved Docker observation')
-        raw = json.loads(_bounded_file(OBSERVATION / 'docker.json', MAX_INPUT, private=True), object_pairs_hook=pairs)
-        if len(raw.get('containers', [])) != 1:
-            parser.error('one actual stopped container is required for the log query')
-        print(_started_at(raw['containers'][0]['State']['StartedAt']))
+            parser.error('fixed stopped filtering has no phase or destination')
+        from uvm.installer import stopped_capture
+        if args.action=='filter-stop-post':
+            deadline=time.monotonic()+0.5
+            raw=stopped_capture._bounded_bytes(sys.stdin.buffer,MAX_INPUT,deadline)
+            rows=json.loads(raw,object_pairs_hook=pairs)
+            if type(rows)is not list or len(rows)!=1:raise ValueError('one post-acquisition container required')
+            post=project_observation({'image':[{}],'containers':rows,'volumes':[],'networks':[]})['containers'][0]
+            from uvm.installer.stopped_transport import container_shape
+            container_shape(post);value=canonical(post)
+            if len(value)>65536:raise ValueError('post container projection exceeded its bound')
+            stopped_capture._before(deadline)
+        else:
+            function={'filter-stop-wait':stopped_capture.docker_wait_output,
+                'filter-stop-tar':stopped_capture.routing_tar,'filter-stop-logs':stopped_capture.completion_line}[args.action]
+            value=function(sys.stdin.buffer)
+        sys.stdout.buffer.write(value)
+    elif args.action in ('queried-started-at','queried-container-id','encode-stopped-transport'):
+        if any(value is not None for value in (args.phase,args.backup_name,args.started_at)):
+            parser.error('stopped context comes only from the saved current Docker observation')
+        observed=json.loads(_bounded_file(OBSERVATION/'docker.json',MAX_INPUT,private=True),object_pairs_hook=pairs)
+        data=project_observation(observed)
+        if len(data['containers'])!=1:raise ValueError('one actual stopped container is required')
+        item=data['containers'][0]
+        if args.action=='queried-started-at':print(_started_at(item['State']['StartedAt']))
+        elif args.action=='queried-container-id':
+            if re.fullmatch('[0-9a-f]{64}',item['Id'])is None:raise ValueError('full current stopped CID required')
+            print(item['Id'])
+        else:
+            from uvm.installer.stopped_transport import encode
+            outcomes=json.loads(_bounded_file(OBSERVATION/'stop-producer-statuses.json',4096,private=True),object_pairs_hook=pairs)
+            post=json.loads(_bounded_file(OBSERVATION/'stop-post-container.json',65536,private=True),object_pairs_hook=pairs)
+            value=encode(item,_bounded_file(OBSERVATION/'stop-wait.stdout',2,private=True),
+                _bounded_file(OBSERVATION/'stop-routing.tar',131072,private=True),
+                _bounded_file(OBSERVATION/'stop-envelope.json',2048,private=True),post,outcomes)
+            print(value,end='')
+    elif args.action == 'emit-stopped-observation':
+        if any(value is not None for value in (args.phase,args.backup_name,args.started_at)):
+            parser.error('current stopped observation has no phase or destination selector')
+        data=observation_data()
+        if len(data['containers'])!=1:raise ValueError('one stopped container is required')
+        print(canonical(data).decode(),end='')
     elif args.action == 'emit-request':
         if args.phase is not None:
             parser.error('request emission has no phase selector')

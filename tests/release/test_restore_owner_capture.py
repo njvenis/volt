@@ -21,7 +21,8 @@ a=sys.argv[1:];d=json.loads(Path(os.environ['CAPTURE_DOCKER_FIXTURE']).read_text
 with open(os.environ['CAPTURE_DOCKER_CALLS'],'a') as stream:stream.write(json.dumps(a)+'\\n')
 if a[0]=='inspect':
  fmt=a[a.index('--format')+1]
- if fmt.startswith('{{.Id}}|'):print(d['identity'])
+ if fmt.startswith('{{.Id}}|{{.Created}}|'):print(d.get('retained_identity','a'*64+'|2026-11-20T00:00:00Z|2026-11-20T00:01:00Z|2026-11-20T00:02:00Z|false|false|false|70'))
+ elif fmt.startswith('{{.Id}}|'):print(d['identity'])
  elif '/run/volt-offline-input' in fmt:print(d['input'])
  elif '/run/volt-offline-output' in fmt:print(d['output'])
  else:print('{"id":"'+('a'*64)+'"}')
@@ -50,3 +51,40 @@ else:print('ORIGINAL_OTHER_COMMAND')
             capture,env,log,project=self.fixture(Path(tmp));(capture/'caller.pid').unlink()
             result=subprocess.run(['docker','rm','-f','unrelated-owner'],env=env,capture_output=True,text=True);self.assertEqual(result.returncode,23)
             self.assertEqual([json.loads(v) for v in log.read_text().splitlines()],[['rm','-f','unrelated-owner']]);self.assertFalse((capture/'guard.status').exists())
+
+    def test_full_cid_removal_captures_only_original_named_owner_then_forwards_exact_argv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            capture,env,log,project=self.fixture(Path(tmp))
+            result=subprocess.run(['docker','rm','-f','a'*64],env=env,capture_output=True,text=True)
+            self.assertEqual(result.returncode,23)
+            self.assertEqual((capture/'guard.status').read_text().strip(),'captured')
+            self.assertEqual((capture/'capture-timing').read_text().strip(),'before_removal')
+            calls=[json.loads(v)for v in log.read_text().splitlines()]
+            self.assertEqual(calls[0][1],'volt-offline-'+project+'-12345')
+            self.assertEqual(calls[-1],['rm','-f','a'*64])
+
+    def test_retained_original_owner_capture_is_read_only_and_requires_stopped_identity(self):
+        for running in (False,True):
+            with self.subTest(running=running),tempfile.TemporaryDirectory() as tmp:
+                parent=Path(tmp);capture,env,log,project=self.fixture(parent)
+                if running:
+                    fixture=parent/'fixture.json';d=json.loads(fixture.read_text())
+                    d['retained_identity']='a'*64+'|created|started|finished|true|false|false|0'
+                    fixture.write_text(json.dumps(d))
+                result=subprocess.run([str(capture/'bin/docker'),'--volt-capture-retained-restore-owner'],env=env,capture_output=True,text=True)
+                self.assertEqual(result.returncode,1 if running else 0)
+                calls=[json.loads(v)for v in log.read_text().splitlines()]
+                self.assertTrue(all(c[0]in ('inspect','logs')for c in calls))
+                self.assertEqual((capture/'guard.status').read_text().strip(),'not_stopped'if running else'captured')
+                if not running:self.assertEqual((capture/'capture-timing').read_text().strip(),'retained_after_caller')
+                else:self.assertFalse((capture/'owner.stderr').exists())
+
+    def test_wrong_full_cid_never_captures_logs_or_inspects_foreign_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            capture,env,log,project=self.fixture(Path(tmp))
+            result=subprocess.run(['docker','rm','-f','d'*64],env=env,capture_output=True,text=True)
+            self.assertEqual(result.returncode,23)
+            calls=[json.loads(v)for v in log.read_text().splitlines()]
+            self.assertFalse(any(c[0]=='logs'for c in calls))
+            self.assertFalse(any(c[0]=='inspect'and c[1]=='d'*64 for c in calls))
+            self.assertEqual(calls[-1],['rm','-f','d'*64])

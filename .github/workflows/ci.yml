@@ -203,7 +203,11 @@ jobs:
           SOURCE_SNAPSHOT="sha256:$(git archive --format=tar HEAD | sha256sum | cut -d' ' -f1)"
           CE_IMAGE="$(python3 tools/release/portable_demo.py ce-image --platform "linux/$ARCH")"
           IMAGE="volt-easy-rc4:${ARCH}"
-          docker buildx build --platform "linux/$ARCH" --load -f Dockerfile.g7 \
+          python3 tools/release/native_runtime_probe.py --prepare-build \
+            --platform "linux/$ARCH" --source-commit "$SELECTED_SOURCE_SHA" \
+            --source-snapshot "$SOURCE_SNAPSHOT" --evidence "$RUNNER_TEMP/native-runtime-input"
+          BUILD_CONTEXT="$RUNNER_TEMP/native-runtime-input/source"
+          docker buildx build --platform "linux/$ARCH" --load -f "$BUILD_CONTEXT/Dockerfile.g7" \
             --build-arg "CE_IMAGE=$CE_IMAGE" \
             --build-arg "VOLT_SOURCE_SNAPSHOT=$SOURCE_SNAPSHOT" \
             --label org.opencontainers.image.version=0.1.0-rc.4 \
@@ -211,7 +215,7 @@ jobs:
             --label org.opencontainers.image.source=https://github.com/njvenis/volt \
             --label org.volt.oidc-deployment-modes=demo,external,local \
             --label org.volt.compose-install.contract=1 \
-            --tag "$IMAGE" .
+            --tag "$IMAGE" "$BUILD_CONTEXT"
           docker image inspect "$IMAGE" --format '{{.Os}}/{{.Architecture}} {{.Id}} {{.Size}} {{json .Config.Labels}}' \
             | tee "$RUNNER_TEMP/runtime-image.txt"
           test "$(docker image inspect "$IMAGE" --format '{{.Os}}/{{.Architecture}}')" = "linux/$ARCH"
@@ -223,6 +227,12 @@ jobs:
             *) echo 'native runtime image lacks local-auth mode' >&2; exit 1 ;;
           esac
           mkdir -p "$RUNNER_TEMP/runtime-artifact"
+          python3 tools/release/native_runtime_probe.py \
+            --platform "linux/$ARCH" --source-commit "$SELECTED_SOURCE_SHA" \
+            --source-snapshot "$SOURCE_SNAPSHOT" \
+            --source-archive "$RUNNER_TEMP/native-runtime-input/source.tar" \
+            --build-context "$BUILD_CONTEXT" \
+            --evidence "$RUNNER_TEMP/native-protected-probe"
           docker image save --output "$RUNNER_TEMP/runtime-artifact/runtime.tar" "$IMAGE"
           (cd "$RUNNER_TEMP/runtime-artifact" && sha256sum runtime.tar > runtime.tar.sha256)
           printf '%s\n' "$SOURCE_SNAPSHOT" > "$RUNNER_TEMP/runtime-artifact/source-snapshot.txt"
@@ -239,6 +249,15 @@ jobs:
           name: volt-easy-rc4-runtime-${{ matrix.arch }}
           path: ${{ runner.temp }}/runtime-artifact/
           if-no-files-found: error
+          retention-days: 2
+
+      - name: Retain native protected FD and import component evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: volt-native-protected-probe-${{ matrix.arch }}
+          path: ${{ runner.temp }}/native-protected-probe/
+          if-no-files-found: warn
           retention-days: 2
 
   runtime-local-index:

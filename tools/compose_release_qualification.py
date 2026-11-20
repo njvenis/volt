@@ -503,15 +503,24 @@ def restore_admit_observer_environment(*, capture: Path, environment: dict, info
     script = '#!/bin/sh\nset -u\numask 077\n' + '\n'.join(
         key + '=' + shlex.quote(value) for key, value in values.items()) + r'''
 observe_owned_removal() {
-  [ "$#" -eq 3 ] && [ "$1" = rm ] && [ "$2" = -f ] || return 0
+  mode=before_removal
+  if [ "$#" -eq 1 ] && [ "$1" = --volt-capture-retained-restore-owner ]; then
+    mode=retained_after_caller; target=''
+  else
+    [ "$#" -eq 3 ] && [ "$1" = rm ] && [ "$2" = -f ] || return 0
+    target=$3
+  fi
   IFS= read -r caller <"$PID_FILE" || return 0
   case "$caller" in ''|*[!0-9]*) return 0 ;; esac
   expected_name="volt-offline-$EXPECTED_PROJECT-$caller"
-  [ "$3" = "$expected_name" ] || return 0
+  if [ "$mode" = before_removal ] && [ "$target" != "$expected_name" ]; then
+    case "$target" in ''|*[!0-9a-f]*) return 0 ;; esac
+    [ "${#target}" -eq 64 ] || return 0
+  fi
   if [ -e "$CAPTURE/guard.status" ]; then
     printf '%s\n' duplicate >"$CAPTURE/duplicate.status"; return 0
   fi
-  identity=$("$REAL_DOCKER" inspect "$3" --format '{{.Id}}|{{.Name}}|{{.Config.Image}}|{{index .Config.Labels "volt.compose.owner-token"}}|{{index .Config.Labels "volt.compose.project"}}|{{json .Config.Cmd}}|{{.Image}}|{{if .ImageManifestDescriptor}}{{.ImageManifestDescriptor.digest}}|{{.ImageManifestDescriptor.mediaType}}|{{.ImageManifestDescriptor.size}}|{{.ImageManifestDescriptor.platform.os}}/{{.ImageManifestDescriptor.platform.architecture}}{{end}}' 2>"$CAPTURE/identity.stderr") || {
+  identity=$("$REAL_DOCKER" inspect "$expected_name" --format '{{.Id}}|{{.Name}}|{{.Config.Image}}|{{index .Config.Labels "volt.compose.owner-token"}}|{{index .Config.Labels "volt.compose.project"}}|{{json .Config.Cmd}}|{{.Image}}|{{if .ImageManifestDescriptor}}{{.ImageManifestDescriptor.digest}}|{{.ImageManifestDescriptor.mediaType}}|{{.ImageManifestDescriptor.size}}|{{.ImageManifestDescriptor.platform.os}}/{{.ImageManifestDescriptor.platform.architecture}}{{end}}' 2>"$CAPTURE/identity.stderr") || {
     printf '%s\n' unavailable >"$CAPTURE/guard.status"; return 0;
   }
   printf '%s\n' "$identity" >"$CAPTURE/identity.txt"
@@ -519,6 +528,7 @@ observe_owned_removal() {
 $identity
 EOF_OWNER_ID
   case "$cid" in ''|*[!0-9a-f]*) printf '%s\n' invalid >"$CAPTURE/guard.status"; return 0 ;; esac
+  if [ "$mode" = before_removal ] && [ "$target" != "$expected_name" ] && [ "$target" != "$cid" ]; then return 0; fi
   [ "${#cid}" -eq 64 ] && [ "$name|$reference|$owner|$project|$command" = "/$expected_name|$EXPECTED_REFERENCE|$EXPECTED_OWNER|$EXPECTED_PROJECT|[\"-m\",\"uvm.installer.lock\",\"/state/.install.lock\",\"--offline-restore-admit\"]" ] || {
     printf '%s\n' contradiction >"$CAPTURE/guard.status"; return 0;
   }
@@ -527,6 +537,11 @@ EOF_OWNER_ID
       [ "$child|$media|$size|$platform" = "$EXPECTED_CHILD|$EXPECTED_MEDIA|$EXPECTED_SIZE|$EXPECTED_PLATFORM" ] || {
       printf '%s\n' wrong_image >"$CAPTURE/guard.status"; return 0;
     }
+  fi
+  retained_identity=''
+  if [ "$mode" = retained_after_caller ]; then
+    retained_identity=$("$REAL_DOCKER" inspect "$cid" --format '{{.Id}}|{{.Created}}|{{.State.StartedAt}}|{{.State.FinishedAt}}|{{.State.Running}}|{{.State.Paused}}|{{.State.Restarting}}|{{.State.ExitCode}}') || return 0
+    case "$retained_identity" in "$cid|"*'|false|false|false|'*) ;; *) printf '%s\n' not_stopped >"$CAPTURE/guard.status"; return 0 ;; esac
   fi
   input=$("$REAL_DOCKER" inspect "$cid" --format '{{range .Mounts}}{{if eq .Destination "/run/volt-offline-input"}}{{.Source}}{{end}}{{end}}') || return 0
   output=$("$REAL_DOCKER" inspect "$cid" --format '{{range .Mounts}}{{if eq .Destination "/run/volt-offline-output"}}{{.Source}}{{end}}{{end}}') || return 0
@@ -542,13 +557,26 @@ EOF_OWNER_ID
   "$REAL_DOCKER" inspect "$cid" --format '{"id":{{json .Id}},"name":{{json .Name}},"image_ref":{{json .Config.Image}},"image":{{json .Image}},"selected_witness":{{json .ImageManifestDescriptor}},"labels":{{json .Config.Labels}},"cmd":{{json .Config.Cmd}},"started_at":{{json .State.StartedAt}},"finished_at":{{json .State.FinishedAt}},"exit_code":{{json .State.ExitCode}}}' >"$CAPTURE/owner.json" 2>"$CAPTURE/owner-inspect.stderr" || return 0
   printf '%s\n' "$REAL_DOCKER" logs --timestamps --tail 128 "$cid" >"$CAPTURE/logs.argv.txt"
   if "$REAL_DOCKER" logs --timestamps --tail 128 "$cid" >"$CAPTURE/owner.stdout" 2>"$CAPTURE/owner.stderr"; then
-    printf '%s\n' 0 >"$CAPTURE/logs.exit"; printf '%s\n' captured >"$CAPTURE/guard.status"
+    printf '%s\n' 0 >"$CAPTURE/logs.exit"
+    if [ "$mode" = retained_after_caller ]; then
+      after=$("$REAL_DOCKER" inspect "$cid" --format '{{.Id}}|{{.Created}}|{{.State.StartedAt}}|{{.State.FinishedAt}}|{{.State.Running}}|{{.State.Paused}}|{{.State.Restarting}}|{{.State.ExitCode}}') || return 0
+      [ "$after" = "$retained_identity" ] || { printf '%s\n' changed >"$CAPTURE/guard.status"; return 0; }
+    fi
+    printf '%s\n' "$mode" >"$CAPTURE/capture-timing"
+    printf '%s\n' captured >"$CAPTURE/guard.status"
   else
     printf '%s\n' "$?" >"$CAPTURE/logs.exit"; printf '%s\n' logs_failed >"$CAPTURE/guard.status"
   fi
 }
+# Fixed test-only read-only recovery after the original caller has completed.
+# This private observer command is never forwarded as a Docker command.
+if [ "$#" -eq 1 ] && [ "$1" = --volt-capture-retained-restore-owner ]; then
+  ( ulimit -f 16384 && observe_owned_removal "$@" ) >"$CAPTURE/observer.stdout" 2>"$CAPTURE/observer.stderr"
+  [ -f "$CAPTURE/guard.status" ] && [ "$(cat "$CAPTURE/guard.status")" = captured ]
+  exit "$?"
+fi
 # Observation may fail; ORIGINAL Docker command/result is never replaced/skipped.
-( observe_owned_removal "$@" ) >"$CAPTURE/observer.stdout" 2>"$CAPTURE/observer.stderr" || :
+( ulimit -f 16384 && observe_owned_removal "$@" ) >"$CAPTURE/observer.stdout" 2>"$CAPTURE/observer.stderr" || :
 exec "$REAL_DOCKER" "$@"
 '''
     destination = binary / 'docker'
@@ -591,9 +619,27 @@ def qualify_inventory_rejection(*, kind: str, launcher: Path, state: Path, priva
     (evidence / (name + '.exit')).write_text(str(code) + '\n')
     if code == 0 or (capture / 'caller.pid').read_text().strip() != str(process.pid):
         raise RuntimeError('negative inventory action or exact caller identity was not established')
-    if (not (capture / 'guard.status').is_file() or (capture / 'guard.status').read_text().strip() != 'captured'
+    if not (capture / 'guard.status').exists():
+        # Full-pin cleanup correctly retains a stopped owner. Observe it only
+        # AFTER this exact original caller's actual wait; never replay denial.
+        recover = subprocess.run([str(capture / 'bin/docker'), '--volt-capture-retained-restore-owner'],
+            cwd=private, env=observed_env, capture_output=True, timeout=30)
+        (capture / 'retained-observer.exit').write_text(str(recover.returncode) + '\n')
+    validate_inventory_rejection_capture(kind=kind, capture=capture, info=info,
+        admission=admission, evidence=evidence, name=name, caller_pid=process.pid, caller_exit=code)
+
+
+def validate_inventory_rejection_capture(*, kind: str, capture: Path, info: dict,
+                                        admission: dict, evidence: Path, name: str,
+                                        caller_pid: int, caller_exit: int) -> None:
+    """Validate bound original records, including separately recovered retained owners."""
+    if kind not in ('empty', 'corrupt') or type(caller_pid) is not int or caller_pid <= 0 or type(caller_exit) is not int or caller_exit == 0:
+        raise ValueError('original exact failed caller and fixed inventory case required')
+    if ((capture / 'caller.pid').read_text().strip() != str(caller_pid)
+            or not (capture / 'guard.status').is_file()
+            or (capture / 'guard.status').read_text().strip() != 'captured'
             or (capture / 'duplicate.status').exists()):
-        raise RuntimeError('exact owner logs were not captured before original removal; no cause credit')
+        raise RuntimeError('exact original owner logs were not captured; no cause credit')
     plan_raw = (capture / 'plan.json').read_bytes()
     plan = host_dependency_json(capture / 'plan.json')
     observed = host_dependency_json(capture / 'observed.json')
@@ -608,7 +654,7 @@ def qualify_inventory_rejection(*, kind: str, launcher: Path, state: Path, priva
             or request.get('profile') != 'volt_offline_request_v1'
             or plan['identity'].get('source_revision') != admission['source_commit']
             or plan['identity'].get('source_snapshot') != admission['source_snapshot']
-            or owner.get('name') != '/volt-offline-' + info['project'] + '-' + str(process.pid)):
+            or owner.get('name') != '/volt-offline-' + info['project'] + '-' + str(caller_pid)):
         raise RuntimeError('captured owner request/plan/current-operation/source binding contradicts the replay')
     required = ('offline store inventory is malformed' if kind == 'empty'
                 else 'offline imports differ from captured store inventories')
@@ -630,7 +676,9 @@ def qualify_inventory_rejection(*, kind: str, launcher: Path, state: Path, priva
         'source_revision': admission['source_commit'], 'source_snapshot': admission['source_snapshot'],
         'owner_stdout_sha256': sha(capture / 'owner.stdout'), 'owner_stderr_sha256': sha(capture / 'owner.stderr'),
         'plan_sha256': 'sha256:' + hashlib.sha256(plan_raw).hexdigest(),
-        'instrumentation': 'POSIX Docker observation forwards ORIGINAL removal/commands/results unchanged',
+        'instrumentation': 'POSIX observation of exact original owner; Docker commands/results unchanged',
+        'capture_timing': (capture / 'capture-timing').read_text().strip() if (capture / 'capture-timing').exists() else 'legacy_before_removal',
+        'original_caller_exit': caller_exit,
     }, sort_keys=True, indent=2) + '\n')
 
 def create_offline_fixture_entry(*, state: Path, admission: dict, private: Path) -> Path:

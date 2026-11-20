@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "scope": "public metadata/source compatibility only; no native service/build/lifecycle evidence",
+  "component_indices": {
+    "rekor": {
+      "parent_reference": "ghcr.io/sigstore/rekor/rekor-server@sha256:100d793d68d0e1ba9fea7df8503304cef1ca736c891bd074fcae3d450dd64169",
+      "arm_descriptor": {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "size": 2716,
+        "digest": "sha256:1662dc1c86fa62bf6378e5632b3997af7d367811bd459c3414fab3a5fba88a05",
+        "platform": {
+          "architecture": "arm64",
+          "os": "linux",
+          "variant": "v8"
+        }
+      },
+      "arm_config_digest": "sha256:276a7ed1fcb371ebea2281584966e190a11aece9c356969f16cc3fef4e648f3e",
+      "arm_config_platform": "linux/arm64"
+    },
+    "trillian-signer": {
+      "parent_reference": "ghcr.io/sigstore/scaffolding/trillian_log_signer@sha256:51631983a7e6f0b3faeb188c590e65b9793a6a6617e0631f8b4fd68e98d0460e",
+      "arm_descriptor": {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "size": 2630,
+        "digest": "sha256:f867111835deb9090b8a1fe23af7b7a113fce8a1fa0e8f33ee818b5773cf976f",
+        "platform": {
+          "architecture": "arm64",
+          "os": "linux",
+          "variant": "v8"
+        }
+      },
+      "arm_config_digest": "sha256:eb6fb31032b4bc1e4ce6b94f34e1e72edf6b2e1b0f370f40fc5acd400ed2519b",
+      "arm_config_platform": "linux/arm64"
+    },
+    "trillian-server": {
+      "parent_reference": "ghcr.io/sigstore/scaffolding/trillian_log_server@sha256:d953a8eb3f9311e55ebee754de234f1f63e4db2d5e76c15326c288fb0887bb11",
+      "arm_descriptor": {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "size": 2630,
+        "digest": "sha256:a231538cff7a696d74af5b72b487bf2be7a0ed046df944e3c09eccca46a70983",
+        "platform": {
+          "architecture": "arm64",
+          "os": "linux",
+          "variant": "v8"
+        }
+      },
+      "arm_config_digest": "sha256:51a55500c9633cf48fb86cbaf433aef9adf5d17e9682168d347523d456b1dcf2",
+      "arm_config_platform": "linux/arm64"
+    }
+  },
+  "db": {
+    "existing_amd64_reference": "gcr.io/trillian-opensource-ci/db_server@sha256:0bfefa479e0d16f36b6e33f988ffa0ddbe0c9ce15d44675f1e54ef8e633d948a",
+    "canonical_source_commit": "0362d55869965067c9ffa276a78d18e95a596ca3",
+    "canonical_source_repository": "https://github.com/google/trillian",
+    "dockerfile_path": "examples/deployment/docker/db_server/Dockerfile",
+    "source_files": {
+      "examples/deployment/docker/db_server/Dockerfile": "309f8cdf76182318f1bed0d8a540aa95d69b3adfbe10e29a7fecae23df230cd4",
+      "examples/deployment/docker/db_server/mysql.cnf": "84ada2681e8e52fea554ea3940cf3ea06d87c41a173ebfb8e2482a02fc94abac",
+      "storage/mysql/schema/storage.sql": "58c9d1c5cc093eb33fb3bf05e3ab05ba053ef1ae0a5584cbd6cda69307aaef63"
+    },
+    "base_index_reference": "docker.io/library/mysql@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb",
+    "base_arm_descriptor": {
+      "annotations": {
+        "com.docker.official-images.bashbrew.arch": "arm64v8",
+        "org.opencontainers.image.base.digest": "sha256:22d40602b78a41cc8514b8c83348aba71c190f506a4d3fb2effb0434f726843d",
+        "org.opencontainers.image.base.name": "oraclelinux:9-slim",
+        "org.opencontainers.image.created": "2026-07-27T22:06:33Z",
+        "org.opencontainers.image.revision": "01f90d87012e46cd174073bba02d64e9fc693ed3",
+        "org.opencontainers.image.source": "https://github.com/docker-library/mysql.git#01f90d87012e46cd174073bba02d64e9fc693ed3:8.4",
+        "org.opencontainers.image.url": "https://hub.docker.com/_/mysql",
+        "org.opencontainers.image.version": "8.4.11"
+      },
+      "digest": "sha256:c9be23757267a888182ff13a633118a84ce7ad360abaa0f12a9c357ddf628b61",
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "platform": {
+        "architecture": "arm64",
+        "os": "linux",
+        "variant": "v8"
+      },
+      "size": 2859
+    },
+    "matching_mysql_versions": [
+      "MYSQL_VERSION=8.4.11-1.el9",
+      "MYSQL_SHELL_VERSION=8.4.10-1.el9"
+    ],
+    "existing_versions": [
+      "MYSQL_VERSION=8.4.11-1.el9",
+      "MYSQL_SHELL_VERSION=8.4.10-1.el9"
+    ]
+  },
+  "retained_public_responses": {
+    "trillian-v1.8.0-tag.json": "6379166c0d7c32c7599685426575d2f09b69e752efdd888ccd8a2a4f37a3904d",
+    "mysql-base-arm-config.json": "5e7e005a680e75d935984d3d9390990d2a709b3ed67e92708e9e6747f1f754c9",
+    "mysql-base-arm-manifest.json": "c9be23757267a888182ff13a633118a84ce7ad360abaa0f12a9c357ddf628b61",
+    "mysql-base-index.json": "b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb",
+    "trillian-server.arm-config.json": "51a55500c9633cf48fb86cbaf433aef9adf5d17e9682168d347523d456b1dcf2",
+    "trillian-server.arm-manifest.json": "a231538cff7a696d74af5b72b487bf2be7a0ed046df944e3c09eccca46a70983",
+    "trillian-signer.arm-config.json": "eb6fb31032b4bc1e4ce6b94f34e1e72edf6b2e1b0f370f40fc5acd400ed2519b",
+    "trillian-signer.arm-manifest.json": "f867111835deb9090b8a1fe23af7b7a113fce8a1fa0e8f33ee818b5773cf976f",
+    "rekor.arm-config.json": "276a7ed1fcb371ebea2281584966e190a11aece9c356969f16cc3fef4e648f3e",
+    "rekor.arm-manifest.json": "1662dc1c86fa62bf6378e5632b3997af7d367811bd459c3414fab3a5fba88a05",
+    "db.result.json": "ef937029506782a46a8d6b3c309dd16e0f71c4f3a08f5623ba235a5aa081dac6",
+    "db.config.json": "a726605ad40dd6a5effdf18470ce241a12b4c16ecfc33c7428f99ab0536b0970",
+    "db.headers.json": "d31d8137c45cb7fc44ede751c9738809dd73f0c3e4dc39f0e1e7937952dcafd2",
+    "db.manifest.json": "0bfefa479e0d16f36b6e33f988ffa0ddbe0c9ce15d44675f1e54ef8e633d948a",
+    "trillian-server.result.json": "c5934e04d27929a133a76918be68480e7232748289246f6635653f18d4d286d4",
+    "trillian-server.headers.json": "cbddd904ce6af47e0d80bde016e818620d3562e81a95def61a92de9eb55f296c",
+    "trillian-server.manifest.json": "d953a8eb3f9311e55ebee754de234f1f63e4db2d5e76c15326c288fb0887bb11",
+    "trillian-signer.result.json": "195fd1bbae1889fe2c2f96aa6411556839884b16c116ae716da00fafa80fe1b5",
+    "trillian-signer.headers.json": "52adb2e570084884ad1a5d63ec7b9b43db1354d1095d9e97cfcfa3ca88f0e477",
+    "trillian-signer.manifest.json": "51631983a7e6f0b3faeb188c590e65b9793a6a6617e0631f8b4fd68e98d0460e",
+    "rekor.result.json": "51d2c35d428fd95973796161743ef65bfce647f8daa9e2c51053ed11d34601c8",
+    "rekor.headers.json": "fde0fd857aec6e11fb3a49b64cea64b08a9ef3c08dccc3d3810329135178a617",
+    "rekor.manifest.json": "100d793d68d0e1ba9fea7df8503304cef1ca736c891bd074fcae3d450dd64169"
+  }
+}

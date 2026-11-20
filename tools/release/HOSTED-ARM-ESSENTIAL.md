@@ -1,7 +1,7 @@
 # Ordinary signed LOCAL qualification on hosted native ARM
 
 Prepared from approved draft37ac9fc66bc2b804689baa2dfc9f6f7adf1520d9, separate from
-held Qualys/abb. No local ARM, service, key-generation, signing, deployment,
+held Qualys/abb. No local ARM, service, job-signer generation, candidate signing, deployment,
 workflow dispatch, artifact upload or push has occurred. This is executable
 preparation and public metadata compatibility evidence, not ARM lifecycle GO.
 
@@ -84,9 +84,9 @@ https://github.com/sigstore/rekor/blob/main/docker-compose.yml
 The upstream compose's forced AMD64 DB is a recipe limitation, not a claim that
 all official DB images lack ARM.
 
-## Exact remaining hosted provisioning/job work
+## Hosted provisioning/job invariants
 
-No complete hosted job exists yet. It must run on ubuntu-24.04-arm and consume
+The implemented job below runs on ubuntu-24.04-arm and must consume
 BOTH source-bound runtime children from the existing native matrix, verifying
 ZIP/tar hashes and selected/checkedout P/U before any load. Native verifier/Q,
 Cosign and registry must also resolve to actual ARM configs. No binfmt/QEMU.
@@ -106,9 +106,11 @@ runtime provenance and original bundle/launcher. No private key in any artifact,
 no tlog-upload=false, insecure-ignore flags, mocked log or proof synthesis.
 The job coordinator, not a candidate manifest, provisions this fixture authority.
 
-The missing implementation/approval point is that hosted ephemeral provisioning
-and exact signing/job wiring. This preparation does not call an existing private
-signer/log, upload keys, start services, generate roots or claim that gate met.
+The hosted ephemeral provisioning and exact signing/job wiring are implemented
+in hosted_arm_fixture.py and the native job below. Their actual behavior remains
+unverified pending source review and an approved hosted execution. Local source
+checks do not call an existing private signer/log, upload keys, start services,
+generate a job signer or claim that runtime gate met.
 No new hosted production secrets are needed: all authority is disposable job-local,
 provided its generation/provisioning is explicitly approved and reviewed.
 Before external execution the exact job/controller must bind P/R/U, component
@@ -116,11 +118,12 @@ parents/children, public log/root identity and ownership. Online bootstrap can u
 the genuine local log while signing/verification runs; offline outage verification
 must still use original inclusion bundles, with no relaxed adapter.
 
-Only `public-summary.json` (typed final outcome/P/U/platform) is an intended public
-CI result from the adapter. Do NOT upload the raw evidence/private directories:
+Only the closed typed public outcome/P/U/platform and validated ORIGINAL public
+metadata/inclusion closure are intended public CI results. Do NOT upload the raw
+evidence/private directories:
 installer stdout, operation logs, host owner state, capability files and ephemeral
-keys can be private. A reviewed explicit allowlist must select any additional
-public proofs and scans; never upload RUNNER_TEMP recursively. Job-owned VM
+keys can be private. The implemented explicit closure allowlist excludes instance/signer/raw paths;
+never upload RUNNER_TEMP recursively. Job-owned VM
 teardown is not proof of exact cleanup; capture resource reconciliation separately.
 
 600 seconds remains the approved clean-stop ACCEPTANCE cap and13-second reserve;
@@ -136,7 +139,9 @@ The `hosted-arm-signed-local` job and `hosted_arm_fixture.py` now implement the
 previously missing provisioning/wiring; earlier preparation-only statements above
 record the 8f checkpoint and must not be mistaken for a current unimplemented stage.
 No workflow has been dispatched/pushed, no local service has been started and no
-candidate has been signed during this implementation packet.
+candidate has been signed during this implementation packet. Pure public-policy
+unit tests use fresh in-memory EC keys; they create no log entries, signatures,
+private key files or claim of genuine transparency.
 
 The job uses ubuntu-24.04-arm, contents:read only, no OIDC/packages write or
 repository secrets, exact selected source with persist-credentials:false, pinned

@@ -289,7 +289,7 @@ class Ceremony:
         rekor_cmd=['serve','--trillian_log_server.address=trillian-log-server','--trillian_log_server.port=8090',
             '--rekor_server.address=0.0.0.0','--rekor_server.signer=memory','--enable_attestation_storage',
             '--attestation_storage_bucket=file:///var/run/attestations','--search_index.storage_provider=mysql','--search_index.mysql.dsn='+dsn]
-        self.rekor=self.create('rekor',self.dependencies['rekor'],rekor_cmd,ports=('127.0.0.1:47280:3000',),tmpfs={'/tmp':'rw,noexec,nosuid,size=16m','/var/run/attestations':'rw,noexec,nosuid,size=64m,mode=1777'})
+        self.rekor=self.create('rekor',self.dependencies['rekor'],rekor_cmd,env=('TMPDIR=/var/run/attestations',),ports=('127.0.0.1:47280:3000',),tmpfs={'/tmp':'rw,noexec,nosuid,size=16m','/var/run/attestations':'rw,noexec,nosuid,size=64m,mode=1777'})
         self.wait('genuine-rekor',lambda:bool(self.http(URL+'/ping')))
         data=self.work/'registry-data';data.mkdir(mode=0o700)
         self.registry=self.create('registry',self.dependencies['registry'],[],ports=('127.0.0.1:46150:5000',),binds=('type=bind,src='+str(data)+',dst=/var/lib/registry',),user=str(os.getuid())+':'+str(os.getgid()))

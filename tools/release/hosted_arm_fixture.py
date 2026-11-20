@@ -4,7 +4,7 @@ No production keys/endpoints, emulation, public signing or generic command API.
 Private workspace MUST NOT be uploaded. Only a closed public summary is exported.
 """
 from __future__ import annotations
-import argparse,base64,datetime,hashlib,io,json,os,re,secrets,shutil,stat,subprocess,sys,tarfile,time,urllib.request,uuid
+import argparse,base64,datetime,hashlib,io,json,os,re,secrets,shutil,stat,subprocess,sys,tarfile,time,urllib.request,urllib.error,uuid
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT))
@@ -16,6 +16,9 @@ from uvm.installer.admission import platform_children
 
 REGISTRY='registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373'
 URL='http://127.0.0.1:47280'
+INFRA_ROLES=frozenset(('db','trillian-server','trillian-signer','rekor','registry'))
+INSPECT_PHASES=frozenset(('created','started','liveness','cleanup'))
+WAIT_ROLES={'canonical-mysql':'db','trillian-server':'trillian-server','trillian-signer':'trillian-signer','genuine-rekor':'rekor','owned-registry':'registry'}
 LABEL='volt.hosted-arm.owner'
 ROLE='volt.hosted-arm.role'
 MEDIA={'application/vnd.oci.image.manifest.v1+json','application/vnd.docker.distribution.manifest.v2+json'}
@@ -89,6 +92,14 @@ def trust_documents(rekor_pem,signer_pem,start):
         'rekorTlogUrls':[{'majorApiVersion':1,'operator':'volt-hosted-arm-ephemeral','url':URL,'validFor':{'start':start}}],'tsaConfig':{}}
     return policy,canonical(config)
 
+def infrastructure_network_command(name,owner):
+    if (type(name)is not str or re.fullmatch(r'volt-arm-[0-9a-f]{12}-network',name)is None
+            or type(owner)is not str or re.fullmatch('[0-9a-f]{32}',owner)is None):raise ValueError('fixed owned infrastructure identity required')
+    # This infrastructure bridge must support the fixed loopback publications.
+    # It is NOT the held Qualys application network or a no-egress guarantee.
+    return ['docker','network','create','--driver','bridge','--label',LABEL+'='+owner,name]
+
+
 def stable_recipe(row):
     recipe={k:row.get(k)for k in ('Id','Created','Image','Name','Config','HostConfig')}
     host=recipe['HostConfig']
@@ -109,9 +120,9 @@ class Ceremony:
         self.prefix='volt-arm-'+self.owner[:12];self.counter=0;self.containers=[];self.network=None;self.public={};self.dependencies={}
         self.raw=work/'raw';self.raw.mkdir(mode=0o700);self.started=datetime.datetime.now(datetime.timezone.utc)
         self.lock=json.loads((ROOT/'tools/release/hosted-arm-fixture-components.json').read_text())
-        self.capabilities=None;self.last_producer=None;self.uncertain=[]
+        self.capabilities=None;self.last_producer=None;self.uncertain=[];self.failure_detail=None
     def run(self,label,argv,*,check=True,input_bytes=None,stdin=None):
-        self.last_producer=label
+        self.last_producer=label;self.failure_detail=None
         self.counter+=1;base=self.raw/(str(self.counter).zfill(4)+'-'+label)
         json_write(base.with_suffix('.argv.json'),{'argv':argv,'cwd':str(ROOT),'before_execution':True})
         r=subprocess.run(argv,cwd=ROOT,input=input_bytes,stdin=stdin,capture_output=True)
@@ -119,8 +130,9 @@ class Ceremony:
         if check and r.returncode:raise RuntimeError('private ceremony producer failed: '+label)
         return r
     def document(self,label,argv):return json.loads(self.run(label,argv).stdout,object_pairs_hook=essential.pairs)
-    def inspection(self,cid):
-        rows=self.document('registered-inspect',['docker','inspect',cid])
+    def inspection(self,cid,*,role,phase):
+        if role not in INFRA_ROLES or phase not in INSPECT_PHASES:raise ValueError('fixed inspection role/phase required')
+        rows=self.document(role+'-'+phase+'-inspect',['docker','inspect',cid])
         if type(rows)is not list or len(rows)!=1 or rows[0]['Id']!=cid:raise ValueError('registered full CID differs')
         return rows[0]
     def dependency(self,label,reference,*,native_platform='linux/arm64'):
@@ -146,6 +158,7 @@ class Ceremony:
         dep={'reference':reference,'engine_id':row['Id'],'child':child,'config_id':config['digest'],'image':row}
         self.dependencies[label]=dep;return dep
     def create(self,role,dep,cmd,*,aliases=(),env=(),tmpfs=None,ports=(),binds=(),user=None,entrypoint=None,cap_drop=True):
+        if role not in INFRA_ROLES:raise ValueError('fixed infrastructure role required')
         name=self.prefix+'-'+role;tmpfs=tmpfs or {'/tmp':'rw,noexec,nosuid,size=16m'}
         cmd=cmd or dep['image']['Config'].get('Cmd')or[]
         self.network_check()
@@ -163,7 +176,7 @@ class Ceremony:
         cid=self.run(role+'-create',argv).stdout.decode().strip()
         if not re.fullmatch('[0-9a-f]{64}',cid):raise ValueError('full new CID required')
         self.uncertain.append('unvalidated-container-'+cid)
-        row=self.inspection(cid);cfg=row['Config'];host=row['HostConfig'];witness=row.get('ImageManifestDescriptor')
+        row=self.inspection(cid,role=role,phase='created');cfg=row['Config'];host=row['HostConfig'];witness=row.get('ImageManifestDescriptor')
         if (row['Name']!='/'+name or cfg.get('Labels',{}).get(LABEL)!=self.owner or cfg['Labels'].get(ROLE)!=role
                 or cfg.get('Image')!=dep['engine_id']or cfg.get('Cmd')!=cmd or host.get('NetworkMode')!=self.network['Name']
                 or host.get('ReadonlyRootfs')is not True or host.get('Privileged')is not False
@@ -183,12 +196,13 @@ class Ceremony:
         if row['Image']!=dep['config_id']and witness!=dep['child']:raise ValueError('non-config engine identity requires exact actual child witness')
         record={'cid':cid,'recipe':stable_recipe(row),'started_at':row['State']['StartedAt'],'role':role,'tmpfs':tmpfs,'binds':list(binds)}
         self.containers.append(record);self.uncertain.remove('unvalidated-container-'+cid);json_write(self.work/('container-'+role+'.json'),record)
-        self.run(role+'-start',['docker','start',cid]);row=self.inspection(cid)
+        self.run(role+'-start',['docker','start',cid]);row=self.inspection(cid,role=role,phase='started')
         if stable_recipe(row)!=record['recipe']or row['State'].get('Running')is not True:raise ValueError('registered infrastructure did not start unchanged')
         self.validate_mounts(row,tmpfs,binds)
         networks=row.get('NetworkSettings',{}).get('Networks',{})
         if set(networks)!={self.network['Name']}or networks[self.network['Name']].get('NetworkID')!=self.network['Id']:raise ValueError('actual infrastructure network differs')
-        record['started_at']=row['State']['StartedAt'];return record
+        self.validate_published(row,expected_ports)
+        record['started_at']=row['State']['StartedAt'];record['ports']=expected_ports;return record
     def network_check(self):
         row=self.document('network-current',['docker','network','inspect',self.network['Id']])[0]
         if {k:row.get(k)for k in self.network}!=self.network:raise ValueError('original infrastructure network differs')
@@ -209,12 +223,43 @@ class Ceremony:
                     or mount.get('Source')!=expected[destination]or mount.get('RW')is not True):raise ValueError('unexpected inherited or changed infrastructure mount')
             found[destination]=mount['Source']
         if found!=expected:raise ValueError('infrastructure bind missing')
+    @staticmethod
+    def validate_published(row,expected):
+        actual={}
+        ports=row.get('NetworkSettings',{}).get('Ports')or{}
+        if type(ports)is not dict:raise ValueError('typed effective bindings required')
+        for target,bindings in ports.items():
+            if bindings is None or type(bindings)is list and not bindings:continue
+            if (type(target)is not str or type(bindings)is not list or any(type(b)is not dict or set(b)!={'HostIp','HostPort'}
+                    or type(b['HostIp'])is not str or type(b['HostPort'])is not str for b in bindings)):raise ValueError('effective binding shape differs')
+            actual[target]=bindings
+        if actual!=expected:raise ValueError('effective loopback bindings differ from exact requested ports')
+    @staticmethod
+    def failure_state(role,phase,reason,row=None):
+        if role not in INFRA_ROLES or phase not in ('liveness','health','readiness'):raise ValueError('fixed failure role/phase required')
+        if reason not in ('identity-drift','not-running','paused-or-restarting','http-denial','http-transport','timeout','network-shape','binding-shape','mount-shape'):raise ValueError('fixed failure reason required')
+        detail={'role':role,'phase':phase,'reason':reason}
+        state=row.get('State',{})if type(row)is dict else{}
+        for key,name in (('Running','running'),('OOMKilled','oom_killed')):
+            if type(state.get(key))is bool:detail[name]=state[key]
+        if type(state.get('ExitCode'))is int and 0<=state['ExitCode']<=255:detail['container_exit_code']=state['ExitCode']
+        return detail
     def check(self,record):
-        row=self.inspection(record['cid'])
-        if (stable_recipe(row)!=record['recipe']or row['State']['StartedAt']!=record['started_at']
-                or row['State'].get('Running')is not True or row['State'].get('Paused')is not False
-                or row['State'].get('Restarting')is not False):raise ValueError('original infrastructure identity changed')
-        self.validate_mounts(row,record['tmpfs'],record['binds']);return row
+        role=record['role'];row=self.inspection(record['cid'],role=role,phase='liveness')
+        if stable_recipe(row)!=record['recipe']or row['State']['StartedAt']!=record['started_at']:
+            self.failure_detail=self.failure_state(role,'liveness','identity-drift',row)
+            raise ValueError('original infrastructure identity changed')
+        if row['State'].get('Running')is not True:
+            self.failure_detail=self.failure_state(role,'liveness','not-running',row)
+            raise ValueError('original infrastructure is not running')
+        if row['State'].get('Paused')is not False or row['State'].get('Restarting')is not False:
+            self.failure_detail=self.failure_state(role,'liveness','paused-or-restarting',row)
+            raise ValueError('original infrastructure is not ready')
+        self.failure_detail=self.failure_state(role,'liveness','mount-shape',row)
+        self.validate_mounts(row,record['tmpfs'],record['binds'])
+        self.failure_detail=self.failure_state(role,'liveness','binding-shape',row)
+        self.validate_published(row,record.get('ports',{}))
+        self.failure_detail=None;return row
     def http(self,url,limit=65536):
         if url not in ('http://127.0.0.1:46150/v2/',URL+'/ping',URL+'/api/v1/log/publicKey',URL+'/api/v1/log'):raise ValueError('fixed loopback query required')
         class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -224,10 +269,24 @@ class Ceremony:
             raw=response.read(limit+1)
             if response.status!=200 or len(raw)>limit:raise ValueError('bounded loopback response required')
             return raw
+    def endpoint_ready(self,record,url):
+        expected={'rekor':URL+'/ping','registry':'http://127.0.0.1:46150/v2/'}
+        if expected.get(record['role'])!=url:raise ValueError('fixed role endpoint required')
+        row=self.check(record)
+        self.last_producer=record['role']+'-host-loopback-query'
+        try:return bool(self.http(url))
+        except urllib.error.HTTPError as error:
+            self.failure_detail=self.failure_state(record['role'],'health','http-denial',row)
+            if type(error.code)is int and 100<=error.code<=599:self.failure_detail['http_status']=error.code
+            raise
+        except OSError:
+            self.failure_detail=self.failure_state(record['role'],'health','http-transport',row);raise
     def service_health(self,record):
         import ipaddress
         row=self.check(record)
         if record['role']not in ('trillian-server','trillian-signer'):raise ValueError('fixed health role required')
+        self.failure_detail=self.failure_state(record['role'],'health','network-shape',row)
+        self.last_producer=record['role']+'-private-health-network-check'
         networks=row.get('NetworkSettings',{}).get('Networks',{})
         if set(networks)!={self.network['Name']}:raise ValueError('private health network differs')
         network=networks[self.network['Name']]
@@ -238,16 +297,29 @@ class Ceremony:
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self,*args,**kwargs):return None
         opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
-        with opener.open('http://'+str(address)+':8091/healthz',timeout=3)as response:
-            raw=response.read(65537)
-            return response.status==200 and len(raw)<=65536
+        self.failure_detail=None
+        self.last_producer=record['role']+'-private-health-query'
+        try:
+            with opener.open('http://'+str(address)+':8091/healthz',timeout=3)as response:
+                raw=response.read(65537)
+                return response.status==200 and len(raw)<=65536
+        except urllib.error.HTTPError as error:
+            self.failure_detail=self.failure_state(record['role'],'health','http-denial',row)
+            if type(error.code)is int and 100<=error.code<=599:self.failure_detail['http_status']=error.code
+            raise
+        except OSError:
+            self.failure_detail=self.failure_state(record['role'],'health','http-transport',row);raise
     def wait(self,label,predicate,seconds=180):
+        if label not in WAIT_ROLES:raise ValueError('fixed readiness role required')
         deadline=time.monotonic()+seconds
         while time.monotonic()<deadline:
             try:
                 if predicate():return
             except (OSError,ValueError):pass
             time.sleep(2)
+        self.last_producer=WAIT_ROLES[label]+'-readiness-timeout'
+        if self.failure_detail is None:self.failure_detail=self.failure_state(WAIT_ROLES[label],'readiness','timeout')
+        self.failure_detail['readiness_timed_out']=True
         raise RuntimeError('private fixture readiness failed: '+label)
     def bootstrap(self):
         def text_run(label,argv):
@@ -280,10 +352,10 @@ class Ceremony:
         db={'reference':self.prefix+'-db','engine_id':row['Id'],'config_id':digest(cfg),'child':None,'image':row}
         for label,entry in self.lock['component_indices'].items():self.dependency(label,entry['parent_reference'])
         self.dependency('registry',REGISTRY);self.dependency('cosign',COSIGN_IMAGE)
-        network_id=self.run('network-create',['docker','network','create','--driver','bridge','--internal','--label',LABEL+'='+self.owner,self.prefix+'-network']).stdout.decode().strip()
+        network_id=self.run('network-create',infrastructure_network_command(self.prefix+'-network',self.owner)).stdout.decode().strip()
         self.uncertain.append('unvalidated-network-'+network_id)
         row=self.document('network-initial',['docker','network','inspect',network_id])[0]
-        if row['Id']!=network_id or row['Name']!=self.prefix+'-network'or row.get('Labels',{}).get(LABEL)!=self.owner or row.get('Containers')or row.get('Internal')is not True:raise ValueError('new isolated infrastructure network required')
+        if row['Id']!=network_id or row['Name']!=self.prefix+'-network'or row.get('Labels',{}).get(LABEL)!=self.owner or row.get('Containers')or row.get('Internal')is not False:raise ValueError('ordinary owned infrastructure bridge required')
         self.network={k:row[k]for k in ('Id','Name','Driver','Internal','Labels','IPAM')}
         self.uncertain.remove('unvalidated-network-'+network_id)
         password=secrets.token_hex(24);dsn='test:'+password+'@tcp(mysql:3306)/test?parseTime=true&interpolateParams=true'
@@ -301,10 +373,14 @@ class Ceremony:
             '--rekor_server.address=0.0.0.0','--rekor_server.signer=memory','--enable_attestation_storage',
             '--attestation_storage_bucket=file:///var/run/attestations','--search_index.storage_provider=mysql','--search_index.mysql.dsn='+dsn]
         self.rekor=self.create('rekor',self.dependencies['rekor'],rekor_cmd,env=('TMPDIR=/var/run/attestations',),ports=('127.0.0.1:47280:3000',),tmpfs={'/tmp':'rw,noexec,nosuid,size=16m','/var/run/attestations':'rw,noexec,nosuid,size=64m,mode=1777'})
-        self.wait('genuine-rekor',lambda:bool(self.http(URL+'/ping')))
+        self.wait('genuine-rekor',lambda:self.endpoint_ready(self.rekor,URL+'/ping'))
         data=self.work/'registry-data';data.mkdir(mode=0o700)
         self.registry=self.create('registry',self.dependencies['registry'],[],ports=('127.0.0.1:46150:5000',),binds=('type=bind,src='+str(data)+',dst=/var/lib/registry',),user=str(os.getuid())+':'+str(os.getgid()))
-        self.wait('owned-registry',lambda:bool(self.http('http://127.0.0.1:46150/v2/')))
+        self.wait('owned-registry',lambda:self.endpoint_ready(self.registry,'http://127.0.0.1:46150/v2/'))
+        json_write(self.work/'host-loopback-readiness.json',{'schema_version':1,'coordinator_machine':os.uname().machine,
+            'coordinator_netns_inode':os.stat('/proc/self/ns/net').st_ino,'source_revision':self.revision,
+            'infrastructure_network_internal':False,'roles':{r['role']:{'full_CID':r['cid'],'StartedAt':r['started_at'],'effective_bindings':r['ports'],'host_HTTP_reachable':True}for r in (self.rekor,self.registry)},
+            'scope':'actual coordinator host namespace HTTP after exact effective loopback binding/current owner checks, before keys/Q/installer effects; ordinary bridge is not a no-egress guarantee'})
     def cosign(self,label,args,*,sign=False):
         signer=self.work/'signer';out=self.work/'graph';dep=self.dependencies['cosign']
         argv=['docker','run','--rm','--platform','linux/arm64','--pull=never','--network','host'if sign else'none',
@@ -422,7 +498,7 @@ class Ceremony:
         failures=list(self.uncertain)
         for record in reversed(self.containers):
             try:
-                row=self.inspection(record['cid'])
+                row=self.inspection(record['cid'],role=record['role'],phase='cleanup')
                 if stable_recipe(row)!=record['recipe']or row['State']['StartedAt']!=record['started_at']or row['State'].get('Paused')is not False or row['State'].get('Restarting')is not False:raise ValueError('ownership/recipe drift; retain')
                 self.validate_mounts(row,record['tmpfs'],record['binds'])
                 self.run('cleanup-'+record['role'],['docker','rm','--force',record['cid']])
@@ -440,7 +516,7 @@ class Ceremony:
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--source-commit',required=True);p.add_argument('--source-snapshot',required=True)
     p.add_argument('--artifacts',type=Path,required=True);p.add_argument('--event-sha',required=True);p.add_argument('--work',type=Path,required=True);p.add_argument('--public-result',type=Path,required=True);p.add_argument('--public-proofs',type=Path,required=True)
-    a=p.parse_args();os.umask(0o077);c=None;outcome=1;clean=False;failed_producer=None;proof_files=0
+    a=p.parse_args();os.umask(0o077);c=None;outcome=1;clean=False;failed_producer=None;failed_detail=None;proof_files=0
     try:
         essential.require_native()
         essential.source_binding({'source_checkout':str(ROOT),'source_revision':a.source_commit,'source_snapshot':a.source_snapshot})
@@ -460,6 +536,7 @@ def main():
         proof_files=c.export_original_proofs(a.public_proofs);outcome=0
     except Exception:
         failed_producer=c.last_producer if c else 'preflight'
+        failed_detail=dict(c.failure_detail)if c and c.failure_detail is not None else None
         print('hosted ARM private ceremony failed; no qualification credit; private evidence retained',file=sys.stderr)
     finally:
         if c:
@@ -481,7 +558,7 @@ def main():
             except Exception:outcome=1;failed_producer='source-recheck'
             # Closed summary only, never raw recursive/private upload.
             json_write(a.public_result,{'schema_version':1,'status':'passed'if outcome==0 else'failed','platform':'linux/arm64',
-                'source_revision':a.source_commit,'source_snapshot':a.source_snapshot,'registered_cleanup_passed':clean,'failed_producer':failed_producer,'original_public_proof_files':proof_files,
+                'source_revision':a.source_commit,'source_snapshot':a.source_snapshot,'registered_cleanup_passed':clean,'failed_producer':failed_producer,'failure_detail':failed_detail,'original_public_proof_files':proof_files,
                 'signed_install_stop_backup_restore_health_final_stop':outcome==0,'scope':'native ephemeral fixture-signed LOCAL development qualification; not production/Qualys/emulation',
                 'runtime_reference':getattr(c,'runtime',None),'verifier_reference':getattr(c,'verifier',None)})
     return outcome

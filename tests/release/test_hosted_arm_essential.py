@@ -38,10 +38,13 @@ class HostedArmTests(unittest.TestCase):
         with patch.object(h.platform,'machine',return_value='x86_64'),patch.object(h.subprocess,'run',side_effect=AssertionError('must not contact daemon')):
             with self.assertRaises(ValueError):h.require_native()
     def test_wrong_daemon_and_failed_producer_deny(self):
-        with patch.object(h.platform,'machine',return_value='aarch64'):
+        with patch.object(h.platform,'machine',return_value='aarch64'),patch.dict(h.os.environ,{'DOCKER_HOST':'unix:///var/run/docker.sock'}):
             for result in (subprocess.CompletedProcess([],0,'linux/amd64',''),subprocess.CompletedProcess([],7,'linux/arm64','')):
                 with patch.object(h.subprocess,'run',return_value=result):
                     with self.assertRaises(ValueError):h.require_native()
+    def test_remote_endpoint_denies_without_contacting_daemon(self):
+        with patch.object(h.platform,'machine',return_value='aarch64'),patch.dict(h.os.environ,{'DOCKER_HOST':'ssh://not-contacted.invalid'}),patch.object(h.subprocess,'run',side_effect=AssertionError('no remote contact')):
+            with self.assertRaises(ValueError):h.require_native()
     def test_request_hash_duplicate_json_and_fifo_deny(self):
         import os,time
         with tempfile.TemporaryDirectory()as t:

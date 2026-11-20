@@ -152,9 +152,13 @@ FD; it rejects ambiguous non-config IDs for loaded CI children or freshly built 
 This conservative boundary may surface an actual store-compatibility dependency,
 which must be reported instead of guessed/adopted. It does not run emulation.
 
-The single job-local internal bridge contains only fresh MySQL, Trillian server,
+The single job-local ordinary bridge contains only fresh MySQL, Trillian server,
 Trillian signer, Rekor and registry. Published endpoints are loopback46150/47280
-only. MySQL needs its normal default capabilities for its canonical entrypoint;
+only; DB and Trillian publish no ports. This ordinary bridge is not a no-egress
+guarantee. Fixture requests and signing endpoints remain local. This correction
+does not change product networking, the held Qualys internal-network requirement,
+offline helpers using network none, or independent signature/inclusion checks.
+MySQL needs its normal default capabilities for its canonical entrypoint;
 other services drop all capabilities, with no added capability or Docker socket.
 The DB volume is masked by bounded tmpfs. Registry has ONLY a new dedicated owned
 data bind. No server inherits an instance/key/host-root view. Creation/startup and
@@ -206,3 +210,28 @@ of the coherent candidate. Genuine service/CLI/startup behavior on native ARM is
 still unproved. An actual job failure must retain its failed producer and available
 private evidence; no local mocks or dependency metadata substitute for completion.
 The 600s acceptance rule remains unchanged and no hard host-return claim is made.
+
+
+## Hosted startup recovery qualification
+
+The original 44807729112 ARM result remains failed at generic registered-inspect,
+with guarded cleanup successful and no signed lifecycle acceptance. That label
+and elapsed time do not establish which original role failed. Docker 28's internal
+network path skips external connectivity programming, conflicting with this
+fixture's required loopback mappings; this is a concrete precondition defect,
+not retrospective proof of the original failure's exact actor.
+
+Before installer effects, the corrected coordinator requires the registered live
+Rekor and registry full CID/StartedAt/recipe and exact effective loopback bindings,
+then successful fixed HTTP requests from the coordinator host namespace. It
+records that namespace and binding evidence privately. A local Unix Docker
+endpoint and native ARM daemon remain required. There is no remote-daemon guess.
+Finite failure diagnostics distinguish closed role/phase/reason enums and bounded
+state booleans/exit codes, without raw commands, environment, errors or secrets.
+
+One isolated local AMD64 registry scratch confirmed an ordinary bridge's effective
+loopback mapping and host HTTP reachability; its exact container and network were
+removed. A separate isolated AMD64 canonical DB scratch completed its schema query
+and cleanup. These components neither identify the original ARM failure nor prove
+native ARM lifecycle, occupied-port behavior or signed qualification. No hosted
+rerun or publication is part of this correction.

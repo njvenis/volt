@@ -100,6 +100,43 @@ class HostedFixtureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory()as d:
             c=f.Ceremony(Path(d),'a'*40,'sha256:'+'b'*64);c.uncertain=['unknown-created']
             self.assertFalse(c.cleanup_infra())
+    def test_ordinary_infrastructure_bridge_is_fixed_and_has_no_extra_network(self):
+        command=f.infrastructure_network_command('volt-arm-'+'a'*12+'-network','b'*32)
+        self.assertEqual(command,['docker','network','create','--driver','bridge','--label',f.LABEL+'='+'b'*32,'volt-arm-'+'a'*12+'-network'])
+        self.assertNotIn('--internal',command)
+        for name,owner in (('foreign','b'*32),('volt-arm-'+'a'*12+'-network','bad')):
+            with self.assertRaises(ValueError):f.infrastructure_network_command(name,owner)
+    def test_actual_effective_binding_is_required_not_just_requested_configuration(self):
+        expected={'3000/tcp':[{'HostIp':'127.0.0.1','HostPort':'47280'}]}
+        f.Ceremony.validate_published({'NetworkSettings':{'Ports':expected}},expected)
+        for ports in ({'3000/tcp':[]},{'3000/tcp':None},{'3000/tcp':[{'HostIp':'0.0.0.0','HostPort':'47280'}]},
+                      {'3000/tcp':[{'HostIp':'127.0.0.1','HostPort':'47281'}]}, {'3000/tcp':False}):
+            with self.subTest(ports=ports),self.assertRaises(ValueError):f.Ceremony.validate_published({'NetworkSettings':{'Ports':ports}},expected)
+        with self.assertRaises(ValueError):f.Ceremony.validate_published({'NetworkSettings':{'Ports':expected}},{})
+    def test_unique_role_phase_and_failure_context_exclude_secrets(self):
+        with tempfile.TemporaryDirectory()as d:
+            c=f.Ceremony(Path(d),'a'*40,'sha256:'+'b'*64);calls=[]
+            row={'Id':'c'*64,'State':{'Running':False,'ExitCode':1,'OOMKilled':False,'Error':'SECRET-CANARY'},'Config':{'Env':['MYSQL_PASSWORD=SECRET-CANARY']}}
+            with patch.object(c,'document',side_effect=lambda label,args:(calls.append(label)or[row])):
+                self.assertEqual(c.inspection('c'*64,role='db',phase='liveness'),row)
+            self.assertEqual(calls,['db-liveness-inspect'])
+            detail=c.failure_state('db','liveness','not-running',row)
+            self.assertEqual(detail,{'role':'db','phase':'liveness','reason':'not-running','running':False,'oom_killed':False,'container_exit_code':1})
+            self.assertNotIn('SECRET-CANARY',json.dumps(detail))
+            with self.assertRaises(ValueError):c.failure_state('foreign','liveness','not-running',row)
+            with self.assertRaises(ValueError):c.inspection('c'*64,role='db',phase='arbitrary')
+    def test_readiness_timeout_names_role_and_does_not_learn_private_error_text(self):
+        with tempfile.TemporaryDirectory()as d:
+            c=f.Ceremony(Path(d),'a'*40,'sha256:'+'b'*64)
+            with self.assertRaises(RuntimeError):c.wait('trillian-server',lambda:False,seconds=0)
+            self.assertEqual(c.last_producer,'trillian-server-readiness-timeout')
+            self.assertEqual(c.failure_detail,{'role':'trillian-server','phase':'readiness','reason':'timeout','readiness_timed_out':True})
+    def test_host_loopback_query_checks_registered_mapping_before_network(self):
+        with tempfile.TemporaryDirectory()as d:
+            c=f.Ceremony(Path(d),'a'*40,'sha256:'+'b'*64);record={'role':'rekor'}
+            with patch.object(c,'check',side_effect=ValueError('effective binding differs')),patch.object(c,'http',side_effect=AssertionError('must not query')):
+                with self.assertRaises(ValueError):c.endpoint_ready(record,f.URL+'/ping')
+            with self.assertRaises(ValueError):c.endpoint_ready({'role':'db'},f.URL+'/ping')
     def test_workflow_is_native_read_only_permissions_and_never_recursive_private_upload(self):
         text=(f.ROOT/'.github/workflows/ci.yml').read_text();job=text.split('  hosted-arm-signed-local:',1)[1]
         self.assertIn('runs-on: ubuntu-24.04-arm',job);self.assertIn('contents: read',job)

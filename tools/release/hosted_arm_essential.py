@@ -93,6 +93,17 @@ def prepare_db_context(directory,output):
 
 def require_native():
     if platform.machine()!='aarch64':raise ValueError('native ARM64 host required before Docker')
+    endpoint=os.environ.get('DOCKER_HOST')
+    if not endpoint:
+        context=os.environ.get('DOCKER_CONTEXT')
+        if not context:
+            selected=subprocess.run(['docker','context','show'],capture_output=True,text=True,timeout=30)
+            if selected.returncode:raise ValueError('local Docker context required')
+            context=selected.stdout.strip()
+        selected=subprocess.run(['docker','context','inspect',context,'--format','{{(index .Endpoints "docker").Host}}'],capture_output=True,text=True,timeout=30)
+        if selected.returncode:raise ValueError('local Docker endpoint required')
+        endpoint=selected.stdout.strip()
+    if not endpoint.startswith('unix://'):raise ValueError('local Unix Docker endpoint required before daemon contact')
     r=subprocess.run(['docker','version','--format','{{.Server.Os}}/{{.Server.Arch}}'],capture_output=True,text=True,timeout=30)
     if r.returncode or r.stdout.strip()!=PLATFORM:raise ValueError('native ARM64 daemon required')
 

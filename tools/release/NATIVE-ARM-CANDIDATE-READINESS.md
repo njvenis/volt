@@ -121,3 +121,23 @@ A parent-index identity alone is insufficient: both selected and actual child
 witnesses require a valid digest, supported manifest media type, positive exact
 integer size and the exact requested native platform, then equality of all four.
 No missing or equal-empty witness is accepted.
+
+## Docker CLI portability
+
+Retained b9 hosted AMD64 and ARM64 component records both establish native daemon
+platform and then `image inspect --platform` exit125/unknown flag before any
+container execution. They do not record a client version. Docker documents this
+specific inspection flag as API1.49+: https://docs.docker.com/reference/cli/docker/image/inspect/.
+The probe now records actual client/server versions and audits every fixed
+Docker CLI command's help before candidate execution. Platform-specific inspect
+is chosen only when the flag is advertised and both API versions support it.
+This is preselection, never a catch/retry after a failed producer.
+
+Without the flag, ordinary inspection is limited to the just-built single
+native tag, one typed image with valid immutable ID, exact native OS/architecture
+and source/version labels, and no ambiguous index descriptor. The second engine
+inspection must be identical. Container creation still uses that immutable
+selected ID and explicit supported native platform. Missing create options deny;
+no daemon/default platform, emulation or parent-index-only witness is adopted.
+The fixture-Q build uses the same inspected-image compatibility checks with its
+existing verifier source/platform labels. Failed b9 artifacts remain unchanged.

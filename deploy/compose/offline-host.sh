@@ -591,13 +591,29 @@ offline_observe() {
 # Read-only validation under the existing original host lifecycle holder. This
 # adds no writer/issuer/mount: the same eight-key observation crosses stdin.
 run_public_local_stop() {
+  # Acceptance cap only: stock Docker may return later. Retain failure evidence
+  # from entry and never emit its late progress as a clean-stop result.
+  RETAIN_STOP_EVIDENCE=1
   offline_stop_clock || fail 'host ordinary-stop clock is unavailable'
   OFFLINE_ORDINARY_STOP_DEADLINE_CS=$((OFFLINE_NOW_CS + 60000))
+  printf '%s\n' "$OFFLINE_ORDINARY_STOP_DEADLINE_CS" >"$WORK/ordinary-stop-deadline-centiseconds" \
+    || fail 'ordinary stop evidence could not be recorded'
   verify_actual_mounts
-  locked_compose stop --timeout 600
   offline_stop_clock || fail 'host ordinary-stop clock is unavailable'
   [ "$OFFLINE_NOW_CS" -lt "$OFFLINE_ORDINARY_STOP_DEADLINE_CS" ] || fail 'ordinary stop deadline expired'
-  RETAIN_STOP_EVIDENCE=1
+  ordinary_compose_status=0
+  locked_compose stop --timeout 600 >"$WORK/ordinary-compose.stdout" 2>"$WORK/ordinary-compose.stderr" \
+    || ordinary_compose_status=$?
+  printf '%s\n' "$ordinary_compose_status" >"$WORK/ordinary-compose.exit" \
+    || fail 'ordinary stop producer result could not be recorded'
+  offline_stop_clock || fail 'host ordinary-stop clock is unavailable'
+  printf '%s\n' "$OFFLINE_NOW_CS" >"$WORK/ordinary-compose-returned-centiseconds" \
+    || fail 'ordinary stop return clock could not be recorded'
+  [ "$OFFLINE_NOW_CS" -lt "$OFFLINE_ORDINARY_STOP_DEADLINE_CS" ] || fail 'ordinary stop deadline expired'
+  if [ "$ordinary_compose_status" -ne 0 ]; then
+    printf '%s\n' 'volt installer: ordinary stop Docker producer failed' >&2
+    return "$ordinary_compose_status"
+  fi
   OFFLINE_OUTPUT="$WORK/stop-output"; OFFLINE_OBSERVATION="$WORK/stop-observation"
   mkdir -m 700 "$OFFLINE_OUTPUT" "$OFFLINE_OBSERVATION"
   offline_snapshot

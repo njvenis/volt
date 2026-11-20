@@ -101,6 +101,63 @@ def native_context(requested: str, machine: str, daemon: str) -> None:
         raise ValueError('native host and Docker platform must both match; no emulation')
 
 
+
+def option_advertised(help_text: str, option: str) -> bool:
+    return any(re.match(r'^\s+(?:-[A-Za-z],\s+)?'+re.escape(option)+r'(?:[ =]|$)',line)
+        for line in help_text.splitlines())
+
+
+def audit_docker_cli(run, *, fixture_build: bool=False) -> dict:
+    version=json.loads(run('docker-client-server-version',['docker','version','--format','{{json .}}']).stdout)
+    apis=[]
+    for key in ('Client','Server'):
+        value=version.get(key)
+        if type(value)is not dict or type(value.get('ApiVersion'))is not str or re.fullmatch(r'[0-9]+\.[0-9]+',value['ApiVersion'])is None:
+            raise ValueError('exact Docker client/server API versions required')
+        apis.append(tuple(int(p)for p in value['ApiVersion'].split('.')))
+    inspect_help=run('image-inspect-help',['docker','image','inspect','--help']).stdout
+    commands=[('create',['docker','create','--help'],('--platform','--pull','--name','--restart','--network','--read-only','--user','--security-opt','--label','--tmpfs','--mount','--entrypoint')),
+        ('container-inspect',['docker','inspect','--help'],()),
+        ('start',['docker','start','--help'],('--attach',)),
+        ('remove',['docker','rm','--help'],('--force',))]
+    if fixture_build:
+        commands += [('build',['docker','build','--help'],('--platform','--pull','--network','--target','--build-context','--file','--label','--tag')),
+            ('image-save',['docker','image','save','--help'],('--output',))]
+    for name,argv,options in commands:
+        help_text=run(name+'-help',argv).stdout
+        if any(not option_advertised(help_text,o)for o in options):raise ValueError('fixed Docker CLI recipe unavailable: '+name)
+    if min(apis)<(1,32):raise ValueError('explicit native create platform unavailable')
+    return {'version':version,'inspect_platform':option_advertised(inspect_help,'--platform')and min(apis)>=(1,49)}
+
+
+def inspected_native_image(run, tag: str, requested: str, revision: str, snapshot: str,
+                           capabilities: dict, *, kind: str='runtime') -> tuple[dict,dict]:
+    # Capability selection happens BEFORE inspection, never after an error. Old
+    # clients use the single native build tag/ID, not a default multi-index child.
+    if kind not in ('runtime','verifier'):raise ValueError('fixed image kind required')
+    argv=['docker','image','inspect']
+    if capabilities['inspect_platform']:argv += ['--platform',requested]
+    rows=json.loads(run('selected-image',argv+[tag]).stdout)
+    if type(rows)is not list or len(rows)!=1 or type(rows[0])is not dict:raise ValueError('one native image required')
+    selected=rows[0]
+    config=selected.get('Config');labels=config.get('Labels')if type(config)is dict else None
+    if (type(selected.get('Id'))is not str or re.fullmatch('sha256:[0-9a-f]{64}',selected['Id'])is None
+            or type(selected.get('Os'))is not str or type(selected.get('Architecture'))is not str
+            or selected['Os']+'/'+selected['Architecture']!=requested
+            or type(labels)is not dict or labels.get('org.opencontainers.image.revision')!=revision
+            or labels.get('org.volt.compose.source-snapshot')!=snapshot
+            or kind=='runtime'and labels.get('org.opencontainers.image.version')!='0.1.0-rc.4'):
+        raise ValueError('native built image source/platform differs')
+    if not capabilities['inspect_platform'] and selected.get('Descriptor')is not None and not valid_witness(selected['Descriptor'],requested):
+        raise ValueError('ordinary inspection is not an unambiguous native image')
+    engines=json.loads(run('engine-image',['docker','image','inspect',tag]).stdout)
+    if type(engines)is not list or len(engines)!=1 or type(engines[0])is not dict:raise ValueError('one current engine image required')
+    engine=engines[0]
+    if type(engine.get('Id'))is not str or re.fullmatch('sha256:[0-9a-f]{64}',engine['Id'])is None:raise ValueError('engine image ID differs')
+    if not capabilities['inspect_platform'] and engine!=selected:raise ValueError('single native build tag changed during inspection')
+    return selected,engine
+
+
 def create_command(image: str, requested: str, name: str, token: str,
                    component: Path, driver: Path) -> list[str]:
     command = ['docker','create','--platform',requested,'--pull=never','--name',name,
@@ -165,14 +222,9 @@ def main() -> int:
     daemon=run('daemon-platform',['docker','version','--format','{{.Server.Os}}/{{.Server.Arch}}']).stdout.strip()
     native_context(args.platform,platform.machine(),daemon)
     tag='volt-easy-rc4:'+args.platform.split('/')[1]
-    selected=json.loads(run('selected-image',['docker','image','inspect','--platform',args.platform,tag]).stdout)[0]
-    engine=json.loads(run('engine-image',['docker','image','inspect',tag]).stdout)[0]
-    labels=selected['Config']['Labels']
-    if (selected['Os']+'/'+selected['Architecture']!=args.platform
-            or labels.get('org.opencontainers.image.revision')!=args.source_commit
-            or labels.get('org.volt.compose.source-snapshot')!=args.source_snapshot
-            or labels.get('org.opencontainers.image.version')!='0.1.0-rc.4'):
-        raise ValueError('native built image source/platform differs')
+    capabilities=audit_docker_cli(run)
+    (out/'docker-cli-capabilities.json').write_text(json.dumps(capabilities,indent=2)+'\n')
+    selected,engine=inspected_native_image(run,tag,args.platform,args.source_commit,args.source_snapshot,capabilities)
     component=frozen/'tools/release/protected_launch_component.py';driver=out/'driver.py';driver.write_text(DRIVER)
     component_hash=hashlib.sha256(regular_bytes(component,1048576)).hexdigest();driver_hash=hashlib.sha256(regular_bytes(driver,1048576)).hexdigest()
     token=uuid.uuid4().hex;name='volt-native-protected-'+token

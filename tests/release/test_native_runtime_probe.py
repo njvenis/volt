@@ -173,3 +173,73 @@ class NativeSourceBindingTests(unittest.TestCase):
             with self.subTest(witness=witness):
                 params['selected']['Descriptor']=witness;row['ImageManifestDescriptor']=witness
                 with self.assertRaises(ValueError):checked_identity(row,**params)
+
+
+class DockerCliPortabilityTests(unittest.TestCase):
+    """Legacy/new capabilities are synthetic; retained b9 proves missing flag only."""
+    def harness(self, *, advertised=False, api='1.47', image=None):
+        import json
+        from types import SimpleNamespace
+        from tools.release.native_runtime_probe import audit_docker_cli
+        revision='a'*40;snapshot='sha256:'+'b'*64
+        original={'Id':'sha256:'+'c'*64,'Os':'linux','Architecture':'arm64','Config':{'Labels':{
+            'org.opencontainers.image.revision':revision,'org.volt.compose.source-snapshot':snapshot,
+            'org.opencontainers.image.version':'0.1.0-rc.4'}}}
+        if image is not None:original=image
+        calls=[]
+        options=['--platform','--pull','--name','--restart','--network','--read-only','--user','--security-opt','--label','--tmpfs','--mount','--entrypoint','--attach','--force','--target','--build-context','--file','--tag','--output']
+        def run(label,argv):
+            calls.append((label,argv))
+            if label=='docker-client-server-version':return SimpleNamespace(stdout=json.dumps({'Client':{'ApiVersion':api},'Server':{'ApiVersion':api}}))
+            if label=='image-inspect-help':return SimpleNamespace(stdout='Usage: docker image inspect [OPTIONS] IMAGE\n'+('      --platform string\n'if advertised else'      --format string\n'))
+            if label.endswith('-help'):return SimpleNamespace(stdout='\n'.join('      '+o+' string'for o in options))
+            return SimpleNamespace(stdout=json.dumps([original]))
+        return run,calls,audit_docker_cli(run),original,revision,snapshot
+
+    def test_legacy_client_uses_plain_inspect_and_still_creates_explicit_native_immutable_id(self):
+        from tools.release.native_runtime_probe import inspected_native_image
+        run,calls,capabilities,image,revision,snapshot=self.harness()
+        selected,engine=inspected_native_image(run,'volt-easy-rc4:arm64','linux/arm64',revision,snapshot,capabilities)
+        self.assertEqual(selected,engine)
+        inspect=[a for n,a in calls if n in ('selected-image','engine-image')]
+        self.assertEqual(inspect,[['docker','image','inspect','volt-easy-rc4:arm64']]*2)
+        command=create_command(selected['Id'],'linux/arm64','owned','token',Path('/fixed/component'),Path('/fixed/driver'))
+        self.assertEqual(command[command.index('--platform')+1],'linux/arm64')
+        self.assertEqual(command[command.index('--entrypoint')+2],image['Id'])
+
+    def test_platform_inspect_requires_advertised_flag_and_both_supported_apis(self):
+        from tools.release.native_runtime_probe import inspected_native_image
+        for advertised,api,expected in [(True,'1.49',True),(True,'1.48',False),(False,'1.55',False)]:
+            with self.subTest(advertised=advertised,api=api):
+                run,calls,caps,image,rev,snapshot=self.harness(advertised=advertised,api=api)
+                self.assertIs(caps['inspect_platform'],expected)
+                inspected_native_image(run,'volt-easy-rc4:arm64','linux/arm64',rev,snapshot,caps)
+                command=next(a for n,a in calls if n=='selected-image')
+                self.assertEqual('--platform'in command,expected)
+
+    def test_ordinary_inspection_rejects_ambiguous_index_and_wrong_native_or_source(self):
+        from tools.release.native_runtime_probe import inspected_native_image
+        _,_,_,baseline,_,_=self.harness()
+        cases=[]
+        for key,value in [('Descriptor',{}),('Descriptor',{'mediaType':'application/vnd.oci.image.index.v1+json'}),('Architecture','amd64'),('Id','short'),('Os',False)]:
+            item=copy.deepcopy(baseline);item[key]=value;cases.append(item)
+        item=copy.deepcopy(baseline);item['Config']['Labels']['org.opencontainers.image.revision']='d'*40;cases.append(item)
+        for image in cases:
+            with self.subTest(image=image):
+                run,calls,caps,_,rev,snapshot=self.harness(image=image)
+                with self.assertRaises(ValueError):inspected_native_image(run,'volt-easy-rc4:arm64','linux/arm64',rev,snapshot,caps)
+
+    def test_selected_inspect_error_never_retries_or_falls_back(self):
+        from tools.release.native_runtime_probe import inspected_native_image
+        run,calls,caps,_,rev,snapshot=self.harness(advertised=True,api='1.55')
+        selected_calls=[]
+        def failing(label,argv):
+            if label=='selected-image':selected_calls.append(argv);raise RuntimeError('original inspect failure')
+            return run(label,argv)
+        with self.assertRaises(RuntimeError):inspected_native_image(failing,'volt-easy-rc4:arm64','linux/arm64',rev,snapshot,caps)
+        self.assertEqual(len(selected_calls),1)
+        self.assertIn('--platform',selected_calls[0])
+
+    def test_no_platform_in_description_can_select_flag(self):
+        from tools.release.native_runtime_probe import option_advertised
+        self.assertFalse(option_advertised('      --format string   mentions --platform in description','--platform'))

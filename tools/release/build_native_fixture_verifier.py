@@ -17,7 +17,7 @@ import subprocess
 import sys
 ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT))
-from tools.release.native_runtime_probe import native_context, frozen_git_source, verify_source_context
+from tools.release.native_runtime_probe import native_context, frozen_git_source, verify_source_context, audit_docker_cli, inspected_native_image
 NAMES={'fixture-trust.json','fixture.pub','trusted-root.json'}
 URL='http://127.0.0.1:47280'
 
@@ -111,12 +111,22 @@ def main() -> int:
     if not re.fullmatch('[0-9a-f]{40}',a.source_commit)or not re.fullmatch('sha256:[0-9a-f]{64}',a.source_snapshot):raise ValueError('exact source hashes required')
     policy=a.public_policy.absolute();proof,public_bytes=read_public_policy(policy,a.expected_policy_sha256)
     if ROOT==policy or ROOT in policy.parents:raise ValueError('policy must be independently supplied outside source context')
-    daemon=subprocess.check_output(['docker','version','--format','{{.Server.Os}}/{{.Server.Arch}}'],text=True).strip();native_context(a.platform,platform.machine(),daemon)
     out=a.evidence.absolute();out.mkdir(mode=0o700,parents=True,exist_ok=False)
     source,binding=frozen_git_source(out,a.source_commit,a.source_snapshot)
     staged,staged_proof=stage_public_policy(out,public_bytes,a.expected_policy_sha256)
     if staged_proof!=proof:raise ValueError('private re-staging differs')
     tag='volt-native-fixture-q:'+a.platform.split('/')[1]
+    def run(label,command):
+        (out/(label+'.argv.json')).write_text(json.dumps(command)+'\n')
+        result=subprocess.run(command,cwd=ROOT,capture_output=True,text=True,timeout=60)
+        for suffix,value in (('stdout',result.stdout),('stderr',result.stderr),('exit',str(result.returncode))):
+            (out/(label+'.'+suffix)).write_text(value)
+        if result.returncode:raise RuntimeError('fixture CLI producer failed: '+label)
+        return result
+    daemon=run('daemon-platform',['docker','version','--format','{{.Server.Os}}/{{.Server.Arch}}']).stdout.strip()
+    native_context(a.platform,platform.machine(),daemon)
+    capabilities=audit_docker_cli(run,fixture_build=True)
+    (out/'docker-cli-capabilities.json').write_text(json.dumps(capabilities,indent=2)+'\n')
     argv=['docker','build','--pull=false','--network=none','--platform',a.platform,'--target','verifier-fixture',
         '--build-context','fixture-policy='+str(staged),'--file',str(source/'tools/release/verifier.Dockerfile'),
         '--label','org.opencontainers.image.revision='+a.source_commit,
@@ -130,8 +140,7 @@ def main() -> int:
     if r.returncode:return r.returncode
     verify_source_context(source,binding['files'])
     if public_policy(staged,a.expected_policy_sha256)!=proof:raise ValueError('private staged policy changed across build')
-    row=json.loads(subprocess.check_output(['docker','image','inspect','--platform',a.platform,tag]))[0]
-    if row['Os']+'/'+row['Architecture']!=a.platform or row['Config']['Labels'].get('org.opencontainers.image.revision')!=a.source_commit or row['Config']['Labels'].get('org.volt.compose.source-snapshot')!=a.source_snapshot:raise ValueError('fixture verifier image binding differs')
+    row,engine=inspected_native_image(run,tag,a.platform,a.source_commit,a.source_snapshot,capabilities,kind='verifier')
     (out/'image.json').write_text(json.dumps(row,indent=2)+'\n')
     subprocess.run(['docker','image','save','--output',str(out/'fixture-verifier.tar'),tag],check=True)
     (out/'fixture-verifier.tar.sha256').write_text(hashlib.sha256((out/'fixture-verifier.tar').read_bytes()).hexdigest()+'  fixture-verifier.tar\n')

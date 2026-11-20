@@ -147,6 +147,11 @@ Installation SHALL preserve established secrets, data and ownership across inter
 - **AND** consumed setup never reopens and restored local sessions are revoked before ingress opens
 - **AND** destructive removal and unsupported upgrades cannot occur implicitly
 
+#### Scenario: Ordinary stop acceptance cutoff
+- **WHEN** the original host ordinary-stop clock reaches 600 seconds before the same-incarnation stop and mandatory evidence are verified
+- **THEN** the invocation returns nonzero and retains private failure evidence even if Docker subsequently completes its submitted stop
+- **AND** any standalone cold backup requires independently verified current stopped evidence and the existing admission and custody checks
+
 #### Scenario: Network and prerequisite failures
 - **WHEN** ports, registry access, private-file permissions or required resources are unavailable
 - **THEN** setup reports an actionable safe failure without foreign adoption

@@ -28,6 +28,37 @@ HELPER_EXEC_ONLY=0
 RETAIN_STOP_EVIDENCE=0
 
 fail() { printf '%s\n' "volt installer: $*" >&2; exit 1; }
+select_inspect_capability() {
+  INSPECT_PLATFORM_SUPPORTED=0
+  inspect_api=$(docker version --format '{{.Client.APIVersion}}|{{.Server.APIVersion}}') \
+    || fail 'could not identify Docker inspection API capabilities'
+  IFS='|' read -r inspect_client_api inspect_server_api inspect_extra <<EOF_API
+$inspect_api
+EOF_API
+  [ -n "$inspect_client_api" ] && [ -n "$inspect_server_api" ] && [ -z "$inspect_extra" ] \
+    || fail 'Docker inspection API metadata is malformed'
+  inspect_apis_supported=1
+  for inspect_api in "$inspect_client_api" "$inspect_server_api"; do
+    inspect_major=${inspect_api%%.*}; inspect_minor=${inspect_api#*.}
+    [ "$inspect_api" != "$inspect_minor" ] || fail 'Docker inspection API metadata is malformed'
+    case "$inspect_major:$inspect_minor" in *[!0-9:]*|:*|*:) fail 'Docker inspection API metadata is malformed' ;; esac
+    if [ "$inspect_major" -lt 1 ] || { [ "$inspect_major" -eq 1 ] && [ "$inspect_minor" -lt 49 ]; }; then inspect_apis_supported=0; fi
+  done
+  inspect_help=$(docker image inspect --help) || fail 'could not identify Docker inspection CLI capabilities'
+  if [ "$inspect_apis_supported" -eq 1 ] && printf '%s\n' "$inspect_help" | grep -q -- '--platform'; then INSPECT_PLATFORM_SUPPORTED=1; fi
+}
+inspect_runtime_image() {
+  inspect_platform=$1; shift
+  [ "$inspect_platform" = "$ENGINE_PLATFORM" ] || fail 'inspection must retain the selected native engine platform'
+  case "$inspect_platform" in linux/amd64|linux/arm64) ;; *) fail 'runtime inspection platform is unsupported' ;; esac
+  if [ "$INSPECT_PLATFORM_SUPPORTED" -eq 1 ]; then
+    docker image inspect --platform "$inspect_platform" "$@"
+  else
+    # Full JSON still passes the independent exact-child/config/parent verifier.
+    # Never retry a failed platform-specific inspection as an ordinary one.
+    docker image inspect "$@"
+  fi
+}
 cleanup() {
   cleanup_original_status=$?
   if [ -n "$LOCK_NAME" ]; then
@@ -94,6 +125,7 @@ chmod 700 "$WORK/verified"
 ENGINE_PLATFORM=$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}') || fail 'could not identify the native Docker platform'
 case "$ENGINE_PLATFORM" in linux/amd64|linux/arm64) ;; *) fail 'native Docker platform is unsupported' ;; esac
 PLATFORM=$ENGINE_PLATFORM
+select_inspect_capability
 
 OFFLINE_MODE=${VOLT_OFFLINE:-0}
 case "$OFFLINE_MODE" in 0|1) ;; *) fail 'offline transport mode must be exactly 0 or 1' ;; esac
@@ -175,7 +207,7 @@ graph_verifier() {
 }
 
 refresh_installer_admission() {
-  docker image inspect --platform "$PLATFORM" "$IMAGE_REF" >"$WORK/.next-runtime-image.json" \
+  inspect_runtime_image "$PLATFORM" "$IMAGE_REF" >"$WORK/.next-runtime-image.json" \
     || fail 'cached selected runtime image is unavailable; no implicit pull is permitted'
   chmod 0400 "$WORK/.next-runtime-image.json"
   mv "$WORK/.next-runtime-image.json" "$WORK/runtime-image.json"
@@ -413,7 +445,7 @@ IMAGE_REF=$SIGNED_REFERENCE
 if [ "$OFFLINE_MODE" -eq 0 ]; then
   docker pull --platform "$ENGINE_PLATFORM" "$IMAGE_REF" >/dev/null || fail 'could not pull the authenticated runtime image'
 fi
-docker image inspect --platform "$ENGINE_PLATFORM" "$IMAGE_REF" >"$WORK/runtime-image.json" || fail 'could not inspect the authenticated runtime image'
+inspect_runtime_image "$ENGINE_PLATFORM" "$IMAGE_REF" >"$WORK/runtime-image.json" || fail 'could not inspect the authenticated runtime image'
 if [ "$OFFLINE_MODE" -eq 1 ]; then
   # This is original cached data, not execution or trust from a cache pass.
   cp "$CACHE_DIRECTORY/runtime-index/blobs/sha256/${IMAGE_REF##*@sha256:}" "$WORK/runtime-index.json" \
@@ -421,7 +453,7 @@ if [ "$OFFLINE_MODE" -eq 1 ]; then
 else
   docker buildx imagetools inspect --raw "$IMAGE_REF" >"$WORK/runtime-index.json" || fail 'could not inspect the authenticated runtime index'
 fi
-IMAGE_INSPECT=$(docker image inspect --platform "$ENGINE_PLATFORM" --format '{{.Id}}|{{.Os}}/{{.Architecture}}|{{index .Config.Labels "org.volt.compose.source-snapshot"}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "org.opencontainers.image.version"}}|{{index .Config.Labels "org.volt.oidc-deployment-modes"}}|{{index .Config.Labels "org.volt.compose-install.contract"}}' "$IMAGE_REF")
+IMAGE_INSPECT=$(inspect_runtime_image "$ENGINE_PLATFORM" --format '{{.Id}}|{{.Os}}/{{.Architecture}}|{{index .Config.Labels "org.volt.compose.source-snapshot"}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "org.opencontainers.image.version"}}|{{index .Config.Labels "org.volt.oidc-deployment-modes"}}|{{index .Config.Labels "org.volt.compose-install.contract"}}' "$IMAGE_REF")
 IFS='|' read -r IMAGE_ID PLATFORM SOURCE_SNAPSHOT SOURCE_REVISION IMAGE_VERSION MODES INSTALL_CONTRACT <<EOF_INSPECT
 $IMAGE_INSPECT
 EOF_INSPECT
@@ -436,11 +468,6 @@ case ",$MODES," in *,local,*) ;; *) fail 'runtime does not declare persistent lo
 ENGINE_PLATFORM=$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')
 [ "$ENGINE_PLATFORM" = "$PLATFORM" ] || fail 'selected runtime must match the native Docker engine platform'
 IMAGE_ENGINE_ID=$(docker image inspect --format '{{.Id}}' "$IMAGE_REF") || fail 'could not inspect the engine parent image identity'
-if docker image inspect --help | grep -q -- --platform; then
-  docker image inspect --platform "$PLATFORM" "$IMAGE_REF" >"$WORK/runtime-image.json" \
-    || fail 'could not inspect the actual selected native platform image'
-  IMAGE_ID=$(docker image inspect --platform "$PLATFORM" "$IMAGE_REF" --format '{{.Id}}')
-fi
 [ "$IMAGE_ENGINE_ID" = "$IMAGE_ID" ] || [ "$IMAGE_ENGINE_ID" = "${IMAGE_REF##*@}" ] \
   || fail 'engine parent image ID differs from the signed index or selected object'
 chmod 0400 "$WORK/runtime-image.json" "$WORK/runtime-index.json"

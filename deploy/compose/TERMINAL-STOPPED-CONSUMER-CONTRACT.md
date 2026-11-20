@@ -66,3 +66,28 @@ On an unknown/live read-only child at the original absolute host cutoff, the hos
 The retained route is restricted to fixed read-only Docker wait/inspect/logs/cp, cache/receipt verification, data filtering/encoding, fixed read-only host-stop comparison and reporting. It cannot run Compose lifecycle mutations, archive capture/publication, identity/key creation or any writer. The existing synchronous physical Compose STOP has a separately explicit UNRESOLVED hard-host-startup-deadline limitation; a check after it returns is not proof of a hard600s host cutoff. No new timeout executable or mandatory host dependency has been adopted, and this failure-retention route cannot authorize leaving a mutating command pending. Ordinary stop acceptance remains held on that separate boundary. The existing original stop clock is nevertheless anchored before Compose and is never reset for read-only acquisition.
 
 Retention remains set through owner completion, original producer/report waits, final ownership acknowledgment AND final successful status output. A reporting/logging failure after valid proof or durable backup publication remains nonzero and keeps the private workspace; it never deletes or overwrites a committed backup. No additional raw log or private process record is printed by timeout/error paths.
+
+
+### Standalone backup inventory preparation
+
+For standalone `backup-record` on an already stopped instance, with no ordinary
+stop clock, the three fixed read-only store inventories are a separate bounded
+preparation phase. Captured-phase preparation additionally inventories the
+instance only when that existing phase requires it. Each helper retains its
+single original read-only mount and runs its existing owner/driver/options
+checks inside an independently tracked job. All exact original producer and
+guard waits must succeed within one finite 13-second preparation cutoff.
+Failure retains evidence and cannot start the stopped-proof snapshot.
+
+The same pinned actual lifecycle holder is rechecked at the boundary. Only
+successful preparation clears that preparation clock. A fresh snapshot then
+starts the existing 13-second stopped-proof acquisition/assembly window;
+current CID/StartedAt, post-inspection joins, independent producer/filter
+outcomes and final owner validation remain mandatory. No preparation result
+acknowledges a phase, commits metadata or permits capture/publication. Observed
+and captured inventory validation and the existing archive/publication seals
+are unchanged. This separation does not reset, borrow from, or extend the
+ordinary public-stop T+600 clock or its 13-second reserve; attempting preparation
+with any existing acquisition or ordinary stop clock denies. Public stop and
+all fixed stream/parser limits are unchanged. Restore-provision adds no helper;
+restore-admit retains its existing required imported-store inventories.

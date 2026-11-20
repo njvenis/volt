@@ -124,6 +124,7 @@ offline_host_start() {
   stop_job_kind=$1; stop_job_input=$2; stop_job_output=$3; stop_job_deadline=$4; shift 4
   case "$stop_job_kind" in
     snapshot|report) [ "$#" -eq 0 ] || return 1 ;;
+    inventory) [ "$#" -eq 1 ] || return 1; case "$1" in postgres|media|state|instance) ;; *) return 1 ;; esac ;;
     data) case "${1:-}" in queried-*|filter-stop-*|encode-stopped-transport|emit-stopped-observation|emit-observation|plan-lines) ;; *) return 1 ;; esac ;;
     docker) case "${1:-}:${2:-}" in wait:*|cp:*|logs:*|inspect:*|image:inspect|container:inspect|volume:inspect|network:inspect|info:--format|context:inspect|context:show) ;; *) return 1 ;; esac ;;
     setup) [ "$#" -eq 0 ] || return 1 ;;
@@ -150,6 +151,7 @@ offline_host_start() {
     offline_stop_clock && [ "$OFFLINE_NOW_CS" -lt "$stop_job_deadline" ] || exit 124
     case "$stop_job_kind" in
       snapshot) offline_snapshot_body >"$stop_job/stdout" 2>"$stop_job/stderr" ;;
+      inventory) offline_inventory "$@" >"$stop_job/stdout" 2>"$stop_job/stderr" ;;
       report) exec cat "$stop_job_input" 2>"$stop_job/stderr" ;;
       data) _offline_data_exec "$@" >"$stop_job/stdout" 2>"$stop_job/stderr" ;;
       docker)
@@ -424,6 +426,9 @@ offline_inspect_object() {
 
 offline_inventory() {
   store=$1
+  case "$store" in postgres|media|state|instance) ;; *) return 1 ;; esac
+  ensure_lock_owner || return 1
+  if [ -n "$OFFLINE_STOP_DEADLINE_CS" ]; then offline_stop_before || return 124; fi
   if [ "$store" = instance ]; then
     source_mount="type=bind,src=$STATE,dst=/restore,readonly"
   else
@@ -432,10 +437,81 @@ offline_inventory() {
     case "$actual" in "$OWNER_TOKEN|local|null"|"$OWNER_TOKEN|local|{}") ;; *) fail 'offline inventory refuses foreign or bind-backed store' ;; esac
     source_mount="type=volume,src=${PROJECT}_$store,dst=/restore,readonly"
   fi
+  # Prechecks run inside a registered inventory job for backup. A delayed
+  # Docker inspect cannot block that job's parent past its original cutoff,
+  # and cannot launch another helper after a known expired cutoff.
+  ensure_lock_owner || return 1
+  if [ -n "$OFFLINE_STOP_DEADLINE_CS" ]; then offline_stop_before || return 124; fi
   docker run --platform "$PLATFORM" --pull=never --rm --network none --read-only --cap-drop=ALL \
     --cap-add=DAC_OVERRIDE --security-opt=no-new-privileges --user 0:0 \
     --tmpfs /tmp:rw,noexec,nosuid,size=16m --mount "$source_mount" \
     --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -m uvm.installer.offline_backup inventory
+}
+
+offline_inventory_parallel() {
+  case "$ACTION:$1" in
+    backup-record:observed) inventory_stores='postgres media state' ;;
+    backup-record:captured) inventory_stores='postgres media state instance' ;;
+    *) fail 'parallel inventories require the existing backup phase' ;;
+  esac
+  [ -n "$OFFLINE_STOP_DEADLINE_CS" ] || fail 'original inventory cutoff is missing'
+  # Each root process retains ONLY its original single read-only store mount.
+  # Register all original jobs before waiting for any of their results.
+  for store in $inventory_stores; do
+    offline_host_start inventory '' '' "$OFFLINE_STOP_DEADLINE_CS" "$store" \
+      || fail 'fixed read-only inventory job could not be registered'
+    case "$store" in
+      postgres) inventory_postgres_job=$OFFLINE_JOB ;;
+      media) inventory_media_job=$OFFLINE_JOB ;;
+      state) inventory_state_job=$OFFLINE_JOB ;;
+      instance) inventory_instance_job=$OFFLINE_JOB ;;
+    esac
+  done
+  for store in $inventory_stores; do
+    case "$store" in
+      postgres) inventory_job=$inventory_postgres_job ;;
+      media) inventory_job=$inventory_media_job ;;
+      state) inventory_job=$inventory_state_job ;;
+      instance) inventory_job=$inventory_instance_job ;;
+    esac
+    offline_host_finish "$inventory_job" || fail 'fixed read-only inventory job failed; private evidence retained'
+    offline_stop_before || fail 'original inventory cutoff expired'
+  done
+  {
+    printf '{'; separator=''
+    for store in $inventory_stores; do
+      case "$store" in
+        postgres) inventory_job=$inventory_postgres_job ;;
+        media) inventory_job=$inventory_media_job ;;
+        state) inventory_job=$inventory_state_job ;;
+        instance) inventory_job=$inventory_instance_job ;;
+      esac
+      printf '%s"%s":' "$separator" "$store"
+      cat "$inventory_job/stdout" || fail 'completed inventory data is unavailable'
+      separator=,
+    done
+    printf '}\n'
+  } >"$OFFLINE_OBSERVATION/inventories.json" || return 1
+  chmod 600 "$OFFLINE_OBSERVATION/inventories.json" || return 1
+  offline_stop_before || return 124
+}
+
+
+# Standalone backup preparation has no ordinary stop clock. Inventory is a
+# separately bounded RO phase, complete before a fresh stopped-proof snapshot.
+offline_prepare_backup_inventory() {
+  [ "$ACTION" = backup-record ] || fail 'backup inventory preparation action differs'
+  [ -z "$OFFLINE_STOP_DEADLINE_CS" ] && [ -z "$OFFLINE_ORDINARY_STOP_DEADLINE_CS" ] \
+    || fail 'backup preparation cannot reset an existing acquisition or ordinary stop clock'
+  ensure_lock_owner || return 1
+  offline_stop_clock || return 1
+  OFFLINE_STOP_DEADLINE_CS=$((OFFLINE_NOW_CS + 1300))
+  offline_inventory_parallel "$1" || return 1
+  ensure_lock_owner || return 1
+  offline_stop_before || return 124
+  # This transition grants no authority. A new snapshot, stopped transport,
+  # exact current joins and actual owner's validation are still mandatory.
+  OFFLINE_STOP_DEADLINE_CS=''
 }
 
 offline_snapshot_body() {
@@ -486,7 +562,11 @@ offline_snapshot() {
 
 offline_observe() {
   phase=$1
+  if [ "$ACTION" = backup-record ]; then
+    offline_prepare_backup_inventory "$phase" || fail 'bounded backup inventory preparation failed'
+  fi
   offline_snapshot
+  if [ "$ACTION" != backup-record ]; then
   {
     printf '{'; separator=''
     if [ "$ACTION" != restore-provision ]; then
@@ -500,6 +580,7 @@ offline_observe() {
     printf '}\n'
   } >"$OFFLINE_OBSERVATION/inventories.json"
   chmod 600 "$OFFLINE_OBSERVATION/inventories.json"
+  fi
   if [ "$ACTION" = backup-record ]; then offline_capture_shutdown; fi
   offline_data emit-observation --phase "$phase" >"$OFFLINE_INPUT/.next-phase" || fail 'closed offline observation emission failed'
   chmod 600 "$OFFLINE_INPUT/.next-phase"

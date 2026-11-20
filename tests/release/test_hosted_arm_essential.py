@@ -38,13 +38,37 @@ class HostedArmTests(unittest.TestCase):
         with patch.object(h.platform,'machine',return_value='x86_64'),patch.object(h.subprocess,'run',side_effect=AssertionError('must not contact daemon')):
             with self.assertRaises(ValueError):h.require_native()
     def test_wrong_daemon_and_failed_producer_deny(self):
-        with patch.object(h.platform,'machine',return_value='aarch64'),patch.dict(h.os.environ,{'DOCKER_HOST':'unix:///var/run/docker.sock'}):
+        with patch.object(h.platform,'machine',return_value='aarch64'),patch.dict(h.os.environ,{'DOCKER_HOST':'unix:///var/run/docker.sock'},clear=True):
             for result in (subprocess.CompletedProcess([],0,'linux/amd64',''),subprocess.CompletedProcess([],7,'linux/arm64','')):
                 with patch.object(h.subprocess,'run',return_value=result):
                     with self.assertRaises(ValueError):h.require_native()
     def test_remote_endpoint_denies_without_contacting_daemon(self):
-        with patch.object(h.platform,'machine',return_value='aarch64'),patch.dict(h.os.environ,{'DOCKER_HOST':'ssh://not-contacted.invalid'}),patch.object(h.subprocess,'run',side_effect=AssertionError('no remote contact')):
+        with patch.object(h.platform,'machine',return_value='aarch64'),patch.dict(h.os.environ,{'DOCKER_HOST':'ssh://not-contacted.invalid'},clear=True),patch.object(h.subprocess,'run',side_effect=AssertionError('no remote contact')):
             with self.assertRaises(ValueError):h.require_native()
+    def test_explicit_remote_context_overrides_local_host_before_daemon_contact(self):
+        calls=[]
+        def run(argv,**kwargs):
+            calls.append(argv)
+            self.assertEqual(argv,['docker','context','inspect','remote','--format','{{(index .Endpoints "docker").Host}}'])
+            return subprocess.CompletedProcess(argv,0,'ssh://not-contacted.invalid\n','')
+        with patch.object(h.platform,'machine',return_value='aarch64'),patch.dict(h.os.environ,{'DOCKER_HOST':'unix:///var/run/docker.sock','DOCKER_CONTEXT':'remote'},clear=True),patch.object(h.subprocess,'run',side_effect=run):
+            with self.assertRaises(ValueError):h.require_native()
+        self.assertEqual(len(calls),1)
+    def test_local_endpoint_is_pinned_for_all_following_commands(self):
+        for original in ({'DOCKER_HOST':'unix:///var/run/docker.sock'},
+                         {'DOCKER_HOST':'ssh://ignored.invalid','DOCKER_CONTEXT':'local'},{}):
+            calls=[]
+            def run(argv,**kwargs):
+                calls.append(argv)
+                if argv==['docker','context','show']:return subprocess.CompletedProcess(argv,0,'default\n','')
+                if argv[:3]==['docker','context','inspect']:return subprocess.CompletedProcess(argv,0,'unix:///var/run/docker.sock\n','')
+                self.assertEqual(argv,['docker','version','--format','{{.Server.Os}}/{{.Server.Arch}}'])
+                self.assertNotIn('DOCKER_CONTEXT',h.os.environ)
+                self.assertEqual(h.os.environ['DOCKER_HOST'],'unix:///var/run/docker.sock')
+                return subprocess.CompletedProcess(argv,0,'linux/arm64\n','')
+            with self.subTest(original=original),patch.object(h.platform,'machine',return_value='aarch64'),patch.dict(h.os.environ,original,clear=True),patch.object(h.subprocess,'run',side_effect=run):
+                h.require_native()
+                self.assertEqual(calls[-1][1],'version')
     def test_request_hash_duplicate_json_and_fifo_deny(self):
         import os,time
         with tempfile.TemporaryDirectory()as t:

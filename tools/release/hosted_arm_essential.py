@@ -93,9 +93,11 @@ def prepare_db_context(directory,output):
 
 def require_native():
     if platform.machine()!='aarch64':raise ValueError('native ARM64 host required before Docker')
+    # Docker's explicit context overrides DOCKER_HOST. Resolve only local
+    # metadata first, then pin the validated socket for every descendant CLI.
+    context=os.environ.get('DOCKER_CONTEXT')
     endpoint=os.environ.get('DOCKER_HOST')
-    if not endpoint:
-        context=os.environ.get('DOCKER_CONTEXT')
+    if context or not endpoint:
         if not context:
             selected=subprocess.run(['docker','context','show'],capture_output=True,text=True,timeout=30)
             if selected.returncode:raise ValueError('local Docker context required')
@@ -103,7 +105,10 @@ def require_native():
         selected=subprocess.run(['docker','context','inspect',context,'--format','{{(index .Endpoints "docker").Host}}'],capture_output=True,text=True,timeout=30)
         if selected.returncode:raise ValueError('local Docker endpoint required')
         endpoint=selected.stdout.strip()
-    if not endpoint.startswith('unix://'):raise ValueError('local Unix Docker endpoint required before daemon contact')
+    if not endpoint.startswith('unix:///')or any(c.isspace()or ord(c)<32 for c in endpoint)or '?'in endpoint or '#'in endpoint:
+        raise ValueError('local Unix Docker endpoint required before daemon contact')
+    os.environ.pop('DOCKER_CONTEXT',None)
+    os.environ['DOCKER_HOST']=endpoint
     r=subprocess.run(['docker','version','--format','{{.Server.Os}}/{{.Server.Arch}}'],capture_output=True,text=True,timeout=30)
     if r.returncode or r.stdout.strip()!=PLATFORM:raise ValueError('native ARM64 daemon required')
 

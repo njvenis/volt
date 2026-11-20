@@ -57,6 +57,25 @@ class HostedFixtureTests(unittest.TestCase):
         f.Ceremony.validate_mounts(good,tmp,bind)
         for extra in ({'Type':'volume','Destination':'/extra','Source':'foreign','RW':True},good['Mounts'][0],{'Type':'tmpfs','Destination':'/tmp','RW':False}):
             with self.assertRaises(ValueError):f.Ceremony.validate_mounts({'Mounts':good['Mounts']+[extra]},tmp,bind)
+    def test_created_null_or_absent_and_started_false_share_only_inactive_oom_default(self):
+        base={'Id':'c'*64,'Created':'fixed','Image':'sha256:'+'d'*64,'Name':'/owned',
+            'Config':{'Labels':{'owner':'exact'}},'HostConfig':{'Memory':0,'CapAdd':None}}
+        started=copy.deepcopy(base);started['HostConfig']['OomKillDisable']=False
+        for before in (copy.deepcopy(base),base|{'HostConfig':base['HostConfig']|{'OomKillDisable':None}}):
+            original=copy.deepcopy(before)
+            self.assertEqual(f.stable_recipe(before),f.stable_recipe(started))
+            self.assertEqual(before,original)  # No mutation of the actual observed row.
+        changed=copy.deepcopy(started);changed['HostConfig']['OomKillDisable']=True
+        self.assertNotEqual(f.stable_recipe(started),f.stable_recipe(changed))
+        for field,value in (('Memory',16777216),('CapAdd',['SYS_ADMIN']),('NetworkMode','foreign')):
+            other=copy.deepcopy(started);other['HostConfig'][field]=value
+            self.assertNotEqual(f.stable_recipe(started),f.stable_recipe(other))
+        for field,value in (('Id','f'*64),('Created','replacement'),('Image','sha256:'+'f'*64)):
+            self.assertNotEqual(f.stable_recipe(started),f.stable_recipe(started|{field:value}))
+    def test_malformed_oom_controls_never_alias_false_or_true(self):
+        for value in (0,1,0.0,1.0,'false','true',[],{}):
+            with self.subTest(value=value),self.assertRaises(ValueError):
+                f.stable_recipe({'HostConfig':{'OomKillDisable':value}})
     def test_cleanup_drift_retains_and_uses_only_exact_cid_on_match(self):
         for drift in (False,True):
             with self.subTest(drift=drift),tempfile.TemporaryDirectory()as d:

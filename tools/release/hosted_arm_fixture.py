@@ -90,7 +90,18 @@ def trust_documents(rekor_pem,signer_pem,start):
     return policy,canonical(config)
 
 def stable_recipe(row):
-    return {k:row.get(k)for k in ('Id','Created','Image','Name','Config','HostConfig')}
+    recipe={k:row.get(k)for k in ('Id','Created','Image','Name','Config','HostConfig')}
+    host=recipe['HostConfig']
+    if type(host)is not dict:raise ValueError('closed infrastructure HostConfig required')
+    host=dict(host)
+    # Docker28 turns the inactive default null into false when starting a
+    # container. Missing/null/false are the same inactive default ONLY here.
+    # Explicit true remains distinct; malformed bool/int aliases fail closed.
+    inactive=host.get('OomKillDisable')
+    if inactive is None or inactive is False:host['OomKillDisable']=False
+    elif inactive is not True:raise ValueError('malformed infrastructure OOM control')
+    recipe['HostConfig']=host
+    return recipe
 
 class Ceremony:
     def __init__(self,work,revision,snapshot):

@@ -129,3 +129,75 @@ retains private evidence. This candidate does not add a hard host-return claim,
 new timeout dependency, TLS/Qualys mode, production keyless acceptance or general
 hardware claim. No native runtime evidence exists until the hosted signed journey
 actually completes on those exact immutable bytes.
+
+## Implemented hosted job/provisioner (local candidate, not executed)
+
+The `hosted-arm-signed-local` job and `hosted_arm_fixture.py` now implement the
+previously missing provisioning/wiring; earlier preparation-only statements above
+record the 8f checkpoint and must not be mistaken for a current unimplemented stage.
+No workflow has been dispatched/pushed, no local service has been started and no
+candidate has been signed during this implementation packet.
+
+The job uses ubuntu-24.04-arm, contents:read only, no OIDC/packages write or
+repository secrets, exact selected source with persist-credentials:false, pinned
+Python/uv/locked dependencies, and both same-run runtime artifacts. A new private
+Docker config avoids importing an operator's registry credentials. The coordinator
+checks every archive/selected-source/event/config before loading its ORIGINAL open
+FD; it rejects ambiguous non-config IDs for loaded CI children or freshly built DB.
+This conservative boundary may surface an actual store-compatibility dependency,
+which must be reported instead of guessed/adopted. It does not run emulation.
+
+The single job-local internal bridge contains only fresh MySQL, Trillian server,
+Trillian signer, Rekor and registry. Published endpoints are loopback46150/47280
+only. MySQL needs its normal default capabilities for its canonical entrypoint;
+other services drop all capabilities, with no added capability or Docker socket.
+The DB volume is masked by bounded tmpfs. Registry has ONLY a new dedicated owned
+data bind. No server inherits an instance/key/host-root view. Creation/startup and
+cleanup bind exact full CID/Created/config/recipe/StartedAt/native child witness,
+strict mounts, ports, labels and original network. Unknown creation/drift stays
+retained and makes cleanup/qualification nonzero. No name-only rm or global prune.
+
+The DB TCP/schema query deliberately waits for completed canonical initialization,
+not a temporary initialization socket. Trillian HTTP health is read from the
+registered live container's exact own-network IP/subnet before Rekor starts. No
+public/custom health address or redirect/proxy is accepted. The original live
+Rekor key is read only through the registered loopback endpoint and pinned into
+the existing public trusted-root schema; it is checked again after signing.
+Keys are generated only in the future private job signer directory, never mounted
+into API, DB, registry or Q. The existing pinned Cosign/--signing-config ceremony
+uses that local genuine log, creates mandatory inclusion, signs the complete new
+ordinary two-child graph/Q/bundle/launcher and retains the original proof bytes.
+No proof fabrication, public log submission or production signer is involved.
+
+The maintained essential path then performs the actual signed LOCAL journey,
+followed by fresh original cache verification and supported authenticated destroy.
+Public export is an explicit closed copy of ONLY the verified metadata/signature/
+inclusion closure and independently provisioned PUBLIC trust files, plus a typed
+summary. The instance, signer, raw logs, setup capability, credential data and keys
+are never uploaded. Export rejects unexpected cache inventory/private PEM. The
+workflow uploads only two fixed, separately created public destinations, never
+RUNNER_TEMP recursively. Partial/failing export cannot grant success.
+
+The reached Docker28 inspect defect is fixed in both the external entry generator
+and signed launcher: capabilities are selected before use from advertised CLI
+support AND both actual APIs>=1.49. On old clients the same full JSON goes through
+the unchanged independently authenticated exact native child/config/parent graph
+checks. An ambiguous unselectable index denies; no first-child guess or retry after
+a failed flagged inspection is allowed. Every initial/formatted/refresh site uses
+the fixed native-only helper. POSIX Docker stubs are command/denial proof only,
+not hosted lifecycle, FD, signature or native-runtime acceptance.
+
+Exact future job coordinator invocation (inputs supplied by this workflow):
+
+    uv run python tools/release/hosted_arm_fixture.py \
+      --source-commit SELECTED_SHA --source-snapshot EXACT_GIT_ARCHIVE_U \
+      --artifacts SAME_RUN_NATIVE_RUNTIME_DIRECTORIES --event-sha EXACT_EVENT_SHA \
+      --work NEW_RUNNER_TEMP_PRIVATE \
+      --public-result NEW_RUNNER_TEMP_PUBLIC_JSON \
+      --public-proofs NEW_RUNNER_TEMP_PUBLIC_PROOF_DIRECTORY
+
+Remaining acceptance is independent source review and an approved hosted execution
+of the coherent candidate. Genuine service/CLI/startup behavior on native ARM is
+still unproved. An actual job failure must retain its failed producer and available
+private evidence; no local mocks or dependency metadata substitute for completion.
+The 600s acceptance rule remains unchanged and no hard host-return claim is made.

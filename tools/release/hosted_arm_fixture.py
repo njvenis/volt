@@ -513,10 +513,41 @@ class Ceremony:
         return not failures
 
 
+def cleanup_registered(c,a):
+    """Closed disposition only; preserve the original guarded cleanup ordering.
+
+    False can mean cleanup was withheld/unverified, not observed deletion failure.
+    No infra cleanup follows uncertain initial ownership or failed public destroy.
+    """
+    report={'instance':'not-checked','infrastructure':'not-attempted'}
+    try:
+        evidence=a.work/'journey-evidence';retained=evidence/'retained-fixture.json'
+        if retained.exists():
+            report['instance']='retained-record-read'
+            from tools import compose_release_qualification as q
+            record=json.loads(retained.read_text());private=a.work/'journey-private'
+            env=q.trusted_launcher_environment(private/'cleanup-minimal-host-path',record['admission'])
+            report['instance']='supported-destroy-entered'
+            q.run('hosted-supported-destroy',['sh',str(private/'trusted-offline-entry.sh'),'destroy','--directory',str(private/'instance'),'--confirm-project',record['project'],'--remove-state'],evidence,env=env)
+            report['instance']='supported-destroy-passed'
+        elif (a.work/'journey-private').exists():
+            report['instance']='unreconciled-initial-retained'
+            return False,report
+        else:report['instance']='no-journey-private'
+        report['infrastructure']='entered'
+        clean=c.cleanup_infra()
+        report['infrastructure']='passed'if clean else'failed'
+        return clean,report
+    except Exception:
+        if report['instance']=='supported-destroy-entered':report['instance']='supported-destroy-raised'
+        elif report['instance']=='retained-record-read':report['instance']='retained-record-read-raised'
+        if report['infrastructure']=='entered':report['infrastructure']='raised'
+        return False,report
+
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--source-commit',required=True);p.add_argument('--source-snapshot',required=True)
     p.add_argument('--artifacts',type=Path,required=True);p.add_argument('--event-sha',required=True);p.add_argument('--work',type=Path,required=True);p.add_argument('--public-result',type=Path,required=True);p.add_argument('--public-proofs',type=Path,required=True)
-    a=p.parse_args();os.umask(0o077);c=None;outcome=1;clean=False;failed_producer=None;failed_detail=None;proof_files=0
+    a=p.parse_args();os.umask(0o077);c=None;outcome=1;clean=False;failed_producer=None;failed_detail=None;proof_files=0;journey_detail={};cleanup_detail=None
     try:
         essential.require_native()
         essential.source_binding({'source_checkout':str(ROOT),'source_revision':a.source_commit,'source_snapshot':a.source_snapshot})
@@ -531,7 +562,7 @@ def main():
         inspect=c.document('selected-runtime',fixture_inspect_argv(c.runtime,'linux/arm64',inspect_platform=c.capabilities['inspect_platform']))[0]
         value={'schema_version':1,'profile':essential.PROFILE,'source_revision':a.source_commit,'source_snapshot':a.source_snapshot,'source_checkout':str(ROOT),'evidence':str(a.work/'journey-evidence'),'bundle':str(bundle),'fixture':str(fixture),'image_id':inspect['Id'],'private':str(a.work/'journey-private')}
         c.last_producer='maintained-signed-LOCAL-journey'
-        essential.essential(value,ROOT)
+        essential.essential(value,ROOT,diagnostics=journey_detail)
         c.last_producer='final-original-public-proof-export'
         proof_files=c.export_original_proofs(a.public_proofs);outcome=0
     except Exception:
@@ -542,23 +573,14 @@ def main():
         if c:
             # Supported authenticated cleanup only; never manually repair or
             # delete uncertain instance resources. Infra objects have exact IDs.
-            try:
-                evidence=a.work/'journey-evidence';retained=evidence/'retained-fixture.json'
-                if retained.exists():
-                    from tools import compose_release_qualification as q
-                    record=json.loads(retained.read_text());private=a.work/'journey-private'
-                    env=q.trusted_launcher_environment(private/'cleanup-minimal-host-path',record['admission'])
-                    q.run('hosted-supported-destroy',['sh',str(private/'trusted-offline-entry.sh'),'destroy','--directory',str(private/'instance'),'--confirm-project',record['project'],'--remove-state'],evidence,env=env)
-                elif (a.work/'journey-private').exists():raise ValueError('unreconciled initial fixture; retain')
-                clean=c.cleanup_infra()
-            except Exception:clean=False
+            clean,cleanup_detail=cleanup_registered(c,a)
             if not clean:
                 outcome=1;failed_producer=failed_producer or 'guarded-cleanup'
             try:essential.source_binding({'source_checkout':str(ROOT),'source_revision':a.source_commit,'source_snapshot':a.source_snapshot})
             except Exception:outcome=1;failed_producer='source-recheck'
             # Closed summary only, never raw recursive/private upload.
             json_write(a.public_result,{'schema_version':1,'status':'passed'if outcome==0 else'failed','platform':'linux/arm64',
-                'source_revision':a.source_commit,'source_snapshot':a.source_snapshot,'registered_cleanup_passed':clean,'failed_producer':failed_producer,'failure_detail':failed_detail,'original_public_proof_files':proof_files,
+                'source_revision':a.source_commit,'source_snapshot':a.source_snapshot,'registered_cleanup_passed':clean,'failed_producer':failed_producer,'failure_detail':failed_detail,'journey_detail':journey_detail or None,'cleanup_detail':cleanup_detail,'original_public_proof_files':proof_files,
                 'signed_install_stop_backup_restore_health_final_stop':outcome==0,'scope':'native ephemeral fixture-signed LOCAL development qualification; not production/Qualys/emulation',
                 'runtime_reference':getattr(c,'runtime',None),'verifier_reference':getattr(c,'verifier',None)})
     return outcome

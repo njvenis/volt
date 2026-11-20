@@ -235,3 +235,30 @@ removed. A separate isolated AMD64 canonical DB scratch completed its schema que
 and cleanup. These components neither identify the original ARM failure nor prove
 native ARM lifecycle, occupied-port behavior or signed qualification. No hosted
 rerun or publication is part of this correction.
+
+### Maintained-journey failure diagnostics
+
+Retry 44830200216 reached the maintained signed LOCAL journey after graph signing
+and selected runtime inspection. Its sole public result and fixed job-log error
+do not establish which lifecycle command/assertion failed. The cleanup boolean
+also conflates attempted failure with cleanup withheld for unreconciled initial
+ownership; no deletion failure is inferred from false alone. Original results
+remain unchanged.
+
+The diagnostic-only adapter now observes its private maintained module's original
+run/health calls, forwards original arguments/results/exceptions, and restores
+those callables on every exit. Public journey detail contains only a closed stage,
+entered/returned/raised producer state, and an exact bounded numeric result when
+available. A returned command followed by an assertion remains labelled returned,
+not falsely credited as the failing producer. Unknown private command names map
+to a fixed generic stage; stdout/stderr, exceptions, paths, environment and raw
+arguments are excluded. A missing status stays unknown, not zero.
+
+Cleanup detail independently states whether the supported destroy was entered,
+returned, raised, or withheld for unreconciled initial ownership; infrastructure
+cleanup is separately not-attempted, entered, passed, failed or raised. The exact
+existing cleanup guards/order and all nonzero outcomes are unchanged. Diagnostics
+never authorize cleanup, adoption, retry or qualification. Tests substitute the
+original producers and exercise forwarding, exceptions, missing status, health
+failure, post-command assertions and withheld/failed cleanup; they are not native
+ARM lifecycle evidence. No new hosted execution is part of this diagnostic change.

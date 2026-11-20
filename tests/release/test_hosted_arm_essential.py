@@ -69,6 +69,48 @@ class HostedArmTests(unittest.TestCase):
             with self.subTest(original=original),patch.object(h.platform,'machine',return_value='aarch64'),patch.dict(h.os.environ,original,clear=True),patch.object(h.subprocess,'run',side_effect=run):
                 h.require_native()
                 self.assertEqual(calls[-1][1],'version')
+    def test_stage_observer_forwards_exact_command_and_result_without_private_data(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        result=subprocess.CompletedProcess([],3,'PRIVATE_STDOUT','PRIVATE_STDERR')
+        original=Mock(return_value=result);health=Mock(return_value='private-health')
+        q=SimpleNamespace(run=original,wait_for_local=health);record={}
+        argv=['private-selector','DSN=PRIVATE'];environment={'PRIVATE':'secret'}
+        with h.observe_journey(q,record):
+            self.assertIs(q.run('focused-public-install',argv,Path('/private'),env=environment,check=False),result)
+            original.assert_called_once_with('focused-public-install',argv,Path('/private'),env=environment,check=False)
+            self.assertEqual(record,{'stage':'public-install','producer':'returned','exit_code':3})
+            q.run('PRIVATE_UNKNOWN_LABEL',argv,Path('/private'))
+            self.assertEqual(record['stage'],'other-qualification-command')
+            self.assertNotIn('PRIVATE',json.dumps(record))
+        self.assertIs(q.run,original);self.assertIs(q.wait_for_local,health)
+    def test_stage_observer_preserves_exception_and_original_numeric_status(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        error=RuntimeError('PRIVATE_EXCEPTION')
+        with tempfile.TemporaryDirectory()as d:
+            evidence=Path(d);(evidence/'focused-public-cold-stop.exit').write_text('1\n')
+            original=Mock(side_effect=error);q=SimpleNamespace(run=original,wait_for_local=Mock());record={}
+            with self.assertRaises(RuntimeError)as caught:
+                with h.observe_journey(q,record):q.run('focused-public-cold-stop',['PRIVATE'],evidence)
+            self.assertIs(caught.exception,error);self.assertIs(q.run,original)
+            self.assertEqual(record,{'stage':'public-cold-stop','producer':'raised','exit_code':1})
+            (evidence/'focused-public-cold-stop.exit').unlink()
+            with self.assertRaises(RuntimeError):
+                with h.observe_journey(q,record):q.run('focused-public-cold-stop',['PRIVATE'],evidence)
+            self.assertIsNone(record['exit_code'])
+    def test_stage_observer_distinguishes_health_error_and_post_command_assertion(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        q=SimpleNamespace(run=Mock(return_value=subprocess.CompletedProcess([],0)),wait_for_local=Mock(side_effect=ValueError('PRIVATE')));record={}
+        with self.assertRaises(ValueError):
+            with h.observe_journey(q,record):q.wait_for_local('PRIVATE',Path('/private'))
+        self.assertEqual(record,{'stage':'application-health','producer':'raised','exit_code':None})
+        with self.assertRaises(AssertionError):
+            with h.observe_journey(q,record):
+                q.run('focused-public-install',[],Path('/private'))
+                raise AssertionError('PRIVATE')
+        self.assertEqual(record,{'stage':'public-install','producer':'returned','exit_code':0})
     def test_request_hash_duplicate_json_and_fifo_deny(self):
         import os,time
         with tempfile.TemporaryDirectory()as t:

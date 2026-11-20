@@ -5,6 +5,37 @@ from unittest.mock import patch
 from tools.release import hosted_arm_fixture as f
 
 class HostedFixtureTests(unittest.TestCase):
+    def test_cleanup_disposition_does_not_claim_unattempted_infrastructure_failure(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory()as d:
+            work=Path(d);(work/'journey-private').mkdir();ceremony=SimpleNamespace(cleanup_infra=Mock())
+            clean,report=f.cleanup_registered(ceremony,SimpleNamespace(work=work))
+            self.assertFalse(clean);self.assertEqual(report,{'instance':'unreconciled-initial-retained','infrastructure':'not-attempted'})
+            ceremony.cleanup_infra.assert_not_called()
+    def test_cleanup_disposition_preserves_destroy_error_and_no_extra_cleanup(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from tools import compose_release_qualification as q
+        with tempfile.TemporaryDirectory()as d:
+            work=Path(d);evidence=work/'journey-evidence';evidence.mkdir()
+            (evidence/'retained-fixture.json').write_text(json.dumps({'admission':{},'project':'PRIVATE_PROJECT'}))
+            ceremony=SimpleNamespace(cleanup_infra=Mock())
+            with patch.object(q,'trusted_launcher_environment',return_value={'PRIVATE':'secret'}),patch.object(q,'run',side_effect=RuntimeError('PRIVATE'))as run:
+                clean,report=f.cleanup_registered(ceremony,SimpleNamespace(work=work))
+            self.assertFalse(clean);self.assertEqual(report,{'instance':'supported-destroy-raised','infrastructure':'not-attempted'})
+            ceremony.cleanup_infra.assert_not_called();self.assertEqual(run.call_args.args[0],'hosted-supported-destroy')
+            self.assertNotIn('PRIVATE',json.dumps(report))
+    def test_cleanup_disposition_reports_infrastructure_result_and_uncertainty(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory()as d:
+            for result in (True,False,RuntimeError('PRIVATE')):
+                ceremony=SimpleNamespace(cleanup_infra=Mock(**({'side_effect':result}if isinstance(result,Exception)else{'return_value':result})))
+                clean,report=f.cleanup_registered(ceremony,SimpleNamespace(work=Path(d)))
+                self.assertEqual(clean,result is True)
+                self.assertEqual(report,{'instance':'no-journey-private','infrastructure':'raised'if isinstance(result,Exception)else'passed'if result else'failed'})
+                ceremony.cleanup_infra.assert_called_once_with()
     def artifact(self,root,arch='arm64'):
         p='a'*40;u='sha256:'+'b'*64;event='c'*40
         cfg={'os':'linux','architecture':arch,'config':{'Labels':{'org.opencontainers.image.revision':p,'org.volt.compose.source-snapshot':u,

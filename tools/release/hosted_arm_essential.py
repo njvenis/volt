@@ -5,6 +5,7 @@ fixture Q and signed two-child graph exist. No infrastructure is started here.
 The artifact/runtime source P and this adapter R remain distinct evidence fields.
 """
 from __future__ import annotations
+from contextlib import contextmanager
 import argparse,hashlib,importlib.util,json,os,platform,re,subprocess,sys
 from pathlib import Path
 
@@ -112,7 +113,62 @@ def require_native():
     r=subprocess.run(['docker','version','--format','{{.Server.Os}}/{{.Server.Arch}}'],capture_output=True,text=True,timeout=30)
     if r.returncode or r.stdout.strip()!=PLATFORM:raise ValueError('native ARM64 daemon required')
 
-def essential(value,source):
+# Closed public diagnostic labels. Unknown private helper names never escape.
+JOURNEY_STAGES={
+ 'fixture-installer-bundle-signature':'bundle-signature',
+ 'fixture-verifier-signature':'verifier-signature',
+ 'fixture-verifier-provenance':'verifier-provenance',
+ 'fixture-runtime-pull':'runtime-pull','fixture-runtime-inspect':'runtime-inspect',
+ 'native-engine-platform':'native-engine','fixture-runtime-index':'runtime-index',
+ 'fixture-full-runtime-admission':'full-graph-admission',
+ 'focused-trusted-launcher-signature':'launcher-signature',
+ 'focused-public-install':'public-install','focused-public-cold-stop':'public-cold-stop',
+ 'focused-public-backup':'public-backup','focused-public-destroy-before-restore':'destroy-before-restore',
+ 'focused-external-verify-before-extract':'verify-before-extract',
+ 'focused-instance-extract':'instance-extract','focused-public-restore-provision':'restore-provision',
+ 'focused-state-corruption':'negative-state-corruption',
+ 'focused-remove-state-corruption':'negative-state-restoration',
+ 'focused-public-valid-admit':'valid-admit',
+ 'essential-restored-public-start':'restored-start','essential-restored-public-stop':'restored-stop'}
+
+@contextmanager
+def observe_journey(q,record):
+    """Observe the original producer results; never interpret private output.
+
+    This private module instance is used by one sequential ceremony. Restore its
+    original callables on every exit; no command, argument, result or error changes.
+    A returned command followed by an assertion is not a command-failure claim.
+    """
+    original=q.run;health=q.wait_for_local
+    record.update(stage='qualification-entry',producer='not-started',exit_code=None)
+    def tracked(name,*args,**kwargs):
+        record.update(stage=JOURNEY_STAGES.get(name,'other-qualification-command'),producer='entered',exit_code=None)
+        try:result=original(name,*args,**kwargs)
+        except BaseException:
+            record['producer']='raised'
+            # q.run writes this exact status before its expected nonzero error.
+            # Missing/unreadable status is uncertainty, never inferred success.
+            if name in JOURNEY_STAGES and len(args)>=2:
+                try:
+                    with (Path(args[1])/(name+'.exit')).open('rb')as status:raw=status.read(9)
+                    if len(raw)<=8 and re.fullmatch(rb'-?[0-9]{1,3}\n',raw):
+                        code=int(raw);record['exit_code']=code if -255<=code<=255 else None
+                except OSError:pass
+            raise
+        code=result.returncode
+        record.update(producer='returned',exit_code=code if type(code)is int and -255<=code<=255 else None)
+        return result
+    def checked_health(*args,**kwargs):
+        record.update(stage='application-health',producer='entered',exit_code=None)
+        try:result=health(*args,**kwargs)
+        except BaseException:
+            record['producer']='raised';raise
+        record['producer']='returned';return result
+    q.run=tracked;q.wait_for_local=checked_health
+    try:yield
+    finally:q.run=original;q.wait_for_local=health
+
+def essential(value,source,*,diagnostics=None):
     evidence=Path(value['evidence']);private=Path(value['private'])
     evidence.mkdir(mode=0o700);private.mkdir(mode=0o700)
     record={'runtime_source_revision':value['source_revision'],'runtime_source_snapshot':value['source_snapshot'],
@@ -123,25 +179,26 @@ def essential(value,source):
     sys.path.insert(0,str(source))
     spec=importlib.util.spec_from_file_location('_hosted_maintained_qualifier',source/'tools/compose_release_qualification.py')
     q=importlib.util.module_from_spec(spec);spec.loader.exec_module(q)
-    try:
-        q.qualify_inventory_cause_fixture(bundle=Path(value['bundle']),fixture=Path(value['fixture']),
-            image_id=value['image_id'],source_revision=value['source_revision'],source_snapshot=value['source_snapshot'],
-            platform=PLATFORM,private=private,evidence=evidence)
-        admission=json.loads((evidence/'retained-fixture.json').read_text())['admission']
-        environment=q.trusted_launcher_environment(private/'restored-minimal-host-path',admission)
-        state=private/'instance';entry=private/'trusted-offline-entry.sh'
-        if entry.is_symlink()or not entry.is_file():raise ValueError('original externally authenticated entry required')
-        q.run('essential-restored-public-start',['sh',str(entry),'start','--directory',str(state)],evidence,env=environment)
-        q.wait_for_local('http://127.0.0.1:46180',evidence)
-        q.run('essential-restored-public-stop',['sh',str(entry),'stop','--directory',str(state)],evidence,env=environment)
-        (evidence/'public-summary.json').write_text(json.dumps({'status':'passed','platform':PLATFORM,
-            'source_revision':value['source_revision'],'source_snapshot':value['source_snapshot'],
-            'signed_install_stop_cold_backup_verify_before_extract_restore_admit_health_final_stop':True,
-            'scope':'native fixture-signed development LOCAL only; scanner/production/hardware-independent acceptance unclaimed'},indent=2)+'\n')
-    finally:
-        # Retain raw private evidence/resources on uncertainty. Never upload
-        # this directory wholesale: it can contain capabilities and owner data.
-        source_binding(value)
+    with observe_journey(q,diagnostics if diagnostics is not None else {}):
+        try:
+            q.qualify_inventory_cause_fixture(bundle=Path(value['bundle']),fixture=Path(value['fixture']),
+                image_id=value['image_id'],source_revision=value['source_revision'],source_snapshot=value['source_snapshot'],
+                platform=PLATFORM,private=private,evidence=evidence)
+            admission=json.loads((evidence/'retained-fixture.json').read_text())['admission']
+            environment=q.trusted_launcher_environment(private/'restored-minimal-host-path',admission)
+            state=private/'instance';entry=private/'trusted-offline-entry.sh'
+            if entry.is_symlink()or not entry.is_file():raise ValueError('original externally authenticated entry required')
+            q.run('essential-restored-public-start',['sh',str(entry),'start','--directory',str(state)],evidence,env=environment)
+            q.wait_for_local('http://127.0.0.1:46180',evidence)
+            q.run('essential-restored-public-stop',['sh',str(entry),'stop','--directory',str(state)],evidence,env=environment)
+            (evidence/'public-summary.json').write_text(json.dumps({'status':'passed','platform':PLATFORM,
+                'source_revision':value['source_revision'],'source_snapshot':value['source_snapshot'],
+                'signed_install_stop_cold_backup_verify_before_extract_restore_admit_health_final_stop':True,
+                'scope':'native fixture-signed development LOCAL only; scanner/production/hardware-independent acceptance unclaimed'},indent=2)+'\n')
+        finally:
+            # Retain raw private evidence/resources on uncertainty. Never upload
+            # this directory wholesale: it can contain capabilities and owner data.
+            source_binding(value)
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)

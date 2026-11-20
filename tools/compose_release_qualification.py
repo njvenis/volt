@@ -239,6 +239,18 @@ def run_getpass(name: str, argv: list[str], evidence: Path,
     raise RuntimeError(f"{name} timed out or closed before consuming the protected session cookie")
 
 
+def fixture_inspect_argv(reference: str, platform: str, *, inspect_platform: bool) -> list[str]:
+    """Choose once from advertised/API capability; never retry a failed inspect.
+
+    Ordinary inspection is still full JSON, admitted by the same independent Q
+    against the exact platform/config/selected descriptor and original cache.
+    """
+    if (type(inspect_platform)is not bool or platform not in SUPPORTED_PLATFORMS
+            or not re.fullmatch(r'127\.0\.0\.1:46150/volt@sha256:[0-9a-f]{64}',reference)):
+        raise ValueError('fixed runtime inspection context required')
+    return ['docker','image','inspect',*(['--platform',platform]if inspect_platform else []),reference]
+
+
 def validate_admission_fixture(path: Path, *, image_id: str, source_snapshot: str,
                                source_commit: str, platform: str, bundle: Path,
                                version: str, evidence: Path) -> dict[str, str]:
@@ -262,6 +274,8 @@ def validate_admission_fixture(path: Path, *, image_id: str, source_snapshot: st
     if not re.fullmatch(r"127\.0\.0\.1:46150/volt-installer-verifier@sha256:[0-9a-f]{64}",
                         verifier_reference):
         raise RuntimeError("fixture verifier ref must be independently pinned in the owned loopback registry")
+    from tools.release.native_runtime_probe import audit_docker_cli
+    capabilities = audit_docker_cli(lambda label, argv: run('fixture-capability-' + label, argv, evidence))
     for name, artifact, signature in (("installer-bundle", bundle,
             root / "installer.bundle.sigstore.json"),):
         argv = ["docker", "run", "--rm", "--platform", platform, "--network", "host", "--read-only", "--user", f"{os.getuid()}:{os.getgid()}", "--cap-drop=ALL",
@@ -295,14 +309,14 @@ def validate_admission_fixture(path: Path, *, image_id: str, source_snapshot: st
         raise RuntimeError("signed bundle descriptor does not bind the pinned fixture verifier and loopback runtime")
     image_reference = manifest["release_image"]
     run("fixture-runtime-pull", ["docker", "pull", "--platform", platform, image_reference], evidence)
-    inspected = run("fixture-runtime-inspect", ["docker", "image", "inspect", image_reference], evidence)
+    inspected = run("fixture-runtime-inspect", fixture_inspect_argv(image_reference,platform,inspect_platform=capabilities["inspect_platform"]), evidence)
     try:
         image_row = json.loads(inspected.stdout)[0]
     except (json.JSONDecodeError, IndexError, TypeError) as exc:
         raise RuntimeError("fixture runtime inspection did not return one image") from exc
     if (image_row.get("Descriptor") or {}).get("mediaType") in {"application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json"}:
-        inspected = run("fixture-runtime-selected-inspect", ["docker", "image", "inspect", "--platform", platform, image_reference], evidence)
-        image_row = json.loads(inspected.stdout)[0]
+        if not capabilities['inspect_platform']:
+            raise RuntimeError('ordinary inspection cannot select an ambiguous runtime index')
     if image_row.get("Id") != image_id:
         raise RuntimeError("fixture selected config/manifest ID differs from the requested candidate image object")
     native = run("native-engine-platform", ["docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"], evidence)
@@ -344,6 +358,7 @@ def validate_admission_fixture(path: Path, *, image_id: str, source_snapshot: st
         "source_commit": source_commit, "platform": platform,
         "verifier_reference": verifier_reference}
     result["fixture_directory"] = str(root)
+    result["docker_inspect_platform"] = capabilities["inspect_platform"]
     return result
 
 def qualify_admission_negatives(command: list[str], bundle: Path, image_json: Path,
@@ -696,6 +711,7 @@ def create_offline_fixture_entry(*, state: Path, admission: dict, private: Path)
     verifier = admission['verifier_reference']
     runtime = admission['image_reference']
     platform = admission['platform']
+    inspection = fixture_inspect_argv(runtime,platform,inspect_platform=admission.get('docker_inspect_platform'))
     if (platform not in SUPPORTED_PLATFORMS
             or not re.fullmatch(r'127\.0\.0\.1:46150/volt-installer-verifier@sha256:[0-9a-f]{64}', verifier)
             or not re.fullmatch(r'127\.0\.0\.1:46150/volt@sha256:[0-9a-f]{64}', runtime)
@@ -757,7 +773,7 @@ def create_offline_fixture_entry(*, state: Path, admission: dict, private: Path)
             '/closure/package/' + signature, '/closure/package/' + name]) + ' >/dev/null')
     lines += ['WORK=$(mktemp -d "${TMPDIR:-/tmp}/volt-external-offline.XXXXXXXX")',
         'chmod 700 "$WORK"', "trap 'rm -rf \"$WORK\"' 0 HUP INT TERM",
-        shlex.join(['docker', 'image', 'inspect', '--platform', platform, runtime]) + ' >"$WORK/runtime-image.json"',
+        shlex.join(inspection) + ' >"$WORK/runtime-image.json"',
         shlex.join(['cp', str(closure / 'runtime-index/blobs/sha256' / runtime.split('@sha256:')[1])]) + ' "$WORK/runtime-index.json"',
         'chmod 400 "$WORK/runtime-image.json" "$WORK/runtime-index.json"']
     lines.append('set -- ' + shlex.join(base) +

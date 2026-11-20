@@ -21,7 +21,7 @@ class OfflinePublicEntryTests(unittest.TestCase):
         private=parent/'entry';private.mkdir(mode=0o700)
         admission={'fixture_directory':str(fixture),'verifier_reference':'127.0.0.1:46150/volt-installer-verifier@sha256:'+'a'*64,
             'image_reference':'127.0.0.1:46150/volt@sha256:'+'b'*64,'platform':'linux/amd64',
-            'source_commit':'c'*40,'source_snapshot':'sha256:'+'d'*64,'bundle_version':'0.1.0-rc.4'}
+            'source_commit':'c'*40,'source_snapshot':'sha256:'+'d'*64,'bundle_version':'0.1.0-rc.4','docker_inspect_platform':False}
         wrapper=create_offline_fixture_entry(state=state,admission=admission,private=private)
         binaries=parent/'bin';binaries.mkdir();docker=binaries/'docker'
         docker.write_text('#!'+sys.executable+'\n'+'''import json,os,sys
@@ -33,7 +33,9 @@ if any(v in args for v in ('verify-attestation','verify-blob','--offline-artifac
  if os.environ.get('ENTRY_CLAIMED_AUTH_TEXT')=='1':print('volt installer: initial setup is already claimed',file=sys.stderr)
 if 'verify-attestation' in args and os.environ.get('ENTRY_FAIL')=='crafted':
  print('volt installer: initial setup is already claimed',file=sys.stderr);sys.exit(1)
-if args[:2]==['image','inspect']:print('[]')
+if args[:2]==['image','inspect']:
+ if '--platform'in args:sys.exit(125)
+ print('[]')
 if 'verify-attestation' in args and os.environ.get('ENTRY_FAIL')=='signature':sys.exit(31)
 if '--offline-artifacts' in args and os.environ.get('ENTRY_FAIL')=='full':sys.exit(32)
 ''');docker.chmod(0o700)

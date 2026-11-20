@@ -2,6 +2,7 @@
 import base64
 import copy
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,11 @@ from uvm.installer.offline_artifacts import canonical
 ROOT=Path(__file__).resolve().parents[2]
 SPEC=importlib.util.spec_from_file_location('stopped_transport_source_fixture',ROOT/'tests/installer/test_route_check_delivery.py')
 fixture=importlib.util.module_from_spec(SPEC);SPEC.loader.exec_module(fixture)
+
+
+def identity_program():
+    source=(ROOT/'deploy/compose/offline-host.sh').read_text()
+    return source.split("set -- -c '",1)[1].split("'\n",1)[0]
 
 
 def context():
@@ -107,6 +113,37 @@ class StoppedTransportTests(unittest.TestCase):
 
 
 class PosixStoppedAcquisitionTests(unittest.TestCase):
+    def test_single_saved_identity_projection_rejects_noncanonical_or_ambiguous_context(self):
+        from contextlib import redirect_stdout
+        from uvm.installer import offline_lifecycle as data
+        item,*_=context()
+        started=item['State']['StartedAt']
+        baseline={'image':[{}],'containers':[item],'volumes':[],'networks':[]}
+        cases=[('valid',baseline)]
+        for key,value in (('Id','A'*64),('Id','a'*63),('Id',False),('Id','a'*64+'\n'),
+                ('Id','$(private-selector)'),('State',None)):
+            changed=copy.deepcopy(baseline);changed['containers'][0][key]=value;cases.append((key,changed))
+        for value in ('2026-02-30T00:00:00Z',started+'|extra',started+'\n',None):
+            changed=copy.deepcopy(baseline);changed['containers'][0]['State']['StartedAt']=value;cases.append(('StartedAt',changed))
+        for key,value in (('containers',[]),('containers',[item,item]),('image',{}),('volumes',[0])):
+            changed=copy.deepcopy(baseline);changed[key]=value;cases.append((key,changed))
+        changed=copy.deepcopy(baseline);changed['unexpected']=[];cases.append(('unknown-root',changed))
+        for label,document in cases:
+            with self.subTest(label=label),tempfile.TemporaryDirectory()as temporary:
+                root=Path(temporary);path=root/'docker.json';path.write_bytes(json.dumps(document).encode());path.chmod(0o600)
+                output=io.StringIO()
+                with patch.object(data,'OBSERVATION',root),redirect_stdout(output):
+                    if label=='valid':
+                        exec(compile(identity_program(),'fixed_saved_identity','exec'),{})
+                    else:
+                        with self.assertRaises((ValueError,TypeError,KeyError)):
+                            exec(compile(identity_program(),'fixed_saved_identity','exec'),{})
+                self.assertEqual(output.getvalue(),item['Id']+'|'+started+'\n'if label=='valid'else'')
+        with tempfile.TemporaryDirectory()as temporary:
+            root=Path(temporary);path=root/'docker.json';path.write_text('{"image":[],"image":[]}');path.chmod(0o600)
+            with patch.object(data,'OBSERVATION',root),self.assertRaises(ValueError):
+                exec(compile(identity_program(),'fixed_saved_identity','exec'),{})
+
     def test_actual_fifo_preserves_each_failed_docker_producer_and_valid_capture(self):
         item,_info,tar,envelope,_runtime=context()
         for failed in ('none','wait','logs','post','delayed-start','deadline'):
@@ -133,6 +170,10 @@ fail() { printf '%s\\n' "$*" >&2;printf '%s' "${RETAIN_STOP_EVIDENCE:-0}" >"$WOR
 . "$DRIVER"
 ensure_lock_owner() { printf checked >>"$WORK/owner-checks"; }
 _offline_data_exec() {
+ printf '%s\\n' "$1" >>"$WORK/data-actions"
+ if [ "$1" = queried-stopped-identity ];then
+  exec "$UNIT_PYTHON" -c 'import os;from pathlib import Path;from uvm.installer import offline_lifecycle;offline_lifecycle.OBSERVATION=Path(os.environ["OFFLINE_OBSERVATION"]);exec(compile(os.environ["IDENTITY_PROGRAM"],"fixed_saved_identity","exec"))'
+ fi
  case "${1:-}" in filter-stop-*) sleep "$FILTER_START_DELAY" ;; esac
  exec "$UNIT_PYTHON" -c 'import os;from pathlib import Path;from uvm.installer import route_check,offline_lifecycle;from uvm.auth import route_check_records;route_check._shared=lambda:route_check_records;offline_lifecycle.OBSERVATION=Path(os.environ["OFFLINE_OBSERVATION"]);raise SystemExit(offline_lifecycle.main())' "$@"
 }
@@ -146,7 +187,7 @@ offline_capture_shutdown
                     'DRIVER':str(ROOT/'deploy/compose/offline-host.sh'),'FIXTURE':str(root),'UNIT_PYTHON':sys.executable,
                     'FAILED':failed,'STARTED':item['State']['StartedAt'],'CID':item['Id'],
                     'FILTER_START_DELAY':'1.4' if failed=='deadline' else '.65' if failed=='delayed-start' else '0',
-                    'HOST_BUDGET_CS':'100' if failed=='deadline' else '0'}
+                    'HOST_BUDGET_CS':'100' if failed=='deadline' else '0','IDENTITY_PROGRAM':identity_program()}
                 result=subprocess.run(['sh','-c',script],env=env,capture_output=True,timeout=15)
                 self.assertEqual(result.returncode==0,failed in ('none','delayed-start'),result.stderr)
                 statuses=json.loads((obs/'stop-producer-statuses.json').read_bytes())
@@ -155,6 +196,10 @@ offline_capture_shutdown
                     self.assertEqual((root/'owner-checks').read_text(),'checked'*4)
                     proof=(obs/'shutdown-evidence.json').read_text()
                     with patch.object(wire.route_check,'_shared',return_value=canonical_records):wire.validate(_info,item,proof)
+                    actions=(root/'data-actions').read_text().splitlines()
+                    self.assertEqual(actions.count('queried-stopped-identity'),1)
+                    self.assertNotIn('queried-started-at',actions)
+                    self.assertNotIn('queried-container-id',actions)
                     for job in root.glob('stop-job-*'):
                         self.assertEqual((job/'child-wait').read_text().strip(),'0')
                         self.assertEqual((job/'guard-wait').read_text().strip(),'0')

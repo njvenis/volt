@@ -4,6 +4,31 @@
 
 _offline_data_exec() {
   stdin_flag=''; case "$1" in filter-stop-*) stdin_flag=-i ;; esac
+  case "$1" in
+    queried-stopped-identity)
+      [ "$#" -eq 1 ] || return 1
+      # One fixed typed projection of the SAME saved inspection, not a fresh
+      # context selector. No code, module or path comes from an argument.
+      set -- -c 'import json,re
+from uvm.installer import offline_lifecycle as data
+raw=data._bounded_file(data.OBSERVATION/"docker.json",data.MAX_INPUT,private=True)
+observed=json.loads(raw,object_pairs_hook=data.pairs)
+if (type(observed) is not dict or set(observed)!={"image","containers","volumes","networks"}
+    or any(type(observed[key]) is not list for key in observed)
+    or any(type(row) is not dict for rows in observed.values() for row in rows)
+    or len(observed["image"])!=1 or type(observed["image"][0]) is not dict
+    or len(observed["containers"])!=1
+    or type(observed["containers"][0].get("State")) is not dict):
+    raise ValueError("one saved current Docker inspection required")
+item=data.project_observation(observed)["containers"][0]
+cid=item["Id"]
+if type(cid) is not str or re.fullmatch("[0-9a-f]{64}",cid) is None:
+    raise ValueError("full canonical saved container ID required")
+started=data._started_at(item["State"]["StartedAt"])
+print(cid+"|"+started)'
+      ;;
+    *) set -- -m uvm.installer.offline_lifecycle "$@" ;;
+  esac
   exec docker run --platform "$PLATFORM" --pull=never --rm $stdin_flag --network none --read-only --cap-drop=ALL \
     --security-opt=no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=32m \
     --user "$(id -u):$(id -g)" --mount "type=bind,src=$PACKAGE,dst=/package,readonly" \
@@ -11,7 +36,7 @@ _offline_data_exec() {
     --mount "type=bind,src=$OFFLINE_OBSERVATION,dst=/run/volt-offline-observation,readonly" \
     --mount "type=bind,src=$CACHE_DIRECTORY,dst=/run/volt-offline-artifacts,readonly" \
     --mount "type=bind,src=$CACHE_PARENT,dst=/run/volt-cache-parent,readonly" \
-    --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -m uvm.installer.offline_lifecycle "$@"
+    --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" "$@"
 }
 
 offline_data() {
@@ -235,8 +260,12 @@ offline_capture_shutdown() {
   if [ -n "$OFFLINE_ORDINARY_STOP_DEADLINE_CS" ] && [ "$OFFLINE_ORDINARY_STOP_DEADLINE_CS" -lt "$OFFLINE_STOP_DEADLINE_CS" ]; then
     OFFLINE_STOP_DEADLINE_CS=$OFFLINE_ORDINARY_STOP_DEADLINE_CS
   fi
-  started=$(offline_data queried-started-at) || fail 'actual StartedAt could not be decoded from saved inspection'
-  stopped_cid=$(offline_data queried-container-id) || fail 'actual full CID could not be decoded from saved inspection'
+  stopped_identity=$(offline_data queried-stopped-identity) || fail 'actual current identity could not be decoded from saved inspection'
+  stopped_cid=${stopped_identity%%|*}; started=${stopped_identity#*|}
+  case "$stopped_cid" in ''|*[!0-9a-f]*) fail 'saved current container ID is malformed' ;; esac
+  [ "${#stopped_cid}" -eq 64 ] || fail 'saved current container ID is incomplete'
+  case "$started" in ''|*[!0-9TZ.:-]*) fail 'saved current StartedAt is malformed' ;; esac
+  [ "${#started}" -le 40 ] || fail 'saved current StartedAt exceeds bound'
   offline_stop_before || fail 'current stopped-acquisition deadline expired'
   stop_statuses="$OFFLINE_OBSERVATION/stop-producer-statuses.json"
   printf '{' >"$stop_statuses"

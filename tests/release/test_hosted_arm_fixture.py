@@ -72,6 +72,12 @@ class HostedFixtureTests(unittest.TestCase):
             self.assertNotEqual(f.stable_recipe(started),f.stable_recipe(other))
         for field,value in (('Id','f'*64),('Created','replacement'),('Image','sha256:'+'f'*64)):
             self.assertNotEqual(f.stable_recipe(started),f.stable_recipe(started|{field:value}))
+    def test_retained37_field_shape_created_false_after_exit_null_is_symmetric(self):
+        created={'HostConfig':{'OomKillDisable':False,'Memory':0,'CapAdd':None}}
+        exited={'HostConfig':{'OomKillDisable':None,'Memory':0,'CapAdd':None}}
+        self.assertEqual(f.stable_recipe(created),f.stable_recipe(exited))
+        self.assertEqual(created['HostConfig']['OomKillDisable'],False)
+        self.assertIsNone(exited['HostConfig']['OomKillDisable'])
     def test_malformed_oom_controls_never_alias_false_or_true(self):
         for value in (0,1,0.0,1.0,'false','true',[],{}):
             with self.subTest(value=value),self.assertRaises(ValueError):

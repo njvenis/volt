@@ -94,8 +94,8 @@ def stable_recipe(row):
     host=recipe['HostConfig']
     if type(host)is not dict:raise ValueError('closed infrastructure HostConfig required')
     host=dict(host)
-    # Docker28 turns the inactive default null into false when starting a
-    # container. Missing/null/false are the same inactive default ONLY here.
+    # Docker28 represents this inactive default as null or false across
+    # lifecycle observations. Missing/null/false are equivalent ONLY here.
     # Explicit true remains distinct; malformed bool/int aliases fail closed.
     inactive=host.get('OomKillDisable')
     if inactive is None or inactive is False:host['OomKillDisable']=False

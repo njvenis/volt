@@ -375,3 +375,74 @@ jobs:
           path: ${{ runner.temp }}/index-evidence/
           if-no-files-found: error
           retention-days: 2
+
+  hosted-arm-signed-local:
+    name: Native ARM64 fixture-signed LOCAL backup and restore
+    needs: [runtime-native-artifacts, verifier-native]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      SELECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PYTHON_VERSION: "3.13.15"
+      UV_VERSION: "0.12.18"
+    steps:
+      - name: Checkout exact selected source without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up native coordinator Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install pinned coordinator dependencies
+        run: |
+          set -eu
+          test "$(uname -m)" = aarch64
+          test "$(git rev-parse HEAD)" = "$SELECTED_SOURCE_SHA"
+          python -m pip install "uv==${UV_VERSION}"
+          uv sync --locked
+
+      - name: Download both native runtime children from this exact workflow run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: volt-easy-rc4-runtime-*
+          path: ${{ runner.temp }}/arm-native-inputs
+          merge-multiple: false
+
+      - name: Genuine ephemeral trust, native Q and signed LOCAL cold journey
+        env:
+          EXPECTED_EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          umask 077
+          test "$(git rev-parse HEAD)" = "$SELECTED_SOURCE_SHA"
+          export DOCKER_CONFIG="$RUNNER_TEMP/arm-private-docker-config"
+          mkdir -m 700 "$DOCKER_CONFIG"
+          printf '%s\n' '{}' > "$DOCKER_CONFIG/config.json"
+          export DOCKER_HOST=unix:///var/run/docker.sock
+          SOURCE_SNAPSHOT="sha256:$(git archive --format=tar "$SELECTED_SOURCE_SHA" | sha256sum | cut -d' ' -f1)"
+          uv run python tools/release/hosted_arm_fixture.py \
+            --source-commit "$SELECTED_SOURCE_SHA" --source-snapshot "$SOURCE_SNAPSHOT" \
+            --artifacts "$RUNNER_TEMP/arm-native-inputs" --event-sha "$EXPECTED_EVENT_SHA" \
+            --work "$RUNNER_TEMP/arm-essential-private" \
+            --public-result "$RUNNER_TEMP/arm-native-essential-public.json" \
+            --public-proofs "$RUNNER_TEMP/arm-native-original-proofs"
+
+      # Never upload RUNNER_TEMP/work, raw logs, generated capabilities, state,
+      # signer directory or signing key. Only the closed result and validated
+      # ORIGINAL public proof closure are exported by the coordinator.
+      - name: Retain only closed public native qualification result
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: volt-native-arm-signed-local-result
+          path: |
+            ${{ runner.temp }}/arm-native-essential-public.json
+            ${{ runner.temp }}/arm-native-original-proofs/
+          if-no-files-found: warn
+          retention-days: 2

@@ -63,17 +63,28 @@ class EasyInstallerLauncherTests(unittest.TestCase):
         start = source.split('elif [ "$ACTION" = start ]; then', 1)[1].split('elif [ "$ACTION" = stop ]; then', 1)[0]
         self.assertLess(start.index('RESTORE_IMPORTED'), start.index('start_local_instance'))
         release = source.split('release_start() {', 1)[1].split('\n}', 1)[0]
-        self.assertLess(release.index('recovery_helper acknowledge'), release.index('start_admission release'))
-        self.assertLess(release.index('start_admission release'), release.index('wait_healthy'))
-        self.assertIn('local-restore.yaml', source.split('locked_compose() {', 1)[1].split('\n}', 1)[0])
+        protected_release = '/usr/local/libexec/volt-start-admission.py release'
+        self.assertLess(release.index('recovery_helper acknowledge'), release.index(protected_release))
+        self.assertLess(release.index(protected_release), release.index('wait_healthy'))
+        self.assertIn('/usr/local/bin/python3.14 -I -S', release)
+        self.assertIn('UVM_LOCAL_START_IMAGE_ID=$IMAGE_ID', release)
+        self.assertIn('UVM_LOCAL_START_RESOURCES_SHA256=$LOCAL_START_RESOURCES_SHA256', release)
+        compose_wrapper = source.split('\nlocked_compose() {', 1)[1].split('\n}', 1)[0]
+        self.assertLess(compose_wrapper.index('ensure_lock_owner'), compose_wrapper.index('_locked_compose_command'))
+        self.assertGreater(compose_wrapper.rindex('ensure_lock_owner'), compose_wrapper.index('_locked_compose_command'))
+        self.assertIn('local-restore.yaml', source.split('_locked_compose_command() {', 1)[1].split('\n}', 1)[0])
         for field in ("restore_pending", "restore_imported", "restore_capabilities_revoked", "restore_sessions_revoked"):
             self.assertIn(f"{field})", source)
 
     def test_local_custody_helper_uses_data_only_networkless_mounts_and_actual_mount_audit(self):
         source = (ROOT / "deploy/compose/launcher.sh").read_text()
-        helper = source.split("recovery_helper() {", 1)[1].split("\n}", 1)[0]
+        wrapper = source.split("\nrecovery_helper() {", 1)[1].split("\n}", 1)[0]
+        self.assertLess(wrapper.index('ensure_lock_owner'), wrapper.index('_recovery_helper_command'))
+        self.assertGreater(wrapper.rindex('ensure_lock_owner'), wrapper.index('_recovery_helper_command'))
+        self.assertIn('return "$recovery_status"', wrapper)
+        helper = source.split("_recovery_helper_command() {", 1)[1].split("\n}", 1)[0]
         self.assertIn("--network none --read-only --cap-drop=ALL", helper)
-        self.assertIn("prepare|validate", helper)
+        self.assertIn('prepare|acknowledge|prepare-start', helper)
         self.assertIn("mount_access=',readonly'", helper)
         self.assertNotIn(",rw\"", helper)
         self.assertIn('verify_actual_mounts()', source)

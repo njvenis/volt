@@ -96,7 +96,14 @@ class ActualDiagnosticFDTests(unittest.TestCase):
                 info['host_instance_directory']=str(root)
                 value['containers']=[{'Id':'d'*64,'Name':'/'+project+'-volt-1','Image':'sha256:'+'b'*64,'ImageManifestDescriptor':None,'Config':{'Labels':{'volt.compose.owner-token':owner,'com.docker.compose.project':project,'com.docker.compose.service':'volt'}},'HostConfig':{'NetworkMode':project+'_network'},'NetworkSettings':{'Networks':{project+'_network':{}}},'Mounts':[],'State':{'Running':False,'Status':'exited','Health':None,'StartedAt':START,'ExitCode':0,'OOMKilled':False}}]
             request={'schema_version':1,'profile':d.REQUEST_PROFILE,'operation':'logs' if kind=='producer-failed' else 'diagnose','operation_id':str(uuid.uuid4()),'setup_sha256':digest(setup.read_bytes())};raw=canonical(request)
-            def write(name,obj):p=inputs/name;p.write_bytes(canonical(obj));p.chmod(0o600)
+            def write(name,obj):
+                # Match the exchange's atomic publication: a visible name must
+                # never expose an incomplete file to the real child reader.
+                p=inputs/name; temporary=inputs/('.'+name+'.tmp')
+                descriptor=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+                with os.fdopen(descriptor,'wb') as stream:
+                    stream.write(canonical(obj));stream.flush();os.fsync(stream.fileno())
+                os.replace(temporary,p)
             write('request.json',request);parent,child=context.Pipe(duplex=False)
             def execute():
                 descriptor=os.open(lock,os.O_RDWR);fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB)

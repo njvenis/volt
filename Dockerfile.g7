@@ -76,6 +76,8 @@ if source.count(needle) != 1:
     raise SystemExit('expected exactly one DefectDojo middleware assignment')
 path.write_text(source.replace(needle, replacement))
 PY
+# PGDG removes old versions from its live index. Exact archived binary bytes
+# remain subject to the original SHA-256, installed-version and delta checks.
 COPY docker/g7/versions.lock /tmp/uvm-g7-versions.lock
 COPY third-party/notices/OAUTHLIB-4.0.1-BSD-3-Clause.txt /tmp/ce-global-oauthlib-license.txt
 RUN set -eu; \
@@ -95,7 +97,14 @@ RUN set -eu; \
       esac; \
       package=${package%%:*}; \
       if [ "$is_delta" = 1 ]; then expected_delta+="$package=$version"$'\n'; fi; \
-      apt-get download -qq "$package=$version"; \
+      case "$package" in \
+        postgresql-18|postgresql-client-18|postgresql-common|postgresql-client-common) \
+          archive_source=postgresql-18; \
+          case "$package" in *-common) archive_source=postgresql-common ;; esac; \
+          deb="${package}_${version}_${arch:-all}.deb"; \
+          python3 -c 'import pathlib,sys,urllib.request; url="https://apt-archive.postgresql.org/pub/repos/apt/pool/main/p/"+sys.argv[1]+"/"+sys.argv[2]; response=urllib.request.urlopen(url,timeout=60); data=response.read(67108865); response.close(); assert len(data)<=67108864, "PGDG package exceeds bound"; pathlib.Path(sys.argv[2]).write_bytes(data)' "$archive_source" "$deb" ;; \
+        *) apt-get download -qq "$package=$version" ;; \
+      esac; \
       deb=$(find . -maxdepth 1 -type f -name "${package%%:*}_*.deb" -print -quit); \
       test -n "$deb"; \
       printf '%s  %s\n' "$digest" "$deb" | sha256sum -c -; \

@@ -60,10 +60,14 @@ elif args[:2]==['network','inspect']:sys.exit(1)
                     with self.assertRaises(SystemExit):
                         setup.provision_restore(SimpleNamespace(directory=str(root)))
             launcher = (ROOT / 'deploy/compose/launcher.sh').read_text()
-            body = launcher.split('helper() {', 1)[1].split('\n}', 1)[0]
+            wrapper = launcher.split('\nhelper() {', 1)[1].split('\n}', 1)[0]
+            body = launcher.split('_helper_command() {', 1)[1].split('\n}', 1)[0]
+            managed_guard = launcher.split('check_managed_holder() {', 1)[1].split('\n}', 1)[0]
             script = ('set -eu\nPLATFORM=linux/amd64\nPACKAGE=/signed-package\n'
                 'CACHE_DIRECTORY=/verified-cache/originals\nCACHE_PARENT=/verified-cache\nWORK=/private-work\n'
-                'IMAGE_REF=127.0.0.1:46150/volt@sha256:' + 'a' * 64 + '\nhelper() {' + body + '\n}\nhelper /private-state host-validate /state\n')
+                'LOCK_NAME=\nIMAGE_REF=127.0.0.1:46150/volt@sha256:' + 'a' * 64
+                + '\ncheck_managed_holder() {' + managed_guard + '\n}\n_helper_command() {' + body
+                + '\n}\nhelper() {' + wrapper + '\n}\nhelper /private-state host-validate /state\n')
             result = subprocess.run(['sh', '-c', script], env=environment, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             executions = [json.loads(line) for line in log.read_text().splitlines()]

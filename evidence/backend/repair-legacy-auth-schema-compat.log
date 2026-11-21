@@ -1,0 +1,8 @@
+test_normal_connector_startup_keeps_validated_host_uuid_over_an_old_file (tests.operations.test_g7_recovery_safety.RecoverySafetyTests.test_normal_connector_startup_keeps_validated_host_uuid_over_an_old_file) ... connector_restore_quarantine_startup_complete connectors=1 pid=11
+ok
+test_restricted_app_disables_all_normal_startup_hooks (tests.operations.test_g7_recovery_safety.RecoverySafetyTests.test_restricted_app_disables_all_normal_startup_hooks) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.196s
+
+OK

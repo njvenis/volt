@@ -1,0 +1,91 @@
+// Adopted protocol: uvm/scanners/contracts.py (171285a). Runtime-checked DTOs;
+// provider OpenAPI export and actual packaged routes are verified separately.
+import {sessionFetch} from './session';
+import type {Paths} from './generated/api';
+type DispositionRoute=Paths['/api/v1/scanners/{connector_id}/commands/{command_id}/abandon']['post'];
+export type ScannerAbandonment=DispositionRoute['request']['body'];
+export type ScannerDisposition=Extract<DispositionRoute['responses'],{status:'200'}>['body'];
+import type {Revisions} from './connector-types';
+export type SourceTuple={source_family:'qualys';source_account_id:string;scope_key:string};
+export type Recency={status:'never'|'recent'|'stale';as_of:string;last_complete_at:string|null};
+export type RecoveryView=Extract<Paths['/api/v1/scanners/{connector_id}']['get']['responses'],{status:'200'}>['body']['recovery'];
+export type ScannerView={recovery:RecoveryView;schema_version:1;connector_id:string;source_id:string;source_tuple:SourceTuple;display_name:string;account_label:string;environment_label:string;product:'qualys_vm';platform_id:string;scope:{kind:'account_visible'};lifecycle:'disabled'|'staged'|'active';configuration_revision:number;active_configuration_revision:number|null;credential:{secret_id:string;version_id:string|null;revision:number;state:'unconfigured'|'inactive'|'active'|'revoked'|'quarantined'};expected_revisions:Revisions;validation:null|{status:'unverified'|'succeeded'|'failed';checked_at:string|null;configuration_revision:number|null;credential_version_id:string|null;operation_id:string|null;error_code:string|null};limits:{max_pages:number;max_page_bytes:number;max_operation_bytes:number;max_detections:number;overall_deadline_seconds:number;request_timeout_seconds:number;max_attempts_per_page:number};collection_mode:'manual';schedule_supported:false;latest_attempt_run_id:string|null;latest_complete_run_id:string|null;collection_recency:Recency};
+export type ScannerAction='scanner.configuration.save'|'scanner.connection.test'|'scanner.configuration.activate'|'scanner.collection.start'|'scanner.configuration.disable';
+export type ScannerCommand=ScannerAbandonment['command'];
+export type Operation={schema_version:1;operation_id:string;command_id:string;kind:'test'|'collect';status:'running'|'succeeded'|'partial'|'failed'|'interrupted';configuration_revision:number;credential_version_id:string|null;started_at:string;finished_at:string|null;run_id:string|null;error_code:string|null;receipt_id:string|null};
+export type ScannerReceipt={schema_version:1;command_id:string;action:ScannerAction;target_id:string;decision_id:string;audit_event_id:string;intent_id:string;committed_revision:number;projection:Record<string,unknown>;policy_revision:number;intents:Record<string,unknown>[];occurred_at:string;result:{lifecycle?:'disabled'|'staged'|'active';configuration_revision?:number;active_configuration_revision?:number;operation_id?:string;run_id?:string;status?:'succeeded'|'partial'|'failed'|'interrupted';error_code?:string|null}};
+export type Detection={observation_id:string;group_id:string|null;qid:string;host_id:string|null;detection_type:string|null;severity:string|null;vendor_status:string|null;port:string|null;protocol:string|null;ssl:string|null;unique_vuln_id:string|null;vendor_timestamps:Record<string,string>;collected_at:string;observed_at:string|null;identity_resolution:string;evidence_ref:string;evidence_sha256:string};
+export type DetectionPage={schema_version:1;run_id:string;as_of:string;items:Detection[];next_cursor:string|null;retrieval:{status:'complete'|'partial'|'failed';reason_codes:string[]};coverage:{status:'unknown';reason_codes:string[]};source_freshness:{status:'unknown';reason_codes:string[]};collection_recency:Recency};
+type Check=(v:unknown)=>boolean;
+export const object=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v);
+export const uuid:Check=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+const text:Check=v=>typeof v==='string'&&v.length>0,rev:Check=v=>Number.isSafeInteger(v)&&Number(v)>=0,utc:Check=v=>typeof v==='string'&&v.endsWith('Z')&&Number.isFinite(Date.parse(v));
+const one=(...values:unknown[]):Check=>v=>values.includes(v),nullable=(c:Check):Check=>v=>v===null||c(v),array=(c:Check):Check=>v=>Array.isArray(v)&&v.every(c);
+const shape=(fields:Record<string,Check>):Check=>v=>object(v)&&Object.keys(v).length===Object.keys(fields).length&&Object.entries(fields).every(([k,c])=>c(v[k]));
+const revisions=shape({target:rev,policy:rev,identity_membership:one(0),owners:one(0),authority:rev,connector:rev,source:rev,secret_source:rev,secret:nullable(rev)});
+const tuple=shape({source_family:one('qualys'),source_account_id:uuid,scope_key:uuid}),scope=shape({kind:one('account_visible')}),platform=one('us1','us2','us3','eu1','eu2','in1'),lifecycle=one('disabled','staged','active');
+const recency=shape({status:one('never','recent','stale'),as_of:utc,last_complete_at:nullable(utc)});
+const validation=shape({status:one('unverified','succeeded','failed'),checked_at:nullable(utc),configuration_revision:nullable(rev),credential_version_id:nullable(uuid),operation_id:nullable(uuid),error_code:nullable(text)});
+export const validRecovery:Check=shape({state:one('clear','quarantined','awaiting_activation'),epoch_id:nullable(uuid),fresh_credentials_required:one(true,false),fresh_version_ready:one(true,false),clearance_state:one('missing','available','applied','expired','invalidated'),approval_id:nullable(uuid),approval_expires_at:nullable(utc)});
+export const validScanner:Check=shape({recovery:validRecovery,schema_version:one(1),connector_id:uuid,source_id:uuid,source_tuple:tuple,display_name:text,account_label:text,environment_label:text,product:one('qualys_vm'),platform_id:platform,scope,lifecycle,configuration_revision:rev,active_configuration_revision:nullable(rev),credential:shape({secret_id:uuid,version_id:nullable(uuid),revision:rev,state:one('unconfigured','inactive','active','revoked','quarantined')}),expected_revisions:revisions,validation:nullable(validation),limits:shape({max_pages:rev,max_page_bytes:rev,max_operation_bytes:rev,max_detections:rev,overall_deadline_seconds:rev,request_timeout_seconds:rev,max_attempts_per_page:rev}),collection_mode:one('manual'),schedule_supported:one(false),latest_attempt_run_id:nullable(uuid),latest_complete_run_id:nullable(uuid),collection_recency:recency});
+const operation:Check=shape({schema_version:one(1),operation_id:uuid,command_id:uuid,kind:one('test','collect'),status:one('running','succeeded','partial','failed','interrupted'),configuration_revision:rev,credential_version_id:nullable(uuid),started_at:utc,finished_at:nullable(utc),run_id:nullable(uuid),error_code:nullable(text),receipt_id:nullable(uuid)});
+const settings=shape({product:one('qualys_vm'),api_version:one('2.0'),platform_id:platform,scope,collection_mode:one('manual')});
+export function validScannerCommand(v:unknown,cid:string,sid:string):v is ScannerCommand{
+ if(!object(v)||!shape({schema_version:one(1),command_id:uuid,action:text,target_id:one(cid),membership_ids:v=>Array.isArray(v)&&v.length===0,expected_revisions:revisions,payload:object})(v)||!object(v.expected_revisions)||v.expected_revisions.secret!==null)return false;
+ const base={source_id:one(sid),rationale:boundedText,evidence_ref:boundedText};
+ switch(v.action){case 'scanner.configuration.save':return shape({...base,settings})(v.payload);case 'scanner.configuration.disable':return shape(base)(v.payload);case 'scanner.connection.test':case 'scanner.collection.start':return shape({...base,configuration_revision:v=>rev(v)&&Number(v)>=1,credential_version_id:uuid})(v.payload);case 'scanner.configuration.activate':return shape({...base,configuration_revision:v=>rev(v)&&Number(v)>=1,credential_version_id:uuid,validation_operation_id:uuid})(v.payload);default:return false;}
+}
+export function scannerCommand(view:ScannerView,action:ScannerAction,rationale:string,evidence_ref:string):ScannerCommand{
+ const payload:Record<string,unknown>={source_id:view.source_id,rationale,evidence_ref};
+ if(action==='scanner.configuration.save')payload.settings={product:'qualys_vm',api_version:'2.0',platform_id:view.platform_id,scope:{kind:'account_visible'},collection_mode:'manual'};
+ else if(action!=='scanner.configuration.disable'){payload.configuration_revision=view.configuration_revision;payload.credential_version_id=view.credential.version_id??undefined;if(action==='scanner.configuration.activate')payload.validation_operation_id=view.validation?.operation_id??undefined;}
+ const command={schema_version:1,command_id:crypto.randomUUID(),action,target_id:view.connector_id,membership_ids:[],expected_revisions:{...view.expected_revisions,secret:null},payload};
+ if(!validScannerCommand(command,view.connector_id,view.source_id))throw new ScannerError(422);return command;
+}
+export class ScannerError extends Error{constructor(public status:number,public uncertain=false){super(status===401?'Your session has expired. Sign in again.':status===403?'Access to this source or action is denied.':status===409?'The source, credential or authority changed. Refresh and review. Retained commands must be reconciled unchanged.':status===429?'Requests are throttled. Wait before checking again.':status===422?'The scanner request is incomplete or unsupported.':uncertain?'The operation outcome is unknown. Keep the original command and check it unchanged.':'Scanner information is unavailable or unsupported. No success is confirmed.');}}
+async function request(path:string,check:(value:unknown,status:number)=>boolean,body?:unknown):Promise<unknown>{let response:Response;try{response=await sessionFetch(path,{method:body===undefined?'GET':'POST',headers:body===undefined?undefined:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(body===undefined?15000:135000)});}catch{throw new ScannerError(0,body!==undefined);}if(!response.ok)throw new ScannerError(response.status,body!==undefined);const value:unknown=await response.json().catch(()=>null);if(!check(value,response.status))throw new ScannerError(502,body!==undefined);return value;}
+const root=(cid:string)=>'/api/v1/scanners/'+encodeURIComponent(cid),query=(sid:string)=>'?source_id='+encodeURIComponent(sid);
+export async function readScanner(cid:string,sid:string):Promise<ScannerView>{return await request(root(cid)+query(sid),v=>validScanner(v)&&object(v)&&v.connector_id===cid&&v.source_id===sid) as ScannerView;}
+function validReceipt(v:unknown,c:ScannerCommand){
+ if(!shape({schema_version:one(1),command_id:one(c.command_id),action:one(c.action),target_id:one(c.target_id),decision_id:uuid,audit_event_id:uuid,intent_id:uuid,committed_revision:rev,projection:object,policy_revision:rev,intents:array(object),occurred_at:utc,result:object})(v)||!object(v))return false;
+ if(!object(v.projection)||v.projection.connector_id!==c.target_id||v.projection.source_id!==c.payload.source_id||!revisions(v.projection.expected_revisions))return false;
+ const result=v.result;const configuration='configuration_revision' in c.payload?c.payload.configuration_revision:undefined;
+ switch(c.action){case 'scanner.configuration.save':case 'scanner.configuration.disable':return shape({lifecycle,configuration_revision:rev})(result);case 'scanner.configuration.activate':return shape({lifecycle:one('active'),configuration_revision:one(configuration),active_configuration_revision:one(configuration)})(result);case 'scanner.connection.test':return shape({operation_id:uuid,status:one('succeeded','failed','interrupted'),error_code:nullable(text)})(result);case 'scanner.collection.start':return shape({operation_id:uuid,run_id:uuid,status:one('succeeded','partial','failed','interrupted'),error_code:nullable(text)})(result);}
+}
+export async function sendScanner(c:ScannerCommand):Promise<Operation|ScannerReceipt>{
+ return await request(root(c.target_id)+'/commands',(v,status)=>{
+  if(status===200&&validReceipt(v,c))return true;
+  if(!['scanner.connection.test','scanner.collection.start'].includes(c.action)||!operation(v)||!object(v)||v.command_id!==c.command_id||v.kind!==(c.action==='scanner.connection.test'?'test':'collect')||!('configuration_revision' in c.payload)||v.configuration_revision!==c.payload.configuration_revision||v.credential_version_id!==c.payload.credential_version_id||v.receipt_id!==null)return false;
+  return status===202?v.status==='running'&&v.finished_at===null:status===200&&['failed','partial','interrupted'].includes(String(v.status))&&utc(v.finished_at);
+ },c) as Operation|ScannerReceipt;
+}
+export async function readOperation(cid:string,sid:string,id:string):Promise<Operation>{return await request(root(cid)+'/operations/'+encodeURIComponent(id)+query(sid),v=>operation(v)&&object(v)&&v.operation_id===id) as Operation;}
+const detection=shape({observation_id:uuid,group_id:nullable(uuid),qid:text,host_id:nullable(text),detection_type:nullable(text),severity:nullable(text),vendor_status:nullable(text),port:nullable(text),protocol:nullable(text),ssl:nullable(text),unique_vuln_id:nullable(text),vendor_timestamps:v=>object(v)&&Object.values(v).every(text),collected_at:utc,observed_at:nullable(utc),identity_resolution:text,evidence_ref:text,evidence_sha256:v=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v)});
+const unknownProof=shape({status:one('unknown'),reason_codes:array(text)});
+export async function readDetections(cid:string,sid:string,run:string,cursor?:string):Promise<DetectionPage>{return await request(root(cid)+'/runs/'+encodeURIComponent(run)+'/detections'+query(sid)+'&limit=50'+(cursor?'&cursor='+encodeURIComponent(cursor):''),shape({schema_version:one(1),run_id:one(run),as_of:utc,items:array(detection),next_cursor:nullable(text),retrieval:shape({status:one('complete','partial','failed'),reason_codes:array(text)}),coverage:unknownProof,source_freshness:unknownProof,collection_recency:recency})) as DetectionPage;}
+
+const boundedText:Check=v=>typeof v==='string'&&v.length<=2048&&/\S/.test(v);
+export function validScannerAbandonment(v:unknown,command:ScannerCommand):v is ScannerAbandonment{
+ return shape({schema_version:one(1),command:x=>validScannerCommand(x,command.target_id,command.payload.source_id)&&canonical(x)===canonical(command),rationale:boundedText,evidence_ref:boundedText})(v);
+}
+function canonical(value:unknown):string{
+ if(Array.isArray(value))return '['+value.map(canonical).join(',')+']';
+ if(object(value))return '{'+Object.keys(value).sort().map(k=>JSON.stringify(k)+':'+canonical(value[k])).join(',')+'}';
+ const encoded=JSON.stringify(value);if(encoded===undefined)throw new ScannerError(422,true);return encoded;
+}
+export async function scannerDigest(command:ScannerCommand,actorId:string):Promise<string>{
+ const raw=canonical({principal_id:actorId,command}).replace(/[\u007f-\uffff]/g,c=>'\\u'+c.charCodeAt(0).toString(16).padStart(4,'0'));
+ return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(raw))),b=>b.toString(16).padStart(2,'0')).join('');
+}
+export async function abandonScanner(body:ScannerAbandonment,actorId:string):Promise<ScannerDisposition>{
+ const c=body.command;if(!validScannerAbandonment(body,c))throw new ScannerError(422,true);
+ const digest=await scannerDigest(c,actorId);
+ const common={schema_version:one(1),command_id:one(c.command_id),connector_id:one(c.target_id),source_id:one(c.payload.source_id),action:one(c.action),actor_id:one(actorId),request_digest:one(digest)};
+ return await request(root(c.target_id)+'/commands/'+encodeURIComponent(c.command_id)+'/abandon',(v,status)=>{
+  if(status!==200||!object(v))return false;
+  if(v.disposition==='not_committed')return shape({...common,disposition:one('not_committed'),audit_event_id:uuid,occurred_at:utc})(v);
+  if(v.disposition==='committed')return shape({...common,disposition:one('committed'),receipt:r=>validReceipt(r,c)})(v);
+  if(v.disposition==='admitted')return shape({...common,disposition:one('admitted'),operation:o=>operation(o)&&object(o)&&o.command_id===c.command_id&&o.kind===(c.action==='scanner.connection.test'?'test':'collect')&&['scanner.connection.test','scanner.collection.start'].includes(c.action)&&'configuration_revision' in c.payload&&o.configuration_revision===c.payload.configuration_revision&&o.credential_version_id===c.payload.credential_version_id&&o.receipt_id===null&&(o.status==='running'?o.finished_at===null:['failed','partial','interrupted'].includes(String(o.status))&&utc(o.finished_at))})(v);
+  return false;
+ },body) as ScannerDisposition;
+}

@@ -1,6 +1,7 @@
 services:
   volt:
     environment:
+      UVM_AUTH_MODE: oidc
       UVM_OIDC_DEPLOYMENT_MODE: demo
       UVM_OIDC_PROVIDER_PORT: "9000"
       UVM_OIDC_BROWSER_AUTHORIZATION_ORIGIN: http://127.0.0.1:${VOLT_OIDC_PORT:-8190}

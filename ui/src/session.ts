@@ -30,7 +30,16 @@ export async function sessionFetch(path: string, init: RequestInit = {}): Promis
     const alertScopeDenied = response.status === 403 && code === 'source_scope_forbidden' &&
       (init.method ?? 'GET').toUpperCase() === 'GET' &&
       /^\/api\/v1\/assessment\/groups\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/exception-warning-failure-alerts$/i.test(path);
-    if (response.status === 401 || response.status === 403 && !alertScopeDenied ||
+    const scannerScopeDenied = response.status === 403 && ['forbidden','source_scope_forbidden'].includes(code) &&
+      (init.method ?? 'GET').toUpperCase() === 'GET' &&
+      /^\/api\/v1\/scanners\/[0-9a-f-]{36}(?:\/operations\/[0-9a-f-]{36}|\/runs\/[0-9a-f-]{36}\/detections)?\?source_id=[0-9a-f-]{36}(?:&.*)?$/i.test(path);
+    // Scanner refresh reads metadata and connector permissions concurrently.
+    // An exact resource-read denial from either sibling is local; CSRF, writes,
+    // authentication and identity/session failures retain the global path.
+    const connectorPermissionScopeDenied = response.status === 403 && ['forbidden','source_scope_forbidden'].includes(code) &&
+      (init.method ?? 'GET').toUpperCase() === 'GET' &&
+      /^\/api\/v1\/connectors\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\/permissions|\/secrets\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\?source_id=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(path);
+    if (response.status === 401 || response.status === 403 && !alertScopeDenied && !scannerScopeDenied && !connectorPermissionScopeDenied ||
         response.status === 503 && (code.startsWith('identity_') || code.startsWith('oidc_'))) {
       dispatchEvent(new CustomEvent(SESSION_EVENT, {detail: {status: response.status, code}}));
     }

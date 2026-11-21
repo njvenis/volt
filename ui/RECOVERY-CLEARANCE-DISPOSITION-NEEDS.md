@@ -1,0 +1,20 @@
+# Recovery clearance disposition dependency
+
+Historical needs/fixture-correction checkpoint at ca8d606. The later implementation and exact backend35e schema alignment are documented in `CLEARANCE-DISPOSITION-VERIFICATION.md`; independent review and packaged proof remain separate.
+
+Status: same reviewer placed d2be68e on HOLD. Its 452 passing tests are historical synthetic evidence, not acceptance. The retained state, secret clearing, scoped denial and action gates were accepted within that review; clearance replacement remains incomplete. Root has now adopted `openspec/changes/easy-compose-install/clearance-command-disposition.md`: the exact two-way committed/not_committed contract answers the needs below. Dependent UI implementation may proceed against that document; generated/runtime alignment awaits the committed backend route candidate. No disposition UI is included in this bounded fixture correction.
+
+The current failure is reproducible with complete backend error envelopes: a clearance command can fail before admission because its revision fence is stale or its approval expires. A new imported approval changes the revision, so unchanged replay still fails. The original command stays frozen and blocks new work. Neither a generic409 with details.outcome=not_committed nor receipt404 proves an audited terminal fence. Clearing that command would be unsafe.
+
+Required backend checkpoint for the UI:
+
+- Exact shared-ledger route and closed request/response DTOs, including family/target namespace, full original versioned clearance command, and review rationale/evidence. Pin canonical request digest and actor binding; retain originals without migration or rewriting.
+- Current authorisation and exact connector/source/slot/version/epoch binding for lookup, replay and disposition, including closed recovery state and revoked access. No client actor, proof, key or signing authority.
+- A committed result must recover the original audited clearance receipt. A terminal non-commit result must carry current-actor/original-body-bound audited proof and permanently prevent the old command from committing. Any pending/admitted/indeterminate state must remain distinct and preserve originals. Define races with receipt commit, approval replacement and shared command occupancy.
+- Explicit safe error codes/envelopes for denial, incompatible family/body/actor, missing record, expiry, stale authority, network uncertainty and malformed proof. None can silently enable replacement.
+- Terminal non-commit must permit an explicit reviewed replacement after fresh scanner, permission and exact public secret-slot reads. A separate submit generates a new UUID with current complete fences and current slot/version/epoch; it never rewrites/reuses the old command, automatically applies clearance, tests, or activates.
+- Generated strict schemas and source-bound backend tests proving stale-before-admission and expiry, approval replacement, lost disposition response, current-authority denial, concurrent receipt/disposition, terminal replay and changed-content rejection. Public packaged proof remains delivery-owned.
+
+Bounded fixture correction now uses backend516's complete error envelope, including schema_version, canonical correlation_id, safe status/code pair and all four details fields. 404 uses not_found; stale409 uses revision_conflict; expired409 uses restore_quarantined. Tests compare these bodies against the actual registered backend exception adapter (factory-only in-memory schema discovery, no lifespan/server/external database) and pass them through the production frontend parser. Malformed envelopes have a separate unsupported-response test, so they cannot substitute for a genuine conflict case.
+
+Rendered synthetic tests preserve frozen command bytes through stale/expired response, new approval, changed revisions, refresh, retry and reload. They demonstrate the present safe blocked state, not a working replacement path. No backend/provider/runtime implementation or permission bypass is included.

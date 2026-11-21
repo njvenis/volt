@@ -10,10 +10,47 @@ export type Location = (string | number)[];
 export type Message = string;
 export type ErrorType = string;
 export type Detail = ValidationError[];
+export type Mode = "local";
+export type SchemaVersion = 1;
+export type SetupState = "required" | "claimed" | "unavailable";
+export type ConfigurationRevision = number;
+export type ConnectorId = string;
+export type ConnectorRevision = number;
+export type EnvironmentLabel = string;
+export type Lifecycle = string;
+export type SourceRevision = number;
+export type AuthorityRevision = number;
+export type CanRegisterConnector = boolean;
+export type ConnectorRegistryRevision = number;
+export type Connectors = LocalConnectorSummaryDTO[];
+export type InstallationId = string;
+export type PolicyRevision = number;
+export type SchemaVersion1 = 1;
+export type AccessGroups = string[];
+export type Authenticated = boolean;
+export type CredentialMode = "local_session";
+export type CsrfToken = string;
+export type PrincipalId = string;
+export type ProtectedAdmin = boolean;
+export type ReceiptId = string | null;
+export type SchemaVersion2 = 1;
+export type SourceScopes = string[][];
+export type AccessGroups1 = string[];
+export type Authenticated1 = boolean;
+export type CredentialMode1 = "oidc_session" | "github_link" | "service_bearer";
+export type CsrfToken1 = string | null;
+export type PrincipalId1 = string;
+export type SchemaVersion3 = 1;
+export type SourceScopes1 = string[][];
 
 export interface Components {
   schemas: {
     HTTPValidationError: HTTPValidationError;
+    LocalAuthConfigDTO: LocalAuthConfigDTO;
+    LocalConnectorSummaryDTO: LocalConnectorSummaryDTO;
+    LocalDeploymentDTO: LocalDeploymentDTO;
+    LocalSessionDTO: LocalSessionDTO;
+    OIDCSessionDTO: OIDCSessionDTO;
     ValidationError: ValidationError;
   };
 }
@@ -30,5 +67,64 @@ export interface ValidationError {
   [k: string]: unknown;
 }
 export interface Context {
+  [k: string]: unknown;
+}
+export interface LocalAuthConfigDTO {
+  mode: Mode;
+  schema_version?: SchemaVersion;
+  setup_state: SetupState;
+  [k: string]: unknown;
+}
+export interface LocalConnectorSummaryDTO {
+  configuration_revision: ConfigurationRevision;
+  connector_id: ConnectorId;
+  connector_revision: ConnectorRevision;
+  environment_label: EnvironmentLabel;
+  lifecycle: Lifecycle;
+  source: Source;
+  source_revision: SourceRevision;
+  [k: string]: unknown;
+}
+export interface Source {
+  [k: string]: string;
+}
+export interface LocalDeploymentDTO {
+  authority_revision: AuthorityRevision;
+  can_register_connector: CanRegisterConnector;
+  connector_registry_revision: ConnectorRegistryRevision;
+  connectors: Connectors;
+  installation_id: InstallationId;
+  policy_revision: PolicyRevision;
+  schema_version?: SchemaVersion1;
+  [k: string]: unknown;
+}
+export interface LocalSessionDTO {
+  access_groups: AccessGroups;
+  authenticated: Authenticated;
+  authority: Authority;
+  credential_mode: CredentialMode;
+  csrf_token: CsrfToken;
+  principal_id: PrincipalId;
+  protected_admin: ProtectedAdmin;
+  receipt_id?: ReceiptId;
+  schema_version?: SchemaVersion2;
+  source_scopes: SourceScopes;
+  [k: string]: unknown;
+}
+export interface Authority {
+  [k: string]: unknown;
+}
+export interface OIDCSessionDTO {
+  access_groups: AccessGroups1;
+  authenticated: Authenticated1;
+  authority: Authority1;
+  credential_mode: CredentialMode1;
+  csrf_token: CsrfToken1;
+  principal_id: PrincipalId1;
+  schema_version?: SchemaVersion3;
+  source_scopes: SourceScopes1;
+  [k: string]: unknown;
+}
+export interface Authority1 {
   [k: string]: unknown;
 }

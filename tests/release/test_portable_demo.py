@@ -63,8 +63,7 @@ class PortableDemoArchiveTest(unittest.TestCase):
             image_tar, root / "source.tar", image_id, f"linux/{architecture}", revision, snapshot,
             f"volt-portable-demo:{architecture}")
         installer = root / "installer.tar.gz"
-        subprocess.run([sys.executable, str(ROOT / "tools/build_compose_bundle.py"), "build",
-                        "--output", str(installer)], check=True, stdout=subprocess.DEVNULL)
+        portable_demo.build_legacy_demo_installer(installer)
         (root / "offline-tools").mkdir()
         for helper in (ROOT / "tools/release/portable_demo.py", ROOT / "tools/release/archive.py",
                        ROOT / "tools/release/provenance.py", ROOT / "tools/build_compose_bundle.py"):
@@ -109,9 +108,12 @@ class PortableDemoArchiveTest(unittest.TestCase):
             self.assertEqual(portable_demo.pins()[portable_demo.PLATFORM_CE_KEY[platform]].split("@", 1)[0], "3.5.0")
         prepare = workflow.split("- name: Capture portable package metadata", 1)[1].split("- name:", 1)[0]
         qualify = workflow.split("- name: Run local Compose and browser qualification", 1)[1].split("- name:", 1)[0]
+        self.assertIn("portable_demo.py compose-installer", workflow)
+        self.assertNotIn("tools/build_compose_bundle.py build", workflow)
         self.assertIn("$GITHUB_ENV", prepare)
         self.assertNotIn("compose_release_qualification.py", prepare)
         self.assertIn("compose_release_qualification.py", qualify)
+        self.assertIn("--development-fixture", qualify)
 
     def test_valkey_runtime_loader_is_target_neutral_and_both_commands_are_executed(self) -> None:
         dockerfile = (ROOT / "Dockerfile.g7").read_text()
@@ -190,6 +192,28 @@ class PortableDemoArchiveTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue((package_dir / "installer.tar.gz").is_file())
             self.assertIn("--bootstrap-principal", (package_dir / "PORTABLE-INSTALL.md").read_text())
+
+    def test_production_demo_installer_is_explicitly_nonrelease_rc3_compatibility(self) -> None:
+        source = (ROOT / "tools/release/portable_demo.py").read_text()
+        self.assertIn("build_legacy_demo_installer(installer, source_root)", source)
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "installer.tar.gz"
+            portable_demo.build_legacy_demo_installer(output)
+            with tarfile.open(output, "r:gz") as bundle:
+                root = bundle.getmembers()[0].name.split("/", 1)[0]
+                files = {Path(member.name).name: bundle.extractfile(member).read()
+                         for member in bundle.getmembers() if member.isfile()}
+            manifest = json.loads(files["manifest.json"])
+            self.assertEqual(root, "volt-compose-0.1.0-rc.3")
+            self.assertEqual(manifest["distribution_scope"], "local_demo_compatibility")
+            result = subprocess.run([sys.executable, str(ROOT / "tools/build_compose_bundle.py"),
+                "verify", "--archive", str(output)], text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("not a release installer", result.stderr)
+            accepted = subprocess.run([sys.executable, str(ROOT / "tools/build_compose_bundle.py"),
+                "verify", "--archive", str(output), "--allow-local-demo-compatibility"],
+                text=True, capture_output=True)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
 
     def test_demo_image_missing_or_contradictory_compose_labels_is_rejected(self) -> None:
         for labels in (

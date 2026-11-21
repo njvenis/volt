@@ -115,6 +115,74 @@ auth_identity_events = Table(
     Column("occurred_at", _TZ, nullable=False),
 )
 
+# Additive, installation-local credentials. Local browser sessions intentionally
+# have no OIDC link and never borrow the synthetic provider's identity rows.
+local_auth_installation = Table(
+    "local_auth_installation", uvm_metadata,
+    Column("singleton_id", Integer, primary_key=True),
+    Column("installation_id", String(36), nullable=False, unique=True),
+    Column("setup_generation", Integer, nullable=False),
+    Column("claimed_at", _TZ),
+    Column("created_at", _TZ, nullable=False),
+    CheckConstraint("singleton_id = 1 AND setup_generation > 0", name="local_auth_installation_singleton"),
+)
+
+local_accounts = Table(
+    "local_accounts", uvm_metadata,
+    Column("principal_id", String, ForeignKey("auth_principals.principal_id"), primary_key=True),
+    Column("username", String, nullable=False),
+    Column("username_normalized", String, nullable=False, unique=True),
+    Column("verifier", String),
+    Column("credential_revision", Integer, nullable=False),
+    Column("capability_generation", Integer, nullable=False),
+    Column("status", String, nullable=False),
+    Column("created_at", _TZ, nullable=False),
+    Column("updated_at", _TZ, nullable=False),
+    CheckConstraint("credential_revision > 0", name="local_account_credential_revision_positive"),
+    CheckConstraint("capability_generation > 0", name="local_account_capability_generation_positive"),
+    CheckConstraint("status IN ('pending', 'enabled', 'disabled')", name="local_account_status"),
+)
+
+local_sessions = Table(
+    "local_sessions", uvm_metadata,
+    Column("session_hash", String(64), primary_key=True),
+    Column("session_id", _ID, nullable=False, unique=True),
+    Column("principal_id", String, ForeignKey("local_accounts.principal_id"), nullable=False),
+    Column("credential_revision", Integer, nullable=False),
+    Column("revision", Integer, nullable=False),
+    Column("csrf_hash", String(64), nullable=False),
+    Column("created_at", _TZ, nullable=False),
+    Column("expires_at", _TZ, nullable=False),
+    Column("revoked_at", _TZ),
+    Index("ix_local_sessions_principal", "principal_id", "revoked_at"),
+)
+
+local_capabilities = Table(
+    "local_auth_capabilities", uvm_metadata,
+    Column("capability_hash", String(64), primary_key=True),
+    Column("capability_locator", String(32), nullable=False, unique=True),
+    Column("purpose", String, nullable=False),
+    Column("installation_id", String(36), nullable=False),
+    Column("principal_id", String, ForeignKey("local_accounts.principal_id")),
+    Column("generation", Integer, nullable=False),
+    Column("credential_revision", Integer, nullable=False),
+    Column("expires_at", _TZ, nullable=False),
+    Column("consumed_at", _TZ),
+    Column("created_at", _TZ, nullable=False),
+    CheckConstraint("purpose IN ('setup', 'enrolment', 'recovery')", name="local_capability_purpose"),
+)
+
+local_login_throttles = Table(
+    "local_login_throttles", uvm_metadata,
+    Column("bucket_hash", String(64), primary_key=True),
+    Column("window_started_at", _TZ, nullable=False),
+    Column("attempts", Integer, nullable=False),
+    Column("blocked_until", _TZ),
+    Column("failure_times", _JSON, nullable=False, default=list),
+    CheckConstraint("attempts >= 0", name="local_login_attempts_nonnegative"),
+)
+
 __all__ = ["auth_principals", "oidc_subject_links", "auth_group_memberships",
            "oidc_subject_groups", "oidc_sessions", "oidc_authorization_states", "oidc_sync_state",
-           "auth_identity_events"]
+           "auth_identity_events", "local_auth_installation", "local_accounts", "local_sessions",
+           "local_capabilities", "local_login_throttles"]

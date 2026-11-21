@@ -21,9 +21,33 @@ jobs:
       NODE_VERSION: "24.21.0"
       UV_VERSION: "0.12.18"
       OPENSPEC_VERSION: "1.11.0"
+      SELECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Enforce selected source revision
+        run: test "$(git rev-parse HEAD)" = "$SELECTED_SOURCE_SHA"
+
+      - name: Record selected source identity
+        run: |
+          set -eu
+          CHECKED_OUT_SHA=$(git rev-parse HEAD)
+          SOURCE_SNAPSHOT="sha256:$(git archive --format=tar "$CHECKED_OUT_SHA" | sha256sum | cut -d' ' -f1)"
+          mkdir -p "$RUNNER_TEMP/source-selection"
+          printf '{"event_name":"%s","event_sha":"%s","selected_source_sha":"%s","checked_out_sha":"%s","source_snapshot":"%s"}\n' \
+            "$GITHUB_EVENT_NAME" "$GITHUB_SHA" "$SELECTED_SOURCE_SHA" "$CHECKED_OUT_SHA" "$SOURCE_SNAPSHOT" \
+            > "$RUNNER_TEMP/source-selection/source-selection.json"
+
+      - name: Retain general check source identity
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: volt-easy-portable-source-selection
+          path: ${{ runner.temp }}/source-selection/source-selection.json
+          if-no-files-found: error
+          retention-days: 2
 
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -47,11 +71,18 @@ jobs:
           uv run python -m unittest discover -s tests/identity -v
           uv run python -m unittest tests.ingestion.test_run -v
           uv run python -m unittest tests.operations.test_compose_bundle -v
+          uv run python -m unittest tests.operations.test_portable_ci_source_binding -v
           uv run python -m unittest tests.operations.test_compose_oidc_mode -v
+          uv run python -m unittest tests.operations.test_installer_verifier tests.operations.test_easy_installer_launcher -v
           uv run python -m unittest discover -s tests/release -v
           mkdir -p "$RUNNER_TEMP/volt-compose-bundle"
-          uv run python tools/build_compose_bundle.py build --output "$RUNNER_TEMP/volt-compose-bundle/volt-compose.tar.gz"
-          uv run python tools/build_compose_bundle.py verify --archive "$RUNNER_TEMP/volt-compose-bundle/volt-compose.tar.gz"
+          uv run python tools/build_compose_bundle.py build \
+            --output "$RUNNER_TEMP/volt-compose-bundle/volt-compose.tar.gz" \
+            --image-reference "127.0.0.1:46150/volt@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+            --verifier-reference "127.0.0.1:46150/volt-installer-verifier@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" \
+            --local-admission-fixture
+          uv run python tools/build_compose_bundle.py verify \
+            --archive "$RUNNER_TEMP/volt-compose-bundle/volt-compose.tar.gz" --local-admission-fixture
 
       - name: Verify generated UI API and build
         run: |
@@ -71,3 +102,347 @@ jobs:
         run: |
           uv run python -m unittest discover -s tests/public_check -v
           uv run python tools/public_check.py .
+
+  verifier-native:
+    name: Independent verifier native ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            machine: x86_64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            machine: aarch64
+    permissions:
+      contents: read
+    env:
+      SELECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Require native runner and build verifier without publishing
+        env:
+          ARCH: ${{ matrix.arch }}
+          MACHINE: ${{ matrix.machine }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SELECTED_SOURCE_SHA"
+          test "$(uname -m)" = "$MACHINE"
+          SOURCE_SNAPSHOT="sha256:$(git archive --format=tar HEAD | sha256sum | cut -d' ' -f1)"
+          docker build --platform "linux/$ARCH" -f tools/release/verifier.Dockerfile \
+            --label "org.opencontainers.image.revision=$SELECTED_SOURCE_SHA" \
+            --label "org.volt.compose.source-snapshot=$SOURCE_SNAPSHOT" \
+            -t "volt-installer-verifier:$ARCH" .
+          docker image inspect "volt-installer-verifier:$ARCH" --format '{{.Os}}/{{.Architecture}} {{.Id}} {{.Size}} {{json .Config.Labels}}' | tee "$RUNNER_TEMP/verifier-image.txt"
+          test "$(docker image inspect "volt-installer-verifier:$ARCH" --format '{{.Os}}/{{.Architecture}}')" = "linux/$ARCH"
+          test "$(docker image inspect "volt-installer-verifier:$ARCH" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SELECTED_SOURCE_SHA"
+          test "$(docker image inspect "volt-installer-verifier:$ARCH" --format '{{index .Config.Labels "org.volt.compose.source-snapshot"}}')" = "$SOURCE_SNAPSHOT"
+          docker run --rm --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m "volt-installer-verifier:$ARCH" --help
+          docker run --rm --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m --entrypoint /usr/local/bin/cosign \
+            "volt-installer-verifier:$ARCH" version
+          mkdir -p "$RUNNER_TEMP/verifier-artifact"
+          docker image save --output "$RUNNER_TEMP/verifier-artifact/verifier.tar" "volt-installer-verifier:$ARCH"
+          (cd "$RUNNER_TEMP/verifier-artifact" && sha256sum verifier.tar > verifier.tar.sha256)
+          printf '%s\n' "$SOURCE_SNAPSHOT" > "$RUNNER_TEMP/verifier-artifact/source-snapshot.txt"
+          printf '%s\n' "$SELECTED_SOURCE_SHA" > "$RUNNER_TEMP/verifier-artifact/source-revision.txt"
+          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/verifier-artifact/source-event-revision.txt"
+          printf '{"event_name":"%s","event_sha":"%s","selected_source_sha":"%s","checked_out_sha":"%s","source_snapshot":"%s"}\n' \
+            "$GITHUB_EVENT_NAME" "$GITHUB_SHA" "$SELECTED_SOURCE_SHA" "$(git rev-parse HEAD)" "$SOURCE_SNAPSHOT" \
+            > "$RUNNER_TEMP/verifier-artifact/source-selection.json"
+          cp "$RUNNER_TEMP/verifier-image.txt" "$RUNNER_TEMP/verifier-artifact/"
+
+      - name: Transfer verifier platform image to read-only index qualification
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: volt-easy-rc4-verifier-${{ matrix.arch }}
+          path: ${{ runner.temp }}/verifier-artifact/
+          if-no-files-found: error
+          retention-days: 2
+
+  runtime-native-artifacts:
+    name: RC4 runtime native ${{ matrix.arch }} artifact
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            machine: x86_64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            machine: aarch64
+    permissions:
+      contents: read
+    env:
+      SELECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Build exact source natively without registry publication
+        id: build
+        env:
+          ARCH: ${{ matrix.arch }}
+          MACHINE: ${{ matrix.machine }}
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$SELECTED_SOURCE_SHA"
+          test "$(uname -m)" = "$MACHINE"
+          SOURCE_SNAPSHOT="sha256:$(git archive --format=tar HEAD | sha256sum | cut -d' ' -f1)"
+          CE_IMAGE="$(python3 tools/release/portable_demo.py ce-image --platform "linux/$ARCH")"
+          IMAGE="volt-easy-rc4:${ARCH}"
+          python3 tools/release/native_runtime_probe.py --prepare-build \
+            --platform "linux/$ARCH" --source-commit "$SELECTED_SOURCE_SHA" \
+            --source-snapshot "$SOURCE_SNAPSHOT" --evidence "$RUNNER_TEMP/native-runtime-input"
+          BUILD_CONTEXT="$RUNNER_TEMP/native-runtime-input/source"
+          docker buildx build --platform "linux/$ARCH" --load -f "$BUILD_CONTEXT/Dockerfile.g7" \
+            --build-arg "CE_IMAGE=$CE_IMAGE" \
+            --build-arg "VOLT_SOURCE_SNAPSHOT=$SOURCE_SNAPSHOT" \
+            --label org.opencontainers.image.version=0.1.0-rc.4 \
+            --label "org.opencontainers.image.revision=$SELECTED_SOURCE_SHA" \
+            --label org.opencontainers.image.source=https://github.com/njvenis/volt \
+            --label org.volt.oidc-deployment-modes=demo,external,local \
+            --label org.volt.compose-install.contract=1 \
+            --tag "$IMAGE" "$BUILD_CONTEXT"
+          docker image inspect "$IMAGE" --format '{{.Os}}/{{.Architecture}} {{.Id}} {{.Size}} {{json .Config.Labels}}' \
+            | tee "$RUNNER_TEMP/runtime-image.txt"
+          test "$(docker image inspect "$IMAGE" --format '{{.Os}}/{{.Architecture}}')" = "linux/$ARCH"
+          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SELECTED_SOURCE_SHA"
+          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.volt.compose.source-snapshot"}}')" = "$SOURCE_SNAPSHOT"
+          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "0.1.0-rc.4"
+          case ",$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.volt.oidc-deployment-modes"}}')," in
+            *,local,*) ;;
+            *) echo 'native runtime image lacks local-auth mode' >&2; exit 1 ;;
+          esac
+          mkdir -p "$RUNNER_TEMP/runtime-artifact"
+          python3 tools/release/native_runtime_probe.py \
+            --platform "linux/$ARCH" --source-commit "$SELECTED_SOURCE_SHA" \
+            --source-snapshot "$SOURCE_SNAPSHOT" \
+            --source-archive "$RUNNER_TEMP/native-runtime-input/source.tar" \
+            --build-context "$BUILD_CONTEXT" \
+            --evidence "$RUNNER_TEMP/native-protected-probe"
+          docker image save --output "$RUNNER_TEMP/runtime-artifact/runtime.tar" "$IMAGE"
+          (cd "$RUNNER_TEMP/runtime-artifact" && sha256sum runtime.tar > runtime.tar.sha256)
+          printf '%s\n' "$SOURCE_SNAPSHOT" > "$RUNNER_TEMP/runtime-artifact/source-snapshot.txt"
+          printf '%s\n' "$SELECTED_SOURCE_SHA" > "$RUNNER_TEMP/runtime-artifact/source-revision.txt"
+          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/runtime-artifact/source-event-revision.txt"
+          printf '{"event_name":"%s","event_sha":"%s","selected_source_sha":"%s","checked_out_sha":"%s","source_snapshot":"%s"}\n' \
+            "$GITHUB_EVENT_NAME" "$GITHUB_SHA" "$SELECTED_SOURCE_SHA" "$(git rev-parse HEAD)" "$SOURCE_SNAPSHOT" \
+            > "$RUNNER_TEMP/runtime-artifact/source-selection.json"
+          cp "$RUNNER_TEMP/runtime-image.txt" "$RUNNER_TEMP/runtime-artifact/"
+
+      - name: Transfer platform image to read-only index qualification
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: volt-easy-rc4-runtime-${{ matrix.arch }}
+          path: ${{ runner.temp }}/runtime-artifact/
+          if-no-files-found: error
+          retention-days: 2
+
+      - name: Retain native protected FD and import component evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: volt-native-protected-probe-${{ matrix.arch }}
+          path: ${{ runner.temp }}/native-protected-probe/
+          if-no-files-found: warn
+          retention-days: 2
+
+  runtime-local-index:
+    name: Combine native runtime artifacts in owned local registry
+    needs: [runtime-native-artifacts, verifier-native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      SELECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Download native runtime and verifier platform artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: volt-easy-rc4-*
+          path: ${{ runner.temp }}/platform-artifacts
+          merge-multiple: false
+
+      - name: Create only a loopback registry and inspect the real multi-platform index
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$SELECTED_SOURCE_SHA"
+          REGISTRY=volt-easy-runtime-ci-registry
+          cleanup() {
+            if docker container inspect "$REGISTRY" >/dev/null 2>&1; then
+              owner=$(docker container inspect "$REGISTRY" --format '{{index .Config.Labels "volt.easy-install.owner"}}' 2>/dev/null || :)
+              [ "$owner" = runtime-index-ci ] && docker rm -f "$REGISTRY" >/dev/null 2>&1 || :
+            fi
+          }
+          trap cleanup EXIT HUP INT TERM
+          docker run -d --name "$REGISTRY" --restart=no --label volt.easy-install.owner=runtime-index-ci \
+            -p 127.0.0.1:46150:5000 registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          ready=0
+          for attempt in $(seq 1 30); do
+            if python3 -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:46150/v2/", timeout=1)' >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = 1
+          for arch in amd64 arm64; do
+            runtime_dir="$RUNNER_TEMP/platform-artifacts/volt-easy-rc4-runtime-$arch"
+            verifier_dir="$RUNNER_TEMP/platform-artifacts/volt-easy-rc4-verifier-$arch"
+            test -s "$runtime_dir/runtime.tar" && test -s "$verifier_dir/verifier.tar"
+            runtime_snapshot=$(cat "$runtime_dir/source-snapshot.txt")
+            verifier_snapshot=$(cat "$verifier_dir/source-snapshot.txt")
+            test "$runtime_snapshot" = "$verifier_snapshot"
+            test "$runtime_snapshot" = "sha256:$(git archive --format=tar "$SELECTED_SOURCE_SHA" | sha256sum | cut -d' ' -f1)"
+            test "$(cat "$runtime_dir/source-revision.txt")" = "$SELECTED_SOURCE_SHA"
+            test "$(cat "$verifier_dir/source-revision.txt")" = "$SELECTED_SOURCE_SHA"
+            test "$(cat "$runtime_dir/source-event-revision.txt")" = "$GITHUB_SHA"
+            test "$(cat "$verifier_dir/source-event-revision.txt")" = "$GITHUB_SHA"
+            for artifact_dir in "$runtime_dir" "$verifier_dir"; do
+              python3 - "$artifact_dir/source-selection.json" <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          record = json.loads(Path(sys.argv[1]).read_text())
+          assert record["event_sha"] == os.environ["GITHUB_SHA"]
+          assert record["selected_source_sha"] == os.environ["SELECTED_SOURCE_SHA"]
+          assert record["checked_out_sha"] == os.environ["SELECTED_SOURCE_SHA"]
+          assert record["source_snapshot"] == "sha256:" + __import__("hashlib").sha256(
+              __import__("subprocess").check_output(["git", "archive", "--format=tar", os.environ["SELECTED_SOURCE_SHA"]])).hexdigest()
+          PY
+            done
+            (cd "$runtime_dir" && sha256sum --check runtime.tar.sha256)
+            (cd "$verifier_dir" && sha256sum --check verifier.tar.sha256)
+            docker load --input "$runtime_dir/runtime.tar"
+            docker load --input "$verifier_dir/verifier.tar"
+            docker tag "volt-easy-rc4:$arch" "127.0.0.1:46150/volt:$arch"
+            docker tag "volt-installer-verifier:$arch" "127.0.0.1:46150/verifier:$arch"
+            test "$(docker image inspect "127.0.0.1:46150/volt:$arch" --format '{{.Os}}/{{.Architecture}}')" = "linux/$arch"
+            test "$(docker image inspect "127.0.0.1:46150/verifier:$arch" --format '{{.Os}}/{{.Architecture}}')" = "linux/$arch"
+            test "$(docker image inspect "127.0.0.1:46150/volt:$arch" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SELECTED_SOURCE_SHA"
+            test "$(docker image inspect "127.0.0.1:46150/verifier:$arch" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SELECTED_SOURCE_SHA"
+            test "$(docker image inspect "127.0.0.1:46150/volt:$arch" --format '{{index .Config.Labels "org.volt.compose.source-snapshot"}}')" = "$runtime_snapshot"
+            test "$(docker image inspect "127.0.0.1:46150/verifier:$arch" --format '{{index .Config.Labels "org.volt.compose.source-snapshot"}}')" = "$verifier_snapshot"
+            docker push "127.0.0.1:46150/volt:$arch"
+            docker push "127.0.0.1:46150/verifier:$arch"
+          done
+          docker buildx imagetools create --tag 127.0.0.1:46150/volt:combined \
+            127.0.0.1:46150/volt:amd64 127.0.0.1:46150/volt:arm64
+          docker buildx imagetools create --tag 127.0.0.1:46150/verifier:combined \
+            127.0.0.1:46150/verifier:amd64 127.0.0.1:46150/verifier:arm64
+          mkdir -p "$RUNNER_TEMP/index-evidence"
+          docker buildx imagetools inspect --raw 127.0.0.1:46150/volt:combined > "$RUNNER_TEMP/index-evidence/runtime-index.json"
+          docker buildx imagetools inspect --raw 127.0.0.1:46150/verifier:combined > "$RUNNER_TEMP/index-evidence/verifier-index.json"
+          PYTHONPATH="$GITHUB_WORKSPACE" INDEX_EVIDENCE="$RUNNER_TEMP/index-evidence" python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          from uvm.installer.admission import platform_children
+          evidence = Path(os.environ["INDEX_EVIDENCE"])
+          for image, filename in (("volt", "runtime-index.json"), ("verifier", "verifier-index.json")):
+              raw = (evidence / filename).read_bytes()
+              reference = f"127.0.0.1:46150/{image}@sha256:" + hashlib.sha256(raw).hexdigest()
+              children = platform_children(raw, reference)
+              assert set(children) == {"linux/amd64", "linux/arm64"}, (image, children)
+              (evidence / f"{image}-children.json").write_text(json.dumps({
+                  "reference": reference, "platform_children": children,
+              }, sort_keys=True, indent=2) + "\n")
+              print(json.dumps({"image": image, "reference": reference,
+                                "platform_children": children}, sort_keys=True))
+          PY
+
+      - name: Retain local runtime and verifier index evidence without publishing images
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: volt-easy-rc4-local-index-evidence
+          path: ${{ runner.temp }}/index-evidence/
+          if-no-files-found: error
+          retention-days: 2
+
+  hosted-arm-signed-local:
+    name: Native ARM64 fixture-signed LOCAL backup and restore
+    needs: [runtime-native-artifacts, verifier-native]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      SELECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PYTHON_VERSION: "3.13.15"
+      UV_VERSION: "0.12.18"
+    steps:
+      - name: Checkout exact selected source without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up native coordinator Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install pinned coordinator dependencies
+        run: |
+          set -eu
+          test "$(uname -m)" = aarch64
+          test "$(git rev-parse HEAD)" = "$SELECTED_SOURCE_SHA"
+          python -m pip install "uv==${UV_VERSION}"
+          uv sync --locked
+
+      - name: Download both native runtime children from this exact workflow run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: volt-easy-rc4-runtime-*
+          path: ${{ runner.temp }}/arm-native-inputs
+          merge-multiple: false
+
+      - name: Genuine ephemeral trust, native Q and signed LOCAL cold journey
+        env:
+          EXPECTED_EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          umask 077
+          test "$(git rev-parse HEAD)" = "$SELECTED_SOURCE_SHA"
+          export DOCKER_CONFIG="$RUNNER_TEMP/arm-private-docker-config"
+          mkdir -m 700 "$DOCKER_CONFIG"
+          printf '%s\n' '{}' > "$DOCKER_CONFIG/config.json"
+          export DOCKER_HOST=unix:///var/run/docker.sock
+          SOURCE_SNAPSHOT="sha256:$(git archive --format=tar "$SELECTED_SOURCE_SHA" | sha256sum | cut -d' ' -f1)"
+          uv run python tools/release/hosted_arm_fixture.py \
+            --source-commit "$SELECTED_SOURCE_SHA" --source-snapshot "$SOURCE_SNAPSHOT" \
+            --artifacts "$RUNNER_TEMP/arm-native-inputs" --event-sha "$EXPECTED_EVENT_SHA" \
+            --work "$RUNNER_TEMP/arm-essential-private" \
+            --public-result "$RUNNER_TEMP/arm-native-essential-public.json" \
+            --public-proofs "$RUNNER_TEMP/arm-native-original-proofs"
+
+      # Never upload RUNNER_TEMP/work, raw logs, generated capabilities, state,
+      # signer directory or signing key. Only the closed result and validated
+      # ORIGINAL public proof closure are exported by the coordinator.
+      - name: Retain only closed public native qualification result
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: volt-native-arm-signed-local-result
+          path: |
+            ${{ runner.temp }}/arm-native-essential-public.json
+            ${{ runner.temp }}/arm-native-original-proofs/
+          if-no-files-found: warn
+          retention-days: 2

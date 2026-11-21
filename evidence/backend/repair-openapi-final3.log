@@ -1,0 +1,7 @@
+test_combined_schema_includes_local_oidc_and_base_commands (tests.operations.test_export_openapi.OpenAPIModeExportTests.test_combined_schema_includes_local_oidc_and_base_commands) ... ok
+test_registration_and_abandonment_export_strict_runtime_envelopes (tests.operations.test_export_openapi.OpenAPIModeExportTests.test_registration_and_abandonment_export_strict_runtime_envelopes) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.824s
+
+OK

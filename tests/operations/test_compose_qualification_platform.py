@@ -4,16 +4,34 @@ import json
 import unittest
 from pathlib import Path
 import ast
+import os
 import subprocess
 import sys
 import tempfile
+import shutil
 
 from tools.compose_release_qualification import (SUPPORTED_IMAGE_VERSIONS, SUPPORTED_RELEASE_VERSIONS, init_command,
-    admit_bundle_version, platform_from_image_inspect, qualification_release_metadata,
-    qualification_scope, verified_bundle_version)
+    admit_bundle_version, compose_bundle_verify_command, platform_from_image_inspect, qualification_release_metadata,
+    qualification_scope, scanner_stage_record, verified_bundle_version)
 
 
 class ComposeQualificationPlatformTests(unittest.TestCase):
+    def test_qualification_script_entrypoint_resolves_tools_without_pythonpath(self):
+        root = Path(__file__).resolve().parents[2]
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+        result = subprocess.run([sys.executable, str(root / "tools/compose_release_qualification.py"),
+            "--help"], cwd=root, env=environment, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--development-fixture", result.stdout)
+
+    def test_local_auth_scanner_stage_is_explicitly_pending(self):
+        record = scanner_stage_record()
+        self.assertEqual(record["provider"], "Qualys")
+        self.assertEqual(record["status"], "pending")
+        self.assertIs(record["activation_qualified"], False)
+        self.assertIn("No accepted packaged Qualys", record["reason"])
+
     def test_scope_uses_actual_runner_context_not_release_version(self):
         self.assertEqual(qualification_scope(version="0.1.0-rc.2", development_fixture=False, environment={}),
                          "local_synthetic_rc2")
@@ -40,7 +58,8 @@ class ComposeQualificationPlatformTests(unittest.TestCase):
 
     def test_release_version_allowlist_and_verified_bundle_version(self):
         self.assertEqual(SUPPORTED_RELEASE_VERSIONS, ("0.1.0-rc.2", "0.1.0-rc.3"))
-        self.assertEqual(SUPPORTED_IMAGE_VERSIONS, ("0.1.0-rc.2", "0.1.0-rc.3", "0.1.0-demo"))
+        self.assertEqual(SUPPORTED_IMAGE_VERSIONS,
+                         ("0.1.0-rc.2", "0.1.0-rc.3", "0.1.0-rc.4", "0.1.0-demo"))
         self.assertEqual(admit_bundle_version("verified_version=0.1.0-rc.2 files=8", "0.1.0-rc.2"),
                          "0.1.0-rc.2")
         self.assertEqual(admit_bundle_version("verified_version=0.1.0-rc.3 files=10", "0.1.0-rc.3"),
@@ -50,8 +69,8 @@ class ComposeQualificationPlatformTests(unittest.TestCase):
         self.assertEqual(verified_bundle_version("verified_version=0.1.0-rc.3 files=10 sha256=" + "a" * 64),
                          "0.1.0-rc.3")
         with self.assertRaisesRegex(RuntimeError, "supported release version"):
-            verified_bundle_version("verified_version=0.1.0-rc.4 files=10")
-        with self.assertRaisesRegex(RuntimeError, "fixed RC2, RC3 and explicit demo fixture"):
+            verified_bundle_version("verified_version=0.1.0-rc.5 files=10")
+        with self.assertRaisesRegex(RuntimeError, "future RC4 candidate.*local-auth fixture"):
             admit_bundle_version("verified_version=0.1.0-rc.3 files=10", "0.1.0-rc.4")
         with self.assertRaisesRegex(RuntimeError, "requires explicit development-fixture"):
             admit_bundle_version("verified_version=0.1.0-rc.3 files=10", "0.1.0-demo")
@@ -75,8 +94,12 @@ class ComposeQualificationPlatformTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="compose-qual-version-") as temp_dir:
             base = Path(temp_dir)
             bundle = base / "volt-compose.tar.gz"
+            source = base / "rc3-source"
+            (source / "deploy").mkdir(parents=True)
+            shutil.copytree(root / "deploy/compose", source / "deploy/compose")
+            (source / "deploy/compose/VERSION").write_text("0.1.0-rc.3\n")
             build = subprocess.run([sys.executable, str(root / "tools/build_compose_bundle.py"),
-                "build", "--output", str(bundle)], text=True, capture_output=True)
+                "build", "--output", str(bundle), "--source-root", str(source)], text=True, capture_output=True)
             self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
             private_tmp = base / "private"; private_tmp.mkdir()
             bundle_tmp = base / "extracted"; bundle_tmp.mkdir()
@@ -85,7 +108,7 @@ class ComposeQualificationPlatformTests(unittest.TestCase):
                 "--image-id", "sha256:" + "a" * 64, "--source-snapshot", "sha256:" + "b" * 64,
                 "--source-commit", "c" * 40, "--version", "0.1.0-rc.2", "--bundle", str(bundle),
                 "--evidence", str(evidence), "--private-tmp", str(private_tmp), "--bundle-tmp", str(bundle_tmp)],
-                text=True, capture_output=True)
+                text=True, capture_output=True, env={**os.environ, "PYTHONPATH": str(root)})
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("requested release 0.1.0-rc.2 does not match verified Compose bundle 0.1.0-rc.3",
                           result.stderr)
@@ -103,9 +126,9 @@ class ComposeQualificationPlatformTests(unittest.TestCase):
             bundle_tmp = base / "extracted"; bundle_tmp.mkdir()
             result = subprocess.run([sys.executable, str(root / "tools/compose_release_qualification.py"),
                 "--image-id", "sha256:" + "a" * 64, "--source-snapshot", "sha256:" + "b" * 64,
-                "--source-commit", "c" * 40, "--version", "0.1.0-rc.4", "--bundle", str(base / "missing.tar.gz"),
+                "--source-commit", "c" * 40, "--version", "0.1.0-rc.5", "--bundle", str(base / "missing.tar.gz"),
                 "--evidence", str(evidence), "--private-tmp", str(private_tmp), "--bundle-tmp", str(bundle_tmp)],
-                text=True, capture_output=True)
+                text=True, capture_output=True, env={**os.environ, "PYTHONPATH": str(root)})
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("invalid choice", result.stderr)
             self.assertFalse(evidence.exists())
@@ -123,12 +146,36 @@ class ComposeQualificationPlatformTests(unittest.TestCase):
                 "--image-id", "sha256:" + "a" * 64, "--source-snapshot", "sha256:" + "b" * 64,
                 "--source-commit", "c" * 40, "--version", "0.1.0-demo", "--bundle", str(base / "missing.tar.gz"),
                 "--evidence", str(evidence), "--private-tmp", str(private_tmp), "--bundle-tmp", str(bundle_tmp)],
-                text=True, capture_output=True)
+                text=True, capture_output=True, env={**os.environ, "PYTHONPATH": str(root)})
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("0.1.0-demo requires --development-fixture", result.stderr)
             self.assertFalse(evidence.exists())
             self.assertEqual(list(private_tmp.iterdir()), [])
             self.assertEqual(list(bundle_tmp.iterdir()), [])
+
+    def test_production_demo_bundle_verifier_opts_into_only_marked_rc3_compatibility(self):
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory(prefix="compose-qual-demo-installer-") as directory:
+            bundle = Path(directory) / "installer.tar.gz"
+            produced = subprocess.run([sys.executable, str(root / "tools/release/portable_demo.py"),
+                "compose-installer", "--output", str(bundle)], cwd=root, text=True, capture_output=True)
+            self.assertEqual(produced.returncode, 0, produced.stderr)
+            result = json.loads(produced.stdout.splitlines()[-1])
+            self.assertEqual(result["distribution_scope"], "local_demo_compatibility")
+            argv = compose_bundle_verify_command(bundle, version="0.1.0-demo",
+                development_fixture=True, local_auth_fixture=False)
+            self.assertIn("--allow-local-demo-compatibility", argv)
+            checked = subprocess.run(argv, cwd=root, text=True, capture_output=True)
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+            self.assertEqual(admit_bundle_version(checked.stdout, "0.1.0-demo",
+                development_fixture=True), "0.1.0-rc.3")
+            normal_release = subprocess.run([sys.executable, str(root / "tools/build_compose_bundle.py"),
+                "verify", "--archive", str(bundle)], cwd=root, text=True, capture_output=True)
+            self.assertNotEqual(normal_release.returncode, 0)
+            self.assertIn("not a release installer", normal_release.stderr)
+            local_auth = compose_bundle_verify_command(bundle, version="0.1.0-rc.4",
+                development_fixture=False, local_auth_fixture=True)
+            self.assertNotIn("--allow-local-demo-compatibility", local_auth)
 
     def test_platform_from_image_config_admits_both_supported_architectures(self):
         for architecture, platform in (("amd64", "linux/amd64"), ("arm64", "linux/arm64")):
@@ -176,7 +223,7 @@ class ComposeQualificationPlatformTests(unittest.TestCase):
     def test_browser_smoke_uses_password_login_for_fresh_sessions_without_fixture_bypass(self):
         root = Path(__file__).resolve().parents[2]
         source = (root / "tools/g7_local_preview_smoke.mjs").read_text()
-        self.assertIn("process.argv.includes('--password-stdin')", source)
+        self.assertIn("process.argv.includes(localMode?'--credentials-stdin':'--password-stdin')", source)
         self.assertIn("getByLabel('Username').fill(username)", source)
         self.assertIn("getByLabel('Password').fill(password)", source)
         self.assertNotIn("VOLT_SMOKE_FIXTURE_SUBJECT", source)
@@ -184,7 +231,7 @@ class ComposeQualificationPlatformTests(unittest.TestCase):
         self.assertIn("await page.reload({waitUntil:'domcontentloaded'})", revocation)
         self.assertLess(revocation.index("await page.reload"),
             revocation.index("getByRole('link',{name:/sign in/i})"))
-        self.assertIn('"--password-stdin"',
+        self.assertIn('"--credentials-stdin"',
             (root / "tools/compose_release_qualification.py").read_text())
 
 

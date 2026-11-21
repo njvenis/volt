@@ -68,3 +68,7 @@ Group removal is a soft disable (`access_group.update` with `enabled:false`) so 
 ## Compatibility and reporting
 
 No endpoint infers native authority from provider groups or owner teams. Legacy mode preserves current provider-mapped behavior until explicit activation. Existing owner assignments and issued report/export bytes are immutable. New report calculations record and evaluate native membership event sequence, policy/authority/team revisions, and effective interval boundaries independently at report `as_of` and `known_at`; old reports use frozen inputs. Exports, cursors and receipt disclosure recheck current native authority. No new no-intent exception is introduced.
+
+## Proposed persistent local installation extension (2026-11-18)
+
+The easy-compose-install change adds dedicated local sessions, an atomic one-use first-admin claim and protected deployment/scanner registration. Local authority uses persisted native grants; it does not fabricate IdP membership or alter the approved OIDC/native intersection. The initial session is not authority by itself. Exact-source connector grants and optional explicit initial read access commit with the supported binding, audit and receipt. No implicit assessment-write, approval or remediation power is introduced. See easy-install-api-contract.md and the new change for the versioned proposal; this paragraph is not an execution or gate claim.

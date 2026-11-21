@@ -14,7 +14,12 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY uvm ./uvm
 COPY migrations ./migrations
 COPY alembic.ini ./
+COPY docker/g7/schema-head /tmp/uvm-g7-schema-head
 RUN uv sync --frozen --no-dev
+RUN set -eu; \
+    declared=$(cat /tmp/uvm-g7-schema-head); \
+    actual=$(/opt/uvm/venv/bin/python -c 'from alembic.config import Config; from alembic.script import ScriptDirectory; heads=ScriptDirectory.from_config(Config("/build/alembic.ini")).get_heads(); print(heads[0] if len(heads) == 1 else "multiple:" + ",".join(heads))'); \
+    test "$actual" = "$declared" || { echo "declared runtime schema head $declared differs from the sole migration graph head $actual" >&2; exit 1; }
 # uv uses a symlink to the builder interpreter by default. After the venv is
 # copied into the runtime image, that symlink resolves outside the venv and
 # CPython skips pyvenv.cfg. Keep a venv-local executable so pinned runtime
@@ -38,11 +43,6 @@ RUN set -eu; case "$TARGETARCH" in amd64) musl_arch=x86_64;; arm64) musl_arch=aa
 
 FROM ${CE_IMAGE} AS runtime
 ARG TARGETARCH
-ARG VOLT_OIDC_DEPLOYMENT_MODES=demo,external
-ARG VOLT_SOURCE_SNAPSHOT=unspecified
-LABEL org.volt.oidc-deployment-modes=${VOLT_OIDC_DEPLOYMENT_MODES} \
-      org.volt.compose.source-snapshot=${VOLT_SOURCE_SNAPSHOT} \
-      org.volt.compose-install.contract=1
 USER root
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN python3 - <<'PY'
@@ -76,6 +76,8 @@ if source.count(needle) != 1:
     raise SystemExit('expected exactly one DefectDojo middleware assignment')
 path.write_text(source.replace(needle, replacement))
 PY
+# PGDG removes old versions from its live index. Exact archived binary bytes
+# remain subject to the original SHA-256, installed-version and delta checks.
 COPY docker/g7/versions.lock /tmp/uvm-g7-versions.lock
 COPY third-party/notices/OAUTHLIB-4.0.1-BSD-3-Clause.txt /tmp/ce-global-oauthlib-license.txt
 RUN set -eu; \
@@ -83,7 +85,7 @@ RUN set -eu; \
     export DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none; \
     apt-get update -qq; \
     mkdir -p /tmp/os-packages; cd /tmp/os-packages; \
-    packages=''; expected_delta=''; \
+    packages=''; expected_delta=''; verified_debs=(); \
     dpkg-query -W -f='${Package}=${Version}\n' | sort > /tmp/g7-packages-before; \
     while IFS='=|' read -r key version digest; do \
       arch=''; case "$key" in *:amd64) arch=amd64 ;; *:arm64) arch=arm64 ;; esac; \
@@ -95,13 +97,21 @@ RUN set -eu; \
       esac; \
       package=${package%%:*}; \
       if [ "$is_delta" = 1 ]; then expected_delta+="$package=$version"$'\n'; fi; \
-      apt-get download -qq "$package=$version"; \
+      case "$package" in \
+        postgresql-18|postgresql-client-18|postgresql-common|postgresql-client-common) \
+          archive_source=postgresql-18; \
+          case "$package" in *-common) archive_source=postgresql-common ;; esac; \
+          deb="${package}_${version}_${arch:-all}.deb"; \
+          python3 -c 'import pathlib,sys,urllib.request; url="https://apt-archive.postgresql.org/pub/repos/apt/pool/main/p/"+sys.argv[1]+"/"+sys.argv[2]; response=urllib.request.urlopen(url,timeout=60); data=response.read(67108865); response.close(); assert len(data)<=67108864, "PGDG package exceeds bound"; pathlib.Path(sys.argv[2]).write_bytes(data)' "$archive_source" "$deb" ;; \
+        *) apt-get download -qq "$package=$version" ;; \
+      esac; \
       deb=$(find . -maxdepth 1 -type f -name "${package%%:*}_*.deb" -print -quit); \
       test -n "$deb"; \
       printf '%s  %s\n' "$digest" "$deb" | sha256sum -c -; \
+      verified_debs+=("$deb"); \
       packages="$packages $package=$version"; \
     done < <(grep -E '^os_(delta_)?package_' /tmp/uvm-g7-versions.lock); \
-    apt-get install -yqq --no-install-recommends $packages; \
+    apt-get install -yqq --no-install-recommends "${verified_debs[@]}"; \
     for entry in $packages; do expected=${entry#*=}; package=${entry%%=*}; \
       actual=$(dpkg-query -W -f='${Version}' "$package"); test "$actual" = "$expected"; \
     done; \
@@ -117,6 +127,7 @@ RUN set -eu; \
     && useradd --system --uid 1800 --gid uvm --home-dir /opt/uvm --create-home uvm \
     && groupadd --system --gid 1801 valkey \
     && useradd --system --uid 1801 --gid valkey --home-dir /var/lib/valkey --create-home valkey \
+    && chmod 0755 /opt/uvm \
     && pg_dropcluster --stop 18 main \
     && rm -rf /var/lib/postgresql/18/main /etc/postgresql/18/main /var/log/postgresql \
     && install -d -o 1001 -g 1337 /app/media \
@@ -148,6 +159,10 @@ COPY --from=valkey-bin /usr/lib/libcrypto.so.3 /opt/valkey/lib/libcrypto.so.3
 WORKDIR /opt/uvm/app
 COPY --from=uvm-build --chown=uvm:uvm /opt/uvm/venv /opt/uvm/venv
 COPY --from=uvm-build --chown=uvm:uvm /build/uvm ./uvm
+# Installer helpers run as the host UID as well as the API UID. Archive-based
+# build contexts may carry0700 directory modes; public application code must
+# remain traversable without changing ownership or private runtime custody.
+RUN find /opt/uvm/app/uvm -type d -exec chmod 0755 '{}' +
 COPY --chown=1001:1337 docker/g7/beat_progress_scheduler.py /app/beat_progress_scheduler.py
 COPY --chown=1001:1337 docker/g7/verification_middleware.py /app/g7_verification_middleware.py
 COPY --chown=uvm:uvm tools/g7_container_audit_export.py /opt/uvm/app/tools/g7_container_audit_export.py
@@ -166,13 +181,32 @@ COPY --from=ui-build --chown=uvm:uvm /ui/dist /opt/uvm/ui
 COPY --chown=uvm:uvm THIRD-PARTY-NOTICES.md LICENSE /usr/share/doc/volt/third-party/
 COPY --chown=uvm:uvm third-party/notices/ /usr/share/doc/volt/third-party/source/
 WORKDIR /app
+COPY docker/g7/local_maintenance.py /usr/local/bin/uvm-local-maintenance
 COPY docker/g7/entrypoint.sh /usr/local/bin/uvm-g7-entrypoint
 COPY docker/g7/identity_runtime.sh /usr/local/bin/uvm-g7-identity-runtime
 COPY docker/g7/schema-head /etc/uvm-g7-schema-head
 COPY docker/g7/healthcheck.sh /usr/local/bin/uvm-g7-healthcheck
 COPY docker/g7/valkey-server /usr/local/bin/valkey-server
 COPY docker/g7/valkey-cli /usr/local/bin/valkey-cli
-RUN chmod 0755 /usr/local/bin/uvm-g7-entrypoint /usr/local/bin/uvm-g7-identity-runtime /usr/local/bin/uvm-g7-healthcheck /usr/local/bin/valkey-server /usr/local/bin/valkey-cli
+RUN chmod 0755 /usr/local/bin/uvm-local-maintenance /usr/local/bin/uvm-g7-entrypoint /usr/local/bin/uvm-g7-identity-runtime /usr/local/bin/uvm-g7-healthcheck /usr/local/bin/valkey-server /usr/local/bin/valkey-cli
+# ONE canonical protected routing implementation, shared physically by ROOT
+# isolated control and the UID1800 API bridge. API-owned package imports are
+# forbidden in the broker/control closure.
+COPY --chown=0:0 uvm/auth/route_check_records.py /usr/local/lib/volt-private/volt_route_check_records.py
+COPY --chown=0:0 uvm/installer/route_check.py /usr/local/lib/volt-private/volt_route_check_control.py
+COPY --chown=0:0 docker/g7/main_api_launcher.py /usr/local/libexec/volt-main-api-launcher.py
+COPY --chown=0:0 docker/g7/route_check_control.py /usr/local/libexec/volt-route-check-control.py
+COPY --chown=0:0 uvm/installer/terminal_write.py /usr/local/libexec/volt-terminal-write.py
+COPY --chown=0:0 uvm/installer/terminal_completion.py /usr/local/libexec/volt-main-api-completion.py
+COPY --chown=0:0 uvm/installer/start_admission.py /usr/local/libexec/volt-start-admission.py
+COPY --chown=0:0 docker/g7/check_protected_python.py /usr/local/libexec/volt-check-protected-python.py
+RUN chown root:root /opt/uvm /opt/uvm/venv /opt/uvm/venv/bin /opt/uvm/venv/bin/python-uvm /opt/uvm/venv/pyvenv.cfg \
+    && chmod 0755 /opt/uvm /opt/uvm/venv /opt/uvm/venv/bin /opt/uvm/venv/bin/python-uvm \
+    && chmod 0644 /opt/uvm/venv/pyvenv.cfg \
+    && install -d -o root -g root -m 0755 /usr/local/lib/volt-private /usr/local/libexec \
+    && chmod 0644 /usr/local/lib/volt-private/volt_route_check_records.py /usr/local/lib/volt-private/volt_route_check_control.py \
+    && chmod 0755 /usr/local/libexec/volt-start-admission.py /usr/local/libexec/volt-main-api-launcher.py /usr/local/libexec/volt-route-check-control.py /usr/local/libexec/volt-terminal-write.py /usr/local/libexec/volt-main-api-completion.py /usr/local/libexec/volt-check-protected-python.py \
+    && env -i PATH=/usr/bin:/bin LC_ALL=C /usr/local/bin/python3.14 -I -S /usr/local/libexec/volt-check-protected-python.py
 RUN valkey-server --version && valkey-cli --version
 # pip is retained in the build stage for uv installation only. The final CE
 # runtime installs no packages dynamically; remove its installer and vendored
@@ -191,6 +225,11 @@ for path in (Path('/usr/local/bin/pip'), Path('/usr/local/bin/pip3'), Path('/usr
 if pip.exists() or list(site.glob('pip-*.dist-info')):
     raise SystemExit('pip remains in final runtime')
 PY
+ARG VOLT_OIDC_DEPLOYMENT_MODES=demo,external,local
+ARG VOLT_SOURCE_SNAPSHOT=unspecified
+LABEL org.volt.oidc-deployment-modes=${VOLT_OIDC_DEPLOYMENT_MODES} \
+      org.volt.compose.source-snapshot=${VOLT_SOURCE_SNAPSHOT} \
+      org.volt.compose-install.contract=1
 ENV PATH=/opt/uvm/venv/bin:$PATH \
     PYTHONPATH=/opt/uvm/app \
     PGDATA=/var/lib/postgresql/data \

@@ -34,6 +34,7 @@ class RC3AdmissionTests(unittest.TestCase):
         self.source = self.root / "source"
         self.source.mkdir()
         shutil.copytree(ROOT / "deploy/compose", self.source / "deploy/compose")
+        (self.source / "deploy/compose/VERSION").write_text("0.1.0-rc.3\n")
         (self.source / "tools/release").mkdir(parents=True)
         shutil.copyfile(ROOT / "tools/release/exceptions.example.json", self.source / "tools/release/exceptions.example.json")
         for name in candidate.NOTICE_SOURCES:

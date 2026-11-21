@@ -232,6 +232,61 @@ def _root_dto(connection, policy_row, deployment, principal, context):
 
 def install_observer_settings_routes(app: FastAPI) -> None:
     engine, principals = app.state.engine, app.state.principals
+    # Trusted app-construction configuration, never a request/header-selected role.
+    control_flag=os.environ.get('UVM_G7_RECOVERY_CONTROL_ONLY','0')
+    if control_flag not in {'','0','1'}:
+        raise RuntimeError('recovery control role configuration is invalid')
+    control_only=control_flag=='1'
+    control_port=None
+    if control_only:
+        if os.environ.get('UVM_G7_VERIFICATION_ONLY')!='1':
+            raise RuntimeError('recovery control role requires verification-only mode')
+        try:
+            control_port=int(os.environ.get('UVM_G7_RECOVERY_CONTROL_PORT','8002'))
+            if not 1<=control_port<=65535:raise ValueError
+        except ValueError:
+            raise RuntimeError('recovery control listener port is invalid') from None
+
+    def control_host_identity(request,authorization):
+        from uvm.auth.service import configured_service_principals
+        from uvm.assessment.policy_lock import lock_policy
+        server=request.scope.get('server')
+        if (not isinstance(server,tuple) or len(server)!=2
+                or type(server[1]) is not int or server[1]!=control_port):
+            raise HTTPException(404,{'code':'not_found','message':'Route not found'})
+        if not authorization or not authorization.startswith('Bearer ') or not authorization[7:]:
+            raise HTTPException(401,{'code':'authentication_required','message':'Authentication required'})
+        with engine.begin() as connection:
+            lock_policy(connection,shared=True)
+            configured=app.state.principals
+            matches=configured_service_principals(configured,authorization[7:])
+            if len(matches)!=1:
+                raise HTTPException(401,{'code':'authentication_required','message':'Authentication required'})
+            principal=matches[0];policy=_policy(connection)['document']
+            policy_principals=policy.get('principals',{}) if isinstance(policy,dict) else None
+            policy_identity=policy_principals.get(principal,{}) if isinstance(policy_principals,dict) else None
+            if (configured[principal].get('enabled',True) is not True
+                    or not isinstance(policy_identity,dict) or policy_identity.get('enabled',True) is not True):
+                raise HTTPException(403,{'code':'forbidden','message':'Host service identity required'})
+            try:registry=_registry()
+            except RuntimeError:
+                raise HTTPException(503,{'code':'dependency_unavailable','message':'Host authority is unavailable'}) from None
+            entries=[entry for entry in registry.values() if entry['host_principal_id']==principal]
+            if len(entries)!=1:
+                raise HTTPException(403,{'code':'forbidden','message':'Host service identity required'})
+            entry=entries[0]
+            # Registry binding is the existing host permission. Only an existing
+            # wildcard deny applies; no invented native host action/role/grant.
+            if any(isinstance(denial,dict) and denial.get('principal_id') in {principal,'*'}
+                    and '*' in denial.get('actions',[])
+                    and (entry['deployment_id'] in denial.get('target_ids',[]) or '*' in denial.get('target_ids',[]))
+                    for denial in policy.get('denies',[])):
+                raise HTTPException(403,{'code':'forbidden','message':'Host service permission denied'})
+            from uvm.auth.local import LocalAuth
+            if isinstance(getattr(app.state,'oidc_auth',None),LocalAuth):
+                from uvm.connectors.local_recovery import load_authority,validate_binding
+                validate_binding(connection,load_authority(),require_applied=False)
+            return principal,entry
 
     def authenticate(request: Request, authorization: str | None = Header(default=None)):
         auth_service = getattr(app.state, "oidc_auth", None)
@@ -529,6 +584,8 @@ def install_observer_settings_routes(app: FastAPI) -> None:
             return row["result"]
 
     def host_auth(request: Request, authorization: str | None = Header(default=None)):
+        if control_only and request.url.path.startswith('/recovery-control/v1/'):
+            return control_host_identity(request,authorization)
         principal = authenticate(request, authorization)
         context = getattr(request.state, "authority_context", None)
         if context is not None and context.credential_mode in {"oidc_session", "github_link"}:

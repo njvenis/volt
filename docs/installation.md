@@ -2,13 +2,13 @@
 
 ## RC3 Compose installation
 
-This is the target installation procedure for the planned VOLT `0.1.0-rc.3` evaluation prerelease. Use it only after the RC3 tag, signed archives, bundle and corrected external verification guide have actually been published. It is not a claim that publication has occurred. The planned release targets Docker Engine and Docker Desktop with native Linux `amd64` and `arm64` images. Apple Silicon users should select `linux/arm64`; x86-64 users should select `linux/amd64`. These are Linux container platforms and do not establish a native macOS container runtime. RC3 is not a production deployment.
+VOLT `0.1.0-rc.3` was published on 2026-11-18. The signed archives, standalone Compose bundle and verification guide are available from the [RC3 release page](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.3). This evaluation release supports Linux `amd64` and `arm64` container images. Apple Silicon users select `linux/arm64`; x86-64 users select `linux/amd64`. These are Linux container platforms and do not establish a native macOS container runtime. RC3 is not a production deployment.
 
-After publication, the release page is expected to contain a signed offline archive for each platform, a standalone source-free Compose bundle and external release-verification instructions. Use the archive matching the Docker engine where the image will run. A checksum sidecar detects transfer damage; it does not establish who published the files. Do not extract the bundle, load an image, or run any archive-contained helper until the independent verification steps below have succeeded.
+The release page contains a signed offline archive for each platform, a standalone source-free Compose bundle and external release-verification instructions. Use the archive matching the Docker engine where the image will run. A checksum sidecar detects transfer damage; it does not establish who published the files. Do not extract the bundle, load an image, or run any archive-contained helper until the independent verification steps below have succeeded.
 
 ### Download the matching release files
 
-Once the release is published, choose the platform explicitly. Keep the signed archive, the standalone bundle and its checksum together until verification is complete:
+Choose the platform explicitly. Keep the signed archive, the standalone bundle and its checksum together until verification is complete:
 
 ```sh
 export VOLT_RELEASE_TAG=v0.1.0-rc.3
@@ -30,7 +30,7 @@ export VOLT_ARCHIVE="$VOLT_RELEASE_DIR/volt-0.1.0-rc.3-linux-${VOLT_ARCH}.tar.gz
 export VOLT_BUNDLE="$VOLT_RELEASE_DIR/volt-compose.tar.gz"
 ```
 
-The following are the expected permanent asset URLs after publication:
+The release assets are available at these permanent URLs:
 
 - [RC3 release page](https://github.com/njvenis/volt/releases/tag/v0.1.0-rc.3)
 - [Linux/arm64 signed archive](https://github.com/njvenis/volt/releases/download/v0.1.0-rc.3/volt-0.1.0-rc.3-linux-arm64.tar.gz)
@@ -43,7 +43,7 @@ The following are the expected permanent asset URLs after publication:
 
 Begin with the independently obtained fixed `v0.1.0-rc.3` repository tag. Follow the corrected `VERIFY-RELEASE.md` to resolve the source SHA from that trusted tag, check out that exact source, provision the pinned Cosign/Sigstore trust, and verify and load the signed archive. Never let an archive field such as `source_commit` select verifier code. The signed archive binds the source, platform image, common multi-platform index, selected-child SPDX/notices and scan evidence. `registry_digest` is the published common multi-platform registry index digest. `image_index_id` is the saved archive's image index ID and may be null for a classic Docker image save; `platform_manifest_digest` identifies the saved archive's platform manifest. The published platform-specific child digest is recorded separately in `platform-digest.txt`. `image_id` and `image_config_id` identify the selected local platform image. These values describe different artifacts; do not treat a registry/index digest as a local Docker image ID. Do not trust a verifier, checksum, signature key or Sigstore root solely because it was included in the downloaded archive. Authenticate the separate bundle below before extracting or executing it.
 
-The planned signed offline archive binds the versioned source bundle and image evidence. After the signed archive verifies (and, for offline installs, after its image is loaded through the trusted helper), authenticate the downloaded standalone bundle against its signed embedded bytes. Keep the trusted `SOURCE_SHA` resolved from the fixed tag in the same shell. The helper must succeed before checksum inspection or extraction; the sidecar checksum only detects transfer damage. The bundle root is expected to be versioned as `volt-compose-0.1.0-rc.3`.
+The signed offline archive binds the versioned source bundle and image evidence. After the signed archive verifies (and, for offline installs, after its image is loaded through the trusted helper), authenticate the downloaded standalone bundle against its signed embedded bytes. Keep the trusted `SOURCE_SHA` resolved from the fixed tag in the same shell. The helper must succeed before checksum inspection or extraction; the sidecar checksum only detects transfer damage. The bundle root is versioned as `volt-compose-0.1.0-rc.3`.
 
 ```sh
 python3 trusted-source/tools/release/archive.py authenticate-bundle \
@@ -63,7 +63,7 @@ For an online install, use the exact registry digest reported by authenticated r
 
 ### Install the local password-admin demo
 
-The ordinary install needs Docker Engine with Compose v2, Python 3.11 or newer and OpenSSL command-line tools. The separate verification bootstrap needs Git, the pinned Cosign helper and network access for the trusted fixed source tag and Sigstore trust provisioning; `gh` is used by the download example. An offline image import is possible only after those verifier and trust materials have been provisioned and the archive and bundle authenticated. After verification and extraction, ordinary runtime setup does not require a VOLT source checkout, Git, Node.js, npm or a browser package download. Apple Silicon selects a Linux `arm64` container; macOS Docker Desktop itself has not been exercised. The local demo uses synthetic identity and does not contact Okta; external OIDC login and membership sync require connectivity to the configured issuer/API.
+The RC3 installer requires Docker Engine with Compose v2, Python 3.11 or newer and OpenSSL command-line tools. The separate verification bootstrap needs Git, the pinned Cosign helper and network access for the trusted fixed source tag and Sigstore trust provisioning; `gh` is used by the download example. An offline image import is possible only after those verifier and trust materials have been provisioned and the archive and bundle authenticated. After verification and extraction, ordinary runtime setup does not require a VOLT source checkout, Git, Node.js, npm or a browser package download. Apple Silicon selects a Linux `arm64` container; macOS Docker Desktop itself has not been exercised. The local demo uses synthetic identity and does not contact Okta; external OIDC login and membership sync require connectivity to the configured issuer/API.
 
 For an online install, after the archive has been authenticated, construct the immutable registry reference from its signed digest and pull the declared platform:
 

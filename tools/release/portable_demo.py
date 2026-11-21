@@ -33,6 +33,11 @@ COMPOSE_BUNDLE_FILES = {
     "okta-publisher.yaml", "compose.env.example", "oidc.example.json",
     "okta-publisher.example.json", "setup.py", "manifest.json",
 }
+LEGACY_DEMO_COMPOSE_FILES = (
+    "VERSION", "README.md", "backup-restore.md", "compose.yaml", "demo.yaml",
+    "compose.env.example", "oidc.example.json", "setup.py", "okta-publisher.yaml",
+    "okta-publisher.example.json",
+)
 
 
 def sha(path: Path) -> str:
@@ -126,7 +131,10 @@ def _verify_compose_bundle(path: Path) -> None:
         if next(iter(roots)) != f"volt-compose-{version}":
             raise ValueError("Compose installer root and version disagree")
         metadata = json.loads(payload["manifest.json"])
-        if metadata.get("format_version") != 1 or metadata.get("bundle_version") != version or metadata.get("release_image") is not None:
+        if (metadata.get("format_version") != 1 or metadata.get("bundle_version") != version
+                or metadata.get("release_image") is not None
+                or metadata.get("distribution_scope") != "local_demo_compatibility"
+                or set(metadata) != {"format_version", "bundle_version", "release_image", "files", "distribution_scope"}):
             raise ValueError("Compose installer manifest metadata is invalid")
         wanted = {name: hashlib.sha256(payload[name]).hexdigest() for name in expected_payload}
         if metadata.get("files") != wanted:
@@ -136,6 +144,22 @@ def _verify_compose_bundle(path: Path) -> None:
     sidecar = path.with_suffix(path.suffix + ".sha256")
     if sidecar.read_text() != f"{sha(path)}  {path.name}\n":
         raise ValueError("Compose installer checksum sidecar is invalid")
+
+
+def build_legacy_demo_installer(output: Path, source_root: Path = ROOT) -> None:
+    """Build the explicitly non-release RC3 payload nested in local demo archives."""
+    compose = source_root / "deploy" / "compose"
+    with tempfile.TemporaryDirectory(prefix="volt-local-demo-compose-source-") as temporary:
+        staged = Path(temporary) / "source"
+        staged_compose = staged / "deploy" / "compose"
+        staged_compose.mkdir(parents=True)
+        for name in LEGACY_DEMO_COMPOSE_FILES:
+            shutil.copyfile(compose / name, staged_compose / name)
+        (staged_compose / "VERSION").write_text("0.1.0-rc.3\n")
+        command([sys.executable, str(ROOT / "tools/build_compose_bundle.py"), "build",
+                 "--output", str(output), "--source-root", str(staged),
+                 "--local-demo-compatibility"])
+    _verify_compose_bundle(output)
 
 
 def pins() -> dict[str, str]:
@@ -275,7 +299,7 @@ def build(output: Path, platform: str, docker: str) -> dict:
         manifest = _manifest_for_image(image_tar, source_tar, image_id, platform, commit, source_snapshot, image_ref)
         _image_admission(image_tar, manifest)
         installer = package / "installer.tar.gz"
-        command([sys.executable, str(ROOT / "tools/build_compose_bundle.py"), "build", "--output", str(installer)])
+        build_legacy_demo_installer(installer, source_root)
         (package / "offline-tools").mkdir()
         for helper in (ROOT / "tools/release/portable_demo.py", ROOT / "tools/release/archive.py",
                        ROOT / "tools/release/provenance.py", ROOT / "tools/build_compose_bundle.py"):
@@ -364,6 +388,8 @@ def main() -> int:
     build_parser.add_argument("--docker", default="docker")
     verify_parser = sub.add_parser("verify")
     verify_parser.add_argument("--archive", required=True, type=Path)
+    installer_parser = sub.add_parser("compose-installer")
+    installer_parser.add_argument("--output", required=True, type=Path)
     load_parser = sub.add_parser("load")
     load_parser.add_argument("--archive", required=True, type=Path)
     load_parser.add_argument("--docker", default="docker")
@@ -373,6 +399,12 @@ def main() -> int:
     try:
         if args.command == "build":
             result = build(args.output, args.platform, args.docker)
+        elif args.command == "compose-installer":
+            build_legacy_demo_installer(args.output)
+            print(json.dumps({"result": "built", "bundle_version": "0.1.0-rc.3",
+                "distribution_scope": "local_demo_compatibility", "sha256": sha(args.output)},
+                sort_keys=True))
+            return 0
         elif args.command == "verify":
             result = verify(args.archive)
         elif args.command == "ce-image":

@@ -1,0 +1,233 @@
+test_abandonment_is_durable_and_fences_delayed_registration_retry (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_abandonment_is_durable_and_fences_delayed_registration_retry) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+ok
+test_abandonment_returns_exact_committed_receipt (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_abandonment_returns_exact_committed_receipt) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+ok
+test_audit_failure_rolls_back_claim_and_leaves_capability_reusable (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_audit_failure_rolls_back_claim_and_leaves_capability_reusable) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+Read API database operation failed
+Traceback (most recent call last):
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1977, in _exec_single_context
+    self.dialect.do_execute(
+    ~~~~~~~~~~~~~~~~~~~~~~~^
+        cursor, str_statement, effective_parameters, context
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py", line 1192, in do_execute
+    cursor.execute(statement, parameters)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/psycopg/cursor.py", line 117, in execute
+    raise ex.with_traceback(None)
+psycopg.errors.RaiseException: injected local audit failure
+CONTEXT:  PL/pgSQL function reject_local_claim_audit() line 2 at RAISE
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 152, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 745, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 374, in run_endpoint_function
+    return await run_in_threadpool(
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+        _run_sync_endpoint, function=dependant.call, arguments=values
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/starlette/concurrency.py", line 34, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/anyio/to_thread.py", line 65, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        func, args, abandon_on_cancel=abandon_on_cancel, limiter=limiter
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 2706, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 1100, in run
+    result = context.run(func, *args)
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/fastapi/telemetry/_api.py", line 244, in _run_sync_endpoint
+    return function(**arguments)
+  File "/tmp/volt-easy-install-20261118/auth/uvm/auth/local.py", line 415, in claim
+    self._audit(c, principal_id, "local.setup.claimed", principal_id, now,
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        command_id=receipt_id)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/volt-easy-install-20261118/auth/uvm/auth/local.py", line 546, in _audit
+    c.execute(assessment_audit_events.insert().values(event_id=event, event_sequence=seq,
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        actor_id=actor, actor_kind="local_account" if actor != "host-maintenance" else "host_maintenance",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+        occurred_at=now, received_at=now, correlation_id=str(uuid.uuid4()), command_id=command,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        authorization_context=context))
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1494, in execute
+    return meth(
+        self,
+        distilled_parameters,
+        execution_options or NO_OPTIONS,
+    )
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/sqlalchemy/sql/elements.py", line 534, in _execute_on_connection
+    return connection._execute_clauseelement(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        self, distilled_params, execution_options
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1714, in _execute_clauseelement
+    ret = self._execute_context(
+        dialect,
+    ...<9 lines>...
+        param_dict=param_dict,
+    )
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1868, in _execute_context
+    return self._exec_single_context(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~^
+        dialect, context, statement, parameters
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1996, in _exec_single_context
+    self._handle_dbapi_exception(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        e, str_statement, effective_parameters, cursor, context
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 2351, in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1977, in _exec_single_context
+    self.dialect.do_execute(
+    ~~~~~~~~~~~~~~~~~~~~~~~^
+        cursor, str_statement, effective_parameters, context
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py", line 1192, in do_execute
+    cursor.execute(statement, parameters)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/tmp/volt-portable-demo-20261117/auth/.venv/lib/python3.13/site-packages/psycopg/cursor.py", line 117, in execute
+    raise ex.with_traceback(None)
+sqlalchemy.exc.ProgrammingError: (psycopg.errors.RaiseException) injected local audit failure
+CONTEXT:  PL/pgSQL function reject_local_claim_audit() line 2 at RAISE
+[SQL: INSERT INTO assessment_audit_events (event_id, event_sequence, actor_id, actor_kind, origin, action, target_id, before_value, after_value, membership_ids, membership_revision, rationale, evidence_ref, policy_revision, identity_revision, occurred_at, received_at, correlation_id, command_id, authorization_context) VALUES (%(event_id)s::UUID, %(event_sequence)s::BIGINT, %(actor_id)s::VARCHAR, %(actor_kind)s::VARCHAR, %(origin)s::VARCHAR, %(action)s::VARCHAR, %(target_id)s::UUID, %(before_value)s::JSONB, %(after_value)s::JSONB, %(membership_ids)s::JSONB, %(membership_revision)s::INTEGER, %(rationale)s::VARCHAR, %(evidence_ref)s::VARCHAR, %(policy_revision)s::INTEGER, %(identity_revision)s::INTEGER, %(occurred_at)s::TIMESTAMP WITH TIME ZONE, %(received_at)s::TIMESTAMP WITH TIME ZONE, %(correlation_id)s::UUID, %(command_id)s::UUID, %(authorization_context)s::JSONB)]
+[parameters: {'event_id': '00c496b0-61ec-444f-a156-affaf15349f8', 'event_sequence': 2, 'actor_id': 'c4850ab9-7a18-4c52-8a01-89ad21097054', 'actor_kind': 'local_account', 'origin': 'local_auth', 'action': 'local.setup.claimed', 'target_id': 'c4850ab9-7a18-4c52-8a01-89ad21097054', 'before_value': Jsonb({}), 'after_value': Jsonb({'principal_id': 'c4850ab9-7a18-4c5 ... (56 chars)), 'membership_ids': Jsonb([]), 'membership_revision': 0, 'rationale': 'local.setup.claimed', 'evidence_ref': 'local-auth:local.setup.claimed', 'policy_revision': 1, 'identity_revision': 0, 'occurred_at': datetime.datetime(2026, 11, 18, 11, 42, 33, 141859, tzinfo=datetime.timezone.utc), 'received_at': datetime.datetime(2026, 11, 18, 11, 42, 33, 141859, tzinfo=datetime.timezone.utc), 'correlation_id': 'ae6950f1-ae04-46af-ab5f-8f32a9312e6b', 'command_id': '02d5d4c9-3020-415c-b832-b3e147e1b97c', 'authorization_context': Jsonb({'credential_mode': 'local_session'})}]
+(Background on this error at: https://sqlalche.me/e/21/f405)
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+ok
+test_claim_atomic_replay_session_restart_password_and_purpose_bound_enrolment (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_claim_atomic_replay_session_restart_password_and_purpose_bound_enrolment) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+github_webhook_worker_disabled_no_service_principal
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+github_webhook_worker_disabled_no_service_principal
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+ok
+test_registration_submission_races_abandonment_under_policy_serialization (tests.operations.test_local_accounts_postgres.LocalAccountsPostgreSQLTests.test_registration_submission_races_abandonment_under_policy_serialization) ... /tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:28: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  cols = [column.copy() for column in table.columns
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:31: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints = [constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ColumnCollectionConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The CheckConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+/tmp/volt-easy-install-20261118/auth/migrations/versions/0011_ingestion_runs.py:35: SADeprecationWarning: The ForeignKeyConstraint.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+  constraints.extend(constraint.copy() for constraint in original_constraints
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+github_webhook_worker_disabled_no_service_principal
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+github_webhook_worker_disabled_no_service_principal
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+private_ingress_decision peer=127.0.0.1 host=127.0.0.1 status=allow
+ok
+test_combined_schema_includes_local_oidc_and_base_commands (tests.operations.test_export_openapi.OpenAPIModeExportTests.test_combined_schema_includes_local_oidc_and_base_commands) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 4.468s
+
+OK
+Capability written to configured private delivery file.
+Capability written to configured private delivery file.
+Capability written to configured private delivery file.
+Capability written to configured private delivery file.
+Capability written to configured private delivery file.
+Capability written to configured private delivery file.
+PG_COMMAND_RACE {'command_id': '8f78409c-896d-406f-a235-87b4352abec8', 'submit_status': 409, 'abandon_status': 200, 'disposition': 'not_committed', 'registered_count': 0}

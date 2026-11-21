@@ -1,3 +1,4 @@
+import {isAuthConfig, type AuthConfig} from './LocalAccess';
 import {sessionCandidates, type Scope} from './preservation-api';
 import {useCallback, useEffect, useState} from 'react';
 import {errorCode, pauseBrowserSession, SESSION_EVENT, sessionFetch, setBrowserSession} from './session';
@@ -5,15 +6,23 @@ import {forbiddenState, sessionCopy, type SessionState as State} from './session
 export function useBrowserSession() {
   const [state, setState] = useState<State>('loading');
   const [session, updateSession] = useState<{name:string;token:string;candidates:Scope[]}>({name:'',token:'',candidates:[]});
+  const [config,setConfig]=useState<AuthConfig|null>(null);
+  const [local,setLocal]=useState(false);
+  const [protectedAdmin,setProtectedAdmin]=useState(false);
   const [signedOut, setSignedOut] = useState(false);
   const bootstrap = useCallback(async () => {
-    setState('loading'); setBrowserSession(); updateSession({name:'', token:'',candidates:[]});
+    setState('loading'); setProtectedAdmin(false); setBrowserSession(); updateSession({name:'', token:'',candidates:[]});
     try {
       const response = await fetch('/api/v1/auth/session', {credentials:'same-origin', cache:'no-store', headers:{Accept:'application/json'}, signal:AbortSignal.timeout(15000)});
       const body = await response.json();
+      if(response.status===401||body.credential_mode==='local_session'){
+      const discovery=await fetch('/api/v1/auth/config',{credentials:'same-origin',cache:'no-store',signal:AbortSignal.timeout(15000)});
+      if(discovery.ok){const value:unknown=await discovery.json();if(!isAuthConfig(value))throw new Error('Unsupported authentication configuration');setConfig(value);}
+      else if(discovery.status!==404)throw new Error('Authentication unavailable');
+      }
       if (!response.ok) { setState(response.status===401?'signed_out':response.status===403?forbiddenState(errorCode(body)):'unavailable'); return; }
-      if (body.schema_version!==1 || body.authenticated!==true || body.credential_mode!=='oidc_session' || typeof body.principal_id!=='string' || typeof body.csrf_token!=='string' || !body.csrf_token) throw new Error('Unsupported session');
-      setBrowserSession(body.csrf_token); updateSession({name:body.principal_id, token:body.csrf_token,candidates:sessionCandidates(body)}); setState('signed_in'); setSignedOut(false);
+      if (body.schema_version!==1 || body.authenticated!==true || !['oidc_session','local_session'].includes(body.credential_mode) || typeof body.principal_id!=='string' || typeof body.csrf_token!=='string' || !body.csrf_token) throw new Error('Unsupported session');
+      setProtectedAdmin(body.credential_mode==='local_session'&&body.protected_admin===true); setLocal(body.credential_mode==='local_session'); setBrowserSession(body.csrf_token); updateSession({name:body.principal_id, token:body.csrf_token,candidates:sessionCandidates(body)}); setState('signed_in'); setSignedOut(false);
     } catch { setState('unavailable'); }
   }, []);
   useEffect(() => {
@@ -40,7 +49,7 @@ export function useBrowserSession() {
       setBrowserSession(); updateSession({name:'', token:'',candidates:[]}); setSignedOut(true); setState('signed_out');
     } catch { setBrowserSession(); updateSession(prior=>({...prior, token:''})); setState('unavailable'); }
   }
-  return {session, state, signedOut, bootstrap, logout};
+  return {session, config, local, protectedAdmin, state, signedOut, bootstrap, logout};
 }
 export function SessionPanel({state,signedOut,retry}:{state:State;signedOut:boolean;retry:()=>void}) {
   if(state==='signed_in')return null;

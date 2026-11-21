@@ -80,6 +80,16 @@ assessment_command_receipts = Table(
     Column("authorization_context", _JSON, nullable=True),
 )
 
+assessment_command_abandonments = Table(
+    "assessment_command_abandonments", uvm_metadata,
+    Column("command_id", _ID, primary_key=True),
+    Column("principal_id", String, nullable=False),
+    Column("action", String, nullable=False),
+    Column("request_digest", String(64), nullable=False),
+    Column("audit_event_id", _ID, ForeignKey("assessment_audit_events.event_id"), nullable=False),
+    Column("created_at", _TZ, nullable=False),
+)
+
 assessment_projection_intents = Table(
     "assessment_projection_intents", uvm_metadata,
     Column("intent_id", _ID, primary_key=True),

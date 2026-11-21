@@ -117,6 +117,7 @@ class PublicFixturePolicyTests(unittest.TestCase):
             self.assertEqual(public_policy(staged,expected),proof)
             self.assertEqual((staged/'fixture.pub').read_bytes(),files['fixture.pub'])
             self.assertEqual(staged.stat().st_mode&0o777,0o700)
+            self.assertEqual({name:(staged/name).stat().st_mode&0o777 for name in files},dict.fromkeys(files,0o600))
 
     def test_same_byte_named_file_replacement_during_read_is_denied(self):
         import os,tempfile

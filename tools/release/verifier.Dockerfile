@@ -13,9 +13,11 @@ ENTRYPOINT ["python", "-m", "uvm.installer.verifier"]
 # local build context. The normal production target has no fixture key, root,
 # Rekor URL, environment switch, or package-selectable trust mode.
 FROM verifier-base AS verifier-fixture
-COPY --from=fixture-policy --chown=65532:65532 /fixture-trust.json /usr/local/share/volt-verifier/fixture-trust.json
-COPY --from=fixture-policy --chown=65532:65532 /fixture.pub /usr/local/share/volt-verifier/fixture.pub
-COPY --from=fixture-policy --chown=65532:65532 /trusted-root.json /usr/local/share/volt-verifier/trusted-root.json
+# These three PUBLIC policy files must be readable by the admitted host UID.
+# Private build staging stays 0600; never depend on its mode inside the image.
+COPY --from=fixture-policy --chown=65532:65532 --chmod=0444 /fixture-trust.json /usr/local/share/volt-verifier/fixture-trust.json
+COPY --from=fixture-policy --chown=65532:65532 --chmod=0444 /fixture.pub /usr/local/share/volt-verifier/fixture.pub
+COPY --from=fixture-policy --chown=65532:65532 --chmod=0444 /trusted-root.json /usr/local/share/volt-verifier/trusted-root.json
 
 # Keep the default build target production so an omitted --target can never
 # accidentally include the local verification key/root policy.

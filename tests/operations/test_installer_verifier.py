@@ -115,6 +115,17 @@ class IndependentVerifierArchiveTests(unittest.TestCase):
         fixture_stage = stages.index("verifier-base AS verifier-fixture")
         self.assertLess(fixture_stage, len(stages) - 1)
 
+    def test_only_baked_public_fixture_policy_is_readable_by_admitted_host_uid(self):
+        dockerfile=(Path(__file__).parents[2]/'tools/release/verifier.Dockerfile').read_text()
+        fixture=dockerfile.split('FROM verifier-base AS verifier-fixture\n',1)[1].split('FROM verifier-base AS verifier-production',1)[0]
+        copies=[line for line in fixture.splitlines()if line.startswith('COPY ')]
+        self.assertEqual(set(copies),{
+            f'COPY --from=fixture-policy --chown=65532:65532 --chmod=0444 /{name} /usr/local/share/volt-verifier/{name}'
+            for name in ('fixture-trust.json','fixture.pub','trusted-root.json')})
+        self.assertEqual(len(copies),3)
+        self.assertNotIn('--chmod=0444',dockerfile.split('FROM verifier-base AS verifier-fixture',1)[0])
+        self.assertTrue(dockerfile.rstrip().endswith('FROM verifier-base AS verifier-production'))
+
     def test_closed_signed_descriptor_inventory_and_exact_runtime_reference(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive = Path(tmp) / "bundle.tar.gz"

@@ -287,3 +287,26 @@ cleanup authority. Original errors/status and all verification remain unchanged.
 A real no-network verifier subprocess input-denial test exercises exit2 and the
 classifier; injected result tests cover other classes and forwarding. They do not
 reproduce the unavailable original ARM verification inputs or prove a lifecycle.
+
+### Public policy file-mode mismatch reproduced
+
+A local AMD64 component reproduced a concrete Q packaging defect, without using
+or altering an existing fixture service. The current builder privately re-stages
+the three PUBLIC policy inputs as 0600; COPY with chown65532 retains that mode.
+The maintained admission command intentionally runs Q as the host UID. That UID
+cannot read the resulting baked policy file owned by65532. The preserved ed5 Q
+binary and current verifier/admission/Dockerfile source bytes were identical.
+Using the exact original retained ed5 full-graph arguments and read-only inputs,
+a COPY-only scratch with current 0600 staging exited2 with permission denied for
+the fixed policy file. The original0444 Q control passed that read and reached
+expected registry connection refusal under network none. Neither is a full
+admission pass or a retrospective observation of the unavailable ARM stderr.
+Exact scratch containers and derived image were removed; originals were unchanged.
+Pre-build input-inventory and raw-config-ID FROM failures are retained separately.
+
+The narrow correction explicitly COPYs only those three PUBLIC policy files as
+0444, retaining owner65532. Private host staging remains0700/0600; default
+production target, all verifier checks, keys, protected runtime records and other
+image paths remain unchanged. This removes dependence on a caller's public-input
+mode while supporting the already admitted nonroot host UID. Fresh source-bound
+Q/native evidence is still required; the local component is not an ARM claim.

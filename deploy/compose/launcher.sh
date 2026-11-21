@@ -277,7 +277,10 @@ collect_cache_mounts() {
     case "$role" in
       volt'|'*) api_containers="$api_containers $container_id" ;;
       '|host-lifecycle-lock'|'<no value>|host-lifecycle-lock')
-        helper_identity=$(docker inspect "$container_id" --format '{{.Id}}|{{.Config.Image}}|{{index .Config.Labels "volt.compose.owner-token"}}|{{index .Config.Labels "volt.compose.project"}}|{{.Image}}|{{if .ImageManifestDescriptor}}{{.ImageManifestDescriptor.digest}}|{{.ImageManifestDescriptor.mediaType}}|{{.ImageManifestDescriptor.size}}|{{.ImageManifestDescriptor.platform.os}}/{{.ImageManifestDescriptor.platform.architecture}}{{end}}|{{.State.Running}}') \
+        # Docker28 omits this optional descriptor key. Keep all four witness
+        # columns even when absent; config-ID equality is still mandatory below,
+        # or the unchanged complete typed selected-child witness must match.
+        helper_identity=$(docker inspect "$container_id" --format '{{.Id}}|{{.Config.Image}}|{{index .Config.Labels "volt.compose.owner-token"}}|{{index .Config.Labels "volt.compose.project"}}|{{.Image}}|{{with (index . "ImageManifestDescriptor")}}{{.digest}}|{{.mediaType}}|{{.size}}|{{.platform.os}}/{{.platform.architecture}}{{else}}|||{{end}}|{{.State.Running}}') \
           || fail 'fixed helper actual image/owner identity is unavailable'
         IFS='|' read -r helper_id helper_ref helper_owner helper_project helper_image helper_digest helper_media helper_size helper_platform helper_running <<EOF_CACHE_HELPER_ID
 $helper_identity

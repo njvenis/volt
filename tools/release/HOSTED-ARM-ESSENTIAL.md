@@ -342,3 +342,32 @@ They falsify four reached failure phases, preserve actual EXIT statuses0/7 with
 and without a working diagnostic fd, exclude production/noninstall/unvalidated
 receipts, and ensure no instance or resource mutation at those boundaries. They
 are source/control-flow evidence only, not a hosted ARM install pass.
+
+### Docker28 cache helper inspection
+
+The next source-level receipt identified cache-publication. Its current-helper
+observation template referenced ImageManifestDescriptor directly in an `if`.
+Actual retained Docker28.0.4 native container inspect snapshots omit that key.
+The official CLI28 inspector retries the typed template against raw JSON with
+missingkey=error, so even the conditional fails when the key is absent. Also,
+omitting the entire descriptor branch would lose three separators and shift the
+trailing Running value out of its fixed column.
+
+The narrow template correction uses safe map index lookup and emits four empty
+witness columns when the optional descriptor is absent. This permits only the
+existing authenticated exact config-ID path; a selected-manifest identity still
+requires every original typed witness field. Full CID/running/image/owner/project,
+command/isolation/tmpfs/mount and all potential-API bind/volume ancestry checks
+remain unchanged. Missing or contradictory evidence never grants exemption.
+
+A private official Docker28 client replayed the exact old/new template against
+actual retained Docker28 inspect JSON from both native architectures: old exited1
+on the missing field, new returned0 with ten fields and the correct Running
+column. A populated Docker29 descriptor observation preserved all witness fields.
+This is actual CLI/template evidence using a private fixed read-only Unix replay,
+not a native ARM lifecycle or retrospective original-stderr observation. A prior
+created-only local Docker29 API1.48 probe was stopped at its schema mismatch and
+removed exactly; API downgrade did not strip the descriptor. Its failure is
+preserved, not credited as Docker28 behavior. The replay socket was removed.
+No Docker28 host dependency, PATH change, daemon change or telemetry expansion is
+introduced; hosted full cache publication remains to be exercised on fresh source.

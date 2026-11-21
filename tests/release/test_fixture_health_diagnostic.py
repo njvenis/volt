@@ -63,11 +63,20 @@ cat "$ROW"
                     data.write_text(json.dumps(row|{key:wrong}));self.assertEqual(h.failed_health_projection(value,e),{'status':'unavailable'})
                 data.write_text(json.dumps(row));(e/'fixture-full-runtime-admission.exit').write_text('2\n');self.assertEqual(h.failed_health_projection(value,e),{'status':'unavailable'})
             self.assertNotIn('Health.Log.Output',h.HEALTH_INSPECT_TEMPLATE);self.assertNotIn('.Config.Env',h.HEALTH_INSPECT_TEMPLATE)
+    def test_actual_cli_oversize_and_deadline_are_finite_unavailable(self):
+        import time
+        with tempfile.TemporaryDirectory()as d:
+            root=Path(d);value,e,row=self.fixture(root);bin=root/'bin';bin.mkdir();script=bin/'docker'
+            for body in ('exec head -c 20000 /dev/zero','exec sleep 3'):
+                script.write_text('#!/bin/sh\n'+body+'\n');script.chmod(0o700)
+                start=time.monotonic()
+                with patch.dict(os.environ,{'PATH':str(bin)+':'+os.environ['PATH']}):self.assertEqual(h.failed_health_projection(value,e),{'status':'unavailable'})
+                self.assertLess(time.monotonic()-start,2.8)
     def test_cli_identity_change_between_queries_denies(self):
         with tempfile.TemporaryDirectory()as d:
             value,e,row=self.fixture(Path(d));counter=[0]
             def run(*args,**kwargs):
-                counter[0]+=1;r=row|({'started':'DIFFERENT'}if counter[0]==2 else{});return subprocess.CompletedProcess(args,0,json.dumps(r).encode())
+                counter[0]+=1;r=row|({'started':'DIFFERENT'}if counter[0]==2 else{});kwargs['stdout'].write(json.dumps(r).encode());return subprocess.CompletedProcess(args,0)
             with patch.object(h.subprocess,'run',side_effect=run):self.assertEqual(h.failed_health_projection(value,e),{'status':'unavailable'})
             self.assertEqual(counter[0],2)
 if __name__=='__main__':unittest.main()

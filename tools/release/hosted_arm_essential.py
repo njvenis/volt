@@ -269,9 +269,15 @@ def failed_health_projection(value,evidence):
                 or admitted['id']!=runtime['image_id']or admitted['source_revision']!=value['source_revision']
                 or admitted['source_snapshot']!=value['source_snapshot']):return unavailable
         def inspect(target):
-            r=subprocess.run(['docker','container','inspect',target,'--format',HEALTH_INSPECT_TEMPLATE],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=2)
-            if r.returncode or len(r.stdout)>16384:raise ValueError('diagnostic unavailable')
-            row=json.loads(r.stdout,object_pairs_hook=pairs)
+            import tempfile,resource
+            # A regular private output FD plus a child-only kernel file limit
+            # bounds acquisition itself; never buffer arbitrary daemon output.
+            with tempfile.TemporaryFile()as output:
+                r=subprocess.run(['docker','container','inspect',target,'--format',HEALTH_INSPECT_TEMPLATE],stdout=output,stderr=subprocess.DEVNULL,timeout=2,
+                    preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_FSIZE,(16384,16384)))
+                output.seek(0);raw=output.read(16385)
+            if r.returncode or len(raw)>16384:raise ValueError('diagnostic unavailable')
+            row=json.loads(raw,object_pairs_hook=pairs)
             if (not re.fullmatch('[0-9a-f]{64}',row['id'])or row['name']!='/'+project+'-volt-1'
                     or row['owner']!=owner or row['project']!=project or row['image']not in(runtime['image_id'],runtime['image_config_id'])
                     or row['reference']!='127.0.0.1:46150/volt@'+runtime['image_index_digest']

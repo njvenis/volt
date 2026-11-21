@@ -131,6 +131,75 @@ JOURNEY_STAGES={
  'focused-public-valid-admit':'valid-admit',
  'essential-restored-public-start':'restored-start','essential-restored-public-stop':'restored-stop'}
 
+# Diagnostic matching ONLY: these existing error strings confer no admission.
+ADMISSION_ERRORS={
+ 'verification input is missing or is not a regular file':'input-file',
+ 'installer bundle is missing, unsafe, or exceeds the archive size limit':'bundle-input',
+ 'installer archive member count is outside the closed inventory bound':'bundle-inventory',
+ 'installer archive contains duplicate members':'bundle-inventory',
+ 'installer archive contains unsafe path, type, or member size':'bundle-inventory',
+ 'installer archive contains duplicate inventory names':'bundle-inventory',
+ 'installer archive member content is missing':'bundle-inventory',
+ 'installer archive member content exceeds its declared bound':'bundle-inventory',
+ 'installer archive inventory is not the closed RC4 inventory':'bundle-inventory',
+ 'installer bundle manifest is invalid JSON':'bundle-manifest',
+ 'local fixture bundle does not bind its independently pinned verifier image':'bundle-verifier-binding',
+ 'installer bundle manifest, version, source inventory, or runtime reference mismatch':'bundle-manifest',
+ 'fixture verifier trust material is incomplete':'fixture-policy',
+ 'fixture Cosign operation is not in the closed verification allowlist':'fixture-policy',
+ 'Docker runtime inspection is not valid JSON':'runtime-inspection',
+ 'Docker runtime inspection must identify exactly one image':'runtime-inspection',
+ 'selected runtime platform differs from the admitted engine platform':'runtime-platform',
+ 'selected runtime image has no immutable configuration ID':'runtime-identity',
+ 'runtime labels do not match the signed source and local-install contract':'runtime-labels',
+ 'runtime index bytes do not match the signed immutable reference':'runtime-index',
+ 'runtime reference is not a supported OCI image index':'runtime-index',
+ 'runtime index must have exactly one supported Linux amd64 and arm64 child':'runtime-index',
+ 'runtime platform descriptor digest is malformed':'runtime-index',
+ 'runtime index is missing a supported platform child':'runtime-index',
+ 'verified runtime provenance output is not JSON':'runtime-provenance',
+ 'verified runtime provenance output has no attestations':'runtime-provenance',
+ 'runtime requires exactly one supported signed provenance statement':'runtime-provenance',
+ 'signed runtime provenance does not bind source, version, index and exact platform children':'runtime-provenance',
+ 'registry redirect refused during child admission':'child-registry',
+ 'fixture child registry is not the owned loopback registry':'child-registry',
+ 'registry child request failed closed':'child-registry',
+ 'registry child document too large':'child-registry',
+ 'registry child digest invalid':'child-descriptor',
+ 'registry child size invalid':'child-descriptor',
+ 'actual child/config bytes differ from signed digest':'child-bytes',
+ 'registry child document invalid':'child-bytes',
+ 'signed child media type differs':'child-descriptor',
+ 'actual platform child is not an executable image manifest':'child-descriptor',
+ 'actual platform config differs from signed source/platform contract':'child-config',
+ 'actual platform config media type unsupported':'child-config',
+ 'selected Docker config/descriptor ID differs from signed platform child':'selected-child-binding',
+ 'full graph verification requires reference, source, version, and platform metadata':'invocation',
+ 'full graph verification requires image inspection, index, and output paths':'invocation'}
+
+def admission_error_class(raw):
+    """Classify a bounded original stderr, never return its dynamic content.
+
+    This is a matched diagnostic, not authenticated causal evidence or authority.
+    Unknown, duplicate, unterminated or unsupported text yields no classification.
+    """
+    if type(raw)is not bytes or len(raw)>65536 or not raw.endswith(b'\n'):return 'unclassified'
+    try:text=raw.decode('ascii')
+    except UnicodeDecodeError:return 'unclassified'
+    if any(ord(c)<32 and c not in '\n\t'for c in text):return 'unclassified'
+    prefix='verifier.py: error: '
+    rows=[line for line in text.split('\n')if line.startswith(prefix)]
+    if len(rows)!=1:return 'unclassified'
+    message=rows[0][len(prefix):]
+    if message in ADMISSION_ERRORS:return ADMISSION_ERRORS[message]
+    if message.startswith('local fixture transparency verification failed: '):return 'fixture-transparency'
+    return 'unclassified'
+
+def retained_admission_error(evidence):
+    from tools.release.native_runtime_probe import regular_bytes
+    try:return admission_error_class(regular_bytes(Path(evidence)/'fixture-full-runtime-admission.stderr',65536))
+    except (OSError,ValueError):return 'unclassified'
+
 @contextmanager
 def observe_journey(q,record):
     """Observe the original producer results; never interpret private output.
@@ -142,6 +211,7 @@ def observe_journey(q,record):
     original=q.run;health=q.wait_for_local
     record.update(stage='qualification-entry',producer='not-started',exit_code=None)
     def tracked(name,*args,**kwargs):
+        record.pop('admission_error_class',None)
         record.update(stage=JOURNEY_STAGES.get(name,'other-qualification-command'),producer='entered',exit_code=None)
         try:result=original(name,*args,**kwargs)
         except BaseException:
@@ -154,6 +224,8 @@ def observe_journey(q,record):
                     if len(raw)<=8 and re.fullmatch(rb'-?[0-9]{1,3}\n',raw):
                         code=int(raw);record['exit_code']=code if -255<=code<=255 else None
                 except OSError:pass
+            if name=='fixture-full-runtime-admission'and record['exit_code']==2:
+                record['admission_error_class']=retained_admission_error(args[1])
             raise
         code=result.returncode
         record.update(producer='returned',exit_code=code if type(code)is int and -255<=code<=255 else None)

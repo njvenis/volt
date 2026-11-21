@@ -111,6 +111,50 @@ class HostedArmTests(unittest.TestCase):
                 q.run('focused-public-install',[],Path('/private'))
                 raise AssertionError('PRIVATE')
         self.assertEqual(record,{'stage':'public-install','producer':'returned','exit_code':0})
+    def test_admission_error_classifier_never_exports_private_or_unknown_content(self):
+        prefix=b'verifier.py: error: '
+        self.assertEqual(h.admission_error_class(prefix+b'selected runtime platform differs from the admitted engine platform\n'),'runtime-platform')
+        self.assertEqual(h.admission_error_class(prefix+b'local fixture transparency verification failed: PRIVATE_TOKEN\n'),'fixture-transparency')
+        for raw in (prefix+b'PRIVATE_UNKNOWN\n',prefix+b'selected runtime platform differs from the admitted engine platform',
+                    prefix+b'runtime index is missing a supported platform child\n'+prefix+b'PRIVATE_SECOND\n',
+                    b'noise'+prefix+b'runtime index is missing a supported platform child\n',
+                    b'\xef\xbb\xbf'+prefix+b'runtime index is missing a supported platform child\n',
+                    prefix+b'runtime index is missing a supported platform child\r\n',b'x'*65537+b'\n'):
+            with self.subTest(raw=raw[:40]):self.assertEqual(h.admission_error_class(raw),'unclassified')
+    def test_actual_verifier_subprocess_exit2_input_diagnostic_is_classified(self):
+        # Executes the real unchanged verifier entrypoint, no Docker, network,
+        # signature creation or accepted input. Unknown missing-path data stays private.
+        with tempfile.TemporaryDirectory()as d:
+            root=Path(d)
+            argv=[sys.executable,'-m','uvm.installer.verifier','--bundle',str(root/'PRIVATE_missing'),
+                  '--bundle-signature',str(root/'sig'),'--image-inspect',str(root/'inspect'),
+                  '--index',str(root/'index'),'--output-dir',str(root/'output'),
+                  '--signer','fixture','--issuer','fixture','--reference','unused',
+                  '--source-revision','a'*40,'--source-snapshot','sha256:'+'b'*64,
+                  '--version','0.1.0-rc.4','--platform','linux/arm64']
+            result=subprocess.run(argv,capture_output=True,timeout=10)
+            self.assertEqual(result.returncode,2);self.assertEqual(result.stdout,b'')
+            self.assertEqual(h.admission_error_class(result.stderr),'input-file')
+            self.assertNotIn('PRIVATE',h.admission_error_class(result.stderr))
+    def test_observer_classifies_only_exact_full_graph_exit2_and_preserves_error(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        error=RuntimeError('PRIVATE_ORIGINAL')
+        with tempfile.TemporaryDirectory()as d:
+            root=Path(d);(root/'fixture-full-runtime-admission.stderr').write_bytes(b'verifier.py: error: actual platform config differs from signed source/platform contract\n')
+            q=SimpleNamespace(run=Mock(side_effect=error),wait_for_local=Mock());record={}
+            for code in (2,1):
+                (root/'fixture-full-runtime-admission.exit').write_text(str(code)+'\n')
+                with self.assertRaises(RuntimeError)as caught:
+                    with h.observe_journey(q,record):q.run('fixture-full-runtime-admission',['PRIVATE'],root)
+                self.assertIs(caught.exception,error)
+                if code==2:self.assertEqual(record['admission_error_class'],'child-config')
+                else:self.assertNotIn('admission_error_class',record)
+            (root/'fixture-full-runtime-admission.exit').write_text('2\n')
+            (root/'fixture-full-runtime-admission.stderr').unlink()
+            with self.assertRaises(RuntimeError):
+                with h.observe_journey(q,record):q.run('fixture-full-runtime-admission',[],root)
+            self.assertEqual(record['admission_error_class'],'unclassified')
     def test_request_hash_duplicate_json_and_fifo_deny(self):
         import os,time
         with tempfile.TemporaryDirectory()as t:

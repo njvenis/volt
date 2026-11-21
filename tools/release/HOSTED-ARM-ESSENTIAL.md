@@ -262,3 +262,28 @@ never authorize cleanup, adoption, retry or qualification. Tests substitute the
 original producers and exercise forwarding, exceptions, missing status, health
 failure, post-command assertions and withheld/failed cleanup; they are not native
 ARM lifecycle evidence. No new hosted execution is part of this diagnostic change.
+
+### Full graph admission rejection classification
+
+Approved diagnostic run 44851790362 returned full-graph-admission/raised/exit2,
+with initial ownership unreconciled and infrastructure cleanup not attempted.
+The maintained call runs the independently provisioned Q against the signed
+bundle, runtime/index observation and source/platform expectations. Its normal
+sequence checks regular inputs, the closed bundle, bundle/index signatures,
+runtime provenance, source/platform policy and both immutable child/config byte
+joins. Exit2 alone does not identify which check rejected; host-side prior
+signatures do not substitute for this independent verification. No ARM-specific
+cause is established by the exported result, and no behavior fix follows from it.
+
+Only for this exact original full-graph command's recorded exit2, the observer
+now reads its original bounded regular stderr (64KiB maximum, nofollow/nonblock)
+and classifies one complete ASCII verifier error line against existing static
+error strings or the fixed fixture-transparency-failure prefix. The public value
+is a fixed error class only. Unknown text, missing bytes, unsupported encoding,
+control characters, duplicate error records or unterminated data stay unclassified.
+Dynamic suffixes, raw errors, paths and private values never enter the receipt.
+This is diagnostic text matching, not authenticated causal proof, acceptance or
+cleanup authority. Original errors/status and all verification remain unchanged.
+A real no-network verifier subprocess input-denial test exercises exit2 and the
+classifier; injected result tests cover other classes and forwarding. They do not
+reproduce the unavailable original ARM verification inputs or prove a lifecycle.

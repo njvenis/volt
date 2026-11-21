@@ -371,3 +371,39 @@ removed exactly; API downgrade did not strip the descriptor. Its failure is
 preserved, not credited as Docker28 behavior. The replay socket was removed.
 No Docker28 host dependency, PATH change, daemon change or telemetry expansion is
 introduced; hosted full cache publication remains to be exercised on fresh source.
+
+### Restore-admit negative observer compatibility
+
+The next run returned restore-provision0 before the empty inventory negative,
+which uses its own Popen observer rather than the normal run wrapper. Two
+observer-owned inspect templates still directly referenced the optional
+ImageManifestDescriptor: the exact-owner identity row and retained owner JSON.
+Docker28 fails these lookups before the observation can establish inventory-cause
+evidence. Observation failure does not replace or skip the original Docker rm,
+so the overall failed harness is not proof that restore provisioning failed or
+that the backend accepted an invalid import.
+
+Both reached templates now use the same safe optional-key lookup. Identity keeps
+exactly four empty witness columns; owner JSON uses null when absent. Only an
+already admitted exact config-ID can use the absent-descriptor case. The original
+selected-manifest branch still requires the entire typed child/media/size/platform
+witness, and all owner/project/fullCID/operation/plan/source and stopped-identity
+checks remain. Before-removal and retained-after-caller modes keep forwarding
+original commands/results unchanged; no product image, public interface, writer,
+capability, import or cleanup authority changes.
+
+The private official Docker28 client replay on actual retained native28 snapshots
+from both architectures gives old1/new0 for both templates, with eleven identity
+columns and nullable owner witness. A populated29 descriptor positive retains its
+witness. The replay used only a fixed private read-only Unix endpoint, removed
+on completion; no real Docker daemon or current fixture was contacted. POSIX
+observer tests separately prove config-ID absent-witness capture, selected-manifest
+missing-witness denial, exact original rm forwarding/status and stopped-only
+retained observation. These are compatibility/guard components, not a new native
+restore or retrospectively observed original denial cause.
+
+The reached restore/import/admit/restored-start/final-stop/supported-destroy path
+was scanned for the identical direct optional-field mechanism: product projections
+already use safe index and infrastructure readers use full JSON/get. Remaining
+direct templates in the unrelated interrupted-initial observer and three port
+control helpers are recorded as unreached and unchanged, not credited on Docker28.

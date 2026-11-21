@@ -535,7 +535,7 @@ observe_owned_removal() {
   if [ -e "$CAPTURE/guard.status" ]; then
     printf '%s\n' duplicate >"$CAPTURE/duplicate.status"; return 0
   fi
-  identity=$("$REAL_DOCKER" inspect "$expected_name" --format '{{.Id}}|{{.Name}}|{{.Config.Image}}|{{index .Config.Labels "volt.compose.owner-token"}}|{{index .Config.Labels "volt.compose.project"}}|{{json .Config.Cmd}}|{{.Image}}|{{if .ImageManifestDescriptor}}{{.ImageManifestDescriptor.digest}}|{{.ImageManifestDescriptor.mediaType}}|{{.ImageManifestDescriptor.size}}|{{.ImageManifestDescriptor.platform.os}}/{{.ImageManifestDescriptor.platform.architecture}}{{end}}' 2>"$CAPTURE/identity.stderr") || {
+  identity=$("$REAL_DOCKER" inspect "$expected_name" --format '{{.Id}}|{{.Name}}|{{.Config.Image}}|{{index .Config.Labels "volt.compose.owner-token"}}|{{index .Config.Labels "volt.compose.project"}}|{{json .Config.Cmd}}|{{.Image}}|{{with (index . "ImageManifestDescriptor")}}{{.digest}}|{{.mediaType}}|{{.size}}|{{.platform.os}}/{{.platform.architecture}}{{else}}|||{{end}}' 2>"$CAPTURE/identity.stderr") || {
     printf '%s\n' unavailable >"$CAPTURE/guard.status"; return 0;
   }
   printf '%s\n' "$identity" >"$CAPTURE/identity.txt"
@@ -569,7 +569,7 @@ EOF_OWNER_ID
     }
     chmod 600 "$CAPTURE/$copied"
   done
-  "$REAL_DOCKER" inspect "$cid" --format '{"id":{{json .Id}},"name":{{json .Name}},"image_ref":{{json .Config.Image}},"image":{{json .Image}},"selected_witness":{{json .ImageManifestDescriptor}},"labels":{{json .Config.Labels}},"cmd":{{json .Config.Cmd}},"started_at":{{json .State.StartedAt}},"finished_at":{{json .State.FinishedAt}},"exit_code":{{json .State.ExitCode}}}' >"$CAPTURE/owner.json" 2>"$CAPTURE/owner-inspect.stderr" || return 0
+  "$REAL_DOCKER" inspect "$cid" --format '{"id":{{json .Id}},"name":{{json .Name}},"image_ref":{{json .Config.Image}},"image":{{json .Image}},"selected_witness":{{json (index . "ImageManifestDescriptor")}},"labels":{{json .Config.Labels}},"cmd":{{json .Config.Cmd}},"started_at":{{json .State.StartedAt}},"finished_at":{{json .State.FinishedAt}},"exit_code":{{json .State.ExitCode}}}' >"$CAPTURE/owner.json" 2>"$CAPTURE/owner-inspect.stderr" || return 0
   printf '%s\n' "$REAL_DOCKER" logs --timestamps --tail 128 "$cid" >"$CAPTURE/logs.argv.txt"
   if "$REAL_DOCKER" logs --timestamps --tail 128 "$cid" >"$CAPTURE/owner.stdout" 2>"$CAPTURE/owner.stderr"; then
     printf '%s\n' 0 >"$CAPTURE/logs.exit"

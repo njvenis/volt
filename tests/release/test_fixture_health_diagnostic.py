@@ -3,7 +3,8 @@ import json,os,subprocess,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
 from tools.release import hosted_arm_essential as h
-from tests.release.test_install_failure_receipt import InstallFailureReceiptTests,Q,SIGNER,ISSUER
+from tests.release import test_install_failure_receipt as receipt_test
+Q,SIGNER,ISSUER=receipt_test.Q,receipt_test.SIGNER,receipt_test.ISSUER
 ROOT=Path(__file__).resolve().parents[2]
 class FixtureHealthTests(unittest.TestCase):
     def test_actual_shell_each_failure_branch_both_release_passes_and_gates(self):
@@ -24,14 +25,15 @@ SIGNER='''+SIGNER+'''\nISSUER='''+ISSUER+'''\nLOCK_NAME=''
 WORK=''
 INSTALLING=0
 checks=0
+PROJECT=owned-stub
 trap cleanup 0
 wait_healthy
 '''
                     for trusted in(True,False):
-                        env=InstallFailureReceiptTests().environment(root)|{'CAUSE':cause,'RELEASE':release}
+                        env=receipt_test.InstallFailureReceiptTests().environment(root)|{'CAUSE':cause,'RELEASE':release}
                         if not trusted:env['VOLT_BOOTSTRAP_VERIFIER_VERIFIED']='0'
                         r=subprocess.run(['sh','-c',script],env=env,capture_output=True,timeout=5)
-                        self.assertEqual(r.returncode,1)
+                        self.assertEqual(r.returncode,1,r.stderr)
                         diag=h.health_phase_receipt(r.stderr)
                         self.assertEqual(diag,{'cause':cause,'pass':release,'profile':'volt_fixture_health_exit_v1'}if trusted else None)
                         self.assertNotIn('PRIVATE',json.dumps(diag));self.assertEqual(r.stdout,b'')

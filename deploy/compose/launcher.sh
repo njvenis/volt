@@ -28,6 +28,8 @@ HELPER_EXEC_ONLY=0
 RETAIN_STOP_EVIDENCE=0
 INSTALL_RECEIPT_ACTION=${1:-}
 INSTALL_RECEIPT_PHASE=host-preflight
+INSTALL_HEALTH_PASS=not-started
+INSTALL_HEALTH_CAUSE=not-observed
 
 fail() { printf '%s\n' "volt installer: $*" >&2; exit 1; }
 select_inspect_capability() {
@@ -83,6 +85,11 @@ emit_fixture_install_receipt() {
   # Start our own whole line even after an unterminated private child diagnostic.
   # Failed reporting never changes the operation or its existing cleanup route.
   printf '\nVOLT_FIXTURE_INSTALL_RECEIPT {"phase":"%s","profile":"volt_fixture_install_exit_v1","status":%s}\n' "$INSTALL_RECEIPT_PHASE" "$1" >&2 || :
+  if [ "$INSTALL_RECEIPT_PHASE" = health ] && [ "$1" -ne 0 ]; then
+    case "${INSTALL_HEALTH_PASS:-}" in closed|configured) ;; *) return 0 ;; esac
+    case "${INSTALL_HEALTH_CAUSE:-}" in owner-before-poll|owner-after-healthy|unhealthy|wait-budget) ;; *) return 0 ;; esac
+    printf '\nVOLT_FIXTURE_HEALTH_RECEIPT {"cause":"%s","pass":"%s","profile":"volt_fixture_health_exit_v1"}\n' "$INSTALL_HEALTH_CAUSE" "$INSTALL_HEALTH_PASS" >&2 || :
+  fi
   return 0
 }
 
@@ -959,12 +966,15 @@ wait_healthy() {
   INSTALL_RECEIPT_PHASE=health
   tries=0
   while [ "$tries" -lt 180 ]; do
+    INSTALL_HEALTH_CAUSE=owner-before-poll
     ensure_lock_owner
     health=$(docker container inspect "${PROJECT}-volt-1" --format '{{.State.Health.Status}}' 2>/dev/null || :)
-    if [ "$health" = healthy ]; then ensure_lock_owner; return; fi
+    if [ "$health" = healthy ]; then INSTALL_HEALTH_CAUSE=owner-after-healthy; ensure_lock_owner; return; fi
+    INSTALL_HEALTH_CAUSE=unhealthy
     [ "$health" != unhealthy ] || fail 'VOLT container health check failed'
     tries=$((tries + 1)); sleep 2
   done
+  INSTALL_HEALTH_CAUSE=wait-budget
   fail 'VOLT did not become healthy within six minutes'
 }
 
@@ -1040,11 +1050,14 @@ start_local_instance() {
   prepare_start_container
   INSTALL_RECEIPT_PHASE=api-start
   locked_compose start || fail 'bootstrap maintenance container start failed'
+  INSTALL_HEALTH_PASS=configured
+  if [ "$publish_after_ack" -eq 1 ]; then INSTALL_HEALTH_PASS=closed; fi
   release_start
   if [ "$publish_after_ack" -eq 1 ]; then
     prepare_start_container
     INSTALL_RECEIPT_PHASE=api-start
     locked_compose start || fail 'configured local start failed'
+    INSTALL_HEALTH_PASS=configured
     release_start
   fi
 }

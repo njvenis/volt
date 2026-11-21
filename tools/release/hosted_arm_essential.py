@@ -232,8 +232,76 @@ def retained_install_receipt(evidence):
     try:return install_phase_receipt(regular_bytes(Path(evidence)/'focused-public-install.stderr',1024*1024))
     except (OSError,ValueError):return None
 
+HEALTH_CAUSES=frozenset(('owner-before-poll','owner-after-healthy','unhealthy','wait-budget'))
+def health_phase_receipt(raw):
+    if type(raw)is not bytes or len(raw)>1024*1024:return None
+    prefix=b'VOLT_FIXTURE_HEALTH_RECEIPT '
+    lines=[line for line in raw.splitlines(keepends=True)if line.startswith(prefix)]
+    if len(lines)!=1 or not lines[0].endswith(b'\n')or len(lines[0])>512:return None
+    try:
+        encoded=lines[0][len(prefix):-1];r=json.loads(encoded.decode('ascii'),object_pairs_hook=pairs)
+        if (type(r)is not dict or set(r)!={'profile','pass','cause'}or r['profile']!='volt_fixture_health_exit_v1'
+                or r['pass']not in ('closed','configured')or r['cause']not in HEALTH_CAUSES
+                or json.dumps(r,sort_keys=True,separators=(',',':')).encode()!=encoded):return None
+        return r
+    except (ValueError,UnicodeDecodeError,TypeError):return None
+
+# Fixed metadata-only projection: raw Health.Log.Output/config/env never enters
+# this subprocess stream. The daemon retains at most five health log entries.
+HEALTH_INSPECT_TEMPLATE='{"id":{{json .Id}},"name":{{json .Name}},"created":{{json .Created}},"image":{{json .Image}},"reference":{{json .Config.Image}},"owner":{{json (index .Config.Labels "volt.compose.owner-token")}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"revision":{{json (index .Config.Labels "org.opencontainers.image.revision")}},"snapshot":{{json (index .Config.Labels "org.volt.compose.source-snapshot")}},"started":{{json .State.StartedAt}},"status":{{json .State.Status}},"exit":{{json .State.ExitCode}},"oom":{{json .State.OOMKilled}},"restarting":{{json .State.Restarting}},"restarts":{{json .RestartCount}},"health":{{if .State.Health}}{"status":{{json .State.Health.Status}},"streak":{{json .State.Health.FailingStreak}},"logs":[{{range $i,$l:=.State.Health.Log}}{{if $i}},{{end}}{"exit":{{json $l.ExitCode}},"start":{{json $l.Start}},"end":{{json $l.End}}}{{end}}]}{{else}}null{{end}}}'
+
+def failed_health_projection(value,evidence):
+    """Failure-only observation. No adoption, lifecycle command or authority."""
+    from tools.release.native_runtime_probe import regular_bytes
+    unavailable={'status':'unavailable'}
+    try:
+        root=Path(value['private'])/'instance';journal=root/'instance.json'
+        original=regular_bytes(journal,1024*1024);info=json.loads(original,object_pairs_hook=pairs)
+        # Reuse the original successful independently verified graph result,
+        # never derive image/source expectations from the candidate journal.
+        if regular_bytes(Path(evidence)/'fixture-full-runtime-admission.exit',8)!=b'0\n':return unavailable
+        runtime=json.loads(regular_bytes(Path(evidence)/'fixture-full-runtime-admission.stdout',65536),object_pairs_hook=pairs)['runtime']
+        if (runtime['image_id']!=value['image_id']or runtime['source_revision']!=value['source_revision']
+                or runtime['source_snapshot']!=value['source_snapshot']or runtime['platform']!=PLATFORM):return unavailable
+        owner=info['owner_token'];project=info['project'];admitted=info['image_admission']
+        if (type(owner)is not str or not re.fullmatch('[0-9a-f]{64}',owner)
+                or project!='volt-easy-delivery-'+owner[:12]or info['mode']!='local'or info['platform']!=PLATFORM
+                or admitted['id']!=runtime['image_id']or admitted['source_revision']!=value['source_revision']
+                or admitted['source_snapshot']!=value['source_snapshot']):return unavailable
+        def inspect(target):
+            r=subprocess.run(['docker','container','inspect',target,'--format',HEALTH_INSPECT_TEMPLATE],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=2)
+            if r.returncode or len(r.stdout)>16384:raise ValueError('diagnostic unavailable')
+            row=json.loads(r.stdout,object_pairs_hook=pairs)
+            if (not re.fullmatch('[0-9a-f]{64}',row['id'])or row['name']!='/'+project+'-volt-1'
+                    or row['owner']!=owner or row['project']!=project or row['image']not in(runtime['image_id'],runtime['image_config_id'])
+                    or row['reference']!='127.0.0.1:46150/volt@'+runtime['image_index_digest']
+                    or row['revision']!=value['source_revision']or row['snapshot']!=value['source_snapshot']):raise ValueError('identity unavailable')
+            return row
+        before=inspect(project+'-volt-1');after=inspect(before['id'])
+        keys=('id','name','created','image','reference','owner','project','revision','snapshot','started')
+        if any(before[k]!=after[k]for k in keys)or regular_bytes(journal,1024*1024)!=original:return unavailable
+        for k in('oom','restarting'):
+            if type(after[k])is not bool:return unavailable
+        for k in('exit','restarts'):
+            if type(after[k])is not int or not 0<=after[k]<=2147483647:return unavailable
+        if after['status']not in ('created','running','paused','restarting','removing','exited','dead'):return unavailable
+        health=after['health'];logs=[]
+        if health is not None:
+            if (type(health)is not dict or set(health)!={'status','streak','logs'}or health['status']not in('starting','healthy','unhealthy')
+                    or type(health['streak'])is not int or not 0<=health['streak']<=2147483647
+                    or type(health['logs'])is not list or len(health['logs'])>5):return unavailable
+            for log in health['logs']:
+                if type(log)is not dict or set(log)!={'exit','start','end'}or type(log['exit'])is not int or not -1<=log['exit']<=255:return unavailable
+                # No raw timestamps exported. Typed exit sequence alone has no identity.
+                if any(type(log[k])is not str or len(log[k])>64 for k in('start','end')):return unavailable
+                logs.append(log['exit'])
+        return {'status':'observed','container_state':after['status'],'container_exit':after['exit'],'oom_killed':after['oom'],
+                'restarting':after['restarting'],'restart_count':after['restarts'],'health_status':health['status']if health else'absent',
+                'failing_streak':health['streak']if health else None,'health_exit_codes':logs}
+    except Exception:return unavailable
+
 @contextmanager
-def observe_journey(q,record):
+def observe_journey(q,record,*,health_context=None):
     """Observe the original producer results; never interpret private output.
 
     This private module instance is used by one sequential ceremony. Restore its
@@ -245,6 +313,8 @@ def observe_journey(q,record):
     def tracked(name,*args,**kwargs):
         record.pop('admission_error_class',None)
         record.pop('install_receipt',None)
+        record.pop('health_receipt',None)
+        record.pop('health_projection',None)
         record.update(stage=JOURNEY_STAGES.get(name,'other-qualification-command'),producer='entered',exit_code=None)
         try:result=original(name,*args,**kwargs)
         except BaseException:
@@ -259,6 +329,11 @@ def observe_journey(q,record):
                 except OSError:pass
             if name=='focused-public-install'and len(args)>=2:
                 record['install_receipt']=retained_install_receipt(args[1])
+                if record['install_receipt']and record['install_receipt']['phase']=='health':
+                    from tools.release.native_runtime_probe import regular_bytes
+                    try:record['health_receipt']=health_phase_receipt(regular_bytes(Path(args[1])/'focused-public-install.stderr',1024*1024))
+                    except (OSError,ValueError):record['health_receipt']=None
+                    if health_context is not None:record['health_projection']=failed_health_projection(health_context,args[1])
             if name=='fixture-full-runtime-admission'and record['exit_code']==2:
                 record['admission_error_class']=retained_admission_error(args[1])
             raise
@@ -286,7 +361,7 @@ def essential(value,source,*,diagnostics=None):
     sys.path.insert(0,str(source))
     spec=importlib.util.spec_from_file_location('_hosted_maintained_qualifier',source/'tools/compose_release_qualification.py')
     q=importlib.util.module_from_spec(spec);spec.loader.exec_module(q)
-    with observe_journey(q,diagnostics if diagnostics is not None else {}):
+    with observe_journey(q,diagnostics if diagnostics is not None else {},health_context=value):
         try:
             q.qualify_inventory_cause_fixture(bundle=Path(value['bundle']),fixture=Path(value['fixture']),
                 image_id=value['image_id'],source_revision=value['source_revision'],source_snapshot=value['source_snapshot'],

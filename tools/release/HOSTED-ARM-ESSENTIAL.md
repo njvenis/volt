@@ -310,3 +310,35 @@ production target, all verifier checks, keys, protected runtime records and othe
 image paths remain unchanged. This removes dependence on a caller's public-input
 mode while supporting the already admitted nonroot host UID. Fresh source-bound
 Q/native evidence is still required; the local component is not an ARM claim.
+
+### Source-level ordinary fixture install exit receipt
+
+The disposable hosted runner did not retain the original public-install private
+stderr. No authorized retrieval remains. The next diagnostic is a source-level
+checkpoint, not another error-phrase classifier: the signed launcher maintains a
+closed phase as its actual control flow advances, and its existing EXIT cleanup
+emits one canonical JSON record on the stderr the maintained caller already
+captures privately. Only install with the baked ordinary loopback Q pin and all
+matching verified-bootstrap expectations can emit it. Production/nonfixture,
+noninstall and unvalidated callers emit nothing. There is no new option,
+environment selector, file, mount, issuer or authority.
+
+The record contains only profile, finite phase and original shell exit status
+BEFORE existing cleanup. It is not a cleanup result: original0 followed by an
+uncertain cleanup can still produce caller nonzero. Reporting failure is ignored
+so it cannot change exit/cleanup decisions. The unchanged cleanup then runs as
+before; no current instance receives diagnostic writes. Raw arguments, paths,
+environment, exception messages, producer text, stdout and capabilities are absent.
+A whole-line delimiter separates the record from unterminated child text. The
+host observer accepts exactly one canonical closed record from bounded original
+private stderr, rejects malformed/duplicate/partial records and retains the
+original caller result separately. Receipt data grants no success, cleanup,
+trust, capability or admission authority. Phase is the last reached checkpoint,
+not an inferred root cause or a claim that its operation succeeded.
+
+Actual public launcher subprocess tests use one owned stub executable for Docker
+and dummy package inputs; no crypto, daemon or candidate runtime is executed.
+They falsify four reached failure phases, preserve actual EXIT statuses0/7 with
+and without a working diagnostic fd, exclude production/noninstall/unvalidated
+receipts, and ensure no instance or resource mutation at those boundaries. They
+are source/control-flow evidence only, not a hosted ARM install pass.

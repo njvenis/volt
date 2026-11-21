@@ -26,6 +26,8 @@ CREATED_NETWORK=''
 INSTALLING=0
 HELPER_EXEC_ONLY=0
 RETAIN_STOP_EVIDENCE=0
+INSTALL_RECEIPT_ACTION=${1:-}
+INSTALL_RECEIPT_PHASE=host-preflight
 
 fail() { printf '%s\n' "volt installer: $*" >&2; exit 1; }
 select_inspect_capability() {
@@ -59,8 +61,34 @@ inspect_runtime_image() {
     docker image inspect "$@"
   fi
 }
+emit_fixture_install_receipt() {
+  # Diagnostic only, on the already private ordinary fixture caller's stderr.
+  # No new selector, file/mount, authority, raw producer text or install decision.
+  [ "$INSTALL_RECEIPT_ACTION" = install ] || return 0
+  case "$VERIFIER_IMAGE" in 127.0.0.1:46150/volt-installer-verifier@sha256:*) ;; *) return 0 ;; esac
+  receipt_digest=${VERIFIER_IMAGE##*@sha256:}
+  case "$receipt_digest" in ''|*[!0-9a-f]*) return 0 ;; esac
+  [ "${#receipt_digest}" -eq 64 ] || return 0
+  [ "${VOLT_BOOTSTRAP_VERIFIER_VERIFIED:-}" = 1 ] \
+    && [ "${VOLT_EXPECTED_VERIFIER_IMAGE:-}" = "$VERIFIER_IMAGE" ] \
+    && [ "${VOLT_EXPECTED_VERSION:-}" = "$VERSION" ] \
+    && [ "${VOLT_EXPECTED_SIGNER:-}" = "$SIGNER" ] \
+    && [ "${VOLT_EXPECTED_ISSUER:-}" = "$ISSUER" ] || return 0
+  case "$INSTALL_RECEIPT_PHASE" in
+    host-preflight|verifier-fetch|bundle-discovery|runtime-fetch|runtime-observation|online-full-graph|cache-stage|original-cache-export|runtime-identity|package-extraction|argument-validation|resource-creation|initial-request|initial-admission|exclusive-lock|cache-publication|custody-prepare|journal-read|custody-validation|resource-validation|compose-validation|api-prepare|api-start|api-release|health|capability-delivery|final-owner-check|final-report|completed) ;;
+    *) return 0 ;;
+  esac
+  case "$1" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$1" -le 255 ] || return 0
+  # Start our own whole line even after an unterminated private child diagnostic.
+  # Failed reporting never changes the operation or its existing cleanup route.
+  printf '\nVOLT_FIXTURE_INSTALL_RECEIPT {"phase":"%s","profile":"volt_fixture_install_exit_v1","status":%s}\n' "$INSTALL_RECEIPT_PHASE" "$1" >&2 || :
+  return 0
+}
+
 cleanup() {
   cleanup_original_status=$?
+  if [ "${INSTALL_RECEIPT_ACTION:-}" = install ]; then emit_fixture_install_receipt "$cleanup_original_status"; fi
   if [ -n "$LOCK_NAME" ]; then
     if [ "$LOCK_CREATED" -ne 1 ] || ! remove_lock_owner; then
       printf '%s\n' 'volt installer: lifecycle owner cleanup uncertain; all registered resources and workspace retained' >&2
@@ -360,6 +388,7 @@ EOF_CACHE_HELPER_MOUNTS
 }
 
 publish_installer_cache() {
+  INSTALL_RECEIPT_PHASE=cache-publication
   # Offline execution began at the exact journal-bound retained stage. Its
   # package directory moves with the atomic publication; never keep using a
   # vanished source path or search for another package after the rename.
@@ -414,6 +443,7 @@ fi
 # provenance before invoking the signed launcher. It verifies the bundle
 # without extracting it and returns the immutable runtime ref.
 if [ "$OFFLINE_MODE" -eq 0 ]; then
+  INSTALL_RECEIPT_PHASE=verifier-fetch
   docker pull --platform "$ENGINE_PLATFORM" "$VERIFIER_IMAGE" >/dev/null || fail 'could not fetch the independently pinned verifier image'
 fi
 if [ "$OFFLINE_MODE" -eq 1 ]; then
@@ -427,6 +457,7 @@ bundle_discovery() {
   --bundle-signature /package/installer.bundle.sigstore.json --bundle-only \
     --signer "$SIGNER" --issuer "$ISSUER" "$@"
 }
+INSTALL_RECEIPT_PHASE=bundle-discovery
 bundle_discovery >"$WORK/bundle-admission.txt" || fail 'signed installer bundle or closed inventory did not verify'
 SIGNED_REFERENCE=''
 SIGNED_BUNDLE_SHA256=''
@@ -443,8 +474,10 @@ IMAGE_REF=$SIGNED_REFERENCE
 # Authenticate the exact runtime image and its signed SLSA provenance before
 # executing any Python/OpenSSL helper from it. No Docker socket is mounted.
 if [ "$OFFLINE_MODE" -eq 0 ]; then
+  INSTALL_RECEIPT_PHASE=runtime-fetch
   docker pull --platform "$ENGINE_PLATFORM" "$IMAGE_REF" >/dev/null || fail 'could not pull the authenticated runtime image'
 fi
+INSTALL_RECEIPT_PHASE=runtime-observation
 inspect_runtime_image "$ENGINE_PLATFORM" "$IMAGE_REF" >"$WORK/runtime-image.json" || fail 'could not inspect the authenticated runtime image'
 if [ "$OFFLINE_MODE" -eq 1 ]; then
   # This is original cached data, not execution or trust from a cache pass.
@@ -475,16 +508,19 @@ if [ "$OFFLINE_MODE" -eq 1 ]; then
   load_installer_intent
   refresh_installer_admission
 else
+  INSTALL_RECEIPT_PHASE=online-full-graph
   graph_verifier online >"$WORK/graph-admission.json" \
     || fail 'independent verifier rejected the signed source, provenance, index, child or platform graph'
   resolve_cache_location
   if [ "$EARLY_ACTION" = install ]; then
     [ ! -e "$CACHE_STATE" ] && [ ! -L "$CACHE_STATE" ] || fail 'refusing an existing instance directory'
     [ ! -e "$CACHE_PARENT" ] && [ ! -L "$CACHE_PARENT" ] || fail 'retained verification anchor cannot recreate an installation'
+    INSTALL_RECEIPT_PHASE=cache-stage
     mkdir -m 700 "$CACHE_PARENT" || fail 'dedicated private verification anchor could not be created'
     CACHE_DIRECTORY=$(mktemp -d "$CACHE_PARENT/.originals.partial.XXXXXXXX") \
       || fail 'private original-artifact staging could not be created'
     CACHE_STAGE=${CACHE_DIRECTORY##*/}
+    INSTALL_RECEIPT_PHASE=original-cache-export
     graph_verifier export --export-offline-artifacts --expected-verifier-reference "$VERIFIER_IMAGE" \
       --cache-state "$CACHE_STATE" --cache-stage-name "$CACHE_STAGE" \
       >"$WORK/graph-admission.json" || fail 'complete original authentication transport could not be exported and reverified'
@@ -501,6 +537,7 @@ else
 fi
 
 # Complete independent graph admission precedes this first candidate execution.
+INSTALL_RECEIPT_PHASE=runtime-identity
 docker run --platform "$PLATFORM" --pull=never --rm -i --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
   --entrypoint /opt/uvm/venv/bin/python "$IMAGE_REF" -c 'import json,sys; result=json.load(sys.stdin); r=result["runtime"]; print("image_id_kind="+r["image_id_kind"]); print("image_config_id="+r["image_config_id"]); print("selected_descriptor="+json.dumps(r["selected_descriptor"],sort_keys=True,separators=(",",":"))); print("selected_manifest_id="+r["selected_descriptor"]["digest"]); print("selected_manifest_media="+r["selected_descriptor"]["mediaType"]); print("selected_manifest_size="+str(r["selected_descriptor"]["size"])); print("installer_pin_json="+json.dumps(result["offline_artifacts"],sort_keys=True,separators=(",",":")))' \
   <"$WORK/graph-admission.json" >"$WORK/runtime-identity.txt" || fail 'admitted runtime identity inventory could not be decoded'
@@ -522,6 +559,7 @@ case "$IMAGE_ID_KIND" in config|selected_manifest) ;; *) fail 'runtime object ki
 
 # Extraction is constrained to a private directory and occurs only after the
 # signature check. Reject paths and inventories outside the one-level bundle.
+INSTALL_RECEIPT_PHASE=package-extraction
 ROOT=''
 while IFS= read -r member; do
   case "$member" in
@@ -627,6 +665,7 @@ recovery_helper() {
 }
 
 prepare_local_custody() {
+  INSTALL_RECEIPT_PHASE=custody-prepare
   [ "$MODE" = local ] || return 0
   recovery_helper request >"$WORK/recovery-request.json" || fail 'could not create closed local recovery request'
   chmod 600 "$WORK/recovery-request.json"
@@ -636,6 +675,7 @@ prepare_local_custody() {
 }
 
 validate_local_custody() {
+  INSTALL_RECEIPT_PHASE=custody-validation
   [ "$MODE" = local ] || return 0
   recovery_helper request >"$WORK/recovery-request.json" || fail 'local recovery identity request failed'
   chmod 600 "$WORK/recovery-request.json"
@@ -849,6 +889,7 @@ check_managed_holder() {
 }
 
 take_lock() {
+  INSTALL_RECEIPT_PHASE=exclusive-lock
   if [ -n "$LOCK_NAME" ]; then ensure_lock_owner; return 0; fi
   LOCK_NAME="volt-lock-${PROJECT}-$$"
   init_request=${1:-}
@@ -912,6 +953,7 @@ take_lock() {
 }
 
 wait_healthy() {
+  INSTALL_RECEIPT_PHASE=health
   tries=0
   while [ "$tries" -lt 180 ]; do
     ensure_lock_owner
@@ -945,6 +987,7 @@ collect_start_resources() {
 }
 
 prepare_start_container() {
+  INSTALL_RECEIPT_PHASE=api-prepare
   ensure_lock_owner
   locked_compose create --force-recreate || fail 'local container preparation failed'
   verify_actual_mounts
@@ -961,6 +1004,7 @@ prepare_start_container() {
 }
 
 release_start() {
+  INSTALL_RECEIPT_PHASE=api-release
   ensure_lock_owner
   tries=0
   while [ "$tries" -lt 360 ]; do
@@ -991,16 +1035,19 @@ release_start() {
 start_local_instance() {
   publish_after_ack=$START_CLOSED
   prepare_start_container
+  INSTALL_RECEIPT_PHASE=api-start
   locked_compose start || fail 'bootstrap maintenance container start failed'
   release_start
   if [ "$publish_after_ack" -eq 1 ]; then
     prepare_start_container
+    INSTALL_RECEIPT_PHASE=api-start
     locked_compose start || fail 'configured local start failed'
     release_start
   fi
 }
 
 copy_capability() {
+  INSTALL_RECEIPT_PHASE=capability-delivery
   ensure_lock_owner
   destination=$1
   operation=$2
@@ -1122,6 +1169,7 @@ if [ "$ACTION" = recovery ]; then
   RECOVERY_COMMAND=$1
   shift
 fi
+INSTALL_RECEIPT_PHASE=argument-validation
 STATE=''
 HTTP_PORT=8180
 USERNAME=''
@@ -1171,6 +1219,7 @@ while [ "$STATE" != / ] && [ "${STATE%/}" != "$STATE" ]; do STATE=${STATE%/}; do
 case "$STATE" in *,*|*:* ) fail 'instance path cannot contain commas or colons for Docker bind mounts' ;; esac
 
 if [ "$ACTION" = install ]; then
+  INSTALL_RECEIPT_PHASE=resource-creation
   parent=$(dirname -- "$STATE")
   mkdir -p "$parent"
   parent=$(cd -P -- "$parent" && pwd -P) || fail 'could not resolve the private instance parent directory'
@@ -1209,6 +1258,7 @@ if [ "$ACTION" = install ]; then
   GATEWAY=$(docker network inspect "$NETWORK" --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}')
   case "$SUBNET" in *[!0-9./]*|'') fail 'Docker returned an invalid private network subnet' ;; esac
   case "$GATEWAY" in *[!0-9.]*|*..*|.*|*.|'') fail 'Docker returned an invalid private network gateway' ;; esac
+  INSTALL_RECEIPT_PHASE=initial-request
   docker run --platform "$PLATFORM" --pull=never --rm --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
     --tmpfs /tmp:rw,noexec,nosuid,size=16m --user "$(id -u):$(id -g)" \
     --mount "type=bind,src=$PACKAGE,dst=/package,readonly" \
@@ -1225,6 +1275,7 @@ if [ "$ACTION" = install ]; then
     --runtime-compose-directory "$STATE/compose" --host-instance-directory "$STATE" \
     >"$WORK/runtime-init-request.json" || fail 'fixed initialization request emission failed'
   chmod 600 "$WORK/runtime-init-request.json"
+  INSTALL_RECEIPT_PHASE=initial-admission
   graph_verifier initial --offline-artifacts --expected-verifier-reference "$VERIFIER_IMAGE" --bind-initial-request \
     >"$WORK/init-admission.json" || fail 'fresh original graph does not bind this exact initial request'
   chmod 600 "$WORK/init-admission.json"
@@ -1252,6 +1303,7 @@ else
   read_instance
 fi
 
+INSTALL_RECEIPT_PHASE=journal-read
 read_instance
 case "$ACTION" in
   backup-status) run_backup_status; exit 0 ;;
@@ -1262,16 +1314,22 @@ refresh_installer_admission
 read_instance
 case "$ACTION" in diagnose|logs) run_diagnostics; exit $? ;; esac
 validate_local_custody
+INSTALL_RECEIPT_PHASE=resource-validation
 check_owned_resources
 if [ "$ACTION" = install ]; then
+  INSTALL_RECEIPT_PHASE=compose-validation
   locked_compose config --quiet || fail 'resolved local Compose configuration failed validation'
   start_local_instance
   copy_capability "$STATE/secrets/bootstrap-capability-output" prepare-setup
+  INSTALL_RECEIPT_PHASE=capability-delivery
   ensure_lock_owner
   show_capability "$STATE/secrets/bootstrap-capability-output"
+  INSTALL_RECEIPT_PHASE=final-owner-check
   ensure_lock_owner
   ensure_lock_owner
+  INSTALL_RECEIPT_PHASE=final-report
   printf 'instance=%s\n' "$STATE"
+  INSTALL_RECEIPT_PHASE=completed
 elif [ "$ACTION" = start ]; then
   if [ "$RESTORE_PENDING" -eq 1 ]; then
     [ "$RESTORE_IMPORTED" -eq 1 ] || fail 'restored stores lack offline admission; runtime remains stopped'

@@ -200,6 +200,38 @@ def retained_admission_error(evidence):
     try:return admission_error_class(regular_bytes(Path(evidence)/'fixture-full-runtime-admission.stderr',65536))
     except (OSError,ValueError):return 'unclassified'
 
+INSTALL_PHASES=frozenset(('host-preflight','verifier-fetch','bundle-discovery','runtime-fetch',
+ 'runtime-observation','online-full-graph','cache-stage','original-cache-export','runtime-identity',
+ 'package-extraction','argument-validation','resource-creation','initial-request','initial-admission',
+ 'exclusive-lock','cache-publication','custody-prepare','journal-read','custody-validation',
+ 'resource-validation','compose-validation','api-prepare','api-start','api-release','health',
+ 'capability-delivery','final-owner-check','final-report','completed'))
+
+def install_phase_receipt(raw):
+    """Read ONE source-produced closed record, not an error phrase matcher.
+
+    Diagnostic only. Status is the original shell exit BEFORE unchanged cleanup,
+    so it can differ from the caller result if cleanup subsequently failed.
+    """
+    if type(raw)is not bytes or len(raw)>1024*1024:return None
+    prefix=b'VOLT_FIXTURE_INSTALL_RECEIPT '
+    rows=[line for line in raw.splitlines(keepends=True)if line.startswith(prefix)]
+    if len(rows)!=1 or not rows[0].endswith(b'\n')or len(rows[0])>512:return None
+    try:
+        encoded=rows[0][len(prefix):-1];record=json.loads(encoded.decode('ascii'),object_pairs_hook=pairs)
+        if (type(record)is not dict or set(record)!={'phase','profile','status'}
+                or record['profile']!='volt_fixture_install_exit_v1'
+                or type(record['phase'])is not str or record['phase']not in INSTALL_PHASES
+                or type(record['status'])is not int or not 0<=record['status']<=255
+                or json.dumps(record,sort_keys=True,separators=(',',':')).encode()!=encoded):return None
+    except (ValueError,UnicodeDecodeError):return None
+    return record
+
+def retained_install_receipt(evidence):
+    from tools.release.native_runtime_probe import regular_bytes
+    try:return install_phase_receipt(regular_bytes(Path(evidence)/'focused-public-install.stderr',1024*1024))
+    except (OSError,ValueError):return None
+
 @contextmanager
 def observe_journey(q,record):
     """Observe the original producer results; never interpret private output.
@@ -212,6 +244,7 @@ def observe_journey(q,record):
     record.update(stage='qualification-entry',producer='not-started',exit_code=None)
     def tracked(name,*args,**kwargs):
         record.pop('admission_error_class',None)
+        record.pop('install_receipt',None)
         record.update(stage=JOURNEY_STAGES.get(name,'other-qualification-command'),producer='entered',exit_code=None)
         try:result=original(name,*args,**kwargs)
         except BaseException:
@@ -224,6 +257,8 @@ def observe_journey(q,record):
                     if len(raw)<=8 and re.fullmatch(rb'-?[0-9]{1,3}\n',raw):
                         code=int(raw);record['exit_code']=code if -255<=code<=255 else None
                 except OSError:pass
+            if name=='focused-public-install'and len(args)>=2:
+                record['install_receipt']=retained_install_receipt(args[1])
             if name=='fixture-full-runtime-admission'and record['exit_code']==2:
                 record['admission_error_class']=retained_admission_error(args[1])
             raise

@@ -18,6 +18,9 @@ FROM verifier-base AS verifier-fixture
 COPY --from=fixture-policy --chown=65532:65532 --chmod=0444 /fixture-trust.json /usr/local/share/volt-verifier/fixture-trust.json
 COPY --from=fixture-policy --chown=65532:65532 --chmod=0444 /fixture.pub /usr/local/share/volt-verifier/fixture.pub
 COPY --from=fixture-policy --chown=65532:65532 --chmod=0444 /trusted-root.json /usr/local/share/volt-verifier/trusted-root.json
+# BuildKit may also apply COPY chmod to newly created destination parents.
+# The inherited nonroot owner repairs only traversal of this PUBLIC directory.
+RUN chmod 0755 /usr/local/share/volt-verifier
 
 # Keep the default build target production so an omitted --target can never
 # accidentally include the local verification key/root policy.

@@ -123,6 +123,10 @@ class IndependentVerifierArchiveTests(unittest.TestCase):
             f'COPY --from=fixture-policy --chown=65532:65532 --chmod=0444 /{name} /usr/local/share/volt-verifier/{name}'
             for name in ('fixture-trust.json','fixture.pub','trusted-root.json')})
         self.assertEqual(len(copies),3)
+        self.assertIn('RUN chmod 0755 /usr/local/share/volt-verifier',fixture)
+        self.assertLess(fixture.rindex('COPY '),fixture.index('RUN chmod 0755'))
+        self.assertNotIn('USER ',fixture)
+        self.assertNotIn('chmod 0755',dockerfile.split('FROM verifier-base AS verifier-fixture',1)[0])
         self.assertNotIn('--chmod=0444',dockerfile.split('FROM verifier-base AS verifier-fixture',1)[0])
         self.assertTrue(dockerfile.rstrip().endswith('FROM verifier-base AS verifier-production'))
 

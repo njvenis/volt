@@ -220,12 +220,14 @@ class Closure:
             raise ValueError('offline blob is outside the original signed package')
         if signer != self.release['signer'] or issuer != self.release['issuer']:
             raise ValueError('offline release differs from externally expected publisher policy')
-        if self.fixture is not True:
-            raise ValueError('production original public trust/time policy is not independently provisioned for offline use')
+        if self.fixture is None:
+            raise ValueError('custody-only readers cannot authenticate artifacts')
         signature = 'launcher.sigstore.json' if name == 'launcher.sh' else 'installer.bundle.sigstore.json'
         trust = Path('/usr/local/share/volt-verifier')
-        result = subprocess.run(['/usr/local/bin/cosign', 'verify-blob', '--key', str(trust / 'fixture.pub'),
-            '--trusted-root', str(trust / 'trusted-root.json'), '--bundle', str(self.root / 'package' / signature),
+        from uvm.installer.sigstore_policy import keyless_arguments
+        policy = (['--key',str(trust/'fixture.pub'),'--trusted-root',str(trust/'trusted-root.json')]
+            if self.fixture is True else keyless_arguments(signer,issuer))
+        result = subprocess.run(['/usr/local/bin/cosign', 'verify-blob', *policy, '--bundle', str(self.root / 'package' / signature),
             str(self.root / 'package' / name)], stdin=subprocess.DEVNULL, capture_output=True, text=True,
             env={'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': '/tmp'}, timeout=90)
         if result.returncode:
@@ -243,12 +245,14 @@ class Closure:
             raise ValueError('offline verification target/type is outside the fixed graph')
         if signer != self.release['signer'] or issuer != self.release['issuer']:
             raise ValueError('offline release differs from externally expected publisher policy')
-        if self.fixture is not True:
-            raise ValueError('production original public trust/time policy is not independently provisioned for offline use')
+        if self.fixture is None:
+            raise ValueError('custody-only readers cannot authenticate artifacts')
         # These are baked independent verifier inputs, never closure inputs.
         trust = Path('/usr/local/share/volt-verifier')
-        argv = ['/usr/local/bin/cosign', 'verify-attestation', '--type', predicate,
-            '--key', str(trust / 'fixture.pub'), '--trusted-root', str(trust / 'trusted-root.json'),
+        from uvm.installer.sigstore_policy import keyless_arguments
+        policy = (['--key',str(trust/'fixture.pub'),'--trusted-root',str(trust/'trusted-root.json')]
+            if self.fixture is True else keyless_arguments(signer,issuer))
+        argv = ['/usr/local/bin/cosign', 'verify-attestation', '--type', predicate, *policy,
             '--local-image', str(self.root / self.references[reference])]
         result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
             env={'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': '/tmp'}, timeout=90)

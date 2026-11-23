@@ -12,8 +12,9 @@ class ExportGraphTests(unittest.TestCase):
         for reference in ('https://another.invalid/volt@sha256:' + 'a' * 64,
                 '127.0.0.1:46150/another@sha256:' + 'a' * 64):
             with self.assertRaises(ValueError): export.FixtureRegistry(reference)
-        with self.assertRaisesRegex(ValueError, 'not independently provisioned'):
-            export.export_originals(None, fixture=False)
+        from types import SimpleNamespace
+        with self.assertRaisesRegex(ValueError, 'exact RC4'):
+            export.export_originals(SimpleNamespace(signer='foreign',issuer='foreign'),fixture=False)
 
     def fixture(self, *, layer_type=None, wrong_subject=False, native_proof_config=False):
         config = canonical({'os': 'linux', 'architecture': 'amd64', 'config': {}})

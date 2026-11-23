@@ -60,6 +60,48 @@ class FixtureRegistry:
         return raw
 
 
+class ProductionRegistry:
+    """Public read-only original metadata from the two fixed official GHCR repos."""
+    def __init__(self,reference):
+        from urllib.parse import urlsplit
+        m=re.fullmatch(r'ghcr\.io/(njvenis/(?:volt|volt-installer-verifier))@sha256:[0-9a-f]{64}',reference)
+        if m is None:raise ValueError('production original export requires a fixed official GHCR digest')
+        self.repository=m[1];self.token=None
+        class Redirect(HTTPRedirectHandler):
+            def redirect_request(self,req,fp,code,msg,headers,newurl):
+                t=urlsplit(newurl)
+                if ('/blobs/' not in req.full_url or t.scheme!='https'or t.username or t.password
+                        or t.port not in(None,443)or not t.hostname or not t.hostname.endswith('.githubusercontent.com')):
+                    raise ValueError('production registry redirect denied')
+                return Request(newurl,headers={'Accept':'application/octet-stream'})
+        self.opener=build_opener(ProxyHandler({}),Redirect())
+    def read(self,category,value,*,optional_404=False):
+        from urllib.parse import urlencode
+        if category not in('manifests','blobs','referrers')or re.fullmatch(r'(?:sha256:[0-9a-f]{64}|sha256-[0-9a-f]{64})',value)is None:
+            raise ValueError('production registry path is not closed/content-addressed')
+        headers={'Accept':','.join(sorted(INDEX_TYPES|MANIFEST_TYPES))+',application/json'}
+        if self.token:headers['Authorization']='Bearer '+self.token
+        url='https://ghcr.io/v2/'+self.repository+'/'+category+'/'+value
+        try:response=self.opener.open(Request(url,headers=headers),timeout=20)
+        except HTTPError as error:
+            if optional_404 and error.code==404:return None
+            if error.code!=401 or self.token is not None:raise ValueError('production original metadata request failed')from None
+            # Ignore candidate WWW-Authenticate destinations; use fixed GHCR public pull.
+            with self.opener.open(Request('https://ghcr.io/token?'+urlencode({'scope':'repository:'+self.repository+':pull'})),timeout=20)as auth:
+                raw=auth.read(65537)
+            if len(raw)>65536:raise ValueError('GHCR pull token exceeds bound')
+            record=json.loads(raw);token=record.get('token')or record.get('access_token')
+            if type(token)is not str or re.fullmatch(r'[A-Za-z0-9._~+/-]+=*',token)is None:raise ValueError('GHCR public pull token malformed')
+            self.token=token;headers['Authorization']='Bearer '+token
+            try:response=self.opener.open(Request(url,headers=headers),timeout=20)
+            except HTTPError as retry:
+                if optional_404 and retry.code==404:return None
+                raise ValueError('production original authenticated request failed')from None
+        with response:raw=response.read(MAX_MEMBER+1)
+        if len(raw)>MAX_MEMBER:raise ValueError('production original metadata exceeds bound')
+        return raw
+
+
 class MetadataLayout:
     def __init__(self, registry, reference: str):
         self.registry, self.reference = registry, reference
@@ -183,7 +225,11 @@ class MetadataLayout:
 
 def export_originals(args, *, fixture: bool) -> dict:
     if not fixture:
-        raise ValueError('production original public trust/time policy is not independently provisioned for offline export')
+        from uvm.installer.sigstore_policy import identity
+        identity(args.signer,args.issuer)
+        if (re.fullmatch(r'ghcr\.io/njvenis/volt@sha256:[0-9a-f]{64}',args.reference)is None
+                or re.fullmatch(r'ghcr\.io/njvenis/volt-installer-verifier@sha256:[0-9a-f]{64}',args.expected_verifier_reference)is None):
+            raise ValueError('production export runtime/verifier roles must retain fixed official repositories')
     root = ROOT
     from uvm.installer.offline_artifacts import _directory
     from uvm.installer.lock import _bounded_file
@@ -228,7 +274,7 @@ def export_originals(args, *, fixture: bool) -> dict:
         limit = 64 * MAX_MEMBER if name == 'installer.bundle.tar.gz' else MAX_MEMBER
         write('package/' + name, _bounded_file(source, limit, private=False))
     for name, reference in references.items():
-        layout = MetadataLayout(FixtureRegistry(reference), reference)
+        layout = MetadataLayout((FixtureRegistry if fixture else ProductionRegistry)(reference), reference)
         transport = layout.collect()
         write(name + '/index.json', canonical(transport))
         write(name + '/oci-layout', canonical({'imageLayoutVersion': '1.0.0'}))

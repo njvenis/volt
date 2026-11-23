@@ -25,3 +25,8 @@ RUN chmod 0755 /usr/local/share/volt-verifier
 # Keep the default build target production so an omitted --target can never
 # accidentally include the local verification key/root policy.
 FROM verifier-base AS verifier-production
+# Standard public-good trust, independently acquired by the pinned Cosign TUF
+# client at build time. No package/customer root, policy record or expiry override.
+USER 0:0
+RUN python -c 'import os,subprocess,pathlib,shutil; home="/tmp/volt-sigstore-build"; subprocess.run(["/usr/local/bin/cosign","initialize","--mirror","https://tuf-repo-cdn.sigstore.dev"],env={"PATH":"/usr/local/bin:/usr/bin:/bin","HOME":home},check=True); source=pathlib.Path(home)/".sigstore/root/tuf-repo-cdn.sigstore.dev/targets/trusted_root.json"; destination=pathlib.Path("/usr/local/share/volt-verifier/public-trusted-root.json"); destination.parent.mkdir(parents=True,exist_ok=True); shutil.copyfile(source,destination); destination.chmod(0o444); shutil.rmtree(home)'
+USER 65532:65532

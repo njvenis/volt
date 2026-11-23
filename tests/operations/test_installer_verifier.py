@@ -128,7 +128,12 @@ class IndependentVerifierArchiveTests(unittest.TestCase):
         self.assertNotIn('USER ',fixture)
         self.assertNotIn('chmod 0755',dockerfile.split('FROM verifier-base AS verifier-fixture',1)[0])
         self.assertNotIn('--chmod=0444',dockerfile.split('FROM verifier-base AS verifier-fixture',1)[0])
-        self.assertTrue(dockerfile.rstrip().endswith('FROM verifier-base AS verifier-production'))
+        self.assertTrue(dockerfile.rstrip().endswith('USER 65532:65532'))
+        production=dockerfile.split('FROM verifier-base AS verifier-production',1)[1]
+        self.assertIn('initialize',production)
+        self.assertIn('https://tuf-repo-cdn.sigstore.dev',production)
+        self.assertNotIn('fixture.pub',production)
+        self.assertNotIn('fixture-trust.json',production)
 
     def test_closed_signed_descriptor_inventory_and_exact_runtime_reference(self):
         with tempfile.TemporaryDirectory() as tmp:

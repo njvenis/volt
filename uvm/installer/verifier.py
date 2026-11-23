@@ -75,6 +75,13 @@ def cosign(*args: str) -> str:
     if FIXTURE_POLICY.is_file():
         policy = json.loads(FIXTURE_POLICY.read_text())
         return _cosign_fixture(policy, *args)
+    from uvm.installer.sigstore_policy import keyless_arguments
+    # Production CLI inputs cannot replace the immutable release identity/root.
+    if '--certificate-identity' not in args or '--certificate-oidc-issuer' not in args:
+        raise ValueError('production verifier requires exact keyless publisher arguments')
+    signer=args[args.index('--certificate-identity')+1];issuer=args[args.index('--certificate-oidc-issuer')+1]
+    policy=keyless_arguments(signer,issuer)
+    args=(*args[:-1], '--trusted-root', policy[-1], args[-1])
     result = subprocess.run(("/usr/local/bin/cosign", *args), stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/tmp"})

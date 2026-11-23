@@ -138,7 +138,36 @@ jobs:
           verifier_repo="ghcr.io/njvenis/volt-installer-verifier"
           sha_tag="sha-$CANDIDATE_SOURCE_SHA"
           expected_snapshot="sha256:$(git archive --format=tar "$CANDIDATE_SOURCE_SHA" | sha256sum | cut -d' ' -f1)"
-          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          containers=()
+          cleanup_containers() {
+            for container in "${containers[@]}"; do docker rm "$container" >/dev/null 2>&1 || true; done
+          }
+          trap cleanup_containers EXIT
+          check_verifier_root() {
+            local image_id container_id
+            image_id=$(docker image inspect "$1" --format '{{.Id}}')
+            container_id=$(docker create "$image_id")
+            containers+=("$container_id")
+            test "$(docker inspect "$container_id" --format '{{.Image}}')" = "$image_id"
+            docker cp "$container_id:/usr/local/share/volt-verifier/public-trusted-root.json" - | \
+              python3 -c 'import json,sys,tarfile; archive=tarfile.open(fileobj=sys.stdin.buffer,mode="r|"); rows=[]; root=None
+          def unique(pairs):
+              result={}
+              for key,value in pairs:
+                  if key in result: raise ValueError("duplicate trusted-root JSON key")
+                  result[key]=value
+              return result
+          for member in archive:
+              if member.name != "public-trusted-root.json" or not member.isfile() or member.issym() or member.islnk() or member.uid != 0 or member.mode != 0o444 or member.size < 1 or member.size > 65536: raise SystemExit("untrusted trusted-root archive entry")
+              stream=archive.extractfile(member)
+              if stream is None: raise SystemExit("trusted-root entry has no content")
+              data=stream.read(65537)
+              if len(data) != member.size or len(data) > 65536: raise SystemExit("trusted-root entry size mismatch")
+              rows.append(member.name)
+              root=json.loads(data,object_pairs_hook=unique)
+          if rows != ["public-trusted-root.json"] or not isinstance(root,dict) or root.get("mediaType") != "application/vnd.dev.sigstore.trustedroot+json;version=0.1": raise SystemExit("trusted-root archive inventory or media type mismatch")'
+            docker rm "$container_id" >/dev/null
+          }
           for kind in runtime verifier; do
             for arch in amd64 arm64; do
               dir="$root/$kind-$arch"
@@ -155,10 +184,18 @@ jobs:
               test "$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}')" = "linux/$arch"
               test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$CANDIDATE_SOURCE_SHA"
               test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.volt.compose.source-snapshot"}}')" = "$expected_snapshot"
+              if [ "$kind" = verifier ]; then check_verifier_root "$image"; fi
               test "$(cat "$root/$kind-$arch/source-snapshot.txt")" = "$expected_snapshot"
+            done
+          done
+          # Complete all four artifact and both verifier-root preflights before the first registry write.
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          for kind in runtime verifier; do
+            if [ "$kind" = runtime ]; then repository="$runtime_repo"; else repository="$verifier_repo"; fi
+            for arch in amd64 arm64; do
+              image="${repository}:$sha_tag-linux-$arch"
               docker push "$image"
             done
-            if [ "$kind" = runtime ]; then repository="$runtime_repo"; else repository="$verifier_repo"; fi
             docker buildx imagetools create --tag "$repository:$sha_tag" \
               --tag "$repository:0.1.0-rc.4" \
               "$repository:$sha_tag-linux-amd64" "$repository:$sha_tag-linux-arm64"
@@ -194,6 +231,20 @@ jobs:
           verifier_digest=$(cat "$root/verifier-index-digest.txt")
           runtime_ref="$runtime_repo@$runtime_digest"
           verifier_ref="$verifier_repo@$verifier_digest"
+          runtime_children=$(python3 - "$root/runtime-children.json" "$runtime_repo" <<'PY'
+          import json, re, sys
+          from pathlib import Path
+          children=json.loads(Path(sys.argv[1]).read_text())
+          for platform in ("linux/amd64", "linux/arm64"):
+              digest=children.get(platform)
+              if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                  raise SystemExit(f"runtime index has no exact digest for {platform}")
+              print(f"{platform}={sys.argv[2]}@{digest}")
+          PY
+          )
+          runtime_amd64_ref=$(sed -n 's/^linux\/amd64=//p' <<<"$runtime_children")
+          runtime_arm64_ref=$(sed -n 's/^linux\/arm64=//p' <<<"$runtime_children")
+          test -n "$runtime_amd64_ref" && test -n "$runtime_arm64_ref"
           mkdir -p "$root/payload"
           python3 tools/build_compose_bundle.py build --output "$root/payload/installer.bundle.tar.gz" \
             --image-reference "$runtime_ref" --verifier-reference "$verifier_ref" \
@@ -223,6 +274,8 @@ jobs:
           Path(root/"verifier-provenance.json").write_text(json.dumps(verifier,sort_keys=True)+"\n")
           PY
           /tmp/volt-release-tools/cosign sign --yes "$runtime_ref"
+          /tmp/volt-release-tools/cosign sign --yes "$runtime_amd64_ref"
+          /tmp/volt-release-tools/cosign sign --yes "$runtime_arm64_ref"
           /tmp/volt-release-tools/cosign sign --yes "$verifier_ref"
           /tmp/volt-release-tools/cosign attest --yes --type https://volt.dev/attestation/easy-install/v1 \
             --predicate "$root/runtime-provenance.json" "$runtime_ref"
@@ -230,8 +283,20 @@ jobs:
             --predicate "$root/verifier-provenance.json" "$verifier_ref"
           /tmp/volt-release-tools/cosign verify --certificate-identity "$COSIGN_IDENTITY" \
             --certificate-oidc-issuer "$COSIGN_ISSUER" "$runtime_ref"
+          /tmp/volt-release-tools/cosign verify-attestation --type https://sigstore.dev/cosign/sign/v1 \
+            --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$runtime_ref"
+          /tmp/volt-release-tools/cosign verify --certificate-identity "$COSIGN_IDENTITY" \
+            --certificate-oidc-issuer "$COSIGN_ISSUER" "$runtime_amd64_ref"
+          /tmp/volt-release-tools/cosign verify-attestation --type https://sigstore.dev/cosign/sign/v1 \
+            --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$runtime_amd64_ref"
+          /tmp/volt-release-tools/cosign verify --certificate-identity "$COSIGN_IDENTITY" \
+            --certificate-oidc-issuer "$COSIGN_ISSUER" "$runtime_arm64_ref"
+          /tmp/volt-release-tools/cosign verify-attestation --type https://sigstore.dev/cosign/sign/v1 \
+            --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$runtime_arm64_ref"
           /tmp/volt-release-tools/cosign verify --certificate-identity "$COSIGN_IDENTITY" \
             --certificate-oidc-issuer "$COSIGN_ISSUER" "$verifier_ref"
+          /tmp/volt-release-tools/cosign verify-attestation --type https://sigstore.dev/cosign/sign/v1 \
+            --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$verifier_ref"
           /tmp/volt-release-tools/cosign verify-attestation --type https://volt.dev/attestation/easy-install/v1 \
             --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$runtime_ref"
           /tmp/volt-release-tools/cosign verify-attestation --type https://slsa.dev/provenance/v1 \

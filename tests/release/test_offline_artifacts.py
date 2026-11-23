@@ -13,7 +13,7 @@ from uvm.installer import offline_artifacts as offline
 
 
 class OfflineArtifactTests(unittest.TestCase):
-    def fixture(self, root):
+    def fixture(self, root, *, arm_variant=None):
         root.chmod(0o700)
         files = {}
 
@@ -34,6 +34,7 @@ class OfflineArtifactTests(unittest.TestCase):
             raw = offline.canonical({'schemaVersion': 2, 'mediaType': media, 'architecture': arch})
             children[arch] = {'mediaType': media, 'digest': offline.digest(raw), 'size': len(raw),
                 'platform': {'os': 'linux', 'architecture': arch}}
+            if arch=='arm64'and arm_variant is not None:children[arch]['platform']['variant']=arm_variant
             add('runtime-' + arch + '/blobs/sha256/' + offline.digest(raw)[7:], raw)
             add('runtime-index/blobs/sha256/' + offline.digest(raw)[7:], raw)
         index_raw = offline.canonical({'schemaVersion': 2, 'mediaType': index_media,
@@ -66,6 +67,16 @@ class OfflineArtifactTests(unittest.TestCase):
         (root / 'closure.json').write_bytes(offline.canonical(document))
         (root / 'closure.json').chmod(0o600)
         return document
+
+    def test_arm_v8_layout_joins_same_original_child_without_other_variant_allowances(self):
+        # Unsigned structural fixture only; no synthetic cryptographic claim.
+        for variant in ('v8','v7',True,'V8'):
+            with self.subTest(variant=variant),tempfile.TemporaryDirectory()as tmp,patch.object(offline,'ROOT',Path(tmp)):
+                root=Path(tmp);self.fixture(root,arm_variant=variant)
+                if variant=='v8':
+                    closure=offline.Closure(fixture=True);self.assertIn('runtime-arm64',closure.references.values())
+                else:
+                    with self.assertRaisesRegex(ValueError,'exact native child'):offline.Closure(fixture=True)
 
     def test_original_inventory_and_both_native_roots_are_required(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(offline, 'ROOT', Path(tmp)):

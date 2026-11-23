@@ -16,8 +16,8 @@ class ExportGraphTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'exact RC4'):
             export.export_originals(SimpleNamespace(signer='foreign',issuer='foreign'),fixture=False)
 
-    def fixture(self, *, layer_type=None, wrong_subject=False, native_proof_config=False):
-        config = canonical({'os': 'linux', 'architecture': 'amd64', 'config': {}})
+    def fixture(self, *, layer_type=None, wrong_subject=False, native_proof_config=False, config_arch="amd64"):
+        config = canonical({'os': 'linux', 'architecture': config_arch, 'config': {}})
         proof = canonical({'mediaType': 'synthetic-proof-contract', 'verificationMaterial': {}, 'dsseEnvelope': {}})
         empty = b'{}'
         descriptor = lambda raw, media: {'digest': digest(raw), 'size': len(raw), 'mediaType': media}
@@ -52,6 +52,22 @@ class ExportGraphTests(unittest.TestCase):
                 return objects[category, value]
         layout = export.MetadataLayout(Registry(), '127.0.0.1:46150/volt@' + digest(root))
         return layout, objects, calls, digest(proof), digest(config), filesystem['digest']
+
+    def test_arm_v8_native_index_role_does_not_upgrade_proof_or_other_variants(self):
+        # Public retained Cosign descriptor has linux/arm64/variant=v8; this
+        # unit index is structural only and is never represented as signed.
+        for role,variant,allowed in (('executable','v8',True),('proof','v8',False),('executable','v7',False)):
+            layout,objects,calls,_proof,_config,filesystem=self.fixture(config_arch='arm64')
+            child=layout.reference.split('@')[1];raw_child=objects['manifests',child]
+            raw=canonical({'schemaVersion':2,'mediaType':'application/vnd.oci.image.index.v1+json','manifests':[{
+                'digest':child,'size':len(raw_child),'mediaType':'application/vnd.oci.image.manifest.v1+json',
+                'platform':{'os':'linux','architecture':'arm64','variant':variant}}]})
+            desc={'digest':digest(raw),'size':len(raw),'mediaType':'application/vnd.oci.image.index.v1+json'};objects['manifests',digest(raw)]=raw
+            if allowed:
+                layout.document(desc,role=role);self.assertIn(filesystem,layout.omitted_filesystem);self.assertNotIn(('blobs',filesystem),calls)
+            else:
+                with self.assertRaises(ValueError):layout.document(desc,role=role)
+                self.assertNotIn(filesystem,layout.omitted_filesystem)
 
     def test_only_typed_filesystem_edges_omit_and_shared_proof_blob_survives(self):
         layout, _objects, calls, proof, _config, filesystem = self.fixture()

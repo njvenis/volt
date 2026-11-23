@@ -41,7 +41,7 @@ class InstalledArtifactTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
             _root, _anchor, stage, _current, _info, _receipt = self.fixture(Path(temporary), stack)
             closure = artifacts.Closure(fixture=None)
-            with self.assertRaisesRegex(ValueError, 'not independently provisioned'):
+            with self.assertRaisesRegex(ValueError, 'custody-only readers cannot authenticate artifacts'):
                 closure.verify_blob('launcher.sh', signer=installed.SIGNER, issuer=installed.ISSUER)
             with self.assertRaisesRegex(ValueError, 'fixed original-closure mount'):
                 artifacts.Closure(fixture=True, custody_root=stage)

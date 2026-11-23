@@ -14,7 +14,7 @@ from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from uvm.installer.offline_artifacts import (ROOT, PACKAGE, MAX_FILES, MAX_MEMBER, MAX_TOTAL,
-    PROFILE, canonical, digest, pairs)
+    PROFILE, canonical, digest, pairs, native_platform)
 
 PACKAGE_ROOT = Path('/package')
 INDEX_TYPES = frozenset(('application/vnd.oci.image.index.v1+json',
@@ -157,8 +157,7 @@ class MetadataLayout:
                     raise ValueError('original OCI index repeats a graph object')
                 seen.add(child.get('digest'))
                 platform = child.get('platform')
-                child_role = ('executable' if role == 'executable' and platform in (
-                    {'os': 'linux', 'architecture': 'amd64'}, {'os': 'linux', 'architecture': 'arm64'}) else 'proof')
+                child_role = ('executable' if role == 'executable' and native_platform(platform) is not None else 'proof')
                 self.document(child, role=child_role)
         elif media in MANIFEST_TYPES:
             config = document.get('config')

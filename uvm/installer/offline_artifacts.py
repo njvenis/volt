@@ -34,6 +34,14 @@ def digest(raw: bytes) -> str:
     return 'sha256:' + hashlib.sha256(raw).hexdigest()
 
 
+def native_platform(value):
+    """Closed executable platform forms; ARM v8 names the existing arm64 ABI."""
+    if value=={'os':'linux','architecture':'amd64'}:return 'linux/amd64'
+    if value in ({'os':'linux','architecture':'arm64'},
+            {'os':'linux','architecture':'arm64','variant':'v8'}):return 'linux/arm64'
+    return None
+
+
 def pairs(items):
     result = {}
     for key, value in items:
@@ -186,7 +194,8 @@ class Closure:
             if name in ('runtime-amd64', 'runtime-arm64'):
                 parent = self.blob(self.release['runtime_reference'].split('@')[1], layout='runtime-index')
                 platform = {'os': 'linux', 'architecture': name.split('-')[1]}
-                rows = [item for item in json.loads(parent)['manifests'] if item.get('platform') == platform]
+                rows = [item for item in json.loads(parent)['manifests']
+                    if native_platform(item.get('platform')) == 'linux/' + name.split('-')[1]]
                 if len(rows) != 1:
                     raise ValueError('offline runtime index lacks an exact native child')
                 expected = expected.split('@')[0] + '@' + rows[0]['digest']

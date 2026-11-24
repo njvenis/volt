@@ -1,0 +1,382 @@
+name: Prepare and publish VOLT RC4 installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful main push run of Portable checks with native runtime and verifier artifacts
+        type: string
+        required: true
+      candidate_source_sha:
+        description: Exact 40-character source commit recorded by that CI run
+        type: string
+        required: true
+      qualification_evidence:
+        description: Reviewer-readable URI for accepted end-to-end qualification evidence
+        type: string
+        required: true
+      publish_approved:
+        description: Explicitly approve the gated RC4 publication job
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: volt-rc4-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main' && inputs.publish_approved == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: volt-rc4-publication
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+      id-token: write
+    env:
+      CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+      CANDIDATE_SOURCE_SHA: ${{ inputs.candidate_source_sha }}
+      QUALIFICATION_EVIDENCE: ${{ inputs.qualification_evidence }}
+      GH_TOKEN: ${{ github.token }}
+      COSIGN_IDENTITY: https://github.com/njvenis/volt/.github/workflows/release-rc4.yml@refs/heads/main
+      COSIGN_ISSUER: https://token.actions.githubusercontent.com
+    steps:
+      - name: Check out the main-branch release controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require reviewer evidence and validate the successful native CI run
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$CANDIDATE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CANDIDATE_RUN_ID" =~ ^[0-9]+$ ]]
+          test -n "$QUALIFICATION_EVIDENCE"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" > "$RUNNER_TEMP/candidate-run.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          run = json.loads(Path(os.environ["RUNNER_TEMP"], "candidate-run.json").read_text())
+          expected = {
+              "event": "push", "head_branch": "main",
+              "head_sha": os.environ["CANDIDATE_SOURCE_SHA"],
+              "path": ".github/workflows/ci.yml", "status": "completed",
+              "conclusion": "success",
+          }
+          mismatch = {key: (run.get(key), value) for key, value in expected.items()
+                      if (run.get(key, "").split("@", 1)[0] if key == "path" else run.get(key)) != value}
+          if mismatch:
+              raise SystemExit(f"candidate run is not a successful main native CI run: {mismatch}")
+          PY
+          git merge-base --is-ancestor "$CANDIDATE_SOURCE_SHA" origin/main
+          test -z "$(git ls-remote origin refs/tags/v0.1.0-rc.4 'refs/tags/v0.1.0-rc.4^{}')"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name' \
+            > "$RUNNER_TEMP/existing-release-tags.txt"
+          if grep -Fxq v0.1.0-rc.4 "$RUNNER_TEMP/existing-release-tags.txt"; then
+            echo 'refusing an existing RC4 GitHub Release' >&2
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/environments/volt-rc4-publication" > "$RUNNER_TEMP/environment.json"
+          python3 tools/release/guards.py --approved true \
+            --environment-json "$RUNNER_TEMP/environment.json" \
+            --approval-reference "$QUALIFICATION_EVIDENCE"
+
+      - name: Download the exact retained native artifacts
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/volt-easy-rc4-candidate"
+          mkdir -p "$out"
+          for kind in runtime verifier; do
+            for arch in amd64 arm64; do
+              dir="$out/$kind-$arch"
+              mkdir -p "$dir"
+              gh run download "$CANDIDATE_RUN_ID" \
+                --name "volt-easy-rc4-$kind-$arch" --dir "$dir"
+              (cd "$dir" && sha256sum --check "$kind.tar.sha256")
+              test "$(cat "$dir/source-revision.txt")" = "$CANDIDATE_SOURCE_SHA"
+              test "$(cat "$dir/source-snapshot.txt")" = "sha256:$(git archive --format=tar "$CANDIDATE_SOURCE_SHA" | sha256sum | cut -d' ' -f1)"
+            done
+          done
+          expected_snapshot="sha256:$(git archive --format=tar "$CANDIDATE_SOURCE_SHA" | sha256sum | cut -d' ' -f1)"
+          git archive "$CANDIDATE_SOURCE_SHA" deploy/compose | tar -x -C "$out"
+          test "$(cat "$out/deploy/compose/VERSION")" = 0.1.0-rc.4
+
+      - name: Install pinned Cosign and verify immutable tags are unused
+        run: |
+          set -euo pipefail
+          python3 tools/release/install_cosign.py
+          /tmp/volt-release-tools/cosign version
+          python3 - <<'PY'
+          import os, sys
+          sys.path.insert(0, "tools/release")
+          import registry
+          tags = ["0.1.0-rc.4", f"sha-{os.environ['CANDIDATE_SOURCE_SHA']}"]
+          for repository in ("njvenis/volt", "njvenis/volt-installer-verifier"):
+              registry.REPOSITORY = repository
+              child_tags = [f"sha-{os.environ['CANDIDATE_SOURCE_SHA']}-linux-{arch}"
+                            for arch in ("amd64", "arm64")]
+              for tag in tags + child_tags:
+                  if not registry.unused_tag(tag, username=os.environ["GITHUB_ACTOR"],
+                                             password=os.environ["GH_TOKEN"]):
+                      raise SystemExit(f"refusing to overwrite existing GHCR tag {repository}:{tag}")
+          PY
+
+      - name: Publish and verify the signed multi-platform assets, bundle, and bootstrap package
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/volt-easy-rc4-candidate"
+          runtime_repo="ghcr.io/njvenis/volt"
+          verifier_repo="ghcr.io/njvenis/volt-installer-verifier"
+          sha_tag="sha-$CANDIDATE_SOURCE_SHA"
+          expected_snapshot="sha256:$(git archive --format=tar "$CANDIDATE_SOURCE_SHA" | sha256sum | cut -d' ' -f1)"
+          containers=()
+          cleanup_containers() {
+            for container in "${containers[@]}"; do docker rm "$container" >/dev/null 2>&1 || true; done
+          }
+          trap cleanup_containers EXIT
+          check_verifier_root() {
+            local image_id container_id
+            image_id=$(docker image inspect "$1" --format '{{.Id}}')
+            container_id=$(docker create "$image_id")
+            containers+=("$container_id")
+            test "$(docker inspect "$container_id" --format '{{.Image}}')" = "$image_id"
+            docker cp "$container_id:/usr/local/share/volt-verifier/public-trusted-root.json" - | \
+              python3 -c 'import json,sys,tarfile; archive=tarfile.open(fileobj=sys.stdin.buffer,mode="r|"); rows=[]; root=None
+          def unique(pairs):
+              result={}
+              for key,value in pairs:
+                  if key in result: raise ValueError("duplicate trusted-root JSON key")
+                  result[key]=value
+              return result
+          for member in archive:
+              if member.name != "public-trusted-root.json" or not member.isfile() or member.issym() or member.islnk() or member.uid != 0 or member.mode != 0o444 or member.size < 1 or member.size > 65536: raise SystemExit("untrusted trusted-root archive entry")
+              stream=archive.extractfile(member)
+              if stream is None: raise SystemExit("trusted-root entry has no content")
+              data=stream.read(65537)
+              if len(data) != member.size or len(data) > 65536: raise SystemExit("trusted-root entry size mismatch")
+              rows.append(member.name)
+              root=json.loads(data,object_pairs_hook=unique)
+          if rows != ["public-trusted-root.json"] or not isinstance(root,dict) or root.get("mediaType") != "application/vnd.dev.sigstore.trustedroot+json;version=0.1": raise SystemExit("trusted-root archive inventory or media type mismatch")'
+            docker rm "$container_id" >/dev/null
+          }
+          for kind in runtime verifier; do
+            for arch in amd64 arm64; do
+              dir="$root/$kind-$arch"
+              docker load --input "$dir/$kind.tar"
+              if [ "$kind" = runtime ]; then
+                local_image="volt-easy-rc4:$arch"
+                repository="$runtime_repo"
+              else
+                local_image="volt-installer-verifier:$arch"
+                repository="$verifier_repo"
+              fi
+              image="${repository}:$sha_tag-linux-$arch"
+              docker tag "$local_image" "$image"
+              test "$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}')" = "linux/$arch"
+              test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$CANDIDATE_SOURCE_SHA"
+              test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.volt.compose.source-snapshot"}}')" = "$expected_snapshot"
+              if [ "$kind" = verifier ]; then check_verifier_root "$image"; fi
+              test "$(cat "$root/$kind-$arch/source-snapshot.txt")" = "$expected_snapshot"
+            done
+          done
+          # Complete all four artifact and both verifier-root preflights before the first registry write.
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          for kind in runtime verifier; do
+            if [ "$kind" = runtime ]; then repository="$runtime_repo"; else repository="$verifier_repo"; fi
+            for arch in amd64 arm64; do
+              image="${repository}:$sha_tag-linux-$arch"
+              docker push "$image"
+            done
+            docker buildx imagetools create --tag "$repository:$sha_tag" \
+              --tag "$repository:0.1.0-rc.4" \
+              "$repository:$sha_tag-linux-amd64" "$repository:$sha_tag-linux-arm64"
+          done
+          python3 - <<'PY'
+          import hashlib, json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, "tools/release")
+          import registry
+          sys.path.insert(0, ".")
+          from uvm.installer.admission import platform_children
+          out=Path(os.environ["RUNNER_TEMP"], "volt-easy-rc4-candidate")
+          sha_tag="sha-"+os.environ["CANDIDATE_SOURCE_SHA"]
+          for name, repository in (("runtime", "njvenis/volt"),
+                                   ("verifier", "njvenis/volt-installer-verifier")):
+              registry.REPOSITORY=repository
+              digest=registry.tag_digest(sha_tag, username=os.environ["GITHUB_ACTOR"], password=os.environ["GH_TOKEN"])
+              release_digest=registry.tag_digest("0.1.0-rc.4", username=os.environ["GITHUB_ACTOR"], password=os.environ["GH_TOKEN"])
+              if release_digest != digest:
+                  raise SystemExit(f"{name} RC4 tag differs from its source-commit index tag")
+              raw=registry.manifest_bytes(digest, username=os.environ["GITHUB_ACTOR"], password=os.environ["GH_TOKEN"])
+              reference=f"ghcr.io/{repository}@{digest}"
+              children=platform_children(raw, reference)
+              for arch in ("amd64", "arm64"):
+                  child=registry.tag_digest(f"{sha_tag}-linux-{arch}", username=os.environ["GITHUB_ACTOR"], password=os.environ["GH_TOKEN"])
+                  if children[f"linux/{arch}"] != child:
+                      raise SystemExit(f"{name} index does not bind the exact {arch} child tag digest")
+              (out/f"{name}-index.json").write_bytes(raw)
+              (out/f"{name}-index-digest.txt").write_text(digest+"\n")
+              (out/f"{name}-children.json").write_text(json.dumps(children, sort_keys=True, indent=2)+"\n")
+          PY
+          runtime_digest=$(cat "$root/runtime-index-digest.txt")
+          verifier_digest=$(cat "$root/verifier-index-digest.txt")
+          runtime_ref="$runtime_repo@$runtime_digest"
+          verifier_ref="$verifier_repo@$verifier_digest"
+          runtime_children=$(python3 - "$root/runtime-children.json" "$runtime_repo" <<'PY'
+          import json, re, sys
+          from pathlib import Path
+          children=json.loads(Path(sys.argv[1]).read_text())
+          for platform in ("linux/amd64", "linux/arm64"):
+              digest=children.get(platform)
+              if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                  raise SystemExit(f"runtime index has no exact digest for {platform}")
+              print(f"{platform}={sys.argv[2]}@{digest}")
+          PY
+          )
+          runtime_amd64_ref=$(sed -n 's/^linux\/amd64=//p' <<<"$runtime_children")
+          runtime_arm64_ref=$(sed -n 's/^linux\/arm64=//p' <<<"$runtime_children")
+          test -n "$runtime_amd64_ref" && test -n "$runtime_arm64_ref"
+          mkdir -p "$root/payload"
+          python3 tools/build_compose_bundle.py build --output "$root/payload/installer.bundle.tar.gz" \
+            --image-reference "$runtime_ref" --verifier-reference "$verifier_ref" \
+            --source-root "$root"
+          python3 tools/build_compose_bundle.py verify --archive "$root/payload/installer.bundle.tar.gz" \
+            --source-root "$root" --verifier-reference "$verifier_ref"
+          bundle_sha=$(sha256sum "$root/payload/installer.bundle.tar.gz" | cut -d' ' -f1)
+          source_snapshot=$(cat "$root/runtime-amd64/source-snapshot.txt")
+          runtime_children=$(cat "$root/runtime-children.json")
+          python3 - "$root" "$runtime_digest" "$verifier_digest" "$bundle_sha" "$source_snapshot" <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          root=Path(sys.argv[1]); source=os.environ["GITHUB_SERVER_URL"]+"/"+os.environ["GITHUB_REPOSITORY"]
+          revision=os.environ["CANDIDATE_SOURCE_SHA"]
+          children=json.loads((root/"runtime-children.json").read_text())
+          runtime={"schema_version":1,"release_version":"0.1.0-rc.4","source_repository":source,
+            "source_revision":revision,"source_snapshot":sys.argv[5],"image_index_digest":sys.argv[2],
+            "platform_children":children,"installer_bundle_sha256":sys.argv[4]}
+          runtime["image_index_digest"]="sha256:"+runtime["image_index_digest"].removeprefix("sha256:")
+          Path(root/"runtime-provenance.json").write_text(json.dumps(runtime,sort_keys=True)+"\n")
+          verifier={"buildDefinition":{"buildType":"https://github.com/Attestations/GitHubActionsWorkflow@v1",
+            "externalParameters":{"workflow":{"ref":os.environ["GITHUB_REPOSITORY"]+"/.github/workflows/ci.yml@refs/heads/main","repository":source},
+              "source":{"uri":source,"ref":revision},"candidate_run_id":os.environ["CANDIDATE_RUN_ID"]},
+            "resolvedDependencies":[{"uri":"git+"+source,"digest":{"gitCommit":revision}}]},
+            "runDetails":{"builder":{"id":"https://github.com/actions/runner"},
+              "metadata":{"invocationId":os.environ["GITHUB_SERVER_URL"]+"/"+os.environ["GITHUB_REPOSITORY"]+"/actions/runs/"+os.environ["CANDIDATE_RUN_ID"]}}}
+          Path(root/"verifier-provenance.json").write_text(json.dumps(verifier,sort_keys=True)+"\n")
+          PY
+          /tmp/volt-release-tools/cosign sign --yes "$runtime_ref"
+          /tmp/volt-release-tools/cosign sign --yes "$runtime_amd64_ref"
+          /tmp/volt-release-tools/cosign sign --yes "$runtime_arm64_ref"
+          /tmp/volt-release-tools/cosign sign --yes "$verifier_ref"
+          /tmp/volt-release-tools/cosign attest --yes --type https://volt.dev/attestation/easy-install/v1 \
+            --predicate "$root/runtime-provenance.json" "$runtime_ref"
+          /tmp/volt-release-tools/cosign attest --yes --type https://slsa.dev/provenance/v1 \
+            --predicate "$root/verifier-provenance.json" "$verifier_ref"
+          /tmp/volt-release-tools/cosign verify --certificate-identity "$COSIGN_IDENTITY" \
+            --certificate-oidc-issuer "$COSIGN_ISSUER" "$runtime_ref"
+          /tmp/volt-release-tools/cosign verify-attestation --type https://sigstore.dev/cosign/sign/v1 \
+            --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$runtime_ref"
+          /tmp/volt-release-tools/cosign verify --certificate-identity "$COSIGN_IDENTITY" \
+            --certificate-oidc-issuer "$COSIGN_ISSUER" "$runtime_amd64_ref"
+          /tmp/volt-release-tools/cosign verify-attestation --type https://sigstore.dev/cosign/sign/v1 \
+            --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$runtime_amd64_ref"
+          /tmp/volt-release-tools/cosign verify --certificate-identity "$COSIGN_IDENTITY" \
+            --certificate-oidc-issuer "$COSIGN_ISSUER" "$runtime_arm64_ref"
+          /tmp/volt-release-tools/cosign verify-attestation --type https://sigstore.dev/cosign/sign/v1 \
+            --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$runtime_arm64_ref"
+          /tmp/volt-release-tools/cosign verify --certificate-identity "$COSIGN_IDENTITY" \
+            --certificate-oidc-issuer "$COSIGN_ISSUER" "$verifier_ref"
+          /tmp/volt-release-tools/cosign verify-attestation --type https://sigstore.dev/cosign/sign/v1 \
+            --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$verifier_ref"
+          /tmp/volt-release-tools/cosign verify-attestation --type https://volt.dev/attestation/easy-install/v1 \
+            --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$runtime_ref"
+          /tmp/volt-release-tools/cosign verify-attestation --type https://slsa.dev/provenance/v1 \
+            --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$verifier_ref"
+          tar -xOzf "$root/payload/installer.bundle.tar.gz" volt-compose-0.1.0-rc.4/launcher.sh > "$root/payload/launcher.sh"
+          /tmp/volt-release-tools/cosign sign-blob --yes --bundle "$root/payload/launcher.sigstore.json" "$root/payload/launcher.sh"
+          /tmp/volt-release-tools/cosign sign-blob --yes --bundle "$root/payload/installer.bundle.sigstore.json" "$root/payload/installer.bundle.tar.gz"
+          /tmp/volt-release-tools/cosign verify-blob --bundle "$root/payload/launcher.sigstore.json" \
+            --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$root/payload/launcher.sh"
+          /tmp/volt-release-tools/cosign verify-blob --bundle "$root/payload/installer.bundle.sigstore.json" \
+            --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$root/payload/installer.bundle.tar.gz"
+          docker pull "$runtime_ref"
+          docker image inspect "$runtime_ref" > "$root/runtime-image-inspect.json"
+          offline_root="$root/offline-authentication-closure"
+          offline_uid=$(id -u)
+          offline_gid=$(id -g)
+          test ! -e "$offline_root" && test ! -L "$offline_root"
+          umask 077
+          mkdir -m 700 "$offline_root"
+          test "$(stat -c '%u:%g:%a' "$offline_root")" = "$offline_uid:$offline_gid:700"
+          cleanup_offline_root() {
+            if [ -d "$offline_root" ] && [ ! -L "$offline_root" ]; then rm -rf -- "$offline_root"; fi
+          }
+          trap cleanup_offline_root EXIT
+          docker pull --platform linux/amd64 "$verifier_ref"
+          docker run --rm --pull=never --platform linux/amd64 --network bridge \
+            --user "$offline_uid:$offline_gid" --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --mount "type=bind,src=$offline_root,dst=/run/volt-offline-artifacts" \
+            --mount "type=bind,src=$root/payload,dst=/package,readonly" \
+            --mount "type=bind,src=$root/runtime-index.json,dst=/inputs/index.json,readonly" \
+            --mount "type=bind,src=$root/runtime-image-inspect.json,dst=/inputs/image.json,readonly" \
+            "$verifier_ref" --bundle /package/installer.bundle.tar.gz \
+            --bundle-signature /package/installer.bundle.sigstore.json \
+            --export-offline-artifacts --expected-verifier-reference "$verifier_ref" \
+            --signer "$COSIGN_IDENTITY" --issuer "$COSIGN_ISSUER" \
+            --reference "$runtime_ref" --source-revision "$CANDIDATE_SOURCE_SHA" \
+            --source-snapshot "$source_snapshot" --version 0.1.0-rc.4 \
+            --platform linux/amd64 --image-inspect /inputs/image.json --index /inputs/index.json \
+            --output-dir /tmp/admission
+          test -s "$offline_root/closure.json"
+          docker run --rm --pull=never --platform linux/amd64 --network none \
+            --user "$offline_uid:$offline_gid" --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --mount "type=bind,src=$offline_root,dst=/run/volt-offline-artifacts,readonly" \
+            --mount "type=bind,src=$root/payload,dst=/package,readonly" \
+            --mount "type=bind,src=$root/runtime-index.json,dst=/inputs/index.json,readonly" \
+            --mount "type=bind,src=$root/runtime-image-inspect.json,dst=/inputs/image.json,readonly" \
+            "$verifier_ref" --bundle /package/installer.bundle.tar.gz \
+            --bundle-signature /package/installer.bundle.sigstore.json \
+            --offline-artifacts --expected-verifier-reference "$verifier_ref" \
+            --signer "$COSIGN_IDENTITY" --issuer "$COSIGN_ISSUER" \
+            --reference "$runtime_ref" --source-revision "$CANDIDATE_SOURCE_SHA" \
+            --source-snapshot "$source_snapshot" --version 0.1.0-rc.4 \
+            --platform linux/amd64 --image-inspect /inputs/image.json --index /inputs/index.json \
+            --output-dir /tmp/admission
+          rm -rf -- "$offline_root"
+          python3 tools/release/build_easy_installer.py \
+            --output "$root/payload/volt-compose-0.1.0-rc.4-installer.tar.gz" \
+            --bundle "$root/payload/installer.bundle.tar.gz" \
+            --launcher-signature "$root/payload/launcher.sigstore.json" \
+            --bundle-signature "$root/payload/installer.bundle.sigstore.json" \
+            --verifier-reference "$verifier_ref" --source-root "$root"
+          python3 tools/release/easy_bootstrap.py --version 0.1.0-rc.4 \
+            --signer "$COSIGN_IDENTITY" --issuer "$COSIGN_ISSUER" \
+            --verifier-image "$verifier_ref" > "$root/payload/BOOTSTRAP.txt"
+          {
+            printf '%s\n\n' '# VOLT 0.1.0-rc.4 evaluation installer' \
+              'RC3 remains the previous published Compose prerelease. RC4 is an evaluation prerelease, not a production support claim.' \
+              'Install Docker Engine and Compose v2. Download and extract the installer package, then run this complete trusted-page command before invoking the launcher:'
+            cat "$root/payload/BOOTSTRAP.txt"
+          } > "$root/payload/VERIFY-RC4.md"
+          printf '%s  %s\n' "$(sha256sum "$root/payload/volt-compose-0.1.0-rc.4-installer.tar.gz" | cut -d' ' -f1)" \
+            volt-compose-0.1.0-rc.4-installer.tar.gz > "$root/payload/volt-compose-0.1.0-rc.4-installer.tar.gz.sha256"
+          printf '%s  %s\n' "$(sha256sum "$root/payload/installer.bundle.tar.gz" | cut -d' ' -f1)" \
+            installer.bundle.tar.gz > "$root/payload/installer.bundle.tar.gz.sha256"
+          gh release create v0.1.0-rc.4 --target "$CANDIDATE_SOURCE_SHA" --draft --prerelease \
+            --title 'VOLT 0.1.0-rc.4 (evaluation candidate)' \
+            --notes-file "$root/payload/VERIFY-RC4.md" \
+            "$root/payload/volt-compose-0.1.0-rc.4-installer.tar.gz" \
+            "$root/payload/volt-compose-0.1.0-rc.4-installer.tar.gz.sha256" \
+            "$root/payload/installer.bundle.tar.gz" "$root/payload/installer.bundle.tar.gz.sha256" \
+            "$root/payload/VERIFY-RC4.md"

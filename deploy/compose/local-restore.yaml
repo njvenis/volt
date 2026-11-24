@@ -1,0 +1,5 @@
+# A restored local-auth database must have sessions and outstanding account
+# capabilities revoked before the host publishes the loopback application port.
+services:
+  volt:
+    ports: !reset []

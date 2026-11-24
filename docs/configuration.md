@@ -2,7 +2,9 @@
 
 ## Local preview
 
-The local preview does not require a hand-written environment file. `tools/g7_local_preview.py init <name>` generates private configuration, local TLS material, and synthetic credentials under `$XDG_STATE_HOME/volt/g7-preview/<name>` (defaulting to `$HOME/.local/state`). Keep that state directory private. The helper mounts its secret directory read-only into the container and owns the preview's ports, network, and volumes. See [historical RC1 launcher instructions](installation.md#historical-rc1-launcher) for that released-image path or [the development preview guide](local-preview.md) for source builds. For current Compose evaluation, use the [RC2 installation guide](installation.md#rc2-compose-installation).
+The local preview does not require a hand-written environment file. `tools/g7_local_preview.py init <name>` generates private configuration, local TLS material, and synthetic credentials under `$XDG_STATE_HOME/volt/g7-preview/<name>` (defaulting to `$HOME/.local/state`). Keep that state directory private. The helper mounts its secret directory read-only into the container and owns the preview's ports, network, and volumes. See [historical RC1 launcher instructions](installation.md#historical-rc1-launcher) for that released-image path or the [development preview guide](local-preview.md) for source builds. For Compose evaluation, use the [published RC3 installation guide](installation.md#rc3-compose-installation).
+
+RC3's password provider creates a synthetic demo identity. It is not persistent local-account authentication. Use RC3's separate external OIDC configuration when evaluating an external identity provider.
 
 ## Development image packaging
 

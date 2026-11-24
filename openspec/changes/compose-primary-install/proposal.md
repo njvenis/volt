@@ -11,3 +11,7 @@ Package Compose files, setup tooling, non-secret examples, lifecycle and coordin
 ## Requirements
 
 NFR-04, NFR-05, NFR-06, CR-01, CR-03, CR-05, CR-08, CR-09, CR-10, CR-11, FR-AS-03 and FR-OP-01.
+
+## Proposed easy-install extension (2026-11-18)
+
+The user requested a supported persistent local mode and browser first-admin setup in openspec/changes/easy-compose-install. This adds a new-instance route; external OIDC and explicitly labelled demo contracts remain unchanged. The new independently authenticated online package does not change historical release assets or imply production qualification.

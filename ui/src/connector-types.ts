@@ -53,7 +53,7 @@ export type Validation = {status: "unverified" | "valid" | "stale" | "failed";
 export type Recovery = {
   state: "clear" | "quarantined" | "awaiting_activation";
   recovery_epoch_id: UUID | null; operator_clearance_present: boolean;
-  requires_fresh_credentials: boolean; reason: "restore_quarantined" | null;
+  requires_fresh_credentials: boolean; approval_id?:UUID; approval_expires_at?:UTC; reason: "restore_quarantined" | null;
 };
 export type RemoteRevocation = {status: "not_requested" | "pending" | "confirmed" |
   "failed" | "unknown"; intent_id: UUID | null;
@@ -84,7 +84,7 @@ export type BasePayload = {connector_id: UUID; source_id: UUID;
 export type MetadataAction = "connector.configuration.stage" |
   "connector.configuration.validate" | "connector.configuration.activate" |
   "connector.configuration.disable" | "connector.configuration.rollback" |
-  "connector.secret.version.revoke" | "connector.secret.submission.reconcile";
+  "connector.secret.version.revoke" | "connector.secret.submission.reconcile" | "connector.recovery.clearance.apply";
 export type ReceiptAction = MetadataAction | "connector.secret.submit" |
   "connector.installation.start" | "connector.installation.verify";
 export type Command<P> = Schema & {
@@ -92,7 +92,7 @@ export type Command<P> = Schema & {
   target_id: "00000000-0000-4000-8000-000000000000";
   membership_ids: []; expected_revisions: Revisions; payload: BasePayload & P;
 };
-export type Effect = "connector_configuration_committed" |
+export type Effect = "connector_recovery_clearance_applied" | "connector_configuration_committed" |
   "connector_validation_requested" | "connector_secret_submitted" |
   "connector_secret_revoked" | "connector_secret_submission_reconciled" |
   "connector_installation_started" | "connector_installation_verified";
@@ -101,7 +101,7 @@ export type Receipt = Schema & {
   command_id: UUID; action: ReceiptAction;
   target_id: "00000000-0000-4000-8000-000000000000";
   policy_revision: Rev; decision_id: UUID; audit_event_id: UUID;
-  intents: {intent_id: UUID; kind: "connector.validate" | "connector.reconcile" |
+  intents: {intent_id: UUID; kind: "connector.recovery.clearance.apply" | "connector.validate" | "connector.reconcile" |
     "connector.remote_revoke" | "connector.installation.verify";
     target_id: UUID; authority_revision: Rev; status: IntentStatus}[];
   result: {effect: Effect; connector_id: UUID; source_id: UUID;
@@ -120,7 +120,7 @@ export type ValidationResult = {configuration_revision: Rev; source_revision: Re
   valid: boolean; reason: Failure | null};
 export type IntentView = Schema & {
   connector_id: UUID; source_id: UUID; intent_id: UUID;
-  kind: "connector.validate" | "connector.reconcile" |
+  kind: "connector.recovery.clearance.apply" | "connector.validate" | "connector.reconcile" |
     "connector.remote_revoke" | "connector.installation.verify";
   status: IntentStatus; attempts: Rev; last_error: Failure | null;
   next_attempt_at: UTC | null; completed_at: UTC | null;
@@ -166,7 +166,7 @@ export type StartFlowResponse = Schema & {flow: FlowView;
 
 export type SubmitSecret = Schema & {
   submission_id: UUID; version_id: UUID; source_id: UUID;
-  purpose: Secret["purpose"]; expected_revisions: Revisions;
+  purpose: Secret["purpose"] | "qualys_vm_basic"; expected_revisions: Revisions;
   rationale: Text; evidence_ref: Text;
   input: {kind: "value"; value: Text} |
     {kind: "reference"; reference: Text};
@@ -181,7 +181,7 @@ export type ErrorView = Schema & {error: {
   code: "authentication_required" | "csrf_failed" | "forbidden" |
     "source_scope_forbidden" | "not_found" | "invalid_request" |
     "revision_conflict" | "command_conflict" | "submission_conflict" |
-    "credential_revoked" | "restore_quarantined" | "callback_invalid" |
+    "credential_revoked" | "credential_material_reused" | "restore_quarantined" | "callback_invalid" |
     "validation_required" | "dependency_unavailable" | "outcome_unknown";
   message: Text; correlation_id: UUID;
   details: {outcome: "not_committed" | "unknown";

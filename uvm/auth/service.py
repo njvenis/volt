@@ -15,7 +15,7 @@ import time
 import uuid
 from functools import wraps
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import sqlalchemy as sa
@@ -23,13 +23,14 @@ from authlib.integrations.httpx_client import AsyncOAuth2Client
 from authlib.oidc.core import CodeIDToken
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
+from pydantic import BaseModel
 from httpx2 import AsyncClient
 from joserfc import jwt
 from joserfc.jwk import KeySet
 from joserfc.jwt import JWTClaimsRegistry
 
 from uvm.auth.schema import AUTHORITY_CONTEXT, AuthorityContext
-from uvm.auth.native_authority import NATIVE_MODE, effective_access, native_state
+from uvm.auth.native_authority import NATIVE_MODES, NATIVE_MODE, effective_access, native_state
 from uvm.persistence.auth_schema import (auth_group_memberships, auth_identity_events,
     auth_principals, oidc_authorization_states, oidc_sessions, oidc_subject_groups,
     oidc_subject_links, oidc_sync_state)
@@ -42,6 +43,17 @@ from uvm.assessment.policy_lock import lock_policy
 UTC = timezone.utc
 COOKIE_NAME = "uvm_session"
 _STATE_TTL = 600
+
+
+class OIDCSessionDTO(BaseModel):
+    schema_version: Literal[1] = 1
+    authenticated: bool
+    csrf_token: str | None
+    principal_id: str
+    credential_mode: Literal["oidc_session", "github_link", "service_bearer"]
+    access_groups: list[str]
+    source_scopes: list[list[str]]
+    authority: dict[str, Any]
 
 
 def _now() -> datetime:
@@ -141,7 +153,8 @@ def _scope(value: Any) -> tuple[str, str, str]:
 
 def _secret_value(path: str, label: str) -> str:
     try:
-        value = open(path, encoding="utf-8").read().strip()
+        with open(path, encoding="utf-8") as secret_file:
+            value = secret_file.read().strip()
     except OSError as exc:
         raise RuntimeError(f"OIDC {label} secret file is unavailable") from exc
     if not value:
@@ -162,6 +175,9 @@ def group_scope_covered(connection, context: AuthorityContext | None, group_ids,
     if context is None:
         return True
     groups = tuple(sorted(set(group_ids)))
+    from uvm.connectors.publication import group_is_published
+    if any(not group_is_published(connection, group_id, context) for group_id in groups):
+        return False
     if not groups:
         return False
     known = set(connection.execute(sa.select(vulnerability_groups.c.group_id).where(
@@ -204,7 +220,7 @@ def group_scope_covered(connection, context: AuthorityContext | None, group_ids,
     # Keep a granting role paired with the source ceiling contributed by the
     # same identity access group.  The target IDs above are vulnerability UUIDs
     # and are deliberately not compared with identity-group IDs.
-    if context.credential_mode in {"oidc_session", "github_link"}:
+    if context.credential_mode in {"oidc_session", "github_link", "local_session"}:
         grant_groups = (set(context.access_groups) if granting_identity_groups is None
             else set(granting_identity_groups))
         if not grant_groups:
@@ -216,20 +232,38 @@ def group_scope_covered(connection, context: AuthorityContext | None, group_ids,
         for required in required_by_group.values()) and set(required_by_group) == set(groups)
 
 
+def configured_service_principals(principals, token):
+    """Existing service-token selector, shared without constructing an OIDC service.
+
+    Returns configured identities only. Callers retain their own current
+    permission checks; this does not grant roles or create an authority context.
+    """
+    if not isinstance(principals,dict) or not isinstance(token,str) or not token.isascii() or len(token)>512:
+        return ()
+    return tuple(name for name,item in principals.items()
+        if isinstance(item,dict) and item.get('actor_kind')=='service'
+        and isinstance(item.get('token'),str) and item['token'].isascii()
+        and hmac.compare_digest(token,item['token']))
+
+
 class OIDCAuth:
     def __init__(self, engine, principals: dict[str, dict[str, Any]]):
         self.engine = engine
         self.principals = principals
+        from uvm.persistence.auth_schema import local_auth_installation
+        with engine.connect() as connection:
+            local_install = connection.execute(sa.select(local_auth_installation.c.installation_id).where(
+                local_auth_installation.c.singleton_id == 1)).scalar_one_or_none()
+        if local_install is not None:
+            raise RuntimeError("persisted local authentication cannot be switched to OIDC mode")
         self.config = load_oidc_config()
         self.client_secret = _secret_value(self.config["client_secret_file"], "client")
         self.sync_secret = _secret_value(self.config["sync_secret_file"], "sync")
         self.operator_secret = _secret_value(self.config["operator_secret_file"], "operator")
 
     def _service_context(self, token: str) -> AuthorityContext | None:
-        for name, item in self.principals.items():
-            if (item.get("actor_kind") == "service" and isinstance(item.get("token"), str)
-                    and hmac.compare_digest(token, item["token"])):
-                return self.service_context_for_principal(name)
+        for name in configured_service_principals(self.principals,token):
+            return self.service_context_for_principal(name)
         return None
 
     def service_context_for_principal(self, principal_id: str) -> AuthorityContext | None:
@@ -307,7 +341,7 @@ class OIDCAuth:
         policy_document = connection.execute(sa.select(assessment_policy.c.document).where(
             assessment_policy.c.policy_id == 1)).scalar_one_or_none() or {}
         native = native_state(policy_document)
-        if native.get("mode") == NATIVE_MODE:
+        if native.get("mode") in NATIVE_MODES:
             resolved = self._native_identity_access(connection, principal_id, link["issuer"],
                 link["subject"], policy_document, now)
             groups, group_roles, group_scopes, group_revision, roles, scopes = resolved
@@ -379,7 +413,7 @@ class OIDCAuth:
         policy_revision = policy_row["revision"] if policy_row else 0
         policy_document = policy_row["document"] if policy_row else {}
         native = native_state(policy_document)
-        if native.get("mode") == NATIVE_MODE:
+        if native.get("mode") in NATIVE_MODES:
             if policy_document.get("principals", {}).get(row["principal_id"], {}).get("enabled") is False:
                 raise HTTPException(401, {"code": "session_invalid", "message": "Authentication required"})
             resolved = self._native_identity_access(connection, row["principal_id"],
@@ -625,7 +659,7 @@ class OIDCAuth:
             response.delete_cookie("uvm_oidc_browser", path="/api/v1/auth/callback")
             return response
 
-        @app.get("/api/v1/auth/session")
+        @app.get("/api/v1/auth/session", response_model=OIDCSessionDTO)
         def session(request: Request):
             context = self.resolve_request(request)
             csrf_token = None
@@ -962,8 +996,22 @@ class OIDCAuth:
 
 
 def install_auth(app: FastAPI) -> OIDCAuth | None:
-    if os.environ.get("UVM_AUTH_MODE") != "oidc":
+    mode = os.environ.get("UVM_AUTH_MODE")
+    from uvm.persistence.auth_schema import local_auth_installation
+    with app.state.engine.connect() as connection:
+        has_local_table = sa.inspect(connection).has_table(local_auth_installation.name)
+        persisted_local = (has_local_table and connection.execute(
+            sa.select(local_auth_installation.c.installation_id).where(
+                local_auth_installation.c.singleton_id == 1)).scalar_one_or_none() is not None)
+    if persisted_local and mode != "local":
+        raise RuntimeError("persisted local authentication requires UVM_AUTH_MODE=local")
+    if mode == "local":
+        from uvm.auth.local import install_local_auth
+        return install_local_auth(app)
+    if mode in {None, "", "bearer"}:
         return None
+    if mode != "oidc":
+        raise RuntimeError("UVM_AUTH_MODE is unsupported")
     service = OIDCAuth(app.state.engine, app.state.principals)
     app.state.oidc_auth = service
     service.install_routes(app)

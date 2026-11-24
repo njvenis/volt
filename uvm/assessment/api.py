@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from uvm.assessment.command_occupancy import guard_assessment, guard_command
+
 from contextlib import contextmanager, nullcontext
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
@@ -23,7 +25,7 @@ import sqlalchemy as sa
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from uvm.assessment.policy_lock import lock_policy
 from uvm.auth.schema import AUTHORITY_CONTEXT
-from uvm.auth.native_authority import (NATIVE_ACTIONS, NATIVE_MODE, apply_command as apply_native_command,
+from uvm.auth.native_authority import (NATIVE_ACTIONS, NATIVE_MODE, NATIVE_MODES, LOCAL_NATIVE_MODE, apply_command as apply_native_command,
     effective_access, effective_team_members, native_state)
 from uvm.assessment.sla_references import resolve_policy_reference
 from uvm.assessment.sla_classification import (evaluation_revision_head,
@@ -37,11 +39,11 @@ from uvm.assessment.episodes import (confirm_members, ensure_current_episodes,
 from uvm.persistence.github_lifecycle import enqueue_group_projection
 
 from uvm.persistence.assessment_schema import (
-    assessment_audit_events, assessment_command_receipts,
+    assessment_audit_events, assessment_command_abandonments, assessment_command_receipts,
     assessment_export_acknowledgements, assessment_group_state,
     assessment_policy, assessment_projection_intents,
 )
-from uvm.persistence.auth_schema import auth_principals, oidc_sessions
+from uvm.persistence.auth_schema import auth_principals, local_accounts, local_capabilities, local_sessions, oidc_sessions
 from uvm.persistence.native_authority_schema import administration_reconciliation_intents
 from uvm.persistence.metrics_schema import metrics_report_atoms, report_requests
 from uvm.persistence.metrics_schema import (reporting_projection_intents,
@@ -479,6 +481,64 @@ def _uuid(value: Any, field: str) -> str:
     return value
 
 
+def _registration_command_schema() -> dict:
+    revision = {"type": "integer", "minimum": 0}
+    payload = {"type": "object", "properties": {
+        "display_name": {"type": "string"}, "source_family": {"const": "qualys"},
+        "account_label": {"type": "string"}, "product": {"const": "qualys_vm"},
+        "platform_id": {"enum": ["us1", "us2", "us3", "eu1", "eu2", "in1"]},
+        "scope": {"type": "object", "properties": {"kind": {"const": "account_visible"}},
+            "required": ["kind"], "additionalProperties": False},
+        "environment_label": {"type": "string"}, "rationale": {"type": "string"},
+        "evidence_ref": {"type": "string"}, "grant_initial_read": {"type": "boolean"}},
+        "required": ["display_name", "source_family", "account_label", "product", "platform_id", "scope",
+            "environment_label", "rationale", "evidence_ref", "grant_initial_read"],
+        "additionalProperties": False}
+    return {"type": "object", "properties": {
+        "schema_version": {"const": 1}, "command_id": {"type": "string", "format": "uuid"},
+        "action": {"const": "connector.binding.register"},
+        "target_id": {"const": "00000000-0000-0000-0000-000000000000"},
+        "membership_ids": {"type": "array", "maxItems": 0},
+        "expected_policy_revision": revision, "expected_authority_revision": revision,
+        "expected_connector_registry_revision": revision, "payload": payload},
+        "required": ["schema_version", "command_id", "action", "target_id", "membership_ids",
+            "expected_policy_revision", "expected_authority_revision",
+            "expected_connector_registry_revision", "payload"], "additionalProperties": False}
+
+
+def _commands_request_schema() -> dict:
+    legacy = {"type": "object", "required": ["command_id", "action", "target_id",
+        "membership_ids", "expected_revisions", "payload"], "properties": {
+        "command_id": {"type": "string", "format": "uuid"}, "action": {"type": "string", "not": {"const": "connector.binding.register"}},
+        "target_id": {"type": "string", "format": "uuid"},
+        "membership_ids": {"type": "array", "items": {"type": "string", "format": "uuid"}},
+        "expected_revisions": {"type": "object"}, "payload": {"type": "object"}},
+        "additionalProperties": True}
+    return {"oneOf": [_registration_command_schema(), legacy]}
+
+
+def _abandon_request_schema() -> dict:
+    from uvm.connectors.clearance_disposition import command_schema
+    return {"type": "object", "properties": {
+        "schema_version": {"const": 1}, "command": {"oneOf":[_registration_command_schema(),command_schema()]},
+        "rationale": {"type": "string"}, "evidence_ref": {"type": "string"}},
+        "required": ["schema_version", "command", "rationale", "evidence_ref"],
+        "additionalProperties": False}
+
+
+def _abandon_response_schema() -> dict:
+    from uvm.connectors.clearance_disposition import response_schemas
+    values=response_schemas()
+    common={'schema_version':{'const':1},'command_id':{'type':'string','format':'uuid'},
+        'request_digest':{'type':'string','pattern':'^[0-9a-f]{64}$'}}
+    for disposition,extra in (('committed',{'receipt':{'type':'object'}}),('not_committed',{
+            'actor_id':{'type':'string'},'audit_event_id':{'type':'string','format':'uuid'},
+            'committed_at':{'type':'string','format':'date-time'}})):
+        properties={**common,'disposition':{'const':disposition},**extra}
+        values.append({'type':'object','properties':properties,'required':list(properties),'additionalProperties':False})
+    return {'oneOf':values}
+
+
 def _sla_policy_scope_matches_member(document: dict, stable_attrs: dict) -> bool:
     scope = document.get("scope", {})
     return (all(not scope.get(selector) or stable_attrs.get(attribute) in scope[selector]
@@ -710,6 +770,9 @@ def _source_covered_grants(connection, grants: list[dict], group_id: str) -> lis
     """Keep each OIDC access-group grant paired with its own exact source ceiling."""
     grants = _target_scoped_grants(connection, grants, group_id)
     context = AUTHORITY_CONTEXT.get()
+    from uvm.connectors.publication import group_is_published
+    if not group_is_published(connection, group_id, context):
+        return []
     rows = connection.execute(sa.select(source_observations.c.source_family,
         source_observations.c.source_account_id, collection_runs.c.scope_key)
         .select_from(source_observations.join(occurrences,
@@ -956,7 +1019,7 @@ def _candidate_permission_actions(policy: dict, principal: str) -> set[str]:
     if wildcard_grant or wildcard_role:
         candidate_actions.update(_ACTIONS)
     native = native_state(policy)
-    if native.get("mode") == NATIVE_MODE:
+    if native.get("mode") in NATIVE_MODES:
         current = effective_access(policy, principal)
         for group_id in (current[0] if current else ()):
             group = native.get("access_groups", {}).get(group_id, {})
@@ -979,7 +1042,7 @@ def _policy_authority_ids(policy: dict, principal: str) -> set[str]:
     if request_context is not None and request_context.principal_id == principal:
         identities.update(request_context.access_groups)
     native = native_state(policy)
-    if native.get("mode") == NATIVE_MODE:
+    if native.get("mode") in NATIVE_MODES:
         access = effective_access(policy, principal)
         return {principal, *access[0]} if access else {principal}
     for team_id in record.get("team_ids", []):
@@ -1017,7 +1080,7 @@ def _matching_grants(policy: dict, principal: str, action: str, target_id: str) 
     resolved_grants = []
     # Native mode is an explicit authority boundary. Legacy role projections
     # remain retained for rollback/audit, but cannot preserve stale grants.
-    if native.get("mode") != NATIVE_MODE:
+    if native.get("mode") not in NATIVE_MODES:
         for grant in policy.get("grants", []):
             if grant.get("role_id") in roles:
                 role = roles[grant["role_id"]]
@@ -1028,7 +1091,7 @@ def _matching_grants(policy: dict, principal: str, action: str, target_id: str) 
                         or (["*"] if scope.get("membership_mode") == "all_current" else []))})
             else:
                 resolved_grants.append(grant)
-    if native.get("mode") == NATIVE_MODE:
+    if native.get("mode") in NATIVE_MODES:
         group_ids = set(effective_access(policy, principal)[0])
         for group_id in group_ids:
             group = native.get("access_groups", {}).get(group_id, {})
@@ -1036,8 +1099,15 @@ def _matching_grants(policy: dict, principal: str, action: str, target_id: str) 
                 if permission.get("action") != action:
                     continue
                 scope = permission.get("target_scope", {})
-                targets = scope.get("group_ids", []) or (
-                    ["*"] if scope.get("membership_mode") == "all_current" else [])
+                if scope.get("kind") == "deployment":
+                    targets = [_ZERO_ID]
+                elif scope.get("kind") == "connector":
+                    targets = scope.get("connector_ids", [])
+                elif scope.get("kind") == "source_read":
+                    targets = ["*"] if scope.get("membership_mode") == "all_current" else []
+                else:
+                    targets = scope.get("group_ids", []) or (
+                        ["*"] if scope.get("membership_mode") == "all_current" else [])
                 resolved_grants.append({**permission, "principal_id": group_id,
                     "grant_id": f"native:{group_id}:{permission['permission_id']}",
                     "actions": [action], "target_ids": targets,
@@ -1260,6 +1330,7 @@ def _payload_rationale(action: str, payload: dict) -> tuple[str, str]:
         "connector.configuration.rollback": ({"connector_id", "source_id", "rationale", "evidence_ref", "configuration_revision", "validation_intent_id"}, set()),
         "connector.secret.version.revoke": ({"connector_id", "source_id", "rationale", "evidence_ref", "secret_id", "version_id"}, set()),
         "connector.secret.submission.reconcile": ({"connector_id", "source_id", "rationale", "evidence_ref", "submission_id", "secret_id", "version_id"}, set()),
+        "connector.recovery.clearance.apply": ({"connector_id", "source_id", "secret_id", "version_id", "recovery_epoch_id", "rationale", "evidence_ref"}, set()),
         "owners.assign": ({"owners"}, {"routing_override", "rationale"}),
         "portion.define": ({"portion_id", "owner_ids", "membership_ids"}, {"rationale"}),
         "portion.transfer": ({"portion_id", "owner_ids", "membership_ids", "rationale"}, set()),
@@ -1750,7 +1821,7 @@ def _apply_group_action(document: dict, action: str, payload: dict, membership_i
 _CONNECTOR_COMMAND_ACTIONS = {"connector.configuration.stage", "connector.configuration.validate",
     "connector.configuration.activate", "connector.configuration.disable",
     "connector.configuration.rollback", "connector.secret.version.revoke",
-    "connector.secret.submission.reconcile"}
+    "connector.secret.submission.reconcile", "connector.recovery.clearance.apply"}
 _POLICY_ACTIONS = {"policy.role.create", "policy.role.assign", "policy.role.update", "principal.update", "policy.sla.publish"} | NATIVE_ACTIONS | _CONNECTOR_COMMAND_ACTIONS
 _NO_INTENT_POLICY_ACTIONS = {"policy.role.create", "policy.role.assign", "policy.role.update", "principal.update"}
 _SCOPE_KEYS = {"group_ids", "source_families", "environments", "service_ids", "membership_mode"}
@@ -1768,13 +1839,39 @@ _SOD_KEYS = {"approval_requires_distinct_actor", "prohibit_requester_approval",
 
 def _validate_role_document(payload: dict) -> dict:
     scope, limits, sod = payload["target_scope"], payload["limits"], payload["separation_of_duties"]
-    if not isinstance(scope, dict) or set(scope) != _SCOPE_KEYS:
+    if not isinstance(scope, dict):
         _error(422, "invalid_command", "target_scope shape is invalid")
-    if any(not isinstance(scope[key], list) or any(not isinstance(value, str) for value in scope[key])
-           for key in ("group_ids", "source_families", "environments", "service_ids")):
-        _error(422, "invalid_command", "target_scope selectors must be string arrays")
-    if scope["membership_mode"] not in {"explicit", "all_current"}:
-        _error(422, "invalid_command", "membership_mode is invalid")
+    if set(scope) == _SCOPE_KEYS:
+        if any(not isinstance(scope[key], list) or any(not isinstance(value, str) for value in scope[key])
+               for key in ("group_ids", "source_families", "environments", "service_ids")):
+            _error(422, "invalid_command", "target_scope selectors must be string arrays")
+        if scope["membership_mode"] not in {"explicit", "all_current"}:
+            _error(422, "invalid_command", "membership_mode is invalid")
+    elif scope.get("kind") == "deployment" and set(scope) == {"kind", "deployment_ids"}:
+        if not isinstance(scope["deployment_ids"], list) or not scope["deployment_ids"] or any(not isinstance(x, str) for x in scope["deployment_ids"]):
+            _error(422, "invalid_command", "deployment target scope is invalid")
+        for deployment_id in scope["deployment_ids"]:
+            _uuid(deployment_id, "deployment_id")
+    elif scope.get("kind") == "connector" and set(scope) == {"kind", "connector_ids", "source_pairs"}:
+        if (not isinstance(scope["connector_ids"], list) or not scope["connector_ids"]
+                or not isinstance(scope["source_pairs"], list) or not scope["source_pairs"]):
+            _error(422, "invalid_command", "connector target scope is invalid")
+        for connector_id in scope["connector_ids"]:
+            _uuid(connector_id, "connector_id")
+        for pair in scope["source_pairs"]:
+            if (not isinstance(pair, dict) or set(pair) != {"connector_id", "source_family", "source_account_id", "scope_key"}
+                    or pair["connector_id"] not in scope["connector_ids"]
+                    or any(not isinstance(pair.get(k), str) or not pair[k] for k in ("source_family", "source_account_id", "scope_key"))):
+                _error(422, "invalid_command", "connector source pair is invalid")
+    elif scope.get("kind") == "source_read" and set(scope) == {"kind", "membership_mode", "source_scopes"}:
+        if (scope["membership_mode"] != "all_current" or not isinstance(scope["source_scopes"], list)
+                or not scope["source_scopes"] or any(not isinstance(x, dict)
+                or set(x) != {"source_family", "source_account_id", "scope_key"}
+                or any(not isinstance(x.get(k), str) or not x[k] for k in ("source_family", "source_account_id", "scope_key"))
+                for x in scope["source_scopes"])):
+            _error(422, "invalid_command", "source-read target scope is invalid")
+    else:
+        _error(422, "invalid_command", "target_scope shape is invalid")
     if not isinstance(limits, dict) or not _LEGACY_LIMIT_KEYS <= set(limits) or not set(limits) <= _LIMIT_KEYS:
         _error(422, "invalid_command", "limits shape is invalid")
     limits = {**_LIMIT_DEFAULTS, **limits}
@@ -1828,13 +1925,44 @@ def _envelope_allows(envelope: dict, role: dict) -> bool:
     if "*" not in allowed_actions and not set(role["actions"]) <= allowed_actions:
         return False
     outer, inner = envelope.get("target_scope", {}), role.get("target_scope", {})
-    for key in ("group_ids", "source_families", "environments", "service_ids"):
-        allowed = set(outer.get(key, []))
-        requested = set(inner.get(key, []))
-        if "*" not in allowed and (not requested or not requested <= allowed):
-            return False
-    if inner.get("membership_mode") == "all_current" and outer.get("membership_mode") != "all_current":
+    if envelope.get("version") != 2 and inner.get("kind") in {"deployment", "connector", "source_read"}:
         return False
+    if envelope.get("version") == 2:
+        kind = inner.get("kind")
+        if kind == "deployment":
+            scope_allowed = bool(inner.get("deployment_ids")) and set(inner["deployment_ids"]) <= set(outer.get("deployment_ids", []))
+            allowed_kinds = {"policy.read", "access_group.read", "ownership.team.read", "ownership.team.manage"}
+        elif kind == "connector":
+            allowed_ids = set(envelope.get("connector_ids", []))
+            allowed_pairs = {tuple(pair.get(k) for k in ("connector_id", "source_family", "source_account_id", "scope_key"))
+                for pair in envelope.get("connector_sources", []) if isinstance(pair, dict)}
+            scope_allowed = (bool(inner.get("connector_ids")) and set(inner["connector_ids"]) <= allowed_ids
+                and bool(inner.get("source_pairs")) and all(tuple(pair.get(k) for k in
+                    ("connector_id", "source_family", "source_account_id", "scope_key")) in allowed_pairs
+                    for pair in inner["source_pairs"]))
+            allowed_kinds = {"connector.read", "connector.configure", "connector.secret.manage"}
+        elif kind == "source_read":
+            ceiling = {tuple(item.get(k) for k in ("source_family", "source_account_id", "scope_key"))
+                for item in envelope.get("source_read_targets", []) if isinstance(item, dict)}
+            requested = {tuple(item.get(k) for k in ("source_family", "source_account_id", "scope_key"))
+                for item in inner.get("source_scopes", []) if isinstance(item, dict)}
+            scope_allowed = bool(requested) and requested <= ceiling
+            allowed_kinds = {"assessment.read", "audit.read"}
+        else:
+            scope_allowed = False
+            allowed_kinds = set()
+        if not set(role["actions"]) <= allowed_kinds:
+            return False
+        if not scope_allowed:
+            return False
+    else:
+        for key in ("group_ids", "source_families", "environments", "service_ids"):
+            allowed = set(outer.get(key, []))
+            requested = set(inner.get(key, []))
+            if "*" not in allowed and (not requested or not requested <= allowed):
+                return False
+    if envelope.get("version") != 2 and inner.get("membership_mode") == "all_current" and outer.get("membership_mode") != "all_current":
+            return False
     observer_actions = {"observer.timing.read", "observer.timing.configure", "audit.read.deployment"}
     if observer_actions.intersection(role.get("actions", [])):
         allowed_deployments = envelope.get("deployment_scopes", [])
@@ -1865,7 +1993,8 @@ def _envelope_allows(envelope: dict, role: dict) -> bool:
             return False
     for key in ("allowed_environments", "allowed_service_ids"):
         allowed, requested = set(outer_limits.get(key, [])), set(inner_limits.get(key, []))
-        if "*" not in allowed and (not requested or not requested <= allowed):
+        if "*" not in allowed and ((requested and not requested <= allowed)
+                or (envelope.get("version") != 2 and not requested)):
             return False
     for key in ("maximum_sla_duration_seconds", "maximum_deadline_extension_seconds"):
         outer_value, inner_value = outer_limits.get(key), inner_limits.get(key)
@@ -1899,7 +2028,7 @@ def _apply_policy_action(document: dict, principal: str, action: str, payload: d
                       "native.authority.activate", "native.authority.rollback"} and principal not in set(state.get("bootstrap_admins", [])):
             _error(403, "forbidden", "Protected bootstrap administration is required")
         if action in {"ownership.team.create", "ownership.team.update", "ownership.team.membership.set"}:
-            if state.get("mode") != NATIVE_MODE or not _matches(after, principal,
+            if state.get("mode") not in NATIVE_MODES or not _matches(after, principal,
                     "ownership.team.manage", payload.get("team_id", _ZERO_ID), None):
                 _error(403, "forbidden", "Current ownership-team administration authority is required")
         grantable = state.get("grantable_envelope", {})
@@ -1910,8 +2039,22 @@ def _apply_policy_action(document: dict, principal: str, action: str, payload: d
                 _error(422, "invalid_command", "Access-group action is not selectable")
             return _validate_role_document(role_input)
         def envelope_allows_native(current_envelope, role, scopes, actor):
-            scope_allowed = (bool(source_ceiling) and all(tuple((item["source_family"],
-                item["source_account_id"], item["scope_key"])) in source_ceiling for item in scopes))
+            typed = role.get("target_scope", {}).get("kind") in {"deployment", "connector", "source_read"}
+            if typed and (current_envelope.get("version") != 2 or state.get("mode") != LOCAL_NATIVE_MODE):
+                return False
+            if current_envelope.get("version") == 2:
+                if state.get("mode") != LOCAL_NATIVE_MODE:
+                    return False
+                typed_scope = role.get("target_scope", {})
+                if typed_scope.get("kind") == "deployment":
+                    scope_allowed = not scopes
+                else:
+                    requested = {tuple((item["source_family"], item["source_account_id"], item["scope_key"]))
+                        for item in scopes}
+                    scope_allowed = bool(requested) and requested <= source_ceiling
+            else:
+                scope_allowed = (bool(source_ceiling) and all(tuple((item["source_family"],
+                    item["source_account_id"], item["scope_key"])) in source_ceiling for item in scopes))
             return scope_allowed and _envelope_allows(current_envelope, role)
         try:
             after, _kind, _target = apply_native_command(after, action, payload, principal, now,
@@ -1924,8 +2067,10 @@ def _apply_policy_action(document: dict, principal: str, action: str, payload: d
         except (ValueError, TypeError, AttributeError, KeyError) as exc:
             _error(422, "invalid_command", str(exc))
     elif action in {"policy.role.create", "policy.role.update"}:
-        if native_state(after).get("mode") == NATIVE_MODE:
+        if native_state(after).get("mode") in NATIVE_MODES:
             _error(403, "forbidden", "Legacy role administration is disabled in native mode")
+        if envelope.get("version") == 2:
+            _error(403, "forbidden", "Typed delegation targets are available only in local native-v2")
         role_id = payload["role_id"]
         if not isinstance(role_id, str) or not role_id:
             _error(422, "invalid_command", "role_id is required")
@@ -1941,8 +2086,10 @@ def _apply_policy_action(document: dict, principal: str, action: str, payload: d
         role.update(role_id=role_id, revision=int(current.get("revision", 0) + 1) if current else 1)
         roles[role_id] = role
     elif action == "policy.role.assign":
-        if native_state(after).get("mode") == NATIVE_MODE:
+        if native_state(after).get("mode") in NATIVE_MODES:
             _error(403, "forbidden", "Legacy role assignment is disabled in native mode")
+        if envelope.get("version") == 2:
+            _error(403, "forbidden", "Typed delegation targets are available only in local native-v2")
         role_id, principal_id = payload["role_id"], payload["principal_id"]
         role = after.get("roles", {}).get(role_id)
         if role is None or not isinstance(principal_id, str) or not principal_id:
@@ -1974,7 +2121,7 @@ def _apply_policy_action(document: dict, principal: str, action: str, payload: d
             "principal_id": principal_id, "effective_from": start,
             "effective_until": end})
     elif action == "principal.update":
-        if native_state(after).get("mode") == NATIVE_MODE:
+        if native_state(after).get("mode") in NATIVE_MODES:
             native = native_state(after)
             if principal not in set(native.get("bootstrap_admins", [])):
                 _error(403, "forbidden", "Protected bootstrap administration is required for account disable")
@@ -2159,7 +2306,7 @@ def install_assessment_routes(app: FastAPI) -> None:
     def _warning_route_scope_allowed(policy, binding):
         """Bound routing administration by the active bootstrap grant ceiling."""
         native = native_state(policy)
-        if native.get("mode") != NATIVE_MODE:
+        if native.get("mode") not in NATIVE_MODES:
             return True
         scope = native.get("grantable_envelope", {}).get("warning_route_scope")
         if not isinstance(scope, dict):
@@ -2258,9 +2405,9 @@ def install_assessment_routes(app: FastAPI) -> None:
             if int(policy_row["revision"]) != body["expected_policy_revision"]:
                 _error(409, "stale_revision", "Policy revision changed")
             policy = policy_row["document"]
-            if native_state(policy).get("mode") == NATIVE_MODE and not body.get("finding_group_ids"):
+            if native_state(policy).get("mode") in NATIVE_MODES and not body.get("finding_group_ids"):
                 _error(422, "invalid_command", "Native warning routes require explicit finding groups")
-            if native_state(policy).get("mode") == NATIVE_MODE:
+            if native_state(policy).get("mode") in NATIVE_MODES:
                 known_groups = native_state(policy).get("access_groups", {})
                 if any(group_id not in known_groups for group_id in alert_groups):
                     _error(422, "invalid_command", "Failure alert groups must be current native access groups")
@@ -2298,7 +2445,7 @@ def install_assessment_routes(app: FastAPI) -> None:
                 if not _warning_route_scope_allowed(policy, prior_scope):
                     _error(403, "source_scope_forbidden", "Existing route is outside the current warning administration envelope")
                 old_targets = prior_scope["finding_group_ids"]
-                if native_state(policy).get("mode") == NATIVE_MODE:
+                if native_state(policy).get("mode") in NATIVE_MODES:
                     if not old_targets:
                         _error(403, "source_scope_forbidden", "Existing route finding scope is unavailable")
                     _warning_admin_grants(connection, policy, principal,
@@ -2348,6 +2495,7 @@ def install_assessment_routes(app: FastAPI) -> None:
                 policy_revision=next_policy_revision, context=context, now=now)
             result = {"schema_version": 1, "route_id": route_id, "revision": revision,
                 "policy_revision": next_policy_revision, "audit": "committed"}
+            guard_assessment(connection, command_id, principal, 'warning.route.manage', hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
             connection.execute(assessment_command_receipts.insert().values(
                 command_id=command_id, principal_id=principal, action="warning.route.manage",
                 target_id=route_id, request_digest=hashlib.sha256(json.dumps(body,
@@ -2381,7 +2529,7 @@ def install_assessment_routes(app: FastAPI) -> None:
             if policy_row is None or int(policy_row["revision"]) != body["expected_policy_revision"]:
                 _error(409, "stale_revision", "Policy revision changed")
             policy = policy_row["document"]
-            if native_state(policy).get("mode") == NATIVE_MODE and not body.get("finding_group_ids"):
+            if native_state(policy).get("mode") in NATIVE_MODES and not body.get("finding_group_ids"):
                 _error(422, "invalid_command", "Native warning actor links require explicit finding groups")
             context, _grants = _warning_admin_grants(connection, policy, principal,
                 "warning.actor_link.manage", target_group_ids, request, str(uuid.uuid4()))
@@ -2392,7 +2540,7 @@ def install_assessment_routes(app: FastAPI) -> None:
             if int(latest) != body["expected_link_revision"]:
                 _error(409, "stale_revision", "Warning actor-link revision changed")
             native = native_state(policy)
-            if native.get("mode") == NATIVE_MODE:
+            if native.get("mode") in NATIVE_MODES:
                 scope = native.get("grantable_envelope", {}).get("warning_route_scope", {})
                 allowed_installations = scope.get("installation_ids", [])
                 allowed_workspaces = scope.get("workspace_ids", [])
@@ -2436,6 +2584,7 @@ def install_assessment_routes(app: FastAPI) -> None:
                 policy_revision=next_policy_revision, context=context, now=now)
             result = {"schema_version": 1, "link_id": link_id, "revision": revision,
                 "policy_revision": next_policy_revision, "audit": "committed"}
+            guard_assessment(connection, command_id, principal, 'warning.actor_link.manage', hashlib.sha256(json.dumps(body, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
             connection.execute(assessment_command_receipts.insert().values(
                 command_id=command_id, principal_id=principal, action="warning.actor_link.manage",
                 target_id=link_id, request_digest=hashlib.sha256(json.dumps(body,
@@ -2589,7 +2738,7 @@ def install_assessment_routes(app: FastAPI) -> None:
             state = native_state(policy)
             bootstrap = principal in set(state.get("bootstrap_admins", []))
             group_admin = bootstrap or _matches(policy, principal, "access_group.read", _ZERO_ID, None)
-            team_admin = bootstrap or (state.get("mode") == NATIVE_MODE and any(
+            team_admin = bootstrap or (state.get("mode") in NATIVE_MODES and any(
                 _matches(policy, principal, "ownership.team.manage", team_id, None)
                 for team_id in state.get("ownership_teams", {})))
             envelope = state.get("grantable_envelope", {}) if bootstrap else {}
@@ -2787,11 +2936,107 @@ def install_assessment_routes(app: FastAPI) -> None:
                 "ownership_revision": state.get("ownership_revision", 0),
                 "principals": principals}
 
-    @app.post("/api/v1/assessment/commands")
+    @app.post("/api/v1/assessment/commands/{command_id}/abandon", openapi_extra={
+        "requestBody": {"required": True, "content": {"application/json": {
+            "schema": _abandon_request_schema()}}},
+        "responses":{"200":{"description":"Committed original command or audited terminal noncommit",
+            "content":{"application/json":{"schema":_abandon_response_schema()}}}}})
+    def abandon_command(command_id: str, body: dict, request: Request,
+                        principal: str = Depends(authenticate)):
+        parsed_id = _uuid(command_id, "command_id")
+        if (not isinstance(body, dict) or set(body) != {"schema_version", "command", "rationale", "evidence_ref"}
+                or body.get("schema_version") != 1 or not isinstance(body.get("command"), dict)
+                or any(not isinstance(body.get(key), str) or not body[key].strip()
+                    for key in ("rationale", "evidence_ref"))):
+            _error(422, "invalid_command", "Command disposition request is invalid")
+        command = body["command"]
+        if command.get('action')=='connector.recovery.clearance.apply':
+            from uvm.connectors.clearance_disposition import abandon_clearance
+            try:
+                return abandon_clearance(app,parsed_id,body,request,principal)
+            except sa.exc.DBAPIError:
+                _error(503,'dependency_unavailable','Clearance disposition could not commit')
+        command_fields = {"schema_version", "command_id", "action", "target_id",
+            "membership_ids", "expected_policy_revision", "expected_authority_revision",
+            "expected_connector_registry_revision", "payload"}
+        if (set(command) != command_fields or command.get("schema_version") != 1
+                or command.get("action") != "connector.binding.register"
+                or command.get("command_id") != parsed_id
+                or command.get("target_id") != "00000000-0000-0000-0000-000000000000"
+                or command.get("membership_ids") != []
+                or any(type(command.get(key)) is not int or command[key] < 0 for key in (
+                    "expected_policy_revision", "expected_authority_revision",
+                    "expected_connector_registry_revision"))
+                or not isinstance(command.get("payload"), dict)):
+            _error(422, "invalid_command", "Only a complete connector registration command can be abandoned")
+        digest = _digest(principal, command)
+        now = now_utc()
+        with engine.begin() as connection:
+            lock_policy(connection)
+            policy_row = connection.execute(sa.select(assessment_policy).where(
+                assessment_policy.c.policy_id == 1).with_for_update()).mappings().first()
+            if policy_row is None:
+                _error(503, "persistence_unavailable", "Assessment policy is unavailable")
+            auth_service = getattr(app.state, "oidc_auth", None)
+            context = auth_service.final_context(connection, request) if auth_service else None
+            document = policy_row["document"]
+            state = native_state(document)
+            if (context is None or context.credential_mode != "local_session"
+                    or context.principal_id != principal
+                    or state.get("mode") not in NATIVE_MODES
+                    or principal not in set(state.get("bootstrap_admins", []))):
+                _error(403, "forbidden", "Protected local command disposition is required")
+            guard_command(connection, parsed_id, family='assessment', principal_id=principal,
+                action=command['action'], request_digest=digest, allow_terminal=True)
+            prior = connection.execute(sa.select(assessment_command_receipts).where(
+                assessment_command_receipts.c.command_id == parsed_id).with_for_update()).mappings().first()
+            if prior is not None:
+                if prior["principal_id"] != principal or prior["request_digest"] != digest:
+                    _error(409, "command_id_reused", "Command ID is bound to different content")
+                return {"schema_version": 1, "command_id": parsed_id,
+                    "disposition": "committed", "request_digest": digest,
+                    "receipt": dict(prior["result"])}
+            terminal = connection.execute(sa.select(assessment_command_abandonments).where(
+                assessment_command_abandonments.c.command_id == parsed_id).with_for_update()).mappings().first()
+            if terminal is not None:
+                if terminal["principal_id"] != principal or terminal["request_digest"] != digest:
+                    _error(409, "command_id_reused", "Command ID is terminally bound to different content")
+                return {"schema_version": 1, "command_id": parsed_id,
+                    "disposition": "not_committed", "request_digest": digest,
+                    "actor_id": principal, "audit_event_id": terminal["audit_event_id"],
+                    "committed_at": _utc_z(terminal["created_at"])}
+            audit_id = str(uuid.uuid4())
+            sequence = connection.execute(sa.select(sa.func.coalesce(
+                sa.func.max(assessment_audit_events.c.event_sequence), 0) + 1)).scalar_one()
+            connection.execute(assessment_audit_events.insert().values(
+                event_id=audit_id, event_sequence=sequence, actor_id=principal,
+                actor_kind="local_account", origin="local_api",
+                action="connector.binding.registration_abandoned", target_id=_ZERO_ID,
+                before_value={"command_id": parsed_id, "request_digest": digest},
+                after_value={"command_id": parsed_id, "disposition": "not_committed",
+                    "request_digest": digest}, membership_ids=[], membership_revision=0,
+                rationale=body["rationale"].strip(), evidence_ref=body["evidence_ref"].strip(),
+                policy_revision=policy_row["revision"], identity_revision=0,
+                occurred_at=now, received_at=now, correlation_id=parsed_id,
+                command_id=parsed_id, authorization_context=context.document()))
+            connection.execute(assessment_command_abandonments.insert().values(
+                command_id=parsed_id, principal_id=principal, action=command["action"],
+                request_digest=digest, audit_event_id=audit_id, created_at=now))
+            return {"schema_version": 1, "command_id": parsed_id,
+                "disposition": "not_committed", "request_digest": digest,
+                "actor_id": principal, "audit_event_id": audit_id,
+                "committed_at": _utc_z(now)}
+
+    @app.post("/api/v1/assessment/commands", openapi_extra={
+        "requestBody": {"required": True, "content": {"application/json": {
+            "schema": _commands_request_schema()}}}})
     def submit_command(body: dict, request: Request, principal: str = Depends(authenticate)):
         command_id = _uuid(body.get("command_id"), "command_id")
         target_id = _uuid(body.get("target_id"), "target_id")
         action = body.get("action")
+        if action == "connector.binding.register":
+            from uvm.connectors.api import execute_local_binding_registration
+            return execute_local_binding_registration(app, body, request, principal)
         membership_ids = body.get("membership_ids")
         expected = body.get("expected_revisions")
         payload = body.get("payload")
@@ -2834,13 +3079,15 @@ def install_assessment_routes(app: FastAPI) -> None:
             active_connection = _ACTIVE_COMMAND_CONNECTION.get()
             transaction = engine.begin() if active_connection is None else nullcontext(active_connection)
             with transaction as connection:
+                # Command tombstones and registration commits share this lock.
+                # A terminal not-committed result can therefore fence even a
+                # delayed retry carrying the same ID with altered action bytes.
+                lock_policy(connection)
                 barrier_command_id = request.headers.get("x-uvm-g7-barrier-command")
                 if (os.environ.get("UVM_G7_DISPOSABLE_MODE") == "1" and
                         barrier_command_id == str(body.get("command_id", ""))):
                     connection.execute(sa.text("SELECT set_config('application_name', :name, true)"),
                         {"name": "g7cmd:" + barrier_command_id})
-                if policy_command:
-                    lock_policy(connection)
                 policy_row = connection.execute(sa.select(assessment_policy).where(
                     assessment_policy.c.policy_id == 1).with_for_update()).mappings().first()
                 if policy_row is None:
@@ -2870,10 +3117,10 @@ def install_assessment_routes(app: FastAPI) -> None:
                 # reserved global ID and cannot itself be matched to a scoped
                 # grant. Receipt replay performs the same scoped recheck.
                 native_action = action in NATIVE_ACTIONS or (action == "principal.update"
-                    and native_state(policy).get("mode") == NATIVE_MODE)
+                    and native_state(policy).get("mode") in NATIVE_MODES)
                 protected_native = action in {"native.authority.activate", "native.authority.rollback",
                     "access_group.create", "access_group.update", "access_group.membership.set"} or (
-                    action == "principal.update" and native_state(policy).get("mode") == NATIVE_MODE)
+                    action == "principal.update" and native_state(policy).get("mode") in NATIVE_MODES)
                 if action != "policy.sla.publish" and not protected_native:
                     required_action = ("ownership.team.manage" if action.startswith("ownership.team.") else action)
                     required_target = payload.get("team_id", target_id) if action.startswith("ownership.team.") else target_id
@@ -2920,6 +3167,7 @@ def install_assessment_routes(app: FastAPI) -> None:
                     assessment_command_receipts.c.command_id == command_id).with_for_update()).mappings().first()
                 if protected_native and principal not in set(native_state(policy).get("bootstrap_admins", [])):
                     _error(403, "forbidden", "Protected bootstrap administration is required")
+                guard_assessment(connection, command_id, principal, action, digest)
                 if prior is not None:
                     if prior["request_digest"] != digest:
                         _error(409, "command_id_reused", "Command ID is bound to different content")
@@ -3424,7 +3672,7 @@ def install_assessment_routes(app: FastAPI) -> None:
                                 ).mappings().all()})
                         after = _apply_policy_action(old_document, principal, action, payload, now,
                             current_principals, expected)
-                        if action == "principal.update" and native_state(policy).get("mode") == NATIVE_MODE:
+                        if action == "principal.update" and native_state(policy).get("mode") in NATIVE_MODES:
                             identity_id = payload.get("principal_id")
                             identity_row = connection.execute(sa.select(auth_principals).where(
                                 auth_principals.c.principal_id == identity_id).with_for_update()).mappings().first()
@@ -3438,6 +3686,22 @@ def install_assessment_routes(app: FastAPI) -> None:
                                     oidc_sessions.c.principal_id == identity_id,
                                     oidc_sessions.c.revoked_at.is_(None)).values(
                                         revoked_at=now, revision=oidc_sessions.c.revision + 1))
+                            local_account = connection.execute(sa.select(local_accounts).where(
+                                local_accounts.c.principal_id == identity_id).with_for_update()).mappings().first()
+                            if local_account:
+                                connection.execute(local_accounts.update().where(
+                                    local_accounts.c.principal_id == identity_id).values(
+                                        status=("pending" if not local_account["verifier"] else "enabled") if payload["enabled"] else "disabled",
+                                        credential_revision=local_account["credential_revision"] +
+                                            (0 if payload["enabled"] and local_account["status"] == "pending" else 1),
+                                        updated_at=now))
+                                connection.execute(local_sessions.update().where(
+                                    local_sessions.c.principal_id == identity_id,
+                                    local_sessions.c.revoked_at.is_(None)).values(
+                                        revoked_at=now, revision=local_sessions.c.revision + 1))
+                                if payload["enabled"] is False:
+                                    connection.execute(local_capabilities.delete().where(
+                                        local_capabilities.c.principal_id == identity_id))
                     revision = current_policy_revision + 1
                     connection.execute(assessment_policy.update().where(
                         assessment_policy.c.policy_id == 1).values(
@@ -4100,6 +4364,7 @@ def install_assessment_routes(app: FastAPI) -> None:
                     **({"result": administration_result} if native_action else {}),
                     **({"inventory_revision": inventory_revision} if action == "policy.sla.publish"
                         and inventory_revision is not None else {})}
+                guard_assessment(connection, command_id, principal, action, digest)
                 connection.execute(assessment_command_receipts.insert().values(
                     command_id=command_id, principal_id=principal, action=action,
                     target_id=target_id, request_digest=digest, decision_id=decision_id,
@@ -4576,7 +4841,7 @@ def install_assessment_routes(app: FastAPI) -> None:
                 .where(exception_warning_failure_alerts.c.group_id == group_id)
                 .order_by(exception_warning_failure_alerts.c.created_at,
                     exception_warning_failure_alerts.c.alert_id)).mappings().all()
-            if native_state(policy).get("mode") == NATIVE_MODE:
+            if native_state(policy).get("mode") in NATIVE_MODES:
                 if auth_context is None:
                     _error(403, "source_scope_forbidden", "Current warning alert group membership is required")
                 # Resolve recipient-group membership from current native state,

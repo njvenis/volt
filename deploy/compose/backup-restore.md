@@ -1,13 +1,20 @@
 # Compose cold backup and restore
 
-This is a cold, single-image evaluation procedure. It has no RPO/RTO promise and does not demonstrate a live backup controller or production recovery. It captures all three Compose volumes together with OIDC/client and recovery keys, application secrets, the exact image ID, bundle version and configuration digest.
+**RC4 standalone status:** the packaged `sh ./volt` command does not yet expose
+the source-tree `backup-record`, `restore-provision`, or `restore-admit`
+operations below. Those source-tree commands currently require Python on the
+operator host and are not the supported minimal-host user flow. The RC4
+standalone backup/restore journey is unqualified; use this procedure only in
+the explicitly controlled source-tree evaluation described below.
+
+This is a cold, single-image evaluation procedure. It has no RPO/RTO promise and does not demonstrate a live backup controller or production recovery. It captures all three Compose volumes together with OIDC/client and recovery keys, application secrets, the exact image ID, bundle version and configuration digest. The private Qualys page evidence directory is `/opt/uvm/state/scanner-evidence` inside the existing `state` volume; its file bytes, ownership and mode are included in that volume's inventory and archive. The host-only recovery operator key remains in the protected instance directory and outside every API mount.
 
 ## Capture
 
 1. Stop admission at the configured TLS proxy and prevent new external provider commands.
 2. Confirm through the external provider/host integration controls that no outbound command, webhook, polling run or other effect is in flight or unresolved. The Compose installer does not own this independent effect journal; if that confirmation is unavailable, do not take or claim a coordinated backup.
 3. Stop VOLT using `python3 setup.py stop INSTANCE`. The command allows ten minutes for the supervisor's sequential cleanup, then requires exit 0, no OOM, and successful writer, worker and PostgreSQL cleanup evidence from the current container run. Forced termination or cleanup failure blocks backup. Do not capture until this succeeds. This stops UVM, CE, workers and the in-container databases before volume reads.
-4. Run `python3 setup.py backup-record INSTANCE` while it remains stopped. This records each store’s file-content, ownership and permission inventory, including explicitly empty media or state stores. Copy the complete private instance directory, including `.env`, `instance.json`, `oidc.json` and `secrets/`, into the protected backup set. Capture exact image ID and bundle version from `instance.json` and `VERSION`. Preserve the original absolute instance and extracted-bundle paths; this restore procedure intentionally does not relocate or rename an instance.
+4. Run `python3 setup.py backup-record INSTANCE` while it remains stopped. This records each store’s file-content, ownership and permission inventory, including explicitly empty media or state stores. Copy the complete private instance directory, including `.env`, `instance.json`, `oidc.json`, `local-auth.json`, `local-recovery.json`, and all of `secrets/`, into the protected backup set. The local recovery files include the independent issuer/material keys, host-only operator private key and its public/config files, and the current restore fence. Keep this protected copy outside the VOLT API container and all three API data stores. Capture exact image ID and bundle version from `instance.json` and `VERSION`. Preserve the original absolute instance and extracted-bundle paths; this restore procedure intentionally does not relocate or rename an instance.
 5. With the container stopped, archive each exact project volume using the admitted image as an offline tar helper. Set `IMAGE_ID` to the `image` value in `instance.json`, `PROJECT` to its `project` value, and `BACKUP_DIR` to a private existing directory. The image contains GNU tar; the helper has no network and no Docker socket:
 
    ```sh
@@ -28,7 +35,7 @@ Do not copy a running PostgreSQL volume or only one of the three volumes. Do not
 
 ## Restore
 
-Restore all three archives and the exact private instance directory to a fresh Docker host at the same absolute paths, with the same project name and exact bundle version. Verify every recorded digest before extraction, and load the exact recorded image ID from the host's protected image archive. Confirm the project resources do not already exist. From the extracted bundle directory, run `python3 setup.py restore-provision INSTANCE`. This creates only the three correctly owner-labelled empty volumes and private network; it does not create or start the runtime. Import each archive into its matching volume using the offline helper below, then run `python3 setup.py restore-admit INSTANCE`. That checks all three imports exactly match the captured inventories (including valid empty stores) and verifies PostgreSQL's `PG_VERSION`. It refuses runtime startup before all checks pass:
+Restore all three archives and the exact private instance directory to a fresh Docker host at the same absolute paths, with the same project name and exact bundle version. Verify every recorded digest before extraction, and load the exact recorded image ID from the host's protected image archive. Confirm the project resources do not already exist. From the extracted bundle directory, run `python3 setup.py restore-provision INSTANCE`. For local auth, this first writes a new restore UUID and incremented generation to the host instance journal and the independent fence; it never reuses the old epoch. This creates only the three correctly owner-labelled empty volumes and private network; it does not create or start the runtime. Import each archive into its matching volume using the offline helper below, then run `python3 setup.py restore-admit INSTANCE`. That checks all three imports exactly match the captured inventories (including valid empty stores) and verifies PostgreSQL's `PG_VERSION`. It refuses runtime startup before all checks pass:
 
 ```sh
 for store in postgres media state; do

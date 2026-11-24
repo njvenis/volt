@@ -1,6 +1,6 @@
 # Compose installation local validation
 
-The Compose bundle is a development candidate. The published RC1 image predates its runtime configuration contract; installation requires an explicitly built compatible immutable image. Nothing in this change republishes RC1 or establishes production readiness.
+RC3 is the published Compose evaluation bundle. The published RC1 image predates its runtime configuration contract; RC3 uses its own compatible immutable image. Publication and local synthetic validation do not establish production readiness.
 
 Local synthetic verification exercised a bundle extracted outside the checkout: initialization, exact subject linking, explicit policy/native-authority initialization, repeat-safe initialization, browser login, a permission-scoped audited operation, and retained restart/readback. A local HTTPS external-provider fixture separately exercised OIDC discovery, authorization, token exchange and JWKS validation, exact linked identity, active-but-unlinked denial without a session cookie, and invalid-bearer denial. This does not establish a named provider integration. A provider-specific trusted snapshot/heartbeat publisher remains an external installation prerequisite.
 
@@ -9,3 +9,13 @@ Recovery verification used a cold backup after successful supervisor cleanup, re
 This simulates fresh-host resource absence on one local Docker host; it does not establish recovery on independent hardware, external effect reconciliation, RPO/RTO, key rotation, schema migration, or production recovery. The independent G7 recovery-control contract remains authoritative for its controller and effect-fencing responsibilities. Host client private keys and authoritative journals must stay outside the application.
 
 Focused regression coverage includes recovery admission, inventory mismatch, successful and failed shutdown evidence, OOM/forced-exit rejection, mode security, development launcher initialization, native identity/authority and existing recovery safety checks. OpenSpec strict validation, public-file checks and structural checks accompany the local evidence. Raw outputs and private backup material are retained outside the repository for review.
+
+## RC4 signed-admission fixture checkpoint
+
+The amended maintained qualifier accepts `--auth-mode local --admission-fixture` only with externally provisioned public trust material, a pinned local verifier digest, and separate Cosign bundles for the packaged launcher and closed installer archive. It no longer accepts the former ad hoc `admission.json` record. Fixture trust is baked only into the explicitly selected local verifier target; the default production target contains no fixture policy or key.
+
+A native amd64 candidate built from source commit `a6b7a13ba0b7d38554d28d84a6bf93bbdbefd49e` was pushed only to the owned loopback registry and signed with the private local Rekor fixture. The maintained qualifier verified the launcher and archive bundles, the verifier image signature and provenance, the runtime image signature, and its signed source/bundle attestation. The full graph check then rejected the registry index because it contains a real amd64 child and a BuildKit attestation descriptor but no arm64 runtime child. The qualifier stopped before archive extraction and application startup. This is retained negative admission evidence, not an install pass.
+
+The production-target verifier measured 105,296,038 bytes uncompressed on amd64. The corresponding OCI manifest reports 105,286,740 compressed layer bytes and 105,296,038 bytes including image config and manifest descriptors. These are local registry measurements for amd64 only. Native arm64 runtime artifact transfer and a complete two-platform signed index remain required before the local installer journey can run.
+
+Raw verifier, registry, signer, bundle, and qualifier records are retained outside the repository under `/tmp/volt-easy-install-20261118/evidence/delivery/`. The fixture signing key and Rekor database remain private local test resources; they are not production trust roots.

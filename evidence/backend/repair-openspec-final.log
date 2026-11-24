@@ -1,0 +1,7 @@
+1.11.0
+- Validating...
+✓ change/compose-primary-install
+✓ change/easy-compose-install
+✓ change/g7-enterprise-rollout
+✓ change/rc2-compose-release
+Totals: 4 passed, 0 failed (4 items)

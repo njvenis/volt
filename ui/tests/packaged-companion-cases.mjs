@@ -1,0 +1,74 @@
+// Maintained Node companions against the existing rendered App HTTP fixture.
+// All API replies below are synthetic; no packaged/host/provider proof.
+import assert from 'node:assert/strict';
+import {chromium} from 'playwright';
+import {restoredSessionDenied} from '../scripts/local-companion-state.mjs';
+import {spawn} from 'node:child_process';
+import {mkdtemp,readFile,writeFile,copyFile,chmod,rm,stat} from 'node:fs/promises';
+import {join,resolve} from 'node:path';
+import {tmpdir} from 'node:os';
+import {scannerView,recoveryView,recoverySlot,legacyRecovery,clearanceReceipt,sid,sourceTuple} from './scanner-fixture.mjs';
+const marker='SYNTHETIC_PRIVATE_COMPANION_SECRET';
+async function screenshotEvidence(file,name){if(process.env.VOLT_UI_EVIDENCE)await copyFile(file,join(process.env.VOLT_UI_EVIDENCE,'synthetic-companion-'+name+'.png'));}
+function run(file,args,input){return new Promise(resolveRun=>{const child=spawn(process.execPath,[resolve(import.meta.dirname,'../../tools',file),...args],{stdio:['pipe','pipe','pipe']});let stdout='',stderr='';child.stdout.on('data',x=>stdout+=x);child.stderr.on('data',x=>stderr+=x);const timer=setTimeout(()=>child.kill('SIGKILL'),45000);child.on('close',code=>{clearTimeout(timer);resolveRun({code,stdout,stderr});});child.stdin.end(input===undefined?'':JSON.stringify(input));});}
+function fixture(){
+ const state={restored:false,sessionDenial:401,claimStatus:401,claimed:true,loginCount:0,claims:0,writes:[],sessions:new Set(),view:{...scannerView(),configuration_revision:1,credential:{secret_id:sid(22),version_id:sid(23),state:'quarantined',revision:1},recovery:recoveryView()},operations:new Map()};
+ const denied={schema_version:1,error:{code:'authentication_required',message:'Authentication required',correlation_id:sid(99),details:{}}};
+ const session={schema_version:1,authenticated:true,credential_mode:'local_session',principal_id:sid(1),csrf_token:'synthetic-csrf',source_scopes:[],protected_admin:false,authority:{principal_id:sid(1),credential_mode:'local_session',protected_admin:false}};
+ state.handler=async(req,res)=>{
+  const send=(status,value,headers={})=>{res.writeHead(status,{'Content-Type':'application/json',...headers});res.end(value===undefined?'':JSON.stringify(value));};const path=req.url.pathname,cookie=(req.headers.cookie??'').split(';').map(x=>x.trim()).find(x=>x.startsWith('uvm_session='))?.slice(12),authed=state.sessions.has(cookie);
+  if(path==='/api/v1/auth/config')return send(200,{schema_version:1,mode:'local',setup_state:state.claimed?'claimed':'required'});
+  if(path==='/api/v1/auth/local/login'){state.loginCount++;if(req.body.username!=='companion-user'||req.body.password!==marker)return send(401,denied);const token='synthetic-cookie-'+state.loginCount;state.sessions.add(token);return send(200,session,{'Set-Cookie':`uvm_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600`});}
+  if(path==='/api/v1/auth/session')return authed?send(200,session):send(state.sessionDenial,denied);
+  if(path==='/api/v1/auth/setup/claim'){state.claims++;return send(state.claimStatus,denied);}
+  if(path.endsWith('/logout')){state.sessions.delete(cookie);return send(204,undefined,{'Set-Cookie':'uvm_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'});}
+  if(!authed)return send(401,denied);
+  if(path==='/api/v1/connectors')return send(200,{schema_version:1,items:[{schema_version:1,connector_id:sid(2),source:{source_id:sid(3),revision:1,...sourceTuple},lifecycle:state.view.lifecycle,configuration_revision:1,settings:{environment_label:'Test'}}],next_cursor:null});
+  if(path==='/api/v1/scanners/'+sid(2))return send(200,state.view);
+  if(path.endsWith('/permissions'))return send(200,{schema_version:1,connector_id:sid(2),source:{source_id:sid(3),revision:1,...sourceTuple},principal_id:sid(1),revisions:state.view.expected_revisions,allowed:{'connector.read':true,'connector.configure':true,'connector.secret.manage':true,'github.repository.configure':false}});
+  if(path==='/api/v1/connectors/'+sid(2)+'/secrets/'+sid(22))return send(200,recoverySlot(state.view));
+  if(path.endsWith('/versions')){
+   const body=req.body;state.writes.push('credential');assert.equal(req.headers['x-csrf-token'],'synthetic-csrf');assert.ok(JSON.parse(body.input.value).password===marker+' fresh','password_bytes_mismatch');assert.equal(body.expected_revisions.secret,state.view.credential.revision);state.view.credential={...state.view.credential,revision:state.view.credential.revision+1,version_id:body.version_id,state:'active'};state.view.expected_revisions.connector++;state.view.recovery={...state.view.recovery,fresh_version_ready:true,clearance_state:'missing',approval_id:null,approval_expires_at:null};
+   return send(201,{schema_version:1,command_id:body.submission_id,action:'connector.secret.submit',target_id:'00000000-0000-4000-8000-000000000000',policy_revision:2,decision_id:sid(50),audit_event_id:sid(51),intents:[],result:{effect:'connector_secret_submitted',connector_id:sid(2),source_id:sid(3),revisions:{...state.view.expected_revisions,secret:state.view.credential.revision},configuration_revision:1,active_configuration_revision:null,lifecycle:'disabled',secret_id:sid(22),version_id:body.version_id,version_state:'active',submission_id:body.submission_id,submission_outcome:'committed',flow_id:null,recovery:legacyRecovery(state.view)}});
+  }
+  if(path==='/api/v1/assessment/commands'){
+   assert.equal(req.body.action,'connector.recovery.clearance.apply');state.writes.push('clearance');assert.equal(req.headers['x-csrf-token'],'synthetic-csrf');assert.equal(state.view.recovery.clearance_state,'available');assert.deepEqual(req.body.expected_revisions,recoverySlot(state.view).revisions);const receipt=clearanceReceipt(req.body,state.view);state.view.recovery={...state.view.recovery,state:'awaiting_activation',clearance_state:'applied'};state.view.expected_revisions.connector++;return send(200,receipt);
+  }
+  if(path.endsWith('/commands')&&path.startsWith('/api/v1/scanners/')){
+   const body=req.body;assert.equal(req.headers['x-csrf-token'],'synthetic-csrf');assert.deepEqual(body.expected_revisions,state.view.expected_revisions);state.writes.push(body.action);let result;
+   if(body.action==='scanner.connection.test'){
+    assert.equal(state.view.recovery.state,'awaiting_activation');const now=new Date().toISOString();const operation={schema_version:1,operation_id:sid(60),command_id:body.command_id,kind:'test',status:'succeeded',configuration_revision:1,credential_version_id:state.view.credential.version_id,started_at:now,finished_at:now,run_id:null,error_code:null,receipt_id:body.command_id};state.operations.set(sid(60),operation);state.view.validation={status:'succeeded',checked_at:now,configuration_revision:1,credential_version_id:state.view.credential.version_id,operation_id:sid(60),error_code:null};result={operation_id:sid(60),status:'succeeded',error_code:null};
+   }else{assert.equal(body.action,'scanner.configuration.activate');assert.equal(body.payload.validation_operation_id,sid(60));state.view.lifecycle='active';state.view.active_configuration_revision=1;state.view.recovery={...state.view.recovery,state:'clear',fresh_credentials_required:false};state.view.expected_revisions.connector++;result={lifecycle:'active',configuration_revision:1,active_configuration_revision:1};}
+   return send(200,{schema_version:1,...(state.receiptFault==='missing_id'?{}:{command_id:state.receiptFault==='wrong_id'?sid(98):body.command_id}),action:body.action,target_id:sid(2),decision_id:sid(64),audit_event_id:sid(65),intent_id:sid(66),committed_revision:state.view.expected_revisions.connector,projection:{status:'committed',connector_id:sid(2),source_id:sid(3),expected_revisions:state.view.expected_revisions},policy_revision:2,intents:[{intent_id:sid(66),kind:'scanner.command',target_id:sid(2),status:'complete'}],occurred_at:new Date().toISOString(),result});
+  }
+  if(path.includes('/operations/'))return send(200,state.operations.get(path.split('/').at(-1)));
+  return send(404,{schema_version:1,error:{code:'not_found',message:'Not found',correlation_id:sid(99),details:{}}});
+ };return state;
+}
+export function registerPackagedCompanionCases({test,origin,setHandler}){
+ async function setup(t){const dir=await mkdtemp(join(tmpdir(),'volt-companion-'));await chmod(dir,0o700);const state=fixture();setHandler(state.handler);t.after(async()=>{setHandler(null);await rm(dir,{recursive:true,force:true});});return {dir,state};}
+ const loginInput={username:'companion-user',password:marker};
+ const safeResult=r=>{assert.equal(r.stdout.includes(marker),false);assert.equal(r.stderr.includes(marker),false);};
+ test('packaged companion captures real browser state then observes exact restored-session denial without login',async t=>{
+  const {dir,state}=await setup(t),saved=join(dir,'session.json');let result=await run('compose_release_login.mjs',[origin(),join(dir,'cookie'),'--local-stdin','--save-browser-state',saved],loginInput);safeResult(result);assert.equal(result.code,0,result.stderr);assert.equal((await stat(saved)).mode&0o777,0o600);const capture=JSON.parse(await readFile(saved,'utf8'));assert.equal(capture.principal_id,sid(1));assert.equal(capture.storage_state.cookies.length,1);assert.equal(state.loginCount,1);
+  const probeBrowser=await chromium.launch({headless:true});try{const probeContext=await probeBrowser.newContext({storageState:capture.storage_state});await probeContext.clearCookies();const probe=await probeContext.newPage();await assert.rejects(restoredSessionDenied(probe,capture,origin()),/not_sent/);}finally{await probeBrowser.close();}
+  result=await run('g7_local_preview_smoke.mjs',['--local','--origin',origin(),'--evidence',join(dir,'still-live'),'--verify-restored-session','--browser-state',saved]);assert.equal(result.code,1);assert.equal(result.stderr,'Local browser verification failed.\n');assert.equal(state.loginCount,1);state.sessions.clear();
+  result=await run('g7_local_preview_smoke.mjs',['--local','--origin',origin(),'--evidence',join(dir,'evidence'),'--verify-restored-session','--browser-state',saved]);safeResult(result);assert.equal(result.code,0,result.stderr);assert.equal(JSON.parse(result.stdout).fresh_login,'not performed');assert.equal(state.loginCount,1);await screenshotEvidence(join(dir,'evidence','restored-session-rejected.png'),'restored-session');
+  state.sessionDenial=503;result=await run('g7_local_preview_smoke.mjs',['--local','--origin',origin(),'--evidence',join(dir,'unavailable'),'--verify-restored-session','--browser-state',saved]);assert.equal(result.code,1);assert.equal(result.stderr,'Local browser verification failed.\n');assert.equal(state.loginCount,1);
+ });
+ test('packaged companion checks consumed setup claimed UI and rejects claim and probe login exactly',async t=>{
+  const {dir,state}=await setup(t);const result=await run('g7_local_preview_smoke.mjs',['--local','--origin',origin(),'--evidence',join(dir,'evidence'),'--verify-setup-closed','--credentials-stdin'],{username:'new-probe',password:marker,display_name:'Synthetic probe',capability:marker});safeResult(result);assert.equal(result.code,0,result.stderr);assert.equal(state.claims,1);assert.equal(state.loginCount,1);assert.equal(state.sessions.size,0);await screenshotEvidence(join(dir,'evidence','restored-setup-closed.png'),'setup-closed');
+  state.claimStatus=409;const wrong=await run('g7_local_preview_smoke.mjs',['--local','--origin',origin(),'--evidence',join(dir,'wrong-denial'),'--verify-setup-closed','--credentials-stdin'],{username:'another-probe',password:marker,display_name:'Synthetic probe',capability:marker});safeResult(wrong);assert.equal(wrong.code,1);assert.equal(wrong.stderr,'Local browser verification failed.\n');assert.equal(state.loginCount,1);
+ });
+ test('packaged companion drives fresh credential then external-fixture approval and explicit clearance test activation',async t=>{
+  const {dir,state}=await setup(t),saved=join(dir,'recovery.json'),base=['--local','--origin',origin(),'--recovery-state',saved,'--credentials-stdin'];
+  let result=await run('g7_local_preview_smoke.mjs',[...base,'--evidence',join(dir,'prepare'),'--recovery-prepare'],{...loginInput,scanner:{display_name:'Synthetic scanner',account_label:'Synthetic account',environment_label:'Test',username:'synthetic-reader',password:marker+' fresh',rationale:'Synthetic recovery qualification',evidence_ref:'synthetic:recovery'}});safeResult(result);assert.equal(result.code,0,result.stderr);assert.deepEqual(state.writes,['credential']);const savedText=await readFile(saved,'utf8');assert.equal(savedText.includes(marker),false);assert.equal((await stat(saved)).mode&0o777,0o600);
+  result=await run('g7_local_preview_smoke.mjs',[...base,'--evidence',join(dir,'missing-approval'),'--recovery-complete'],{...loginInput,scanner:{rationale:'Synthetic explicit recovery',evidence_ref:'synthetic:recovery'}});safeResult(result);assert.equal(result.code,1);assert.equal(result.stderr,'Local browser verification failed.\n');assert.deepEqual(state.writes,['credential']);
+  // External fixture state change ONLY; not a host producer or imported-proof claim.
+  state.view.recovery={...state.view.recovery,clearance_state:'available',approval_id:sid(81),approval_expires_at:new Date(Date.now()+600000).toISOString()};state.view.expected_revisions.connector++;
+  const approved=structuredClone(state.view);
+  for(const fault of ['missing_id','wrong_id']){state.receiptFault=fault;state.view=structuredClone(approved);state.writes=['credential'];result=await run('g7_local_preview_smoke.mjs',[...base,'--evidence',join(dir,fault),'--recovery-complete'],{...loginInput,scanner:{rationale:'Synthetic explicit recovery',evidence_ref:'synthetic:recovery'}});safeResult(result);assert.equal(result.code,1);assert.equal(result.stderr,'Local browser verification failed.\n');assert.deepEqual(state.writes,['credential','clearance','scanner.connection.test']);}
+  state.receiptFault=null;state.view=structuredClone(approved);state.writes=['credential'];
+  result=await run('g7_local_preview_smoke.mjs',[...base,'--evidence',join(dir,'complete'),'--recovery-complete'],{...loginInput,scanner:{rationale:'Synthetic explicit recovery',evidence_ref:'synthetic:recovery'}});safeResult(result);assert.equal(result.code,0,result.stderr);assert.equal(JSON.parse(result.stdout).recovery,'clearance_test_activation_persisted');assert.deepEqual(state.writes,['credential','clearance','scanner.connection.test','scanner.configuration.activate']);assert.equal(state.view.recovery.state,'clear');assert.equal(state.view.lifecycle,'active');await screenshotEvidence(join(dir,'prepare','recovery-fresh-credential.png'),'recovery-prepare');await screenshotEvidence(join(dir,'complete','recovery-clear-active.png'),'recovery-complete');
+ });
+}

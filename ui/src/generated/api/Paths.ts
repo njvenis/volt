@@ -21,10 +21,53 @@ export type GroupId = string;
 export type Cursor = string | null;
 export type Authorization5 = string | null;
 export type Authorization6 = string | null;
+export type Body1 =
+  | {
+      action: "connector.binding.register";
+      command_id: string;
+      expected_authority_revision: number;
+      expected_connector_registry_revision: number;
+      expected_policy_revision: number;
+      /**
+       * @maxItems 0
+       */
+      membership_ids: [];
+      payload: {
+        account_label: string;
+        display_name: string;
+        environment_label: string;
+        evidence_ref: string;
+        grant_initial_read: boolean;
+        platform_id: "us1" | "us2" | "us3" | "eu1" | "eu2" | "in1";
+        product: "qualys_vm";
+        rationale: string;
+        scope: {
+          kind: "account_visible";
+        };
+        source_family: "qualys";
+      };
+      schema_version: 1;
+      target_id: "00000000-0000-0000-0000-000000000000";
+    }
+  | {
+      action: string;
+      command_id: string;
+      expected_revisions: {
+        [k: string]: unknown;
+      };
+      membership_ids: string[];
+      payload: {
+        [k: string]: unknown;
+      };
+      target_id: string;
+      [k: string]: unknown;
+    };
 export type Authorization7 = string | null;
+export type CommandId = string;
 export type Authorization8 = string | null;
 export type Authorization9 = string | null;
 export type Authorization10 = string | null;
+export type Authorization11 = string | null;
 export type NativeId = string | null;
 export type SourceFamily = string | null;
 export type Cve = string | null;
@@ -37,21 +80,43 @@ export type Sort = string;
 export type Limit = number;
 export type Cursor1 = string | null;
 export type GroupId1 = string;
-export type Authorization11 = string | null;
-export type GroupId2 = string;
 export type Authorization12 = string | null;
-export type GroupId3 = string;
+export type GroupId2 = string;
 export type Authorization13 = string | null;
-export type GroupId4 = string;
+export type GroupId3 = string;
 export type Authorization14 = string | null;
+export type GroupId4 = string;
+export type Authorization15 = string | null;
 export type GroupId5 = string;
 export type IntentId1 = string;
-export type Authorization15 = string | null;
 export type Authorization16 = string | null;
-export type TeamId = string;
 export type Authorization17 = string | null;
+export type TeamId = string;
 export type Authorization18 = string | null;
+export type Authorization19 = string | null;
 export type GroupId6 = string;
+export type Mode = "local";
+export type SchemaVersion = 1;
+export type SetupState = "required" | "claimed" | "unavailable";
+export type AccessGroups = string[];
+export type Authenticated = boolean;
+export type CredentialMode = "local_session";
+export type CsrfToken = string;
+export type PrincipalId = string;
+export type ProtectedAdmin = boolean;
+export type ReceiptId = string | null;
+export type SchemaVersion1 = 1;
+export type SourceScopes = string[][];
+export type Authorization20 = string | null;
+export type LinkId = string;
+export type Authorization21 = string | null;
+export type AccessGroups1 = string[];
+export type Authenticated1 = boolean;
+export type CredentialMode1 = "oidc_session" | "github_link" | "service_bearer";
+export type CsrfToken1 = string | null;
+export type PrincipalId1 = string;
+export type SchemaVersion2 = 1;
+export type SourceScopes1 = string[][];
 export type Limit1 = number;
 export type Cursor2 = string | null;
 export type ConnectorId = string;
@@ -77,7 +142,7 @@ export type SourceId3 = string;
 export type ConnectorId7 = string;
 export type SourceId4 = string;
 export type ConnectorId8 = string;
-export type CommandId = string;
+export type CommandId1 = string;
 export type SourceId5 = string;
 export type ConnectorId9 = string;
 export type SubmissionId = string;
@@ -91,120 +156,716 @@ export type ConnectorId11 = string;
 export type SecretId2 = string;
 export type ConnectorId12 = string;
 export type SourceId8 = string;
-export type Authorization19 = string | null;
-export type Authorization20 = string | null;
-export type GroupId7 = string;
-export type Authorization21 = string | null;
-export type GroupId8 = string;
+export type AuthorityRevision = number;
+export type CanRegisterConnector = boolean;
+export type ConnectorRegistryRevision = number;
+export type ConfigurationRevision1 = number;
+export type ConnectorId13 = string;
+export type ConnectorRevision = number;
+export type EnvironmentLabel = string;
+export type Lifecycle = string;
+export type SourceRevision = number;
+export type Connectors = LocalConnectorSummaryDTO[];
+export type InstallationId1 = string;
+export type PolicyRevision = number;
+export type SchemaVersion3 = 1;
 export type Authorization22 = string | null;
 export type Authorization23 = string | null;
-export type LinkId = string;
+export type GroupId7 = string;
 export type Authorization24 = string | null;
+export type GroupId8 = string;
 export type Authorization25 = string | null;
-export type RepositoryId = string;
 export type Authorization26 = string | null;
-export type RepositoryId1 = string;
+export type LinkId1 = string;
 export type Authorization27 = string | null;
+export type Authorization28 = string | null;
+export type RepositoryId = string;
+export type Authorization29 = string | null;
+export type RepositoryId1 = string;
+export type Authorization30 = string | null;
 export type Limit2 = number;
 export type Cursor3 = string | null;
 export type RunId = string;
-export type Authorization28 = string | null;
+export type Authorization31 = string | null;
 export type Limit3 = number;
 export type Cursor4 = string | null;
 export type RunId1 = string;
 export type Revision = number;
-export type Authorization29 = string | null;
-export type Authorization30 = string | null;
+export type Authorization32 = string | null;
+export type Authorization33 = string | null;
 export type Limit4 = number;
 export type Cursor5 = string | null;
-export type Authorization31 = string | null;
+export type Authorization34 = string | null;
 export type Limit5 = number;
 export type Offset = number;
 export type DeploymentId = string | null;
 export type GroupId9 = string | null;
-export type Authorization32 = string | null;
+export type Authorization35 = string | null;
 export type TransitionId = string;
-export type Authorization33 = string | null;
-export type Authorization34 = string | null;
+export type Authorization36 = string | null;
+export type Authorization37 = string | null;
 export type Cursor6 = string | null;
 export type DeploymentId1 = string;
-export type Authorization35 = string | null;
+export type Authorization38 = string | null;
 export type DeploymentId2 = string;
-export type Authorization36 = string | null;
+export type Authorization39 = string | null;
 export type DeploymentId3 = string;
-export type CommandId1 = string;
-export type Authorization37 = string | null;
+export type CommandId2 = string;
+export type Authorization40 = string | null;
 export type DeploymentId4 = string;
 export type Revision1 = number;
-export type Authorization38 = string | null;
-export type Authorization39 = string | null;
+export type Authorization41 = string | null;
+export type Authorization42 = string | null;
 export type Limit6 = number;
 export type Cursor7 = string | null;
 export type DeploymentId5 = string;
-export type Authorization40 = string | null;
-export type DeploymentId6 = string;
-export type Authorization41 = string | null;
-export type DeploymentId7 = string;
-export type Authorization42 = string | null;
-export type DeploymentId8 = string;
 export type Authorization43 = string | null;
-export type DeploymentId9 = string;
+export type DeploymentId6 = string;
 export type Authorization44 = string | null;
+export type DeploymentId7 = string;
+export type Authorization45 = string | null;
+export type DeploymentId8 = string;
+export type Authorization46 = string | null;
+export type DeploymentId9 = string;
+export type Authorization47 = string | null;
 export type Limit7 = number;
 export type SinkId = string;
 export type DeploymentId10 = string;
-export type CommandId2 = string;
-export type Authorization45 = string | null;
+export type CommandId3 = string;
+export type Authorization48 = string | null;
 export type DeploymentId11 = string;
 export type Revision2 = number;
-export type Authorization46 = string | null;
-export type Authorization47 = string | null;
+export type Authorization49 = string | null;
+export type Authorization50 = string | null;
 export type SourceFamily1 = string;
 export type SourceAccountId = string;
 export type ScopeKey = string;
 export type EvidenceId = string;
-export type Authorization48 = string | null;
-export type Authorization49 = string | null;
+export type Authorization51 = string | null;
+export type Authorization52 = string | null;
 export type SnapshotId = string;
 export type ClassId = string;
 export type Limit8 = number;
 export type Cursor8 = string | null;
-export type Authorization50 = string | null;
-export type CommandId3 = string;
-export type Authorization51 = string | null;
-export type Authorization52 = string | null;
-export type GroupId10 = string;
 export type Authorization53 = string | null;
+export type CommandId4 = string;
 export type Authorization54 = string | null;
+export type Authorization55 = string | null;
+export type GroupId10 = string;
+export type Authorization56 = string | null;
+export type Authorization57 = string | null;
 export type GroupId11 = string | null;
 export type ReportId1 = string;
-export type Authorization55 = string | null;
+export type Authorization58 = string | null;
 export type ReportId2 = string;
-export type Authorization56 = string | null;
+export type Authorization59 = string | null;
 export type Limit9 = number;
 export type Cursor9 = string | null;
 export type Metric = string | null;
 export type Population = string;
 export type Presentation = string | null;
 export type ReportId3 = string;
-export type Authorization57 = string | null;
+export type Authorization60 = string | null;
 export type Format = string;
-export type Authorization58 = string | null;
+export type ConnectorId14 = string;
+export type SourceId9 = string;
+export type AccountLabel = string;
+export type ActiveConfigurationRevision = number | null;
+export type CollectionMode = "manual";
+export type AsOf = string;
+export type LastCompleteAt = string | null;
+export type Status = "never" | "recent" | "stale";
+export type ConfigurationRevision2 = number;
+export type ConnectorId15 = string;
+export type Revision3 = number;
+export type SecretId3 = string;
+export type State2 = "unconfigured" | "inactive" | "active" | "revoked" | "quarantined";
+export type VersionId1 = string | null;
+export type DisplayName = string;
+export type EnvironmentLabel1 = string;
+export type Authority2 = number;
+export type Connector = number;
+export type IdentityMembership = number;
+export type Owners = number;
+export type Policy = number;
+export type SecretSource = number;
+export type Source1 = number;
+export type Target = number;
+export type LatestAttemptRunId = string | null;
+export type LatestCompleteRunId = string | null;
+export type Lifecycle1 = "disabled" | "staged" | "active";
+export type MaxAttemptsPerPage = number;
+export type MaxDetections = number;
+export type MaxOperationBytes = number;
+export type MaxPageBytes = number;
+export type MaxPages = number;
+export type OverallDeadlineSeconds = number;
+export type RequestTimeoutSeconds = number;
+export type PlatformId = string;
+export type Product = "qualys_vm";
+export type ClearanceState = "missing" | "available" | "applied" | "expired" | "invalidated";
+export type FreshCredentialsRequired = boolean;
+export type FreshVersionReady = boolean;
+export type State3 = "clear" | "quarantined" | "awaiting_activation";
+export type ScheduleSupported = false;
+export type SchemaVersion4 = 1;
+export type Kind = "account_visible";
+export type SourceId10 = string;
+export type ScopeKey1 = string;
+export type SourceAccountId1 = string;
+export type SourceFamily2 = "qualys";
+export type CheckedAt = string | null;
+export type ConfigurationRevision3 = number | null;
+export type CredentialVersionId = string | null;
+export type ErrorCode = string | null;
+export type OperationId = string | null;
+export type Status1 = "unverified" | "succeeded" | "failed";
+export type ConnectorId16 = string;
+export type Action = "scanner.configuration.save";
+export type CommandId5 = string;
+export type Authority3 = number;
+export type Connector1 = number;
+export type IdentityMembership1 = number;
+export type Owners1 = number;
+export type Policy1 = number;
+export type Secret = null;
+export type SecretSource1 = number;
+export type Source2 = number;
+export type Target1 = number;
+/**
+ * @maxItems 0
+ */
+export type MembershipIds = [];
+export type EvidenceRef = string;
+export type Rationale = string;
+export type ApiVersion = "2.0";
+export type CollectionMode1 = "manual";
+export type PlatformId1 = "us1" | "us2" | "us3" | "eu1" | "eu2" | "in1";
+export type Product1 = "qualys_vm";
+export type Kind1 = "account_visible";
+export type SourceId11 = string;
+export type SchemaVersion5 = number;
+export type TargetId = string;
+export type Action1 = "scanner.connection.test";
+export type CommandId6 = string;
+export type Authority4 = number;
+export type Connector2 = number;
+export type IdentityMembership2 = number;
+export type Owners2 = number;
+export type Policy2 = number;
+export type Secret1 = null;
+export type SecretSource2 = number;
+export type Source3 = number;
+export type Target2 = number;
+/**
+ * @maxItems 0
+ */
+export type MembershipIds1 = [];
+export type ConfigurationRevision4 = number;
+export type CredentialVersionId1 = string;
+export type EvidenceRef1 = string;
+export type Rationale1 = string;
+export type SourceId12 = string;
+export type SchemaVersion6 = number;
+export type TargetId1 = string;
+export type Action2 = "scanner.configuration.activate";
+export type CommandId7 = string;
+export type Authority5 = number;
+export type Connector3 = number;
+export type IdentityMembership3 = number;
+export type Owners3 = number;
+export type Policy3 = number;
+export type Secret2 = null;
+export type SecretSource3 = number;
+export type Source4 = number;
+export type Target3 = number;
+/**
+ * @maxItems 0
+ */
+export type MembershipIds2 = [];
+export type ConfigurationRevision5 = number;
+export type CredentialVersionId2 = string;
+export type EvidenceRef2 = string;
+export type Rationale2 = string;
+export type SourceId13 = string;
+export type ValidationOperationId = string;
+export type SchemaVersion7 = number;
+export type TargetId2 = string;
+export type Action3 = "scanner.collection.start";
+export type CommandId8 = string;
+export type Authority6 = number;
+export type Connector4 = number;
+export type IdentityMembership4 = number;
+export type Owners4 = number;
+export type Policy4 = number;
+export type Secret3 = null;
+export type SecretSource4 = number;
+export type Source5 = number;
+export type Target4 = number;
+/**
+ * @maxItems 0
+ */
+export type MembershipIds3 = [];
+export type ConfigurationRevision6 = number;
+export type CredentialVersionId3 = string;
+export type EvidenceRef3 = string;
+export type Rationale3 = string;
+export type SourceId14 = string;
+export type SchemaVersion8 = number;
+export type TargetId3 = string;
+export type Action4 = "scanner.configuration.disable";
+export type CommandId9 = string;
+export type Authority7 = number;
+export type Connector5 = number;
+export type IdentityMembership5 = number;
+export type Owners5 = number;
+export type Policy5 = number;
+export type Secret4 = null;
+export type SecretSource5 = number;
+export type Source6 = number;
+export type Target5 = number;
+/**
+ * @maxItems 0
+ */
+export type MembershipIds4 = [];
+export type EvidenceRef4 = string;
+export type Rationale4 = string;
+export type SourceId15 = string;
+export type SchemaVersion9 = number;
+export type TargetId4 = string;
+export type Action5 = "scanner.configuration.save";
+export type AuditEventId = string;
+export type CommandId10 = string;
+export type CommittedRevision = number;
+export type DecisionId = string;
+export type IntentId3 = string;
+export type Intents = {
+  [k: string]: unknown;
+}[];
+export type OccurredAt = string;
+export type PolicyRevision1 = number;
+export type ConfigurationRevision7 = number;
+export type Lifecycle2 = "disabled" | "staged" | "active";
+export type SchemaVersion10 = 1;
+export type TargetId5 = string;
+export type Action6 = "scanner.connection.test";
+export type AuditEventId1 = string;
+export type CommandId11 = string;
+export type CommittedRevision1 = number;
+export type DecisionId1 = string;
+export type IntentId4 = string;
+export type Intents1 = {
+  [k: string]: unknown;
+}[];
+export type OccurredAt1 = string;
+export type PolicyRevision2 = number;
+export type ErrorCode1 = string | null;
+export type OperationId1 = string;
+export type Status2 = "succeeded" | "failed" | "interrupted";
+export type SchemaVersion11 = 1;
+export type TargetId6 = string;
+export type Action7 = "scanner.configuration.activate";
+export type AuditEventId2 = string;
+export type CommandId12 = string;
+export type CommittedRevision2 = number;
+export type DecisionId2 = string;
+export type IntentId5 = string;
+export type Intents2 = {
+  [k: string]: unknown;
+}[];
+export type OccurredAt2 = string;
+export type PolicyRevision3 = number;
+export type ActiveConfigurationRevision1 = number;
+export type ConfigurationRevision8 = number;
+export type Lifecycle3 = "active";
+export type SchemaVersion12 = 1;
+export type TargetId7 = string;
+export type Action8 = "scanner.collection.start";
+export type AuditEventId3 = string;
+export type CommandId13 = string;
+export type CommittedRevision3 = number;
+export type DecisionId3 = string;
+export type IntentId6 = string;
+export type Intents3 = {
+  [k: string]: unknown;
+}[];
+export type OccurredAt3 = string;
+export type PolicyRevision4 = number;
+export type ErrorCode2 = string | null;
+export type OperationId2 = string;
+export type RunId2 = string;
+export type Status3 = "succeeded" | "partial" | "failed" | "interrupted";
+export type SchemaVersion13 = 1;
+export type TargetId8 = string;
+export type Action9 = "scanner.configuration.disable";
+export type AuditEventId4 = string;
+export type CommandId14 = string;
+export type CommittedRevision4 = number;
+export type DecisionId4 = string;
+export type IntentId7 = string;
+export type Intents4 = {
+  [k: string]: unknown;
+}[];
+export type OccurredAt4 = string;
+export type PolicyRevision5 = number;
+export type ConfigurationRevision9 = number;
+export type Lifecycle4 = "disabled";
+export type SchemaVersion14 = 1;
+export type TargetId9 = string;
+export type CommandId15 = string;
+export type ConfigurationRevision10 = number;
+export type CredentialVersionId4 = string | null;
+export type ErrorCode3 = string | null;
+export type Kind2 = "test" | "collect";
+export type OperationId3 = string;
+export type RunId3 = string | null;
+export type SchemaVersion15 = 1;
+export type CommandId16 = string;
+export type ConfigurationRevision11 = number;
+export type CredentialVersionId5 = string | null;
+export type ErrorCode4 = string | null;
+export type Kind3 = "test" | "collect";
+export type OperationId4 = string;
+export type RunId4 = string | null;
+export type SchemaVersion16 = 1;
+export type ConnectorId17 = string;
+export type CommandId17 = string;
+export type Command = SaveCommand1 | TestCommand1 | ActivateCommand1 | CollectCommand1 | DisableCommand1;
+export type Action10 = "scanner.configuration.save";
+export type CommandId18 = string;
+export type Authority8 = number;
+export type Connector6 = number;
+export type IdentityMembership6 = number;
+export type Owners6 = number;
+export type Policy6 = number;
+export type Secret5 = null;
+export type SecretSource6 = number;
+export type Source7 = number;
+export type Target6 = number;
+/**
+ * @maxItems 0
+ */
+export type MembershipIds5 = [];
+export type EvidenceRef5 = string;
+export type Rationale5 = string;
+export type ApiVersion1 = "2.0";
+export type CollectionMode2 = "manual";
+export type PlatformId2 = "us1" | "us2" | "us3" | "eu1" | "eu2" | "in1";
+export type Product2 = "qualys_vm";
+export type Kind4 = "account_visible";
+export type SourceId16 = string;
+export type SchemaVersion17 = number;
+export type TargetId10 = string;
+export type Action11 = "scanner.connection.test";
+export type CommandId19 = string;
+export type Authority9 = number;
+export type Connector7 = number;
+export type IdentityMembership7 = number;
+export type Owners7 = number;
+export type Policy7 = number;
+export type Secret6 = null;
+export type SecretSource7 = number;
+export type Source8 = number;
+export type Target7 = number;
+/**
+ * @maxItems 0
+ */
+export type MembershipIds6 = [];
+export type ConfigurationRevision12 = number;
+export type CredentialVersionId6 = string;
+export type EvidenceRef6 = string;
+export type Rationale6 = string;
+export type SourceId17 = string;
+export type SchemaVersion18 = number;
+export type TargetId11 = string;
+export type Action12 = "scanner.configuration.activate";
+export type CommandId20 = string;
+export type Authority10 = number;
+export type Connector8 = number;
+export type IdentityMembership8 = number;
+export type Owners8 = number;
+export type Policy8 = number;
+export type Secret7 = null;
+export type SecretSource8 = number;
+export type Source9 = number;
+export type Target8 = number;
+/**
+ * @maxItems 0
+ */
+export type MembershipIds7 = [];
+export type ConfigurationRevision13 = number;
+export type CredentialVersionId7 = string;
+export type EvidenceRef7 = string;
+export type Rationale7 = string;
+export type SourceId18 = string;
+export type ValidationOperationId1 = string;
+export type SchemaVersion19 = number;
+export type TargetId12 = string;
+export type Action13 = "scanner.collection.start";
+export type CommandId21 = string;
+export type Authority11 = number;
+export type Connector9 = number;
+export type IdentityMembership9 = number;
+export type Owners9 = number;
+export type Policy9 = number;
+export type Secret8 = null;
+export type SecretSource9 = number;
+export type Source10 = number;
+export type Target9 = number;
+/**
+ * @maxItems 0
+ */
+export type MembershipIds8 = [];
+export type ConfigurationRevision14 = number;
+export type CredentialVersionId8 = string;
+export type EvidenceRef8 = string;
+export type Rationale8 = string;
+export type SourceId19 = string;
+export type SchemaVersion20 = number;
+export type TargetId13 = string;
+export type Action14 = "scanner.configuration.disable";
+export type CommandId22 = string;
+export type Authority12 = number;
+export type Connector10 = number;
+export type IdentityMembership10 = number;
+export type Owners10 = number;
+export type Policy10 = number;
+export type Secret9 = null;
+export type SecretSource10 = number;
+export type Source11 = number;
+export type Target10 = number;
+/**
+ * @maxItems 0
+ */
+export type MembershipIds9 = [];
+export type EvidenceRef9 = string;
+export type Rationale9 = string;
+export type SourceId20 = string;
+export type SchemaVersion21 = number;
+export type TargetId14 = string;
+export type EvidenceRef10 = string;
+export type Rationale10 = string;
+export type SchemaVersion22 = number;
+export type Action15 =
+  | "scanner.configuration.save"
+  | "scanner.connection.test"
+  | "scanner.configuration.activate"
+  | "scanner.collection.start"
+  | "scanner.configuration.disable";
+export type ActorId = string;
+export type AuditEventId5 = string;
+export type CommandId23 = string;
+export type ConnectorId18 = string;
+export type Disposition = "not_committed";
+export type OccurredAt5 = string;
+export type RequestDigest = string;
+export type SchemaVersion23 = 1;
+export type SourceId21 = string;
+export type Action16 =
+  | "scanner.configuration.save"
+  | "scanner.connection.test"
+  | "scanner.configuration.activate"
+  | "scanner.collection.start"
+  | "scanner.configuration.disable";
+export type ActorId1 = string;
+export type CommandId24 = string;
+export type ConnectorId19 = string;
+export type Disposition1 = "committed";
+export type Receipt =
+  | SaveConfigurationReceipt1
+  | TestConnectionReceipt1
+  | ActivateConfigurationReceipt1
+  | CollectReceipt1
+  | DisableConfigurationReceipt1;
+export type Action17 = "scanner.configuration.save";
+export type AuditEventId6 = string;
+export type CommandId25 = string;
+export type CommittedRevision5 = number;
+export type DecisionId5 = string;
+export type IntentId8 = string;
+export type Intents5 = {
+  [k: string]: unknown;
+}[];
+export type OccurredAt6 = string;
+export type PolicyRevision6 = number;
+export type ConfigurationRevision15 = number;
+export type Lifecycle5 = "disabled" | "staged" | "active";
+export type SchemaVersion24 = 1;
+export type TargetId15 = string;
+export type Action18 = "scanner.connection.test";
+export type AuditEventId7 = string;
+export type CommandId26 = string;
+export type CommittedRevision6 = number;
+export type DecisionId6 = string;
+export type IntentId9 = string;
+export type Intents6 = {
+  [k: string]: unknown;
+}[];
+export type OccurredAt7 = string;
+export type PolicyRevision7 = number;
+export type ErrorCode5 = string | null;
+export type OperationId5 = string;
+export type Status4 = "succeeded" | "failed" | "interrupted";
+export type SchemaVersion25 = 1;
+export type TargetId16 = string;
+export type Action19 = "scanner.configuration.activate";
+export type AuditEventId8 = string;
+export type CommandId27 = string;
+export type CommittedRevision7 = number;
+export type DecisionId7 = string;
+export type IntentId10 = string;
+export type Intents7 = {
+  [k: string]: unknown;
+}[];
+export type OccurredAt8 = string;
+export type PolicyRevision8 = number;
+export type ActiveConfigurationRevision2 = number;
+export type ConfigurationRevision16 = number;
+export type Lifecycle6 = "active";
+export type SchemaVersion26 = 1;
+export type TargetId17 = string;
+export type Action20 = "scanner.collection.start";
+export type AuditEventId9 = string;
+export type CommandId28 = string;
+export type CommittedRevision8 = number;
+export type DecisionId8 = string;
+export type IntentId11 = string;
+export type Intents8 = {
+  [k: string]: unknown;
+}[];
+export type OccurredAt9 = string;
+export type PolicyRevision9 = number;
+export type ErrorCode6 = string | null;
+export type OperationId6 = string;
+export type RunId5 = string;
+export type Status5 = "succeeded" | "partial" | "failed" | "interrupted";
+export type SchemaVersion27 = 1;
+export type TargetId18 = string;
+export type Action21 = "scanner.configuration.disable";
+export type AuditEventId10 = string;
+export type CommandId29 = string;
+export type CommittedRevision9 = number;
+export type DecisionId9 = string;
+export type IntentId12 = string;
+export type Intents9 = {
+  [k: string]: unknown;
+}[];
+export type OccurredAt10 = string;
+export type PolicyRevision10 = number;
+export type ConfigurationRevision17 = number;
+export type Lifecycle7 = "disabled";
+export type SchemaVersion28 = 1;
+export type TargetId19 = string;
+export type RequestDigest1 = string;
+export type SchemaVersion29 = 1;
+export type SourceId22 = string;
+export type Action22 =
+  | "scanner.configuration.save"
+  | "scanner.connection.test"
+  | "scanner.configuration.activate"
+  | "scanner.collection.start"
+  | "scanner.configuration.disable";
+export type ActorId2 = string;
+export type CommandId30 = string;
+export type ConnectorId20 = string;
+export type Disposition2 = "admitted";
+export type CommandId31 = string;
+export type ConfigurationRevision18 = number;
+export type CredentialVersionId9 = string | null;
+export type ErrorCode7 = string | null;
+export type Kind5 = "test" | "collect";
+export type OperationId7 = string;
+export type RunId6 = string | null;
+export type SchemaVersion30 = 1;
+export type CommandId32 = string;
+export type ConfigurationRevision19 = number;
+export type CredentialVersionId10 = string | null;
+export type ErrorCode8 = string | null;
+export type Kind6 = "test" | "collect";
+export type OperationId8 = string;
+export type RunId7 = string | null;
+export type SchemaVersion31 = 1;
+export type RequestDigest2 = string;
+export type SchemaVersion32 = 1;
+export type SourceId23 = string;
+export type ConnectorId21 = string;
+export type OperationId9 = string;
+export type SourceId24 = string;
+export type CommandId33 = string;
+export type ConfigurationRevision20 = number;
+export type CredentialVersionId11 = string | null;
+export type ErrorCode9 = string | null;
+export type Kind7 = "test" | "collect";
+export type OperationId10 = string;
+export type RunId8 = string | null;
+export type SchemaVersion33 = 1;
+export type CommandId34 = string;
+export type ConfigurationRevision21 = number;
+export type CredentialVersionId12 = string | null;
+export type ErrorCode10 = string | null;
+export type Kind8 = "test" | "collect";
+export type OperationId11 = string;
+export type RunId9 = string | null;
+export type SchemaVersion34 = 1;
+export type CommandId35 = string;
+export type ConfigurationRevision22 = number;
+export type CredentialVersionId13 = string | null;
+export type ErrorCode11 = string | null;
+export type Kind9 = "test" | "collect";
+export type OperationId12 = string;
+export type RunId10 = string | null;
+export type SchemaVersion35 = 1;
+export type ConnectorId22 = string;
+export type RunId11 = string;
+export type SourceId25 = string;
 export type Limit10 = number;
 export type Cursor10 = string | null;
-export type Authorization59 = string | null;
-export type DeploymentId12 = string;
-export type Authorization60 = string | null;
-export type DeploymentId13 = string;
+export type AsOf1 = string;
+export type AsOf2 = string;
+export type LastCompleteAt1 = string | null;
+export type Status6 = "never" | "recent" | "stale";
+export type ReasonCodes = string[];
+export type Status7 = "unknown";
+export type CollectedAt = string;
+export type DetectionType = string | null;
+export type EvidenceRef11 = string;
+export type EvidenceSha256 = string;
+export type GroupId12 = string | null;
+export type HostId = string | null;
+export type IdentityResolution = string;
+export type ObservationId = string;
+export type ObservedAt = string | null;
+export type Port = string | null;
+export type Protocol = string | null;
+export type Qid = string;
+export type Severity = string | null;
+export type Ssl = string | null;
+export type UniqueVulnId = string | null;
+export type VendorStatus = string | null;
+export type Items = DetectionView[];
+export type NextCursor = string | null;
+export type ReasonCodes1 = string[];
+export type Status8 = "complete" | "partial" | "failed";
+export type RunId12 = string;
+export type SchemaVersion36 = 1;
+export type ReasonCodes2 = string[];
+export type Status9 = "unknown";
 export type Authorization61 = string | null;
-export type DeploymentId14 = string;
+export type Limit11 = number;
+export type Cursor11 = string | null;
 export type Authorization62 = string | null;
-export type DeploymentId15 = string;
+export type DeploymentId12 = string;
 export type Authorization63 = string | null;
-export type DeploymentId16 = string;
+export type DeploymentId13 = string;
 export type Authorization64 = string | null;
-export type DeploymentId17 = string;
+export type DeploymentId14 = string;
 export type Authorization65 = string | null;
+export type DeploymentId15 = string;
+export type Authorization66 = string | null;
+export type DeploymentId16 = string;
+export type Authorization67 = string | null;
+export type DeploymentId17 = string;
+export type Authorization68 = string | null;
 
 export interface Paths {
   "/api/v1/assessment/access-groups": {
@@ -491,10 +1152,12 @@ export interface Paths {
           };
     };
   };
-  "/api/v1/assessment/exception-warning-actor-links": {
+  "/api/v1/assessment/commands/{command_id}/abandon": {
     post: {
       request: {
-        path?: {};
+        path: {
+          command_id: CommandId;
+        };
         headers: {
           authorization?: Authorization8;
           "Content-Type": "application/json";
@@ -507,6 +1170,81 @@ export interface Paths {
           [k: string]: unknown;
         };
         body: Body3;
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body:
+              | {
+                  action: "connector.recovery.clearance.apply";
+                  actor_id: string;
+                  command_id: string;
+                  disposition: "committed";
+                  receipt: {
+                    [k: string]: unknown;
+                  };
+                  request_digest: string;
+                  schema_version: 1;
+                }
+              | {
+                  action: "connector.recovery.clearance.apply";
+                  actor_id: string;
+                  audit_event_id: string;
+                  command_id: string;
+                  committed_at: string;
+                  disposition: "not_committed";
+                  request_digest: string;
+                  schema_version: 1;
+                }
+              | {
+                  command_id: string;
+                  disposition: "committed";
+                  receipt: {
+                    [k: string]: unknown;
+                  };
+                  request_digest: string;
+                  schema_version: 1;
+                }
+              | {
+                  actor_id: string;
+                  audit_event_id: string;
+                  command_id: string;
+                  committed_at: string;
+                  disposition: "not_committed";
+                  request_digest: string;
+                  schema_version: 1;
+                };
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/assessment/exception-warning-actor-links": {
+    post: {
+      request: {
+        path?: {};
+        headers: {
+          authorization?: Authorization9;
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+        body: Body4;
       };
       responses:
         | {
@@ -556,7 +1294,7 @@ export interface Paths {
       request: {
         path?: {};
         headers: {
-          authorization?: Authorization9;
+          authorization?: Authorization10;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -566,7 +1304,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body4;
+        body: Body5;
       };
       responses:
         | {
@@ -592,7 +1330,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization10;
+          authorization?: Authorization11;
           [k: string]: unknown;
         };
         cookies?: {
@@ -639,7 +1377,7 @@ export interface Paths {
           group_id: GroupId1;
         };
         headers?: {
-          authorization?: Authorization11;
+          authorization?: Authorization12;
           [k: string]: unknown;
         };
         cookies?: {
@@ -675,7 +1413,7 @@ export interface Paths {
           group_id: GroupId2;
         };
         headers?: {
-          authorization?: Authorization12;
+          authorization?: Authorization13;
           [k: string]: unknown;
         };
         cookies?: {
@@ -711,7 +1449,7 @@ export interface Paths {
           group_id: GroupId3;
         };
         headers?: {
-          authorization?: Authorization13;
+          authorization?: Authorization14;
           [k: string]: unknown;
         };
         cookies?: {
@@ -747,7 +1485,7 @@ export interface Paths {
           group_id: GroupId4;
         };
         headers?: {
-          authorization?: Authorization14;
+          authorization?: Authorization15;
           [k: string]: unknown;
         };
         cookies?: {
@@ -784,7 +1522,7 @@ export interface Paths {
           intent_id: IntentId1;
         };
         headers?: {
-          authorization?: Authorization15;
+          authorization?: Authorization16;
           [k: string]: unknown;
         };
         cookies?: {
@@ -818,7 +1556,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization16;
+          authorization?: Authorization17;
           [k: string]: unknown;
         };
         cookies?: {
@@ -854,7 +1592,7 @@ export interface Paths {
           team_id: TeamId;
         };
         headers?: {
-          authorization?: Authorization17;
+          authorization?: Authorization18;
           [k: string]: unknown;
         };
         cookies?: {
@@ -888,7 +1626,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization18;
+          authorization?: Authorization19;
           [k: string]: unknown;
         };
         cookies?: {
@@ -907,6 +1645,375 @@ export interface Paths {
               [k: string]: unknown;
             };
             body: unknown;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/auth/callback": {
+    get: {
+      request: {
+        path?: {};
+        headers?: {
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+      };
+      responses: {
+        status: "200";
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        body: unknown;
+      };
+    };
+  };
+  "/api/v1/auth/config": {
+    get: {
+      request: {
+        path?: {};
+        headers?: {
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+      };
+      responses: {
+        status: "200";
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        body: LocalAuthConfigDTO;
+      };
+    };
+  };
+  "/api/v1/auth/local/enrol": {
+    post: {
+      request: {
+        path?: {};
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+        body: Body6;
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: unknown;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/auth/local/login": {
+    post: {
+      request: {
+        path?: {};
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+        body: Body7;
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: LocalSessionDTO;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/auth/local/password": {
+    post: {
+      request: {
+        path?: {};
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+        body: Body8;
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: unknown;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/auth/local/recovery": {
+    post: {
+      request: {
+        path?: {};
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+        body: Body9;
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: unknown;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/auth/login": {
+    get: {
+      request: {
+        path?: {};
+        headers?: {
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+      };
+      responses: {
+        status: "200";
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        body: unknown;
+      };
+    };
+  };
+  "/api/v1/auth/logout": {
+    post: {
+      request: {
+        path?: {};
+        headers?: {
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+      };
+      responses: {
+        status: "200";
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        body: unknown;
+      };
+    };
+  };
+  "/api/v1/auth/operator/links": {
+    post: {
+      request: {
+        path?: {};
+        headers: {
+          authorization?: Authorization20;
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+        body: Body10;
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: unknown;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/auth/operator/links/{link_id}/revoke": {
+    post: {
+      request: {
+        path: {
+          link_id: LinkId;
+        };
+        headers: {
+          authorization?: Authorization21;
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+        body: Body11;
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: unknown;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/auth/session": {
+    get: {
+      request: {
+        path?: {};
+        headers?: {
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+      };
+      responses: {
+        status: "200";
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        body: OIDCSessionDTO | LocalSessionDTO;
+      };
+    };
+  };
+  "/api/v1/auth/setup/claim": {
+    post: {
+      request: {
+        path?: {};
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+        body: Body12;
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: LocalSessionDTO;
           }
         | {
             status: "422";
@@ -1042,7 +2149,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body5;
+        body: Body13;
       };
       responses:
         | {
@@ -1254,7 +2361,7 @@ export interface Paths {
       request: {
         path: {
           connector_id: ConnectorId8;
-          command_id: CommandId;
+          command_id: CommandId1;
         };
         headers?: {
           [k: string]: unknown;
@@ -1379,7 +2486,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body6;
+        body: Body14;
       };
       responses:
         | {
@@ -1436,6 +2543,30 @@ export interface Paths {
           };
     };
   };
+  "/api/v1/deployment": {
+    get: {
+      request: {
+        path?: {};
+        headers?: {
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+      };
+      responses: {
+        status: "200";
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        body: LocalDeploymentDTO;
+      };
+    };
+  };
   "/api/v1/deployment/mode": {
     get: {
       request: {
@@ -1465,7 +2596,7 @@ export interface Paths {
       request: {
         path?: {};
         headers: {
-          authorization?: Authorization19;
+          authorization?: Authorization22;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -1475,7 +2606,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body7;
+        body: Body15;
       };
       responses:
         | {
@@ -1501,7 +2632,7 @@ export interface Paths {
       request: {
         path?: {};
         headers: {
-          authorization?: Authorization20;
+          authorization?: Authorization23;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -1511,7 +2642,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body8;
+        body: Body16;
       };
       responses:
         | {
@@ -1539,7 +2670,7 @@ export interface Paths {
           group_id: GroupId7;
         };
         headers: {
-          authorization?: Authorization21;
+          authorization?: Authorization24;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -1549,7 +2680,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body9;
+        body: Body17;
       };
       responses:
         | {
@@ -1577,7 +2708,7 @@ export interface Paths {
           group_id: GroupId8;
         };
         headers?: {
-          authorization?: Authorization22;
+          authorization?: Authorization25;
           [k: string]: unknown;
         };
         cookies?: {
@@ -1611,7 +2742,7 @@ export interface Paths {
       request: {
         path?: {};
         headers: {
-          authorization?: Authorization23;
+          authorization?: Authorization26;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -1621,7 +2752,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body10;
+        body: Body18;
       };
       responses:
         | {
@@ -1646,10 +2777,10 @@ export interface Paths {
     patch: {
       request: {
         path: {
-          link_id: LinkId;
+          link_id: LinkId1;
         };
         headers: {
-          authorization?: Authorization24;
+          authorization?: Authorization27;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -1659,7 +2790,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body11;
+        body: Body19;
       };
       responses:
         | {
@@ -1685,7 +2816,7 @@ export interface Paths {
       request: {
         path?: {};
         headers: {
-          authorization?: Authorization25;
+          authorization?: Authorization28;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -1695,7 +2826,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body12;
+        body: Body20;
       };
       responses:
         | {
@@ -1723,7 +2854,7 @@ export interface Paths {
           repository_id: RepositoryId;
         };
         headers: {
-          authorization?: Authorization26;
+          authorization?: Authorization29;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -1733,7 +2864,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body13;
+        body: Body21;
       };
       responses:
         | {
@@ -1794,7 +2925,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization27;
+          authorization?: Authorization30;
           [k: string]: unknown;
         };
         cookies?: {
@@ -1832,7 +2963,7 @@ export interface Paths {
           run_id: RunId;
         };
         headers?: {
-          authorization?: Authorization28;
+          authorization?: Authorization31;
           [k: string]: unknown;
         };
         cookies?: {
@@ -1871,7 +3002,7 @@ export interface Paths {
           revision: Revision;
         };
         headers?: {
-          authorization?: Authorization29;
+          authorization?: Authorization32;
           [k: string]: unknown;
         };
         cookies?: {
@@ -1905,7 +3036,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization30;
+          authorization?: Authorization33;
           [k: string]: unknown;
         };
         cookies?: {
@@ -1941,7 +3072,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization31;
+          authorization?: Authorization34;
           [k: string]: unknown;
         };
         cookies?: {
@@ -1977,7 +3108,7 @@ export interface Paths {
       request: {
         path?: {};
         headers: {
-          authorization?: Authorization32;
+          authorization?: Authorization35;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -2015,7 +3146,7 @@ export interface Paths {
           transition_id: TransitionId;
         };
         headers: {
-          authorization?: Authorization33;
+          authorization?: Authorization36;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -2051,7 +3182,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization34;
+          authorization?: Authorization37;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2088,7 +3219,7 @@ export interface Paths {
           deployment_id: DeploymentId1;
         };
         headers?: {
-          authorization?: Authorization35;
+          authorization?: Authorization38;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2124,7 +3255,7 @@ export interface Paths {
           deployment_id: DeploymentId2;
         };
         headers: {
-          authorization?: Authorization36;
+          authorization?: Authorization39;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -2134,7 +3265,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body14;
+        body: Body22;
       };
       responses:
         | {
@@ -2160,10 +3291,10 @@ export interface Paths {
       request: {
         path: {
           deployment_id: DeploymentId3;
-          command_id: CommandId1;
+          command_id: CommandId2;
         };
         headers?: {
-          authorization?: Authorization37;
+          authorization?: Authorization40;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2200,7 +3331,7 @@ export interface Paths {
           revision: Revision1;
         };
         headers?: {
-          authorization?: Authorization38;
+          authorization?: Authorization41;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2234,7 +3365,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization39;
+          authorization?: Authorization42;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2272,7 +3403,7 @@ export interface Paths {
           deployment_id: DeploymentId5;
         };
         headers?: {
-          authorization?: Authorization40;
+          authorization?: Authorization43;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2308,7 +3439,7 @@ export interface Paths {
           deployment_id: DeploymentId6;
         };
         headers: {
-          authorization?: Authorization41;
+          authorization?: Authorization44;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -2318,7 +3449,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body15;
+        body: Body23;
       };
       responses:
         | {
@@ -2346,7 +3477,7 @@ export interface Paths {
           deployment_id: DeploymentId7;
         };
         headers?: {
-          authorization?: Authorization42;
+          authorization?: Authorization45;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2382,7 +3513,7 @@ export interface Paths {
           deployment_id: DeploymentId8;
         };
         headers: {
-          authorization?: Authorization43;
+          authorization?: Authorization46;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -2392,7 +3523,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body16;
+        body: Body24;
       };
       responses:
         | {
@@ -2420,7 +3551,7 @@ export interface Paths {
           deployment_id: DeploymentId9;
         };
         headers?: {
-          authorization?: Authorization44;
+          authorization?: Authorization47;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2456,10 +3587,10 @@ export interface Paths {
       request: {
         path: {
           deployment_id: DeploymentId10;
-          command_id: CommandId2;
+          command_id: CommandId3;
         };
         headers?: {
-          authorization?: Authorization45;
+          authorization?: Authorization48;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2496,7 +3627,7 @@ export interface Paths {
           revision: Revision2;
         };
         headers?: {
-          authorization?: Authorization46;
+          authorization?: Authorization49;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2530,7 +3661,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization47;
+          authorization?: Authorization50;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2569,7 +3700,7 @@ export interface Paths {
           evidence_id: EvidenceId;
         };
         headers?: {
-          authorization?: Authorization48;
+          authorization?: Authorization51;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2603,7 +3734,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization49;
+          authorization?: Authorization52;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2641,7 +3772,7 @@ export interface Paths {
       request: {
         path?: {};
         headers: {
-          authorization?: Authorization50;
+          authorization?: Authorization53;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -2651,7 +3782,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body17;
+        body: Body25;
       };
       responses:
         | {
@@ -2676,10 +3807,10 @@ export interface Paths {
     get: {
       request: {
         path: {
-          command_id: CommandId3;
+          command_id: CommandId4;
         };
         headers?: {
-          authorization?: Authorization51;
+          authorization?: Authorization54;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2713,7 +3844,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization52;
+          authorization?: Authorization55;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2746,7 +3877,7 @@ export interface Paths {
       request: {
         path?: {};
         headers: {
-          authorization?: Authorization53;
+          authorization?: Authorization56;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -2756,7 +3887,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body18;
+        body: Body26;
       };
       responses:
         | {
@@ -2782,7 +3913,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization54;
+          authorization?: Authorization57;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2819,7 +3950,7 @@ export interface Paths {
           report_id: ReportId1;
         };
         headers?: {
-          authorization?: Authorization55;
+          authorization?: Authorization58;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2855,7 +3986,7 @@ export interface Paths {
           report_id: ReportId2;
         };
         headers?: {
-          authorization?: Authorization56;
+          authorization?: Authorization59;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2896,7 +4027,7 @@ export interface Paths {
           report_id: ReportId3;
         };
         headers?: {
-          authorization?: Authorization57;
+          authorization?: Authorization60;
           [k: string]: unknown;
         };
         cookies?: {
@@ -2926,20 +4057,221 @@ export interface Paths {
           };
     };
   };
-  "/api/v1/unresolved": {
+  "/api/v1/scanners/{connector_id}": {
     get: {
       request: {
-        path?: {};
+        path: {
+          connector_id: ConnectorId14;
+        };
         headers?: {
-          authorization?: Authorization58;
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query: {
+          source_id: SourceId9;
+          [k: string]: unknown;
+        };
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: ScannerView;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/scanners/{connector_id}/commands": {
+    post: {
+      request: {
+        path: {
+          connector_id: ConnectorId16;
+        };
+        headers: {
+          "Content-Type": "application/json";
           [k: string]: unknown;
         };
         cookies?: {
           [k: string]: unknown;
         };
         query?: {
+          [k: string]: unknown;
+        };
+        body: SaveCommand | TestCommand | ActivateCommand | CollectCommand | DisableCommand;
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body:
+              | SaveConfigurationReceipt
+              | TestConnectionReceipt
+              | ActivateConfigurationReceipt
+              | CollectReceipt
+              | DisableConfigurationReceipt
+              | OperationView;
+          }
+        | {
+            status: "202";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: OperationView1;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/scanners/{connector_id}/commands/{command_id}/abandon": {
+    post: {
+      request: {
+        path: {
+          connector_id: ConnectorId17;
+          command_id: CommandId17;
+        };
+        headers: {
+          "Content-Type": "application/json";
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          [k: string]: unknown;
+        };
+        body: AbandonCommand;
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: ScannerNotCommittedDisposition | ScannerCommittedDisposition | ScannerAdmittedDisposition;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/scanners/{connector_id}/operations/{operation_id}": {
+    get: {
+      request: {
+        path: {
+          connector_id: ConnectorId21;
+          operation_id: OperationId9;
+        };
+        headers?: {
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query: {
+          source_id: SourceId24;
+          [k: string]: unknown;
+        };
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: OperationView4 | OperationView5 | OperationView6;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/scanners/{connector_id}/runs/{run_id}/detections": {
+    get: {
+      request: {
+        path: {
+          connector_id: ConnectorId22;
+          run_id: RunId11;
+        };
+        headers?: {
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query: {
+          source_id: SourceId25;
           limit?: Limit10;
           cursor?: Cursor10;
+          [k: string]: unknown;
+        };
+      };
+      responses:
+        | {
+            status: "200";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: DetectionPage;
+          }
+        | {
+            status: "422";
+            headers: {
+              "Content-Type": "application/json";
+              [k: string]: unknown;
+            };
+            body: HTTPValidationError;
+          };
+    };
+  };
+  "/api/v1/unresolved": {
+    get: {
+      request: {
+        path?: {};
+        headers?: {
+          authorization?: Authorization61;
+          [k: string]: unknown;
+        };
+        cookies?: {
+          [k: string]: unknown;
+        };
+        query?: {
+          limit?: Limit11;
+          cursor?: Cursor11;
           [k: string]: unknown;
         };
       };
@@ -2967,7 +4299,7 @@ export interface Paths {
       request: {
         path?: {};
         headers?: {
-          authorization?: Authorization59;
+          authorization?: Authorization62;
           [k: string]: unknown;
         };
         cookies?: {
@@ -3003,7 +4335,7 @@ export interface Paths {
           deployment_id: DeploymentId12;
         };
         headers: {
-          authorization?: Authorization60;
+          authorization?: Authorization63;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -3013,7 +4345,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body19;
+        body: Body27;
       };
       responses:
         | {
@@ -3041,7 +4373,7 @@ export interface Paths {
           deployment_id: DeploymentId13;
         };
         headers: {
-          authorization?: Authorization61;
+          authorization?: Authorization64;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -3051,7 +4383,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body20;
+        body: Body28;
       };
       responses:
         | {
@@ -3079,7 +4411,7 @@ export interface Paths {
           deployment_id: DeploymentId14;
         };
         headers?: {
-          authorization?: Authorization62;
+          authorization?: Authorization65;
           [k: string]: unknown;
         };
         cookies?: {
@@ -3115,7 +4447,7 @@ export interface Paths {
           deployment_id: DeploymentId15;
         };
         headers: {
-          authorization?: Authorization63;
+          authorization?: Authorization66;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -3125,7 +4457,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body21;
+        body: Body29;
       };
       responses:
         | {
@@ -3153,7 +4485,7 @@ export interface Paths {
           deployment_id: DeploymentId16;
         };
         headers: {
-          authorization?: Authorization64;
+          authorization?: Authorization67;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -3163,7 +4495,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body22;
+        body: Body30;
       };
       responses:
         | {
@@ -3191,7 +4523,7 @@ export interface Paths {
           deployment_id: DeploymentId17;
         };
         headers: {
-          authorization?: Authorization65;
+          authorization?: Authorization68;
           "Content-Type": "application/json";
           [k: string]: unknown;
         };
@@ -3201,7 +4533,7 @@ export interface Paths {
         query?: {
           [k: string]: unknown;
         };
-        body: Body23;
+        body: Body31;
       };
       responses:
         | {
@@ -3241,14 +4573,71 @@ export interface Context {
 export interface Body {
   [k: string]: unknown;
 }
-export interface Body1 {
-  [k: string]: unknown;
-}
 export interface Body2 {
   [k: string]: unknown;
 }
 export interface Body3 {
-  [k: string]: unknown;
+  command:
+    | {
+        action: "connector.binding.register";
+        command_id: string;
+        expected_authority_revision: number;
+        expected_connector_registry_revision: number;
+        expected_policy_revision: number;
+        /**
+         * @maxItems 0
+         */
+        membership_ids: [];
+        payload: {
+          account_label: string;
+          display_name: string;
+          environment_label: string;
+          evidence_ref: string;
+          grant_initial_read: boolean;
+          platform_id: "us1" | "us2" | "us3" | "eu1" | "eu2" | "in1";
+          product: "qualys_vm";
+          rationale: string;
+          scope: {
+            kind: "account_visible";
+          };
+          source_family: "qualys";
+        };
+        schema_version: 1;
+        target_id: "00000000-0000-0000-0000-000000000000";
+      }
+    | {
+        action: "connector.recovery.clearance.apply";
+        command_id: string;
+        expected_revisions: {
+          authority: number;
+          connector: number;
+          identity_membership: number;
+          owners: number;
+          policy: number;
+          secret: number;
+          secret_source: number;
+          source: number;
+          target: number;
+        };
+        /**
+         * @maxItems 0
+         */
+        membership_ids: [];
+        payload: {
+          connector_id: string;
+          evidence_ref: string;
+          rationale: string;
+          recovery_epoch_id: string;
+          secret_id: string;
+          source_id: string;
+          version_id: string;
+        };
+        schema_version: 1;
+        target_id: "00000000-0000-4000-8000-000000000000";
+      };
+  evidence_ref: string;
+  rationale: string;
+  schema_version: 1;
 }
 export interface Body4 {
   [k: string]: unknown;
@@ -3256,17 +4645,43 @@ export interface Body4 {
 export interface Body5 {
   [k: string]: unknown;
 }
-export interface Body6 {
+export interface LocalAuthConfigDTO {
+  mode: Mode;
+  schema_version?: SchemaVersion;
+  setup_state: SetupState;
   [k: string]: unknown;
 }
+export interface Body6 {
+  capability: string;
+  new_password: string;
+}
 export interface Body7 {
+  password: string;
+  username: string;
+}
+export interface LocalSessionDTO {
+  access_groups: AccessGroups;
+  authenticated: Authenticated;
+  authority: Authority;
+  credential_mode: CredentialMode;
+  csrf_token: CsrfToken;
+  principal_id: PrincipalId;
+  protected_admin: ProtectedAdmin;
+  receipt_id?: ReceiptId;
+  schema_version?: SchemaVersion1;
+  source_scopes: SourceScopes;
+  [k: string]: unknown;
+}
+export interface Authority {
   [k: string]: unknown;
 }
 export interface Body8 {
-  [k: string]: unknown;
+  current_password: string;
+  new_password: string;
 }
 export interface Body9 {
-  [k: string]: unknown;
+  capability: string;
+  new_password: string;
 }
 export interface Body10 {
   [k: string]: unknown;
@@ -3274,20 +4689,54 @@ export interface Body10 {
 export interface Body11 {
   [k: string]: unknown;
 }
-export interface Body12 {
+export interface OIDCSessionDTO {
+  access_groups: AccessGroups1;
+  authenticated: Authenticated1;
+  authority: Authority1;
+  credential_mode: CredentialMode1;
+  csrf_token: CsrfToken1;
+  principal_id: PrincipalId1;
+  schema_version?: SchemaVersion2;
+  source_scopes: SourceScopes1;
   [k: string]: unknown;
+}
+export interface Authority1 {
+  [k: string]: unknown;
+}
+export interface Body12 {
+  capability: string;
+  display_name: string;
+  password: string;
+  username: string;
 }
 export interface Body13 {
   [k: string]: unknown;
 }
-export interface Payload {
-  [k: string]: unknown;
-}
-export interface Payload1 {
-  [k: string]: unknown;
-}
 export interface Body14 {
   [k: string]: unknown;
+}
+export interface LocalDeploymentDTO {
+  authority_revision: AuthorityRevision;
+  can_register_connector: CanRegisterConnector;
+  connector_registry_revision: ConnectorRegistryRevision;
+  connectors: Connectors;
+  installation_id: InstallationId1;
+  policy_revision: PolicyRevision;
+  schema_version?: SchemaVersion3;
+  [k: string]: unknown;
+}
+export interface LocalConnectorSummaryDTO {
+  configuration_revision: ConfigurationRevision1;
+  connector_id: ConnectorId13;
+  connector_revision: ConnectorRevision;
+  environment_label: EnvironmentLabel;
+  lifecycle: Lifecycle;
+  source: Source;
+  source_revision: SourceRevision;
+  [k: string]: unknown;
+}
+export interface Source {
+  [k: string]: string;
 }
 export interface Body15 {
   [k: string]: unknown;
@@ -3310,9 +4759,829 @@ export interface Body20 {
 export interface Body21 {
   [k: string]: unknown;
 }
+export interface Payload {
+  [k: string]: unknown;
+}
+export interface Payload1 {
+  [k: string]: unknown;
+}
 export interface Body22 {
   [k: string]: unknown;
 }
 export interface Body23 {
+  [k: string]: unknown;
+}
+export interface Body24 {
+  [k: string]: unknown;
+}
+export interface Body25 {
+  [k: string]: unknown;
+}
+export interface Body26 {
+  [k: string]: unknown;
+}
+export interface ScannerView {
+  account_label: AccountLabel;
+  active_configuration_revision: ActiveConfigurationRevision;
+  collection_mode: CollectionMode;
+  collection_recency: CollectionRecencyView;
+  configuration_revision: ConfigurationRevision2;
+  connector_id: ConnectorId15;
+  credential: CredentialView;
+  display_name: DisplayName;
+  environment_label: EnvironmentLabel1;
+  expected_revisions: ExpectedRevisions;
+  latest_attempt_run_id: LatestAttemptRunId;
+  latest_complete_run_id: LatestCompleteRunId;
+  lifecycle: Lifecycle1;
+  limits: ScannerLimitsView;
+  platform_id: PlatformId;
+  product: Product;
+  recovery: RecoveryView;
+  schedule_supported: ScheduleSupported;
+  schema_version: SchemaVersion4;
+  scope: ScannerScopeView;
+  source_id: SourceId10;
+  source_tuple: SourceTupleView;
+  validation: ValidationView | null;
+}
+export interface CollectionRecencyView {
+  as_of: AsOf;
+  last_complete_at: LastCompleteAt;
+  status: Status;
+}
+export interface CredentialView {
+  revision: Revision3;
+  secret_id: SecretId3;
+  state: State2;
+  version_id: VersionId1;
+}
+export interface ExpectedRevisions {
+  authority: Authority2;
+  connector: Connector;
+  identity_membership: IdentityMembership;
+  owners: Owners;
+  policy: Policy;
+  secret: null;
+  secret_source: SecretSource;
+  source: Source1;
+  target: Target;
+}
+export interface ScannerLimitsView {
+  max_attempts_per_page: MaxAttemptsPerPage;
+  max_detections: MaxDetections;
+  max_operation_bytes: MaxOperationBytes;
+  max_page_bytes: MaxPageBytes;
+  max_pages: MaxPages;
+  overall_deadline_seconds: OverallDeadlineSeconds;
+  request_timeout_seconds: RequestTimeoutSeconds;
+}
+/**
+ * Safe current backend recovery metadata, never proof or lease authority.
+ *
+ * All values are required from the current authorized metadata read. Initial
+ * clear/null/false values describe verified initial state, never a fallback
+ * for absent configuration or missing recovery state.
+ */
+export interface RecoveryView {
+  approval_expires_at: string | null;
+  approval_id: string | null;
+  clearance_state: ClearanceState;
+  epoch_id: string | null;
+  fresh_credentials_required: FreshCredentialsRequired;
+  fresh_version_ready: FreshVersionReady;
+  state: State3;
+}
+export interface ScannerScopeView {
+  kind: Kind;
+}
+export interface SourceTupleView {
+  scope_key: ScopeKey1;
+  source_account_id: SourceAccountId1;
+  source_family: SourceFamily2;
+}
+export interface ValidationView {
+  checked_at: CheckedAt;
+  configuration_revision: ConfigurationRevision3;
+  credential_version_id: CredentialVersionId;
+  error_code: ErrorCode;
+  operation_id: OperationId;
+  status: Status1;
+}
+export interface SaveCommand {
+  action: Action;
+  command_id: CommandId5;
+  expected_revisions: RevisionVector;
+  membership_ids: MembershipIds;
+  payload: SavePayload;
+  schema_version: SchemaVersion5;
+  target_id: TargetId;
+}
+export interface RevisionVector {
+  authority: Authority3;
+  connector: Connector1;
+  identity_membership: IdentityMembership1;
+  owners: Owners1;
+  policy: Policy1;
+  secret: Secret;
+  secret_source: SecretSource1;
+  source: Source2;
+  target: Target1;
+}
+export interface SavePayload {
+  evidence_ref: EvidenceRef;
+  rationale: Rationale;
+  settings: QualysSettings;
+  source_id: SourceId11;
+}
+export interface QualysSettings {
+  api_version: ApiVersion;
+  collection_mode: CollectionMode1;
+  platform_id: PlatformId1;
+  product: Product1;
+  scope: AccountVisibleScope;
+}
+export interface AccountVisibleScope {
+  kind: Kind1;
+}
+export interface TestCommand {
+  action: Action1;
+  command_id: CommandId6;
+  expected_revisions: RevisionVector1;
+  membership_ids: MembershipIds1;
+  payload: OperationPayload;
+  schema_version: SchemaVersion6;
+  target_id: TargetId1;
+}
+export interface RevisionVector1 {
+  authority: Authority4;
+  connector: Connector2;
+  identity_membership: IdentityMembership2;
+  owners: Owners2;
+  policy: Policy2;
+  secret: Secret1;
+  secret_source: SecretSource2;
+  source: Source3;
+  target: Target2;
+}
+export interface OperationPayload {
+  configuration_revision: ConfigurationRevision4;
+  credential_version_id: CredentialVersionId1;
+  evidence_ref: EvidenceRef1;
+  rationale: Rationale1;
+  source_id: SourceId12;
+}
+export interface ActivateCommand {
+  action: Action2;
+  command_id: CommandId7;
+  expected_revisions: RevisionVector2;
+  membership_ids: MembershipIds2;
+  payload: ActivatePayload;
+  schema_version: SchemaVersion7;
+  target_id: TargetId2;
+}
+export interface RevisionVector2 {
+  authority: Authority5;
+  connector: Connector3;
+  identity_membership: IdentityMembership3;
+  owners: Owners3;
+  policy: Policy3;
+  secret: Secret2;
+  secret_source: SecretSource3;
+  source: Source4;
+  target: Target3;
+}
+export interface ActivatePayload {
+  configuration_revision: ConfigurationRevision5;
+  credential_version_id: CredentialVersionId2;
+  evidence_ref: EvidenceRef2;
+  rationale: Rationale2;
+  source_id: SourceId13;
+  validation_operation_id: ValidationOperationId;
+}
+export interface CollectCommand {
+  action: Action3;
+  command_id: CommandId8;
+  expected_revisions: RevisionVector3;
+  membership_ids: MembershipIds3;
+  payload: OperationPayload1;
+  schema_version: SchemaVersion8;
+  target_id: TargetId3;
+}
+export interface RevisionVector3 {
+  authority: Authority6;
+  connector: Connector4;
+  identity_membership: IdentityMembership4;
+  owners: Owners4;
+  policy: Policy4;
+  secret: Secret3;
+  secret_source: SecretSource4;
+  source: Source5;
+  target: Target4;
+}
+export interface OperationPayload1 {
+  configuration_revision: ConfigurationRevision6;
+  credential_version_id: CredentialVersionId3;
+  evidence_ref: EvidenceRef3;
+  rationale: Rationale3;
+  source_id: SourceId14;
+}
+export interface DisableCommand {
+  action: Action4;
+  command_id: CommandId9;
+  expected_revisions: RevisionVector4;
+  membership_ids: MembershipIds4;
+  payload: SourcePayload;
+  schema_version: SchemaVersion9;
+  target_id: TargetId4;
+}
+export interface RevisionVector4 {
+  authority: Authority7;
+  connector: Connector5;
+  identity_membership: IdentityMembership5;
+  owners: Owners5;
+  policy: Policy5;
+  secret: Secret4;
+  secret_source: SecretSource5;
+  source: Source6;
+  target: Target5;
+}
+export interface SourcePayload {
+  evidence_ref: EvidenceRef4;
+  rationale: Rationale4;
+  source_id: SourceId15;
+}
+export interface SaveConfigurationReceipt {
+  action: Action5;
+  audit_event_id: AuditEventId;
+  command_id: CommandId10;
+  committed_revision: CommittedRevision;
+  decision_id: DecisionId;
+  intent_id: IntentId3;
+  intents: Intents;
+  occurred_at: OccurredAt;
+  policy_revision: PolicyRevision1;
+  projection: Projection;
+  result: SaveConfigurationResult;
+  schema_version: SchemaVersion10;
+  target_id: TargetId5;
+}
+export interface Projection {
+  [k: string]: unknown;
+}
+export interface SaveConfigurationResult {
+  configuration_revision: ConfigurationRevision7;
+  lifecycle: Lifecycle2;
+}
+export interface TestConnectionReceipt {
+  action: Action6;
+  audit_event_id: AuditEventId1;
+  command_id: CommandId11;
+  committed_revision: CommittedRevision1;
+  decision_id: DecisionId1;
+  intent_id: IntentId4;
+  intents: Intents1;
+  occurred_at: OccurredAt1;
+  policy_revision: PolicyRevision2;
+  projection: Projection1;
+  result: TestConnectionResult;
+  schema_version: SchemaVersion11;
+  target_id: TargetId6;
+}
+export interface Projection1 {
+  [k: string]: unknown;
+}
+export interface TestConnectionResult {
+  error_code: ErrorCode1;
+  operation_id: OperationId1;
+  status: Status2;
+}
+export interface ActivateConfigurationReceipt {
+  action: Action7;
+  audit_event_id: AuditEventId2;
+  command_id: CommandId12;
+  committed_revision: CommittedRevision2;
+  decision_id: DecisionId2;
+  intent_id: IntentId5;
+  intents: Intents2;
+  occurred_at: OccurredAt2;
+  policy_revision: PolicyRevision3;
+  projection: Projection2;
+  result: ActivateConfigurationResult;
+  schema_version: SchemaVersion12;
+  target_id: TargetId7;
+}
+export interface Projection2 {
+  [k: string]: unknown;
+}
+export interface ActivateConfigurationResult {
+  active_configuration_revision: ActiveConfigurationRevision1;
+  configuration_revision: ConfigurationRevision8;
+  lifecycle: Lifecycle3;
+}
+export interface CollectReceipt {
+  action: Action8;
+  audit_event_id: AuditEventId3;
+  command_id: CommandId13;
+  committed_revision: CommittedRevision3;
+  decision_id: DecisionId3;
+  intent_id: IntentId6;
+  intents: Intents3;
+  occurred_at: OccurredAt3;
+  policy_revision: PolicyRevision4;
+  projection: Projection3;
+  result: CollectResult;
+  schema_version: SchemaVersion13;
+  target_id: TargetId8;
+}
+export interface Projection3 {
+  [k: string]: unknown;
+}
+export interface CollectResult {
+  error_code: ErrorCode2;
+  operation_id: OperationId2;
+  run_id: RunId2;
+  status: Status3;
+}
+export interface DisableConfigurationReceipt {
+  action: Action9;
+  audit_event_id: AuditEventId4;
+  command_id: CommandId14;
+  committed_revision: CommittedRevision4;
+  decision_id: DecisionId4;
+  intent_id: IntentId7;
+  intents: Intents4;
+  occurred_at: OccurredAt4;
+  policy_revision: PolicyRevision5;
+  projection: Projection4;
+  result: DisableConfigurationResult;
+  schema_version: SchemaVersion14;
+  target_id: TargetId9;
+}
+export interface Projection4 {
+  [k: string]: unknown;
+}
+export interface DisableConfigurationResult {
+  configuration_revision: ConfigurationRevision9;
+  lifecycle: Lifecycle4;
+}
+export interface OperationView {
+  command_id: CommandId15;
+  configuration_revision: ConfigurationRevision10;
+  credential_version_id: CredentialVersionId4;
+  error_code: ErrorCode3;
+  finished_at: string;
+  kind: Kind2;
+  operation_id: OperationId3;
+  receipt_id: null;
+  run_id: RunId3;
+  schema_version: SchemaVersion15;
+  started_at: string;
+  status: "failed" | "partial" | "interrupted";
+}
+export interface OperationView1 {
+  command_id: CommandId16;
+  configuration_revision: ConfigurationRevision11;
+  credential_version_id: CredentialVersionId5;
+  error_code: ErrorCode4;
+  finished_at: null;
+  kind: Kind3;
+  operation_id: OperationId4;
+  receipt_id: null;
+  run_id: RunId4;
+  schema_version: SchemaVersion16;
+  started_at: string;
+  status: "running";
+}
+export interface AbandonCommand {
+  command: Command;
+  evidence_ref: EvidenceRef10;
+  rationale: Rationale10;
+  schema_version: SchemaVersion22;
+}
+export interface SaveCommand1 {
+  action: Action10;
+  command_id: CommandId18;
+  expected_revisions: RevisionVector5;
+  membership_ids: MembershipIds5;
+  payload: SavePayload1;
+  schema_version: SchemaVersion17;
+  target_id: TargetId10;
+}
+export interface RevisionVector5 {
+  authority: Authority8;
+  connector: Connector6;
+  identity_membership: IdentityMembership6;
+  owners: Owners6;
+  policy: Policy6;
+  secret: Secret5;
+  secret_source: SecretSource6;
+  source: Source7;
+  target: Target6;
+}
+export interface SavePayload1 {
+  evidence_ref: EvidenceRef5;
+  rationale: Rationale5;
+  settings: QualysSettings1;
+  source_id: SourceId16;
+}
+export interface QualysSettings1 {
+  api_version: ApiVersion1;
+  collection_mode: CollectionMode2;
+  platform_id: PlatformId2;
+  product: Product2;
+  scope: AccountVisibleScope1;
+}
+export interface AccountVisibleScope1 {
+  kind: Kind4;
+}
+export interface TestCommand1 {
+  action: Action11;
+  command_id: CommandId19;
+  expected_revisions: RevisionVector6;
+  membership_ids: MembershipIds6;
+  payload: OperationPayload2;
+  schema_version: SchemaVersion18;
+  target_id: TargetId11;
+}
+export interface RevisionVector6 {
+  authority: Authority9;
+  connector: Connector7;
+  identity_membership: IdentityMembership7;
+  owners: Owners7;
+  policy: Policy7;
+  secret: Secret6;
+  secret_source: SecretSource7;
+  source: Source8;
+  target: Target7;
+}
+export interface OperationPayload2 {
+  configuration_revision: ConfigurationRevision12;
+  credential_version_id: CredentialVersionId6;
+  evidence_ref: EvidenceRef6;
+  rationale: Rationale6;
+  source_id: SourceId17;
+}
+export interface ActivateCommand1 {
+  action: Action12;
+  command_id: CommandId20;
+  expected_revisions: RevisionVector7;
+  membership_ids: MembershipIds7;
+  payload: ActivatePayload1;
+  schema_version: SchemaVersion19;
+  target_id: TargetId12;
+}
+export interface RevisionVector7 {
+  authority: Authority10;
+  connector: Connector8;
+  identity_membership: IdentityMembership8;
+  owners: Owners8;
+  policy: Policy8;
+  secret: Secret7;
+  secret_source: SecretSource8;
+  source: Source9;
+  target: Target8;
+}
+export interface ActivatePayload1 {
+  configuration_revision: ConfigurationRevision13;
+  credential_version_id: CredentialVersionId7;
+  evidence_ref: EvidenceRef7;
+  rationale: Rationale7;
+  source_id: SourceId18;
+  validation_operation_id: ValidationOperationId1;
+}
+export interface CollectCommand1 {
+  action: Action13;
+  command_id: CommandId21;
+  expected_revisions: RevisionVector8;
+  membership_ids: MembershipIds8;
+  payload: OperationPayload3;
+  schema_version: SchemaVersion20;
+  target_id: TargetId13;
+}
+export interface RevisionVector8 {
+  authority: Authority11;
+  connector: Connector9;
+  identity_membership: IdentityMembership9;
+  owners: Owners9;
+  policy: Policy9;
+  secret: Secret8;
+  secret_source: SecretSource9;
+  source: Source10;
+  target: Target9;
+}
+export interface OperationPayload3 {
+  configuration_revision: ConfigurationRevision14;
+  credential_version_id: CredentialVersionId8;
+  evidence_ref: EvidenceRef8;
+  rationale: Rationale8;
+  source_id: SourceId19;
+}
+export interface DisableCommand1 {
+  action: Action14;
+  command_id: CommandId22;
+  expected_revisions: RevisionVector9;
+  membership_ids: MembershipIds9;
+  payload: SourcePayload1;
+  schema_version: SchemaVersion21;
+  target_id: TargetId14;
+}
+export interface RevisionVector9 {
+  authority: Authority12;
+  connector: Connector10;
+  identity_membership: IdentityMembership10;
+  owners: Owners10;
+  policy: Policy10;
+  secret: Secret9;
+  secret_source: SecretSource10;
+  source: Source11;
+  target: Target10;
+}
+export interface SourcePayload1 {
+  evidence_ref: EvidenceRef9;
+  rationale: Rationale9;
+  source_id: SourceId20;
+}
+export interface ScannerNotCommittedDisposition {
+  action: Action15;
+  actor_id: ActorId;
+  audit_event_id: AuditEventId5;
+  command_id: CommandId23;
+  connector_id: ConnectorId18;
+  disposition: Disposition;
+  occurred_at: OccurredAt5;
+  request_digest: RequestDigest;
+  schema_version: SchemaVersion23;
+  source_id: SourceId21;
+}
+export interface ScannerCommittedDisposition {
+  action: Action16;
+  actor_id: ActorId1;
+  command_id: CommandId24;
+  connector_id: ConnectorId19;
+  disposition: Disposition1;
+  receipt: Receipt;
+  request_digest: RequestDigest1;
+  schema_version: SchemaVersion29;
+  source_id: SourceId22;
+}
+export interface SaveConfigurationReceipt1 {
+  action: Action17;
+  audit_event_id: AuditEventId6;
+  command_id: CommandId25;
+  committed_revision: CommittedRevision5;
+  decision_id: DecisionId5;
+  intent_id: IntentId8;
+  intents: Intents5;
+  occurred_at: OccurredAt6;
+  policy_revision: PolicyRevision6;
+  projection: Projection5;
+  result: SaveConfigurationResult1;
+  schema_version: SchemaVersion24;
+  target_id: TargetId15;
+}
+export interface Projection5 {
+  [k: string]: unknown;
+}
+export interface SaveConfigurationResult1 {
+  configuration_revision: ConfigurationRevision15;
+  lifecycle: Lifecycle5;
+}
+export interface TestConnectionReceipt1 {
+  action: Action18;
+  audit_event_id: AuditEventId7;
+  command_id: CommandId26;
+  committed_revision: CommittedRevision6;
+  decision_id: DecisionId6;
+  intent_id: IntentId9;
+  intents: Intents6;
+  occurred_at: OccurredAt7;
+  policy_revision: PolicyRevision7;
+  projection: Projection6;
+  result: TestConnectionResult1;
+  schema_version: SchemaVersion25;
+  target_id: TargetId16;
+}
+export interface Projection6 {
+  [k: string]: unknown;
+}
+export interface TestConnectionResult1 {
+  error_code: ErrorCode5;
+  operation_id: OperationId5;
+  status: Status4;
+}
+export interface ActivateConfigurationReceipt1 {
+  action: Action19;
+  audit_event_id: AuditEventId8;
+  command_id: CommandId27;
+  committed_revision: CommittedRevision7;
+  decision_id: DecisionId7;
+  intent_id: IntentId10;
+  intents: Intents7;
+  occurred_at: OccurredAt8;
+  policy_revision: PolicyRevision8;
+  projection: Projection7;
+  result: ActivateConfigurationResult1;
+  schema_version: SchemaVersion26;
+  target_id: TargetId17;
+}
+export interface Projection7 {
+  [k: string]: unknown;
+}
+export interface ActivateConfigurationResult1 {
+  active_configuration_revision: ActiveConfigurationRevision2;
+  configuration_revision: ConfigurationRevision16;
+  lifecycle: Lifecycle6;
+}
+export interface CollectReceipt1 {
+  action: Action20;
+  audit_event_id: AuditEventId9;
+  command_id: CommandId28;
+  committed_revision: CommittedRevision8;
+  decision_id: DecisionId8;
+  intent_id: IntentId11;
+  intents: Intents8;
+  occurred_at: OccurredAt9;
+  policy_revision: PolicyRevision9;
+  projection: Projection8;
+  result: CollectResult1;
+  schema_version: SchemaVersion27;
+  target_id: TargetId18;
+}
+export interface Projection8 {
+  [k: string]: unknown;
+}
+export interface CollectResult1 {
+  error_code: ErrorCode6;
+  operation_id: OperationId6;
+  run_id: RunId5;
+  status: Status5;
+}
+export interface DisableConfigurationReceipt1 {
+  action: Action21;
+  audit_event_id: AuditEventId10;
+  command_id: CommandId29;
+  committed_revision: CommittedRevision9;
+  decision_id: DecisionId9;
+  intent_id: IntentId12;
+  intents: Intents9;
+  occurred_at: OccurredAt10;
+  policy_revision: PolicyRevision10;
+  projection: Projection9;
+  result: DisableConfigurationResult1;
+  schema_version: SchemaVersion28;
+  target_id: TargetId19;
+}
+export interface Projection9 {
+  [k: string]: unknown;
+}
+export interface DisableConfigurationResult1 {
+  configuration_revision: ConfigurationRevision17;
+  lifecycle: Lifecycle7;
+}
+export interface ScannerAdmittedDisposition {
+  action: Action22;
+  actor_id: ActorId2;
+  command_id: CommandId30;
+  connector_id: ConnectorId20;
+  disposition: Disposition2;
+  operation: OperationView2 | OperationView3;
+  request_digest: RequestDigest2;
+  schema_version: SchemaVersion32;
+  source_id: SourceId23;
+}
+export interface OperationView2 {
+  command_id: CommandId31;
+  configuration_revision: ConfigurationRevision18;
+  credential_version_id: CredentialVersionId9;
+  error_code: ErrorCode7;
+  finished_at: null;
+  kind: Kind5;
+  operation_id: OperationId7;
+  receipt_id: null;
+  run_id: RunId6;
+  schema_version: SchemaVersion30;
+  started_at: string;
+  status: "running";
+}
+export interface OperationView3 {
+  command_id: CommandId32;
+  configuration_revision: ConfigurationRevision19;
+  credential_version_id: CredentialVersionId10;
+  error_code: ErrorCode8;
+  finished_at: string;
+  kind: Kind6;
+  operation_id: OperationId8;
+  receipt_id: null;
+  run_id: RunId7;
+  schema_version: SchemaVersion31;
+  started_at: string;
+  status: "failed" | "partial" | "interrupted";
+}
+export interface OperationView4 {
+  command_id: CommandId33;
+  configuration_revision: ConfigurationRevision20;
+  credential_version_id: CredentialVersionId11;
+  error_code: ErrorCode9;
+  finished_at: null;
+  kind: Kind7;
+  operation_id: OperationId10;
+  receipt_id: null;
+  run_id: RunId8;
+  schema_version: SchemaVersion33;
+  started_at: string;
+  status: "running";
+}
+export interface OperationView5 {
+  command_id: CommandId34;
+  configuration_revision: ConfigurationRevision21;
+  credential_version_id: CredentialVersionId12;
+  error_code: ErrorCode10;
+  finished_at: string;
+  kind: Kind8;
+  operation_id: OperationId11;
+  receipt_id: string;
+  run_id: RunId9;
+  schema_version: SchemaVersion34;
+  started_at: string;
+  status: "succeeded";
+}
+export interface OperationView6 {
+  command_id: CommandId35;
+  configuration_revision: ConfigurationRevision22;
+  credential_version_id: CredentialVersionId13;
+  error_code: ErrorCode11;
+  finished_at: string;
+  kind: Kind9;
+  operation_id: OperationId12;
+  receipt_id: null | string;
+  run_id: RunId10;
+  schema_version: SchemaVersion35;
+  started_at: string;
+  status: "failed" | "partial" | "interrupted";
+}
+export interface DetectionPage {
+  as_of: AsOf1;
+  collection_recency: CollectionRecencyView1;
+  coverage: CoverageView;
+  items: Items;
+  next_cursor: NextCursor;
+  retrieval: RetrievalView;
+  run_id: RunId12;
+  schema_version: SchemaVersion36;
+  source_freshness: SourceFreshnessView;
+}
+export interface CollectionRecencyView1 {
+  as_of: AsOf2;
+  last_complete_at: LastCompleteAt1;
+  status: Status6;
+}
+export interface CoverageView {
+  reason_codes: ReasonCodes;
+  status: Status7;
+}
+export interface DetectionView {
+  collected_at: CollectedAt;
+  detection_type: DetectionType;
+  evidence_ref: EvidenceRef11;
+  evidence_sha256: EvidenceSha256;
+  group_id: GroupId12;
+  host_id: HostId;
+  identity_resolution: IdentityResolution;
+  observation_id: ObservationId;
+  observed_at: ObservedAt;
+  port: Port;
+  protocol: Protocol;
+  qid: Qid;
+  severity: Severity;
+  ssl: Ssl;
+  unique_vuln_id: UniqueVulnId;
+  vendor_status: VendorStatus;
+  vendor_timestamps: VendorTimestamps;
+}
+export interface VendorTimestamps {
+  [k: string]: string;
+}
+export interface RetrievalView {
+  reason_codes: ReasonCodes1;
+  status: Status8;
+}
+export interface SourceFreshnessView {
+  reason_codes: ReasonCodes2;
+  status: Status9;
+}
+export interface Body27 {
+  [k: string]: unknown;
+}
+export interface Body28 {
+  [k: string]: unknown;
+}
+export interface Body29 {
+  [k: string]: unknown;
+}
+export interface Body30 {
+  [k: string]: unknown;
+}
+export interface Body31 {
   [k: string]: unknown;
 }

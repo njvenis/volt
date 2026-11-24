@@ -12,6 +12,7 @@ os_package_postgresql-18:amd64=18.6-1.pgdg13+2|bf4062a44757c3f7a207a1b9e20c2bf93
 os_package_postgresql-18:arm64=18.6-1.pgdg13+2|16d1f20450bfdc13118c317a86745ca1a0d56fe192c3d8f8091a7f2d9868c4d9
 os_package_postgresql-client-18:amd64=18.6-1.pgdg13+2|9af40c99f7074f8ff3798155af2f07f1a4e1e3bd4edce44ef928c1e03aea620e
 os_package_postgresql-client-18:arm64=18.6-1.pgdg13+2|098492efc9f576ffee23e1871d31682b332a3c6582072d3ef8f99b6b72573bc7
+os_package_postgresql-client-common=293.pgdg13+1|70da21264140dfb34680cfec52973c7f10b5c8e3c78699a52b04e870b3dee71b
 os_package_tini:amd64=0.19.0-3+b8|a443b12107331f67836a64cb6efe1dd92d2765e15568eb4567dccb409a8cd2a0
 os_package_tini:arm64=0.19.0-3+b8|442405a197deb2471fc881ef3ee66c399dab2a766280e9b935197f1d18d8d6e8
 os_package_util-linux:amd64=2.41.5-0+deb13u1|7d5b1176cc3d8cc6b290b3ec17af458f362d9200845f30da22057a8198744430

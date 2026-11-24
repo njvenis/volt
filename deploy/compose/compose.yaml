@@ -2,6 +2,7 @@ name: ${VOLT_PROJECT:-volt-compose}
 services:
   volt:
     image: ${VOLT_IMAGE:?initialize with an explicitly built compatible image}
+    pull_policy: never
     platform: ${VOLT_PLATFORM:?run setup first}
     restart: unless-stopped
     stop_grace_period: 10m
@@ -15,8 +16,9 @@ services:
       DD_ADMIN_MAIL: admin@localhost.invalid
       DD_ALLOWED_HOSTS: ${VOLT_ALLOWED_HOSTS:-localhost,127.0.0.1}
       DD_INITIALIZE: "true"
-      UVM_AUTH_MODE: oidc
+      UVM_AUTH_MODE: ${VOLT_AUTH_MODE:-oidc}
       UVM_OIDC_DEPLOYMENT_MODE: external
+      UVM_SCANNER_EVIDENCE_DIR: /opt/uvm/state/scanner-evidence
       UVM_OIDC_CONFIG_FILE: /etc/volt/oidc.json
       UVM_G3_BOOTSTRAP_PRINCIPAL: ${VOLT_BOOTSTRAP_PRINCIPAL:-}
       UVM_NATIVE_BOOTSTRAP_PRINCIPALS: ${VOLT_BOOTSTRAP_PRINCIPAL:-}
@@ -30,7 +32,12 @@ services:
       - postgres:/var/lib/postgresql/data
       - media:/app/media
       - state:/opt/uvm/state
-      - ${VOLT_INSTANCE_DIR:?run setup first}/oidc.json:/etc/volt/oidc.json:ro
+      - type: bind
+        source: ${VOLT_INSTANCE_DIR:?run setup first}/oidc.json
+        target: /etc/volt/oidc.json
+        read_only: true
+        bind:
+          create_host_path: false
     secrets:
       - uvm_db_password
       - ce_db_password

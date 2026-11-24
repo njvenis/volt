@@ -432,8 +432,8 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
     install_ingress_guard(app)
 
     if os.getenv("UVM_G7_VERIFICATION_ONLY") == "1":
-        if os.getenv("UVM_AUTH_MODE", "bearer") not in {"bearer", "oidc"}:
-            raise RuntimeError("verification-only API requires bearer or restored OIDC session authentication")
+        if os.getenv("UVM_AUTH_MODE", "bearer") not in {"bearer", "oidc", "local"}:
+            raise RuntimeError("verification-only API requires a supported restored session authentication mode")
 
         @app.middleware("http")
         async def recovery_read_only_fence(request: Request, call_next):
@@ -485,9 +485,11 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
             code = aliases.get(code, code)
             allowed = {"authentication_required", "csrf_failed", "forbidden", "source_scope_forbidden",
                 "not_found", "invalid_request", "revision_conflict", "command_conflict",
-                "submission_conflict", "credential_revoked", "restore_quarantined",
+                "submission_conflict", "credential_revoked", "credential_material_reused", "restore_quarantined",
                 "callback_invalid", "validation_required", "dependency_unavailable", "outcome_unknown",
-                "report_expired", "report_superseded", "host_policy_unavailable"}
+                "report_expired", "report_superseded", "host_policy_unavailable",
+                "command_terminal", "command_id_reused", "source_binding_exists",
+                "authority_version_conflict"}
             if code not in allowed:
                 code = ("authentication_required" if status == 401 else "forbidden" if status == 403
                     else "not_found" if status == 404 else "dependency_unavailable" if status >= 500
@@ -495,7 +497,9 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
             status_by_code = {"authentication_required":401, "csrf_failed":403, "forbidden":403,
                 "source_scope_forbidden":403, "not_found":404, "invalid_request":400,
                 "revision_conflict":409, "command_conflict":409, "submission_conflict":409,
-                "credential_revoked":409, "restore_quarantined":409, "callback_invalid":400,
+                "command_terminal":409, "command_id_reused":409, "source_binding_exists":409,
+                "authority_version_conflict":409,
+                "credential_revoked":409, "credential_material_reused":409, "restore_quarantined":409, "callback_invalid":400,
                 "validation_required":409, "dependency_unavailable":503, "outcome_unknown":503,
                 "host_policy_unavailable":503,
                 "report_expired":400, "report_superseded":409}
@@ -513,7 +517,7 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
             correlation_id = str(uuid.UUID(correlation_id)) if correlation_id else str(uuid.uuid4())
         except ValueError:
             correlation_id = str(uuid.uuid4())
-        return JSONResponse(status_code=status,
+        return JSONResponse(status_code=status, headers=exc.headers,
                             content={"schema_version": 1, "error": {
                                 "code": code,
                                 "message": detail.get("message", "Request failed"),
@@ -538,7 +542,10 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
 
     @app.exception_handler(sa.exc.SQLAlchemyError)
     async def database_error(request, exc):
-        _LOG.exception("Read API database operation failed", exc_info=exc)
+        if request.url.path.startswith("/api/v1/auth/"):
+            _LOG.error("Local authentication database operation failed (%s)", type(exc).__name__)
+        else:
+            _LOG.exception("Read API database operation failed", exc_info=exc)
         connector_wire = (request.url.path.startswith("/api/v1/connectors")
             or request.url.path == "/api/v1/assessment/commands"
             or request.url.path.startswith("/api/v1/github")
@@ -556,7 +563,10 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
 
     @app.exception_handler(Exception)
     async def unexpected_error(request, exc):
-        _LOG.exception("Unhandled read API failure", exc_info=exc)
+        if request.url.path.startswith("/api/v1/auth/"):
+            _LOG.error("Local authentication request failed (%s)", type(exc).__name__)
+        else:
+            _LOG.exception("Unhandled read API failure", exc_info=exc)
         connector_wire = (request.url.path.startswith("/api/v1/connectors")
             or request.url.path == "/api/v1/assessment/commands"
             or request.url.path.startswith("/api/v1/github")
@@ -575,10 +585,22 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
     def auth(request: Request, authorization: str | None = Header(default=None)):
         if auth_service is not None:
             context = auth_service.resolve_request(request)
-            if not context.source_scopes:
+            if not context.source_scopes and context.credential_mode != "local_session":
                 raise HTTPException(403, {"code": "scope_forbidden", "message": "Access forbidden"})
+            read_scopes = context.source_scopes
+            if context.credential_mode == "local_session":
+                from uvm.assessment.api import _scoped_grants
+                from uvm.persistence.assessment_schema import assessment_policy
+                with engine.connect() as connection:
+                    policy = connection.execute(sa.select(assessment_policy.c.document).where(
+                        assessment_policy.c.policy_id == 1)).scalar_one_or_none() or {}
+                granting = _scoped_grants(policy, context.principal_id, "assessment.read", "*")
+                read_scopes = tuple(sorted(context.scopes_for_granting_groups(
+                    grant.get("principal_id") for grant in granting)))
+                if not read_scopes:
+                    raise HTTPException(403, {"code":"scope_forbidden", "message":"Access forbidden"})
             configured = principals.get(context.principal_id, {})
-            return {"name": context.principal_id, "scopes": context.source_scopes,
+            return {"name": context.principal_id, "scopes": read_scopes,
                     "context": context,
                     "service_grants": configured.get("service_grants", ())}
         if not authorization or not authorization.startswith("Bearer "):
@@ -611,7 +633,8 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
         as_of = _as_of_for_cursor(secret, "runs", cursor)
         runs = collection_runs.alias("runs")
         scoped_runs = sa.select(runs).where(_grant_clause(runs, principal["scopes"]))
-        scoped_runs = scoped_runs.where(runs.c.created_at <= as_of)
+        from uvm.connectors.publication import run_is_published_clause
+        scoped_runs = scoped_runs.where(runs.c.created_at <= as_of, run_is_published_clause(runs))
         if cursor is None:
             latest = sa.select(runs.c.run_id, sa.func.max(runs.c.revision).label("revision"))\
                 .where(runs.c.created_at <= as_of).group_by(runs.c.run_id).subquery()
@@ -621,7 +644,7 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
             # Continuations select the exact immutable revisions captured at page one.
             q = scoped_runs
         q = q.where(_grant_clause(runs, principal["scopes"]))
-        q = q.where(runs.c.created_at <= as_of)
+        q = q.where(runs.c.created_at <= as_of, run_is_published_clause(runs))
         ordering = (runs.c.created_at, runs.c.run_id)
         def summary(r):
             with engine.connect() as c:
@@ -663,6 +686,11 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
                 raise HTTPException(404, {"code": "not_found", "message": "Run not found"})
             if (row["source_family"], row["source_account_id"], row["scope_key"]) not in principal["scopes"]:
                 raise HTTPException(403, {"code": "scope_forbidden", "message": "Access forbidden"})
+            from uvm.connectors.publication import run_is_published_clause
+            promoted = c.execute(sa.select(collection_runs.c.run_id).where(
+                collection_runs.c.run_id == run_id, run_is_published_clause(collection_runs)).limit(1)).first()
+            if promoted is None:
+                raise HTTPException(404, {"code":"not_found", "message":"Run not found"})
             rev = row["revision"]
             attempts = c.execute(sa.select(run_attempts).where(run_attempts.c.run_id == run_id,
                                   run_attempts.c.run_revision == rev).order_by(run_attempts.c.attempt_no)).mappings().all()
@@ -788,7 +816,8 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
             runs.c.source_family == observations.c.source_family,
             runs.c.source_account_id == observations.c.source_account_id,
             sa.or_(*grants)))
-        q = q.where(scoped_run_exists, resolutions.c.outcome.in_(("ambiguous", "unresolved")),
+        from uvm.connectors.publication import observation_is_published_clause
+        q = q.where(observation_is_published_clause(observations), scoped_run_exists, resolutions.c.outcome.in_(("ambiguous", "unresolved")),
                     resolutions.c.evaluated_at <= as_of)
         ordering = (resolutions.c.evaluated_at, resolutions.c.resolution_id)
         def serialise(r):
@@ -876,6 +905,12 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
     install_d08_transport_diagnostics(app)
     from uvm.operations.preservation_api import install_preservation_routes
     install_preservation_routes(app, engine, auth, secret)
+    from uvm.auth.local import LocalAuth
+    if isinstance(auth_service, LocalAuth) and os.getenv("UVM_G7_VERIFICATION_ONLY") != "1":
+        from uvm.connectors.scanner_install import install_shared_scanners
+        install_shared_scanners(app,
+            private_evidence_directory=os.environ.get("UVM_SCANNER_EVIDENCE_DIR", "/opt/uvm/state/scanner-evidence"),
+            public_origin=auth_service.config["public_origin"])
     # Registered last: API handlers retain authority, and reserved service paths
     # never resolve to the SPA. Resolve paths before checking the static root.
     ui_root = os.getenv("UVM_UI_ROOT")
@@ -902,6 +937,9 @@ def create_app(engine: Engine | None = None, *, principals=None, cursor_secret: 
         # include restore mutations, projection recovery and external pollers.
         app.router.on_startup.clear()
         app.router.on_shutdown.clear()
+    # Last wrapper: private routing boot follows every earlier lifespan entry.
+    from uvm.auth.route_check import install_main_route_check
+    install_main_route_check(app, auth_service)
     return app
 
 

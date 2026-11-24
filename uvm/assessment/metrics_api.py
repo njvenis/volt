@@ -1,6 +1,9 @@
 """Persisted, current-authorised G5 metric report API."""
 from __future__ import annotations
 
+from uvm.assessment.command_occupancy import guard_assessment
+from uvm.assessment.policy_lock import lock_policy
+
 import base64
 import copy
 import csv
@@ -146,6 +149,7 @@ def _mark_report_failure(engine, target):
     if target is None:
         return
     with engine.begin() as connection:
+        lock_policy(connection)
         accepted = connection.execute(sa.select(report_requests.c.report_id).where(
             report_requests.c.report_id == target["report_id"],
             report_requests.c.command_id == target["command_id"],
@@ -155,6 +159,8 @@ def _mark_report_failure(engine, target):
             report_requests.c.status == "pending").with_for_update()).first()
         if accepted is None:
             return
+        guard_assessment(connection, target['command_id'], target['principal_id'],
+            'report.create', target['request_digest'])
         connection.execute(report_requests.update().where(
             report_requests.c.report_id == target["report_id"],
             report_requests.c.command_id == target["command_id"],
@@ -1009,6 +1015,7 @@ def install_metrics_routes(app: FastAPI, auth):
                 source_keys.add(key)
         document = {**config, "scope_group_ids": sorted(scope_group_ids)}
         with engine.begin() as connection:
+            lock_policy(connection)
             policy_row = connection.execute(sa.select(assessment_policy).where(
                 assessment_policy.c.policy_id == 1).with_for_update()).mappings().first()
             if not policy_row or int(policy_row["revision"]) != expected_policy_revision:
@@ -1131,6 +1138,7 @@ def install_metrics_routes(app: FastAPI, auth):
             # therefore leaves an exact replayable durable outcome.
             report_stage("acceptance_connection_acquisition_start", command_id)
             with engine.begin() as connection:
+                lock_policy(connection)
                 report_stage("acceptance_connection_acquired", command_id)
                 lock_identity_graph(connection)
                 report_stage("acceptance_policy_lock_wait_start", command_id)
@@ -1163,6 +1171,7 @@ def install_metrics_routes(app: FastAPI, auth):
                 if definition_version != DEFINITION:
                     normalized["definition_version"] = definition_version
                 digest = _digest({"principal": principal["name"], **normalized})
+                guard_assessment(connection, command_id, principal["name"], "report.create", digest)
                 previous = connection.execute(sa.select(report_requests).where(
                     report_requests.c.command_id == command_id).with_for_update()).mappings().first()
                 if previous:
@@ -1243,6 +1252,7 @@ def install_metrics_routes(app: FastAPI, auth):
                         "decision_id": decision_id, "audit_event_id": audit_id, "intent_id": intent_id,
                         "committed_revision": policy_revision, "projection": "pending", "report_id": report_id,
                         "error_code": None}
+                    guard_assessment(connection, command_id, principal['name'], 'report.create', digest)
                     connection.execute(assessment_command_receipts.insert().values(command_id=command_id,
                         principal_id=principal["name"], action="report.create", target_id=group_ids[0],
                         request_digest=digest, decision_id=decision_id, audit_event_id=audit_id,
@@ -1260,6 +1270,8 @@ def install_metrics_routes(app: FastAPI, auth):
                 report_stage("materialisation_connection_acquired", command_id)
                 if engine.dialect.name == "postgresql":
                     connection.execute(sa.text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+                lock_policy(connection)
+                guard_assessment(connection, command_id, principal["name"], "report.create", digest)
                 lock_identity_graph(connection)
                 report_stage("materialisation_policy_lock_wait_start", command_id)
                 policy_revision, policy = policy_for(connection, lock=True)
@@ -3051,6 +3063,7 @@ def install_metrics_routes(app: FastAPI, auth):
     def consume_sla_refresh(intent_id):
         """Acknowledge a refresh only after its immutable writer evidence is visible."""
         with engine.begin() as connection:
+            lock_policy(connection)
             intent = connection.execute(sa.select(reporting_projection_intents).where(
                 reporting_projection_intents.c.intent_id == intent_id,
                 reporting_projection_intents.c.kind == "reporting.sla.refresh",

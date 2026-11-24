@@ -1,0 +1,409 @@
+# Ordinary signed LOCAL qualification on hosted native ARM
+
+Prepared from approved draft37ac9fc66bc2b804689baa2dfc9f6f7adf1520d9, separate from
+held Qualys/abb. No local ARM, service, job-signer generation, candidate signing, deployment,
+workflow dispatch, artifact upload or push has occurred. This is executable
+preparation and public metadata compatibility evidence, not ARM lifecycle GO.
+
+## Reproducible pieces
+
+`hosted_arm_essential.py` provides three fixed stages, with no generic command or
+signing/trust bypass. Each takes `--request OWNED_JSON` and an independently
+provided `--expected-request-sha256 sha256:...`. `--plan-only` checks the closed
+request and exact clean source checkout/U and emits a plan without Docker.
+The selected source checkout may be the baseline37 checkout while this adapter
+R is retained separately; its SHA is recorded separately from runtime P/U.
+All source paths/commit/U must match, no installer overlay or image relabel.
+
+`prepare-db-context` checks and copies ONLY the exact three canonical Trillian
+v1.8.0 files, using pinned SHA256; it does not build. `build-q` first requires
+actual uname aarch64 and Docker linux/arm64, then invokes the existing
+`build_native_fixture_verifier.py --platform linux/arm64` with independently
+provisioned PUBLIC three-file policy and expected inventory hash. All existing
+stable FD/public-policy restage/source archive/CLI/witness rules remain intact.
+
+`essential` requires the same native host+daemon and invokes maintained
+`qualify_inventory_cause_fixture(platform='linux/arm64')`, then the original
+externally authenticated public restored start, health and final stop. This
+covers install/stop/cold backup/external verify-cache BEFORE extraction/import/
+empty+corrupt inventory denials/valid restore-admit/start/health/stop, with no new
+account/browser/scanner/SQL operations. The existing strict external admission
+validator still authenticates Q and original launcher, runtime index, BOTH actual
+children/configs, provenance, source and inclusion. No observation is a trust root.
+This adapter retains uncertainty/private state; it does not auto-delete resources.
+
+Example future invocations (NOT executed):
+
+    PYTHONPATH=ADAPTER_CHECKOUT python3 ADAPTER_CHECKOUT/tools/release/hosted_arm_essential.py \
+      prepare-db-context --request PRIVATE_DB_REQUEST --expected-request-sha256 EXPECTED_HASH
+    PYTHONPATH=ADAPTER_CHECKOUT python3 ADAPTER_CHECKOUT/tools/release/hosted_arm_essential.py \
+      build-q --request PRIVATE_Q_REQUEST --expected-request-sha256 EXPECTED_HASH
+    PYTHONPATH=ADAPTER_CHECKOUT python3 ADAPTER_CHECKOUT/tools/release/hosted_arm_essential.py \
+      essential --request PRIVATE_JOURNEY_REQUEST --expected-request-sha256 EXPECTED_HASH
+
+All requests have exactly schema_version integer1, profile
+hosted_native_arm_essential_v1, source_revision, source_snapshot,
+source_checkout (exact clean checkout), evidence (new absolute directory).
+DB preparation additionally has db_source_directory (canonical upstream source).
+Q additionally has public_policy and public_policy_sha256. Essential additionally
+has bundle, fixture, image_id and private (new owned directory). No platform
+selector exists: ARM is fixed. An independently provisioned request hash is
+required; not learned from untrusted artifact bytes. No inputs are provided yet.
+
+## Exact native fixture stack path
+
+The closed public component lock is `hosted-arm-fixture-components.json`.
+All index/child/config bytes were fetched read-only from official registries and
+hashed; retained response hashes identify evidence outside this source tree.
+The existing three Sigstore parent pins already include ARM64/v8 children:
+Rekor1662dc..., Trillian signerf86711..., Trillian servera23153.... They can use the
+same immutable parent pins plus explicit --platform linux/arm64. No replacement
+Rekor protocol or synthesized inclusion proof is introduced.
+
+The existing db_server0bfefa... is an AMD64-only manifest. The canonical exact
+v1.8.0 source commit0362d55869965067c9ffa276a78d18e95a596ca3 copies mysql.cnf and
+storage.sql onto pinned mysql8.4 indexb3b90a... and adjusts file permissions. That
+base already includes ARM childc9be23...; its MYSQL_VERSION8.4.11-1.el9 and
+MYSQL_SHELL_VERSION8.4.10-1.el9 equal the existing AMD64 DB config versions.
+Thus a truthful native ARM DB build can use this unchanged canonical recipe and
+exact base index/schema/config. Its NEW built digest must be recorded and native
+execution actually checked. Compatibility metadata is not a reproducible image
+or runtime claim. Do not emulation-run the old AMD64 DB or switch DB versions.
+
+After preparing canonical context, the future build is:
+
+    docker build --platform linux/arm64 --pull=false --network=none \
+      --file DB_CONTEXT/examples/deployment/docker/db_server/Dockerfile \
+      --tag UNIQUE_EPHEMERAL_DB_TAG DB_CONTEXT
+
+This command is not authorised/executed by the current preparation packet.
+Public source references:
+https://github.com/google/trillian/tree/0362d55869965067c9ffa276a78d18e95a596ca3/examples/deployment/docker/db_server
+https://docs.sigstore.dev/logging/installation/
+https://github.com/sigstore/rekor/blob/main/docker-compose.yml
+The upstream compose's forced AMD64 DB is a recipe limitation, not a claim that
+all official DB images lack ARM.
+
+## Hosted provisioning/job invariants
+
+The implemented job below runs on ubuntu-24.04-arm and must consume
+BOTH source-bound runtime children from the existing native matrix, verifying
+ZIP/tar hashes and selected/checkedout P/U before any load. Native verifier/Q,
+Cosign and registry must also resolve to actual ARM configs. No binfmt/QEMU.
+A new owned loopback registry46150 can assemble the exact TWO-child ordinary
+graph locally from those same-run archives. This avoids transporting already
+signed/recompressed graph blobs between hosts. Fixed repos volt and
+volt-installer-verifier are unchanged, with unique new subjects.
+
+A genuine ephemeral Rekor+Trillian+DB stack must then be provisioned inside the
+job, with the pinned ARM components above, exact owned containers/network/data
+and cleanup guards, no external production endpoints. Generate a fresh signer
+only in RUNNER_TEMP private custody and retain the genuine new log's public key /
+ID in the existing closed trusted-root schema. Build native Q with that immutable
+PUBLIC policy, then use the existing digest-pinned Cosign with the real signing
+config and mandatory transparency to sign Q+SLSA, runtime index+BOTH children,
+runtime provenance and original bundle/launcher. No private key in any artifact,
+no tlog-upload=false, insecure-ignore flags, mocked log or proof synthesis.
+The job coordinator, not a candidate manifest, provisions this fixture authority.
+
+The hosted ephemeral provisioning and exact signing/job wiring are implemented
+in hosted_arm_fixture.py and the native job below. Their actual behavior remains
+unverified pending source review and an approved hosted execution. Local source
+checks do not call an existing private signer/log, upload keys, start services,
+generate a job signer or claim that runtime gate met.
+No new hosted production secrets are needed: all authority is disposable job-local,
+provided its generation/provisioning is explicitly approved and reviewed.
+Before external execution the exact job/controller must bind P/R/U, component
+parents/children, public log/root identity and ownership. Online bootstrap can use
+the genuine local log while signing/verification runs; offline outage verification
+must still use original inclusion bundles, with no relaxed adapter.
+
+Only the closed typed public outcome/P/U/platform and validated ORIGINAL public
+metadata/inclusion closure are intended public CI results. Do NOT upload the raw
+evidence/private directories:
+installer stdout, operation logs, host owner state, capability files and ephemeral
+keys can be private. The implemented explicit closure allowlist excludes instance/signer/raw paths;
+never upload RUNNER_TEMP recursively. Job-owned VM
+teardown is not proof of exact cleanup; capture resource reconciliation separately.
+
+600 seconds remains the approved clean-stop ACCEPTANCE cap and13-second reserve;
+stock Docker may return later. Late result gives no clean proof/authority and
+retains private evidence. This candidate does not add a hard host-return claim,
+new timeout dependency, TLS/Qualys mode, production keyless acceptance or general
+hardware claim. No native runtime evidence exists until the hosted signed journey
+actually completes on those exact immutable bytes.
+
+## Implemented hosted job/provisioner (local candidate, not executed)
+
+The `hosted-arm-signed-local` job and `hosted_arm_fixture.py` now implement the
+previously missing provisioning/wiring; earlier preparation-only statements above
+record the 8f checkpoint and must not be mistaken for a current unimplemented stage.
+No workflow has been dispatched/pushed, no local service has been started and no
+candidate has been signed during this implementation packet. Pure public-policy
+unit tests use fresh in-memory EC keys; they create no log entries, signatures,
+private key files or claim of genuine transparency.
+
+The job uses ubuntu-24.04-arm, contents:read only, no OIDC/packages write or
+repository secrets, exact selected source with persist-credentials:false, pinned
+Python/uv/locked dependencies, and both same-run runtime artifacts. A new private
+Docker config avoids importing an operator's registry credentials. The coordinator
+checks every archive/selected-source/event/config before loading its ORIGINAL open
+FD; it rejects ambiguous non-config IDs for loaded CI children or freshly built DB.
+This conservative boundary may surface an actual store-compatibility dependency,
+which must be reported instead of guessed/adopted. It does not run emulation.
+
+The single job-local ordinary bridge contains only fresh MySQL, Trillian server,
+Trillian signer, Rekor and registry. Published endpoints are loopback46150/47280
+only; DB and Trillian publish no ports. This ordinary bridge is not a no-egress
+guarantee. Fixture requests and signing endpoints remain local. This correction
+does not change product networking, the held Qualys internal-network requirement,
+offline helpers using network none, or independent signature/inclusion checks.
+MySQL needs its normal default capabilities for its canonical entrypoint;
+other services drop all capabilities, with no added capability or Docker socket.
+The DB volume is masked by bounded tmpfs. Registry has ONLY a new dedicated owned
+data bind. No server inherits an instance/key/host-root view. Creation/startup and
+cleanup bind exact full CID/Created/config/recipe/StartedAt/native child witness,
+strict mounts, ports, labels and original network. Unknown creation/drift stays
+retained and makes cleanup/qualification nonzero. No name-only rm or global prune.
+
+The DB TCP/schema query deliberately waits for completed canonical initialization,
+not a temporary initialization socket. Trillian HTTP health is read from the
+registered live container's exact own-network IP/subnet before Rekor starts. No
+public/custom health address or redirect/proxy is accepted. The original live
+Rekor key is read only through the registered loopback endpoint and pinned into
+the existing public trusted-root schema; it is checked again after signing.
+Keys are generated only in the future private job signer directory, never mounted
+into API, DB, registry or Q. The existing pinned Cosign/--signing-config ceremony
+uses that local genuine log, creates mandatory inclusion, signs the complete new
+ordinary two-child graph/Q/bundle/launcher and retains the original proof bytes.
+No proof fabrication, public log submission or production signer is involved.
+
+The maintained essential path then performs the actual signed LOCAL journey,
+followed by fresh original cache verification and supported authenticated destroy.
+Public export is an explicit closed copy of ONLY the verified metadata/signature/
+inclusion closure and independently provisioned PUBLIC trust files, plus a typed
+summary. The instance, signer, raw logs, setup capability, credential data and keys
+are never uploaded. Export rejects unexpected cache inventory/private PEM. The
+workflow uploads only two fixed, separately created public destinations, never
+RUNNER_TEMP recursively. Partial/failing export cannot grant success.
+
+The reached Docker28 inspect defect is fixed in both the external entry generator
+and signed launcher: capabilities are selected before use from advertised CLI
+support AND both actual APIs>=1.49. On old clients the same full JSON goes through
+the unchanged independently authenticated exact native child/config/parent graph
+checks. An ambiguous unselectable index denies; no first-child guess or retry after
+a failed flagged inspection is allowed. Every initial/formatted/refresh site uses
+the fixed native-only helper. POSIX Docker stubs are command/denial proof only,
+not hosted lifecycle, FD, signature or native-runtime acceptance.
+
+Exact future job coordinator invocation (inputs supplied by this workflow):
+
+    uv run python tools/release/hosted_arm_fixture.py \
+      --source-commit SELECTED_SHA --source-snapshot EXACT_GIT_ARCHIVE_U \
+      --artifacts SAME_RUN_NATIVE_RUNTIME_DIRECTORIES --event-sha EXACT_EVENT_SHA \
+      --work NEW_RUNNER_TEMP_PRIVATE \
+      --public-result NEW_RUNNER_TEMP_PUBLIC_JSON \
+      --public-proofs NEW_RUNNER_TEMP_PUBLIC_PROOF_DIRECTORY
+
+Remaining acceptance is independent source review and an approved hosted execution
+of the coherent candidate. Genuine service/CLI/startup behavior on native ARM is
+still unproved. An actual job failure must retain its failed producer and available
+private evidence; no local mocks or dependency metadata substitute for completion.
+The 600s acceptance rule remains unchanged and no hard host-return claim is made.
+
+
+## Hosted startup recovery qualification
+
+The original 44807729112 ARM result remains failed at generic registered-inspect,
+with guarded cleanup successful and no signed lifecycle acceptance. That label
+and elapsed time do not establish which original role failed. Docker 28's internal
+network path skips external connectivity programming, conflicting with this
+fixture's required loopback mappings; this is a concrete precondition defect,
+not retrospective proof of the original failure's exact actor.
+
+Before installer effects, the corrected coordinator requires the registered live
+Rekor and registry full CID/StartedAt/recipe and exact effective loopback bindings,
+then successful fixed HTTP requests from the coordinator host namespace. It
+records that namespace and binding evidence privately. A local Unix Docker
+endpoint and native ARM daemon remain required. There is no remote-daemon guess.
+Finite failure diagnostics distinguish closed role/phase/reason enums and bounded
+state booleans/exit codes, without raw commands, environment, errors or secrets.
+
+One isolated local AMD64 registry scratch confirmed an ordinary bridge's effective
+loopback mapping and host HTTP reachability; its exact container and network were
+removed. A separate isolated AMD64 canonical DB scratch completed its schema query
+and cleanup. These components neither identify the original ARM failure nor prove
+native ARM lifecycle, occupied-port behavior or signed qualification. No hosted
+rerun or publication is part of this correction.
+
+### Maintained-journey failure diagnostics
+
+Retry 44830200216 reached the maintained signed LOCAL journey after graph signing
+and selected runtime inspection. Its sole public result and fixed job-log error
+do not establish which lifecycle command/assertion failed. The cleanup boolean
+also conflates attempted failure with cleanup withheld for unreconciled initial
+ownership; no deletion failure is inferred from false alone. Original results
+remain unchanged.
+
+The diagnostic-only adapter now observes its private maintained module's original
+run/health calls, forwards original arguments/results/exceptions, and restores
+those callables on every exit. Public journey detail contains only a closed stage,
+entered/returned/raised producer state, and an exact bounded numeric result when
+available. A returned command followed by an assertion remains labelled returned,
+not falsely credited as the failing producer. Unknown private command names map
+to a fixed generic stage; stdout/stderr, exceptions, paths, environment and raw
+arguments are excluded. A missing status stays unknown, not zero.
+
+Cleanup detail independently states whether the supported destroy was entered,
+returned, raised, or withheld for unreconciled initial ownership; infrastructure
+cleanup is separately not-attempted, entered, passed, failed or raised. The exact
+existing cleanup guards/order and all nonzero outcomes are unchanged. Diagnostics
+never authorize cleanup, adoption, retry or qualification. Tests substitute the
+original producers and exercise forwarding, exceptions, missing status, health
+failure, post-command assertions and withheld/failed cleanup; they are not native
+ARM lifecycle evidence. No new hosted execution is part of this diagnostic change.
+
+### Full graph admission rejection classification
+
+Approved diagnostic run 44851790362 returned full-graph-admission/raised/exit2,
+with initial ownership unreconciled and infrastructure cleanup not attempted.
+The maintained call runs the independently provisioned Q against the signed
+bundle, runtime/index observation and source/platform expectations. Its normal
+sequence checks regular inputs, the closed bundle, bundle/index signatures,
+runtime provenance, source/platform policy and both immutable child/config byte
+joins. Exit2 alone does not identify which check rejected; host-side prior
+signatures do not substitute for this independent verification. No ARM-specific
+cause is established by the exported result, and no behavior fix follows from it.
+
+Only for this exact original full-graph command's recorded exit2, the observer
+now reads its original bounded regular stderr (64KiB maximum, nofollow/nonblock)
+and classifies one complete ASCII verifier error line against existing static
+error strings or the fixed fixture-transparency-failure prefix. The public value
+is a fixed error class only. Unknown text, missing bytes, unsupported encoding,
+control characters, duplicate error records or unterminated data stay unclassified.
+Dynamic suffixes, raw errors, paths and private values never enter the receipt.
+This is diagnostic text matching, not authenticated causal proof, acceptance or
+cleanup authority. Original errors/status and all verification remain unchanged.
+A real no-network verifier subprocess input-denial test exercises exit2 and the
+classifier; injected result tests cover other classes and forwarding. They do not
+reproduce the unavailable original ARM verification inputs or prove a lifecycle.
+
+### Public policy file-mode mismatch reproduced
+
+A local AMD64 component reproduced a concrete Q packaging defect, without using
+or altering an existing fixture service. The current builder privately re-stages
+the three PUBLIC policy inputs as 0600; COPY with chown65532 retains that mode.
+The maintained admission command intentionally runs Q as the host UID. That UID
+cannot read the resulting baked policy file owned by65532. The preserved ed5 Q
+binary and current verifier/admission/Dockerfile source bytes were identical.
+Using the exact original retained ed5 full-graph arguments and read-only inputs,
+a COPY-only scratch with current 0600 staging exited2 with permission denied for
+the fixed policy file. The original0444 Q control passed that read and reached
+expected registry connection refusal under network none. Neither is a full
+admission pass or a retrospective observation of the unavailable ARM stderr.
+Exact scratch containers and derived image were removed; originals were unchanged.
+Pre-build input-inventory and raw-config-ID FROM failures are retained separately.
+
+The narrow correction explicitly COPYs only those three PUBLIC policy files as
+0444, retaining owner65532. Private host staging remains0700/0600; default
+production target, all verifier checks, keys, protected runtime records and other
+image paths remain unchanged. This removes dependence on a caller's public-input
+mode while supporting the already admitted nonroot host UID. Fresh source-bound
+Q/native evidence is still required; the local component is not an ARM claim.
+
+### Source-level ordinary fixture install exit receipt
+
+The disposable hosted runner did not retain the original public-install private
+stderr. No authorized retrieval remains. The next diagnostic is a source-level
+checkpoint, not another error-phrase classifier: the signed launcher maintains a
+closed phase as its actual control flow advances, and its existing EXIT cleanup
+emits one canonical JSON record on the stderr the maintained caller already
+captures privately. Only install with the baked ordinary loopback Q pin and all
+matching verified-bootstrap expectations can emit it. Production/nonfixture,
+noninstall and unvalidated callers emit nothing. There is no new option,
+environment selector, file, mount, issuer or authority.
+
+The record contains only profile, finite phase and original shell exit status
+BEFORE existing cleanup. It is not a cleanup result: original0 followed by an
+uncertain cleanup can still produce caller nonzero. Reporting failure is ignored
+so it cannot change exit/cleanup decisions. The unchanged cleanup then runs as
+before; no current instance receives diagnostic writes. Raw arguments, paths,
+environment, exception messages, producer text, stdout and capabilities are absent.
+A whole-line delimiter separates the record from unterminated child text. The
+host observer accepts exactly one canonical closed record from bounded original
+private stderr, rejects malformed/duplicate/partial records and retains the
+original caller result separately. Receipt data grants no success, cleanup,
+trust, capability or admission authority. Phase is the last reached checkpoint,
+not an inferred root cause or a claim that its operation succeeded.
+
+Actual public launcher subprocess tests use one owned stub executable for Docker
+and dummy package inputs; no crypto, daemon or candidate runtime is executed.
+They falsify four reached failure phases, preserve actual EXIT statuses0/7 with
+and without a working diagnostic fd, exclude production/noninstall/unvalidated
+receipts, and ensure no instance or resource mutation at those boundaries. They
+are source/control-flow evidence only, not a hosted ARM install pass.
+
+### Docker28 cache helper inspection
+
+The next source-level receipt identified cache-publication. Its current-helper
+observation template referenced ImageManifestDescriptor directly in an `if`.
+Actual retained Docker28.0.4 native container inspect snapshots omit that key.
+The official CLI28 inspector retries the typed template against raw JSON with
+missingkey=error, so even the conditional fails when the key is absent. Also,
+omitting the entire descriptor branch would lose three separators and shift the
+trailing Running value out of its fixed column.
+
+The narrow template correction uses safe map index lookup and emits four empty
+witness columns when the optional descriptor is absent. This permits only the
+existing authenticated exact config-ID path; a selected-manifest identity still
+requires every original typed witness field. Full CID/running/image/owner/project,
+command/isolation/tmpfs/mount and all potential-API bind/volume ancestry checks
+remain unchanged. Missing or contradictory evidence never grants exemption.
+
+A private official Docker28 client replayed the exact old/new template against
+actual retained Docker28 inspect JSON from both native architectures: old exited1
+on the missing field, new returned0 with ten fields and the correct Running
+column. A populated Docker29 descriptor observation preserved all witness fields.
+This is actual CLI/template evidence using a private fixed read-only Unix replay,
+not a native ARM lifecycle or retrospective original-stderr observation. A prior
+created-only local Docker29 API1.48 probe was stopped at its schema mismatch and
+removed exactly; API downgrade did not strip the descriptor. Its failure is
+preserved, not credited as Docker28 behavior. The replay socket was removed.
+No Docker28 host dependency, PATH change, daemon change or telemetry expansion is
+introduced; hosted full cache publication remains to be exercised on fresh source.
+
+### Restore-admit negative observer compatibility
+
+The next run returned restore-provision0 before the empty inventory negative,
+which uses its own Popen observer rather than the normal run wrapper. Two
+observer-owned inspect templates still directly referenced the optional
+ImageManifestDescriptor: the exact-owner identity row and retained owner JSON.
+Docker28 fails these lookups before the observation can establish inventory-cause
+evidence. Observation failure does not replace or skip the original Docker rm,
+so the overall failed harness is not proof that restore provisioning failed or
+that the backend accepted an invalid import.
+
+Both reached templates now use the same safe optional-key lookup. Identity keeps
+exactly four empty witness columns; owner JSON uses null when absent. Only an
+already admitted exact config-ID can use the absent-descriptor case. The original
+selected-manifest branch still requires the entire typed child/media/size/platform
+witness, and all owner/project/fullCID/operation/plan/source and stopped-identity
+checks remain. Before-removal and retained-after-caller modes keep forwarding
+original commands/results unchanged; no product image, public interface, writer,
+capability, import or cleanup authority changes.
+
+The private official Docker28 client replay on actual retained native28 snapshots
+from both architectures gives old1/new0 for both templates, with eleven identity
+columns and nullable owner witness. A populated29 descriptor positive retains its
+witness. The replay used only a fixed private read-only Unix endpoint, removed
+on completion; no real Docker daemon or current fixture was contacted. POSIX
+observer tests separately prove config-ID absent-witness capture, selected-manifest
+missing-witness denial, exact original rm forwarding/status and stopped-only
+retained observation. These are compatibility/guard components, not a new native
+restore or retrospectively observed original denial cause.
+
+The reached restore/import/admit/restored-start/final-stop/supported-destroy path
+was scanned for the identical direct optional-field mechanism: product projections
+already use safe index and infrastructure readers use full JSON/get. Remaining
+direct templates in the unrelated interrupted-initial observer and three port
+control helpers are recorded as unreached and unchanged, not credited on Docker28.

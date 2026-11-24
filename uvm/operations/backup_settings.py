@@ -1,6 +1,8 @@
 """Atomic immutable desired backup settings publication."""
 from __future__ import annotations
 
+from uvm.assessment.command_occupancy import guard_assessment
+
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -48,6 +50,7 @@ def commit_backup_settings(connection, *, deployment_id: str, principal: str,
     target = deployment_audit_id(deployment_id)
     request_digest = canonical_digest({"principal_id": principal,
         "deployment_id": deployment_id, "body": body})
+    guard_assessment(connection, command_id, principal, action, request_digest)
     prior = connection.execute(sa.select(assessment_command_receipts).where(
         assessment_command_receipts.c.command_id == command_id).with_for_update()).mappings().one_or_none()
     if prior is not None:
@@ -144,6 +147,7 @@ def commit_backup_settings(connection, *, deployment_id: str, principal: str,
         "outcome": "desired_committed"}
     if disposable_failpoint == "receipt":
         raise ObserverSettingsUnavailable("disposable receipt write failure fixture")
+    guard_assessment(connection, command_id, principal, action, request_digest)
     connection.execute(assessment_command_receipts.insert().values(
         command_id=command_id, principal_id=principal, action=action,
         target_id=target, request_digest=request_digest, decision_id=decision_id,

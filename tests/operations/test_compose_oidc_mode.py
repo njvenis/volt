@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
 import hashlib
 import tempfile
 from pathlib import Path
 import unittest
 from unittest.mock import patch
+import subprocess
 
 from uvm.auth.service import load_oidc_config
 from deploy.compose.setup import (allowed_host_names, compose_environment, demo_identity,
                                   demo_password_verifier, inspect_image, validate_external,
                                   validate_okta_publisher, compose_files, identity_secret_sources,
-                                  validate_identity_secret_mounts, resolved_compose, compose)
+                                  validate_identity_secret_mounts, resolved_compose, compose,
+                                  local_auth_configuration, compose_env_line,
+                                  compose_instance_path, exclusive_instance_lock,
+                                  capability_from_delivery, load_instance, SECRET_SIZES)
 
 
 def config() -> dict:
@@ -43,6 +48,7 @@ class ExternalOIDCModeTests(unittest.TestCase):
                 ({"mode":"external", "okta_publisher_config_sha256":None}, {}),
                 ({"mode":"external", "okta_publisher_config_sha256":"sha256-test"},
                     {"okta-publisher.json":publisher_config,"okta_service_private_key":private_key}),
+                ({"mode":"local", "okta_publisher_config_sha256":None}, {}),
             )
             for info, expected in cases:
                 with self.subTest(mode=info["mode"], publisher=bool(expected)):
@@ -62,6 +68,14 @@ class ExternalOIDCModeTests(unittest.TestCase):
         self.assertIn("/package/compose/okta-publisher.yaml",compose_files(external))
         external["okta_publisher_config_sha256"] = None
         self.assertNotIn("/package/compose/okta-publisher.yaml",compose_files(external))
+        local = {"mode":"local", "compose_directory":"/package/compose", "local_recovery_acknowledgement":{"status":"applied"}}
+        self.assertEqual(compose_files(local),["-f","/package/compose/compose.yaml","-f","/package/compose/local.yaml"])
+        restoring = {**local, "restore_pending":True, "restore_imported":True}
+        self.assertEqual(compose_files(restoring)[-2:], ["-f","/package/compose/local-restore.yaml"])
+        restoring["restore_capabilities_revoked"] = True
+        self.assertEqual(compose_files(restoring)[-2:], ["-f","/package/compose/local-restore.yaml"])
+        restoring["restore_sessions_revoked"] = True
+        self.assertEqual(compose_files(restoring), compose_files(local))
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory); (root/".env").write_text("test\n")
             info={**info,"env_sha256":hashlib.sha256((root/".env").read_bytes()).hexdigest()}
@@ -128,6 +142,185 @@ class ExternalOIDCModeTests(unittest.TestCase):
         self.assertNotIn(password, json.dumps(value))
         self.assertEqual(hashlib.scrypt(password.encode(), salt=bytes.fromhex(value["salt"]),
             n=2**15, r=8, p=1, dklen=32, maxmem=64 * 1024 * 1024).hex(), value["password_hash"])
+
+    def test_local_auth_file_binds_exact_install_key_delivery_session_and_peer_scope(self):
+        import uuid
+        installation = str(uuid.uuid4())
+        key_id = str(uuid.uuid4())
+        config = local_auth_configuration(installation, key_id,
+            "http://127.0.0.1:46180", 46180, "10.240.0.1")
+        self.assertEqual(config["schema_version"], 1)
+        self.assertEqual(config["installation_id"], installation)
+        self.assertEqual(config["secret_source"], {"kind":"encrypted_local_v1",
+            "secret_source_id":key_id,"key_path":"/run/uvm-connector/local-key"})
+        self.assertEqual(config["bootstrap_delivery"], {"kind":"private_file",
+            "path":"/run/volt-bootstrap/capability"})
+        self.assertEqual(config["session_policy"], {"ttl_seconds":3600})
+        self.assertEqual(config["trusted_ingress"]["allowed_peer_cidrs"],
+            ["127.0.0.1/32", "10.240.0.1/32"])
+        with self.assertRaisesRegex(SystemExit, "exact loopback HTTP origin"):
+            local_auth_configuration(installation, key_id, "https://volt.example.org", 46180,
+                                     "10.240.0.1")
+
+    def test_runtime_helper_persists_the_host_bind_path_without_rewriting_spaces_or_dollars(self):
+        host_path = "/home/Operator/VOLT work/$archive/instance"
+        self.assertEqual(compose_instance_path(Path("/state"), runtime_prepare=True,
+            host_instance_directory=host_path), host_path)
+        self.assertEqual(compose_instance_path(Path("/state"), runtime_prepare=False,
+            host_instance_directory=None), "/state")
+        for unsafe in ("relative/path", "/path,with-comma", "/path:with-colon"):
+            with self.subTest(path=unsafe), self.assertRaisesRegex(SystemExit, "absolute host instance path"):
+                compose_instance_path(Path("/state"), runtime_prepare=True,
+                    host_instance_directory=unsafe)
+
+    def test_capability_delivery_parser_extracts_only_matching_versioned_purpose(self):
+        from uvm.auth.local import _new_capability
+        token = _new_capability("setup", "fixture-install", None, 1, 0)[2]
+        document = json.dumps({"schema_version":1, "purpose":"setup", "capability":token,
+            "expires_in_seconds":1800}).encode()
+        self.assertEqual(capability_from_delivery(document, "prepare-setup"), token)
+        for operation, altered in (
+            ("prepare-setup", {"schema_version":1, "purpose":"recovery", "capability":token,
+                "expires_in_seconds":900}),
+            ("issue-recovery", {"schema_version":1, "purpose":"recovery", "capability":token,
+                "expires_in_seconds":3600}),
+            ("issue-enrolment", {"schema_version":1, "purpose":"enrolment", "capability":token,
+                "expires_in_seconds":900, "debug":"secret"}),
+        ):
+            with self.subTest(operation=operation), self.assertRaisesRegex(SystemExit, "delivery document"):
+                capability_from_delivery(json.dumps(altered).encode(), operation)
+
+    def test_instance_lock_rejects_concurrent_owner_and_releases_stale_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with exclusive_instance_lock(root):
+                with self.assertRaisesRegex(SystemExit, "another VOLT lifecycle"):
+                    with exclusive_instance_lock(root):
+                        pass
+            self.assertEqual((root/".install.lock").stat().st_mode & 0o777, 0o600)
+            with exclusive_instance_lock(root):
+                pass
+
+    def test_local_instance_load_requires_private_matching_key_and_config(self):
+        import uuid
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)/"instance"
+            (root/"secrets").mkdir(parents=True)
+            root.chmod(0o700)
+            for name in SECRET_SIZES:
+                (root/"secrets"/name).write_bytes(b"private-secret\n")
+                (root/"secrets"/name).chmod(0o600)
+            for name in ("recovery-server.crt","recovery-server.key","recovery-client.crt",
+                         "recovery-client.key","recovery-ca.crt"):
+                (root/"secrets"/name).write_bytes(b"private-tls\n")
+                (root/"secrets"/name).chmod(0o600)
+            installation=str(uuid.uuid4()); key_id=str(uuid.uuid4())
+            local=local_auth_configuration(installation,key_id,"http://127.0.0.1:46180",46180,"10.240.0.1")
+            config_file=root/"local-auth.json"
+            config_file.write_text(json.dumps(local)+"\n"); config_file.chmod(0o600)
+            (root/"secrets"/"local-auth-key").write_bytes(b"k"*32)
+            (root/"secrets"/"local-auth-key").chmod(0o600)
+            (root/"secrets"/"bootstrap-delivery").mkdir(mode=0o700)
+            (root/"secrets"/"local-start-admission").mkdir(mode=0o700)
+            journal_id=str(uuid.uuid4())
+            recovery={"schema_version":1,"profile":"volt_local_recovery_v1",
+                "installation_id":installation,"journal_id":journal_id,
+                "restore_generation":0,"recovery_epoch_id":None}
+            (root/"local-recovery.json").write_text("{}\n"); (root/"local-recovery.json").chmod(0o600)
+            for name in ("local-recovery-runtime","local-recovery-authority","local-restore-fence"):
+                (root/"secrets"/name).mkdir(mode=0o700)
+            for relative in ("local-recovery-runtime/issuer.key","local-recovery-runtime/issuer.pub",
+                    "local-recovery-runtime/operator.pub","local-recovery-runtime/material.key",
+                    "local-recovery-authority/operator.key","local-recovery-authority/operator.pub",
+                    "local-recovery-authority/issuer.pub","local-recovery-authority/host.json",
+                    "local-restore-fence/fence.json"):
+                path=root/"secrets"/relative; path.write_bytes(b"fixture\n"); path.chmod(0o600)
+            (root/"oidc.json").write_text("{}\n"); (root/"oidc.json").chmod(0o600)
+            env=root/".env"; env.write_text("private\n"); env.chmod(0o600)
+            metadata={"format_version":1,"initialized":True,"mode":"local","project":"volt-local-test",
+                "bootstrap_principal":"","platform":"linux/amd64","image":"sha256:test",
+                "image_admission":{"id":"sha256:test","platform":"linux/amd64"},
+                "oidc_config_sha256":hashlib.sha256((root/"oidc.json").read_bytes()).hexdigest(),
+                "installation_id":installation,
+                "local_auth_config_sha256":hashlib.sha256(config_file.read_bytes()).hexdigest(),
+                "local_recovery_journal_id":journal_id,"local_recovery_custody":recovery,
+                "ports":[46180,46181,46190],"gateway":"10.240.0.1",
+                "env_sha256":hashlib.sha256(env.read_bytes()).hexdigest()}
+            (root/"instance.json").write_text(json.dumps(metadata)); (root/"instance.json").chmod(0o600)
+            from uvm.installer.recovery_authority import custody_inventory
+            metadata["local_recovery_inventory"] = custody_inventory(root)
+            (root/"instance.json").write_text(json.dumps(metadata))
+            (root/"secrets/local-restore-fence").chmod(0o710)
+            (root/"secrets/local-restore-fence/fence.json").write_text(json.dumps(recovery))
+            (root/"secrets/local-restore-fence/fence.json").chmod(0o640)
+            with patch("deploy.compose.setup.FENCE_RUNTIME_GID", os.getgid()):
+                self.assertEqual(load_instance(str(root))[1]["installation_id"],installation)
+            (root/"secrets"/"local-auth-key").write_bytes(b"k"*31)
+            with self.assertRaisesRegex(SystemExit,"missing or unsafe"):
+                load_instance(str(root))
+
+    def test_local_compose_config_keeps_private_mounts_and_dollar_paths_exact(self):
+        import uuid
+        with tempfile.TemporaryDirectory(prefix="volt local $ state ") as directory:
+            root = Path(directory) / "instance with $ and spaces"
+            secrets = root / "secrets"
+            secrets.mkdir(parents=True)
+            for name in ("uvm_db_password", "ce_db_password", "ce_admin_password", "ce_secret_key",
+                         "ce_credential_key", "uvm_cursor_secret", "oidc_client_secret",
+                         "oidc_sync_secret", "oidc_operator_secret", "recovery-server.crt",
+                         "recovery-server.key", "recovery-ca.crt", "local-auth-key"):
+                (secrets / name).write_bytes(b"private fixture\n")
+            (secrets / "bootstrap-delivery").mkdir(mode=0o700)
+            (root / "oidc.json").write_text("{}\n")
+            local_source = str(uuid.uuid4())
+            (root / "local-auth.json").write_text(json.dumps({"secret_source":{"secret_source_id":local_source}})+"\n")
+            values = {
+                "VOLT_PROJECT":"volt-delivery-config-test", "VOLT_INSTANCE_DIR":str(root),
+                "VOLT_IMAGE":"ghcr.io/njvenis/volt@sha256:" + "a" * 64,
+                "VOLT_IMAGE_ID":"sha256:" + "b" * 64, "VOLT_PLATFORM":"linux/amd64",
+                "VOLT_AUTH_MODE":"local", "VOLT_LOCAL_SECRET_SOURCE_ID":local_source,
+                "VOLT_OKTA_PUBLISHER_CONFIG_FILE":"", "VOLT_DEMO_ADMIN_SUBJECT":"",
+                "VOLT_BOOTSTRAP_PRINCIPAL":"", "VOLT_NATIVE_GRANTABLE_ENVELOPE":"{}",
+                "VOLT_OWNER_TOKEN":"owner-fixture", "VOLT_SUBNET":"10.242.0.0/28",
+                "VOLT_GATEWAY":"10.242.0.1", "VOLT_HTTP_PORT":"46180",
+                "VOLT_RECOVERY_PORT":"46181", "VOLT_OIDC_PORT":"46190",
+                "VOLT_ALLOWED_HOSTS":"localhost,127.0.0.1",
+            }
+            envfile = root / ".env"
+            envfile.write_text("\n".join(compose_env_line(name,value) for name,value in values.items())+"\n")
+            info = {"mode":"local", "project":"volt-delivery-config-test",
+                "owner_token":"owner-fixture", "image":values["VOLT_IMAGE"],
+                "image_admission":{"id":values["VOLT_IMAGE_ID"]},
+                "platform":"linux/amd64", "compose_directory":str(Path(__file__).resolve().parents[2] / "deploy/compose"),
+                "env_sha256":hashlib.sha256(envfile.read_bytes()).hexdigest(),
+                "okta_publisher_config_sha256":None}
+            files, resolved_env, _ = resolved_compose(root, info)
+            self.assertEqual(files[-2:], ["-f",str(Path(__file__).resolve().parents[2] / "deploy/compose/local-restore.yaml")])
+            self.assertEqual(resolved_env, envfile)
+            result = subprocess.run(("docker", "compose", "-f", str(Path(__file__).resolve().parents[2] / "deploy/compose/compose.yaml"),
+                "-f", str(Path(__file__).resolve().parents[2] / "deploy/compose/local.yaml"),
+                "--env-file", str(envfile), "config", "--format", "json"),
+                text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            resolved = json.loads(result.stdout)
+            service = resolved["services"]["volt"]
+            self.assertEqual(set(resolved["services"]), {"volt"})
+            self.assertEqual(service["environment"]["UVM_AUTH_MODE"], "local")
+            self.assertEqual(service["environment"]["UVM_OIDC_CONFIG_FILE"], "")
+            mounts = {item["target"]:item for item in service["volumes"]}
+            self.assertEqual(mounts["/run/secrets/local-auth.json"]["source"].replace("$$", "$"),
+                             str(root / "local-auth.json"))
+            self.assertTrue(mounts["/run/secrets/local-auth.json"]["read_only"])
+            self.assertTrue(mounts["/run/secrets/local-auth-key"]["read_only"])
+            self.assertFalse(mounts["/run/volt-bootstrap"].get("read_only", False))
+            info.update(restore_pending=True, restore_imported=True)
+            restore_files, _, _ = resolved_compose(root, info)
+            self.assertEqual(restore_files[-2:], ["-f",str(Path(__file__).resolve().parents[2] / "deploy/compose/local-restore.yaml")])
+            fenced = subprocess.run(("docker", "compose", *restore_files, "--env-file", str(envfile),
+                "-p", info["project"], "config", "--format", "json"),
+                text=True, capture_output=True, check=False)
+            self.assertEqual(fenced.returncode, 0, fenced.stderr)
+            self.assertEqual(json.loads(fenced.stdout)["services"]["volt"].get("ports", []), [])
 
     def test_okta_publisher_installer_binds_group_and_provider_mapping_without_credentials(self):
         with tempfile.TemporaryDirectory() as directory:

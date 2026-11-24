@@ -1,0 +1,79 @@
+# Persisted local-account mode. This overlay never starts the synthetic OIDC
+# provider and mounts only the local-auth configuration/key plus the narrow
+# private bootstrap-delivery directory with atomic-replace support.
+services:
+  volt:
+    environment:
+      UVM_AUTH_MODE: local
+      UVM_OIDC_DEPLOYMENT_MODE: local
+      UVM_OIDC_CONFIG_FILE: ""
+      UVM_LOCAL_AUTH_CONFIG_FILE: /etc/volt/local-auth.json
+      UVM_CONNECTOR_LOCAL_KEY_FILE: /run/secrets/local-auth-key
+      UVM_CONNECTOR_LOCAL_KEY_ID: ${VOLT_LOCAL_SECRET_SOURCE_ID:?run setup first}
+      UVM_LOCAL_RECOVERY_CONFIG_FILE: /etc/volt/local-recovery.json
+      UVM_LOCAL_START_IMAGE_ID: ${VOLT_IMAGE_ID:?run setup first}
+      UVM_LOCAL_START_RESOURCES_SHA256: ${VOLT_LOCAL_START_RESOURCES_SHA256:-}
+      UVM_SCANNER_EVIDENCE_DIR: /opt/uvm/state/scanner-evidence
+    volumes:
+      - type: bind
+        source: ${VOLT_INSTANCE_DIR:?run setup first}/local-auth.json
+        target: /run/secrets/local-auth.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/local-auth-key
+        target: /run/secrets/local-auth-key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/bootstrap-delivery
+        target: /run/volt-bootstrap
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${VOLT_INSTANCE_DIR:?run setup first}/local-recovery.json
+        target: /run/secrets/local-recovery.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/local-recovery-runtime/issuer.key
+        target: /run/secrets/local-recovery-issuer.key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/local-recovery-runtime/issuer.pub
+        target: /run/secrets/local-recovery-issuer.pub
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/local-recovery-runtime/operator.pub
+        target: /run/secrets/local-recovery-operator.pub
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/local-recovery-runtime/material.key
+        target: /run/secrets/local-recovery-material.key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/local-restore-fence
+        target: /run/volt-restore-fence
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${VOLT_INSTANCE_DIR:?run setup first}/secrets/local-start-admission
+        target: /run/volt-start-admission
+        read_only: true
+        bind:
+          create_host_path: false
+    labels:
+      volt.installation.mode: local-auth

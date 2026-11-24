@@ -293,7 +293,8 @@ def boot_log_events(raw):
     # observations from a bounded tail, never a claim of current phase/readiness.
     if type(raw)is not bytes or len(raw)>1024*1024 or raw and not raw.endswith(b'\n'):return {'status':'unavailable'}
     events=[]
-    for line in raw.splitlines():
+    for line in raw.split(b'\n'):
+        if b'\r'in line:continue
         stamp,space,message=line.partition(b' ')
         if not space or message not in BOOT_LOG_EVENTS:continue
         if re.fullmatch(rb'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z',stamp)is None:continue

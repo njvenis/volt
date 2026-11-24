@@ -16,7 +16,7 @@ class BootLogTests(unittest.TestCase):
   for marker in h.BOOT_LOG_EVENTS:self.assertIn("api_report '"+marker.decode()+"'",source)
  def test_parser_overflow_truncation_unknown_and_unstamped_are_closed(self):
   for raw in(b'X'*(1024*1024+1),STAMP+b'G7_READINESS=ready', (STAMP+b'G7_READINESS=ready\n')*33):self.assertEqual(h.boot_log_events(raw),{'status':'unavailable'})
-  for raw in(b'G7_READINESS=ready\n',b'PRIVATE G7_READINESS=ready\n',b'\xef\xbb\xbf'+STAMP+b'G7_READINESS=ready\n',STAMP+b'G7_READINESS=unknown\n'):
+  for raw in(b'G7_READINESS=ready\n',b'PRIVATE G7_READINESS=ready\n',b'\xef\xbb\xbf'+STAMP+b'G7_READINESS=ready\n',STAMP+b'G7_READINESS=unknown\n',STAMP+b'G7_READINESS=ready\rPRIVATE\n',STAMP+b'G7_READINESS=ready\r\n'):
    self.assertEqual(h.boot_log_events(raw)['events'],[])
  def setup(self,root):
   value,e,row=fixture.FixtureHealthTests().fixture(root);bin=root/'bin';bin.mkdir();data=root/'row';data.write_text(json.dumps(row));logs=root/'logs';logs.write_bytes(STAMP+b'G7_LOCAL_START=host-release-validated\n');calls=root/'calls'
@@ -39,6 +39,13 @@ esac
    self.assertEqual(commands[1],'container logs --timestamps --tail 2000 '+row['id'])
    self.assertTrue(commands[2].startswith('container inspect '+row['id']+' '))
    self.assertNotIn(row['id'],json.dumps(r));self.assertNotIn('PRIVATE',json.dumps(r))
+ def test_actual_cli_cr_junk_record_cannot_forge_an_allowlisted_event(self):
+  with tempfile.TemporaryDirectory()as d:
+   value,e,row,script,logs,calls,env=self.setup(Path(d))
+   logs.write_bytes(STAMP+b'G7_READINESS=ready\rPRIVATE_JUNK\n'+STAMP+b'G7_LOCAL_START=host-release-validated\n')
+   with patch.dict(os.environ,env):r=h.failed_health_projection(value,e)
+   self.assertEqual(r['boot_log'],{'status':'observed','scope':'bounded-tail','events':['host-release-validated']})
+   self.assertNotIn('PRIVATE',json.dumps(r));self.assertNotIn('ready',r['boot_log']['events'])
  def test_actual_log_nonzero_oversize_and_blocked_producer_are_finite_unavailable(self):
   with tempfile.TemporaryDirectory()as d:
    root=Path(d);value,e,row,script,logs,calls,env=self.setup(root)

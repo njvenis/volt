@@ -9,7 +9,9 @@ class HealthSubcheckTests(unittest.TestCase):
   for name in('api','ce-web','ce-worker','ce-beat','exception-warning-worker','recovery-control'):(state/('pid-'+name)).write_text(str(live.pid))
   (state/'ready').touch();(state/'runtime-mode').write_text('runtime')
   identity=root/'identity';identity.write_text('uvm_g7_okta_publisher_healthy(){ return '+('1'if phase=='oidc-publisher'else'0')+'; }\n'+('return 23\n'if phase=='identity-runtime'else''))
-  python=root/'python';python.write_text('#!/bin/sh\nexit '+('7'if phase in('broker-readiness','recovery-port','warning-health')else'0')+'\n');python.chmod(0o700)
+  python=root/'python';body='exit '+('7'if phase in('broker-readiness','recovery-port')else'0')
+  if phase=='warning-health':body='case "$*" in *exception_warning_healthcheck*) exit 7;; esac\nexit 0'
+  python.write_text('#!/bin/sh\n'+body+'\n');python.chmod(0o700)
   for name in('pg_isready','valkey-cli','curl'):
    body='exit 0'
    if name=='pg_isready':body='exit '+('2'if phase=='postgres'else'0')

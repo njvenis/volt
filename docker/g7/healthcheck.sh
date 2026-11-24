@@ -5,7 +5,7 @@ health_phase=identity-runtime
 health_exit() {
   local status=$?
   trap - EXIT
-  if (( status != 0 )); then printf 'VOLT_HEALTH_CHECK_V1 %s\n' "$health_phase" >&2 || :; fi
+  if (( status != 0 )); then printf '\nVOLT_HEALTH_CHECK_V1 %s\n' "$health_phase" >&2 || :; fi
   exit "$status"
 }
 trap health_exit EXIT

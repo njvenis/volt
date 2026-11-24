@@ -46,7 +46,7 @@ wait_healthy
         runtime={'image_id':digest,'image_config_id':config,'image_index_digest':index,'source_revision':revision,'source_snapshot':snapshot,'platform':'linux/arm64'}
         value={'private':str(private),'image_id':digest,'source_revision':revision,'source_snapshot':snapshot}
         (e/'fixture-full-runtime-admission.exit').write_text('0\n');(e/'fixture-full-runtime-admission.stdout').write_text(json.dumps({'runtime':runtime}));(state/'instance.json').write_text(json.dumps({'owner_token':owner,'project':project,'mode':'local','platform':'linux/arm64','image_admission':{'id':digest,'source_revision':revision,'source_snapshot':snapshot}}))
-        row={'id':'1'*64,'name':'/'+project+'-volt-1','created':'2026-01-01T00:00:00Z','started':'2026-01-01T00:00:01Z','image':digest,'reference':'127.0.0.1:46150/volt@'+index,'owner':owner,'project':project,'revision':revision,'snapshot':snapshot,'status':'running','exit':0,'oom':False,'restarting':False,'restarts':0,'health':{'status':'unhealthy','streak':3,'logs':[{'exit':1,'start':'2026-01-01T00:00:02Z','end':'2026-01-01T00:00:03Z'}]}}
+        row={'id':'1'*64,'name':'/'+project+'-volt-1','created':'2026-01-01T00:00:00Z','started':'2026-01-01T00:00:01Z','image':digest,'reference':'127.0.0.1:46150/volt@'+index,'owner':owner,'project':project,'revision':revision,'snapshot':snapshot,'status':'running','exit':0,'oom':False,'restarting':False,'restarts':0,'health':{'status':'unhealthy','streak':3,'logs':[{'exit':1,'start':'2026-01-01T00:00:02Z','end':'2026-01-01T00:00:03Z','checks':['VOLT_HEALTH_CHECK_V1 broker-readiness']}]}}
         return value,e,row
     def test_actual_cli_projection_and_drift_no_output_or_identity_leak(self):
         with tempfile.TemporaryDirectory()as d:
@@ -57,10 +57,13 @@ printf '%s\\n' "$3" >> "$CALLS"
 cat "$ROW"
 ''');script.chmod(0o700)
             with patch.dict(os.environ,{'PATH':str(bin)+':'+os.environ['PATH'],'CALLS':str(calls),'ROW':str(data)}):
-                r=h.failed_health_projection(value,e);self.assertEqual(r['status'],'observed');self.assertEqual(r['health_exit_codes'],[1]);self.assertEqual(calls.read_text().splitlines(),['volt-easy-delivery-'+('a'*12)+'-volt-1','1'*64])
+                r=h.failed_health_projection(value,e);self.assertEqual(r['status'],'observed');self.assertEqual(r['health_exit_codes'],[1]);self.assertEqual(r['health_check_phases'],['broker-readiness']);self.assertEqual(calls.read_text().splitlines(),['volt-easy-delivery-'+('a'*12)+'-volt-1','1'*64])
                 self.assertNotIn('aaaa',json.dumps(r));self.assertNotIn('2026',json.dumps(r));self.assertNotIn('sha256',json.dumps(r))
                 for key,wrong in [('owner','9'*64),('image','sha256:'+'9'*64),('revision','9'*40),('exit',False),('oom',0)]:
                     data.write_text(json.dumps(row|{key:wrong}));self.assertEqual(h.failed_health_projection(value,e),{'status':'unavailable'})
+                for markers in([True],['VOLT_HEALTH_CHECK_V1 PRIVATE'],['VOLT_HEALTH_CHECK_V1 broker-readiness']*2,'PRIVATE'):
+                    changed=json.loads(json.dumps(row));changed['health']['logs'][0]['checks']=markers;data.write_text(json.dumps(changed))
+                    self.assertEqual(h.failed_health_projection(value,e),{'status':'unavailable'})
                 data.write_text(json.dumps(row));(e/'fixture-full-runtime-admission.exit').write_text('2\n');self.assertEqual(h.failed_health_projection(value,e),{'status':'unavailable'})
             self.assertNotIn('Health.Log.Output',h.HEALTH_INSPECT_TEMPLATE);self.assertNotIn('.Config.Env',h.HEALTH_INSPECT_TEMPLATE)
     def test_actual_cli_oversize_and_deadline_are_finite_unavailable(self):
@@ -76,6 +79,7 @@ cat "$ROW"
         with tempfile.TemporaryDirectory()as d:
             value,e,row=self.fixture(Path(d));counter=[0]
             def run(*args,**kwargs):
+                if args[0][2]=='logs':return subprocess.CompletedProcess(args,0)
                 counter[0]+=1;r=row|({'started':'DIFFERENT'}if counter[0]==2 else{});kwargs['stdout'].write(json.dumps(r).encode());return subprocess.CompletedProcess(args,0)
             with patch.object(h.subprocess,'run',side_effect=run):self.assertEqual(h.failed_health_projection(value,e),{'status':'unavailable'})
             self.assertEqual(counter[0],2)

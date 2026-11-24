@@ -266,9 +266,54 @@ def health_phase_receipt(raw):
         return r
     except (ValueError,UnicodeDecodeError,TypeError):return None
 
-# Fixed metadata-only projection: raw Health.Log.Output/config/env never enters
-# this subprocess stream. The daemon retains at most five health log entries.
-HEALTH_INSPECT_TEMPLATE='{"id":{{json .Id}},"name":{{json .Name}},"created":{{json .Created}},"image":{{json .Image}},"reference":{{json .Config.Image}},"owner":{{json (index .Config.Labels "volt.compose.owner-token")}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"revision":{{json (index .Config.Labels "org.opencontainers.image.revision")}},"snapshot":{{json (index .Config.Labels "org.volt.compose.source-snapshot")}},"started":{{json .State.StartedAt}},"status":{{json .State.Status}},"exit":{{json .State.ExitCode}},"oom":{{json .State.OOMKilled}},"restarting":{{json .State.Restarting}},"restarts":{{json .RestartCount}},"health":{{if .State.Health}}{"status":{{json .State.Health.Status}},"streak":{{json .State.Health.FailingStreak}},"logs":[{{range $i,$l:=.State.Health.Log}}{{if $i}},{{end}}{"exit":{{json $l.ExitCode}},"start":{{json $l.Start}},"end":{{json $l.End}}}{{end}}]}{{else}}null{{end}}}'
+HEALTH_CHECK_PHASES=frozenset(('identity-runtime', 'ready-marker', 'critical-marker', 'quiesce-marker', 'runtime-mode', 'recovery-process', 'recovery-port', 'broker-readiness', 'api-process', 'web-process', 'worker-process', 'beat-process', 'warning-process', 'warning-health', 'postgres', 'valkey', 'api-http', 'oidc-provider', 'oidc-proxy', 'oidc-publisher', 'verification-web', 'web-http'))
+# Only exact fixed marker lines are projected; arbitrary health output stays private.
+HEALTH_INSPECT_TEMPLATE='{"id":{{json .Id}},"name":{{json .Name}},"created":{{json .Created}},"image":{{json .Image}},"reference":{{json .Config.Image}},"owner":{{json (index .Config.Labels "volt.compose.owner-token")}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"revision":{{json (index .Config.Labels "org.opencontainers.image.revision")}},"snapshot":{{json (index .Config.Labels "org.volt.compose.source-snapshot")}},"started":{{json .State.StartedAt}},"status":{{json .State.Status}},"exit":{{json .State.ExitCode}},"oom":{{json .State.OOMKilled}},"restarting":{{json .State.Restarting}},"restarts":{{json .RestartCount}},"health":{{if .State.Health}}{"status":{{json .State.Health.Status}},"streak":{{json .State.Health.FailingStreak}},"logs":[{{range $i,$l:=.State.Health.Log}}{{if $i}},{{end}}{"exit":{{json $l.ExitCode}},"start":{{json $l.Start}},"end":{{json $l.End}},"checks":[{{$sep := ""}}{{range $line := split $l.Output "\\n"}}{{if or (eq $line "VOLT_HEALTH_CHECK_V1 identity-runtime") (eq $line "VOLT_HEALTH_CHECK_V1 ready-marker") (eq $line "VOLT_HEALTH_CHECK_V1 critical-marker") (eq $line "VOLT_HEALTH_CHECK_V1 quiesce-marker") (eq $line "VOLT_HEALTH_CHECK_V1 runtime-mode") (eq $line "VOLT_HEALTH_CHECK_V1 recovery-process") (eq $line "VOLT_HEALTH_CHECK_V1 recovery-port") (eq $line "VOLT_HEALTH_CHECK_V1 broker-readiness") (eq $line "VOLT_HEALTH_CHECK_V1 api-process") (eq $line "VOLT_HEALTH_CHECK_V1 web-process") (eq $line "VOLT_HEALTH_CHECK_V1 worker-process") (eq $line "VOLT_HEALTH_CHECK_V1 beat-process") (eq $line "VOLT_HEALTH_CHECK_V1 warning-process") (eq $line "VOLT_HEALTH_CHECK_V1 warning-health") (eq $line "VOLT_HEALTH_CHECK_V1 postgres") (eq $line "VOLT_HEALTH_CHECK_V1 valkey") (eq $line "VOLT_HEALTH_CHECK_V1 api-http") (eq $line "VOLT_HEALTH_CHECK_V1 oidc-provider") (eq $line "VOLT_HEALTH_CHECK_V1 oidc-proxy") (eq $line "VOLT_HEALTH_CHECK_V1 oidc-publisher") (eq $line "VOLT_HEALTH_CHECK_V1 verification-web") (eq $line "VOLT_HEALTH_CHECK_V1 web-http")}}{{$sep}}{{json $line}}{{$sep = ","}}{{end}}{{end}}]}{{end}}]}{{else}}null{{end}}}'
+
+BOOT_LOG_EVENTS={
+ b'G7_INIT=CE initialize':'ce-initialization',
+ b'G7_INIT=UVM migrations':'uvm-migrations',
+ b'G7_LOCAL_START=awaiting-host-acknowledgement':'awaiting-host-acknowledgement',
+ b'G7_LOCAL_START=host-release-validated':'host-release-validated',
+ b'G7_READINESS=ready':'ready',
+ b'G7_READINESS=recovery-control-only':'recovery-control-only',
+ b'G7_API_LAUNCH=private-input-failed':'private-input-failed',
+ b'G7_API_LAUNCH=private-input-invalid':'private-input-invalid',
+ b'G7_API_LAUNCH=unconfirmed':'api-launch-unconfirmed',
+ b'G7_API_LAUNCH=ready-admission-failed':'ready-admission-failed',
+ b'G7_QUIESCE=complete':'quiesce-complete',
+ b'G7_QUIESCE=failed-latched':'quiesce-failed',
+ b'G7_SHUTDOWN=controlled':'shutdown-controlled',
+ b'G7_SHUTDOWN=failed_after_critical_exit':'shutdown-failed',
+}
+
+
+def boot_log_events(raw):
+    # Timestamped, complete, exact whole lines only. These are historical
+    # observations from a bounded tail, never a claim of current phase/readiness.
+    if type(raw)is not bytes or len(raw)>1024*1024 or raw and not raw.endswith(b'\n'):return {'status':'unavailable'}
+    events=[]
+    for line in raw.split(b'\n'):
+        if b'\r'in line:continue
+        stamp,space,message=line.partition(b' ')
+        if not space or message not in BOOT_LOG_EVENTS:continue
+        if re.fullmatch(rb'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z',stamp)is None:continue
+        events.append(BOOT_LOG_EVENTS[message])
+        if len(events)>32:return {'status':'unavailable'}
+    return {'status':'observed','scope':'bounded-tail','events':events}
+
+
+def current_boot_log(target):
+    import tempfile,resource
+    try:
+        with tempfile.TemporaryFile()as output:
+            r=subprocess.run(['docker','container','logs','--timestamps','--tail','2000',target],
+                stdout=output,stderr=output,timeout=2,
+                preexec_fn=lambda:resource.setrlimit(resource.RLIMIT_FSIZE,(1024*1024,1024*1024)))
+            output.seek(0);raw=output.read(1024*1024+1)
+        return boot_log_events(raw)if r.returncode==0 else {'status':'unavailable'}
+    except Exception:return {'status':'unavailable'}
+
 
 def failed_health_projection(value,evidence):
     """Failure-only observation. No adoption, lifecycle command or authority."""
@@ -303,7 +348,7 @@ def failed_health_projection(value,evidence):
                     or row['reference']!='127.0.0.1:46150/volt@'+runtime['image_index_digest']
                     or row['revision']!=value['source_revision']or row['snapshot']!=value['source_snapshot']):raise ValueError('identity unavailable')
             return row
-        before=inspect(project+'-volt-1');after=inspect(before['id'])
+        before=inspect(project+'-volt-1');boot_events=current_boot_log(before['id']);after=inspect(before['id'])
         keys=('id','name','created','image','reference','owner','project','revision','snapshot','started')
         if any(before[k]!=after[k]for k in keys)or regular_bytes(journal,1024*1024)!=original:return unavailable
         for k in('oom','restarting'):
@@ -311,19 +356,21 @@ def failed_health_projection(value,evidence):
         for k in('exit','restarts'):
             if type(after[k])is not int or not 0<=after[k]<=2147483647:return unavailable
         if after['status']not in ('created','running','paused','restarting','removing','exited','dead'):return unavailable
-        health=after['health'];logs=[]
+        health=after['health'];logs=[];checks=[]
         if health is not None:
             if (type(health)is not dict or set(health)!={'status','streak','logs'}or health['status']not in('starting','healthy','unhealthy')
                     or type(health['streak'])is not int or not 0<=health['streak']<=2147483647
                     or type(health['logs'])is not list or len(health['logs'])>5):return unavailable
             for log in health['logs']:
-                if type(log)is not dict or set(log)!={'exit','start','end'}or type(log['exit'])is not int or not -1<=log['exit']<=255:return unavailable
+                if type(log)is not dict or set(log)!={'exit','start','end','checks'}or type(log['exit'])is not int or not -1<=log['exit']<=255:return unavailable
                 # No raw timestamps exported. Typed exit sequence alone has no identity.
                 if any(type(log[k])is not str or len(log[k])>64 for k in('start','end')):return unavailable
-                logs.append(log['exit'])
+                markers=log['checks']
+                if (type(markers)is not list or len(markers)>1 or any(type(v)is not str or not v.startswith('VOLT_HEALTH_CHECK_V1 ')or v[21:]not in HEALTH_CHECK_PHASES for v in markers)):return unavailable
+                logs.append(log['exit']);checks.append(markers[0][21:]if markers else None)
         return {'status':'observed','container_state':after['status'],'container_exit':after['exit'],'oom_killed':after['oom'],
                 'restarting':after['restarting'],'restart_count':after['restarts'],'health_status':health['status']if health else'absent',
-                'failing_streak':health['streak']if health else None,'health_exit_codes':logs}
+                'failing_streak':health['streak']if health else None,'health_exit_codes':logs,'health_check_phases':checks,'boot_log':boot_events}
     except Exception:return unavailable
 
 def authentication_status_snapshot(context):

@@ -227,6 +227,26 @@ def install_phase_receipt(raw):
     except (ValueError,UnicodeDecodeError):return None
     return record
 
+def start_phase_receipt(raw):
+    """Read ONE source-produced closed record, not an error phrase matcher.
+
+    Diagnostic only. Status is the original shell exit BEFORE unchanged cleanup,
+    so it can differ from the caller result if cleanup subsequently failed.
+    """
+    if type(raw)is not bytes or len(raw)>1024*1024:return None
+    prefix=b'VOLT_FIXTURE_START_RECEIPT '
+    rows=[line for line in raw.splitlines(keepends=True)if line.startswith(prefix)]
+    if len(rows)!=1 or not rows[0].endswith(b'\n')or len(rows[0])>512:return None
+    try:
+        encoded=rows[0][len(prefix):-1];record=json.loads(encoded.decode('ascii'),object_pairs_hook=pairs)
+        if (type(record)is not dict or set(record)!={'phase','profile','status'}
+                or record['profile']!='volt_fixture_start_exit_v1'
+                or type(record['phase'])is not str or record['phase']not in INSTALL_PHASES
+                or type(record['status'])is not int or not 0<=record['status']<=255
+                or json.dumps(record,sort_keys=True,separators=(',',':')).encode()!=encoded):return None
+    except (ValueError,UnicodeDecodeError):return None
+    return record
+
 def retained_install_receipt(evidence):
     from tools.release.native_runtime_probe import regular_bytes
     try:return install_phase_receipt(regular_bytes(Path(evidence)/'focused-public-install.stderr',1024*1024))
@@ -306,6 +326,59 @@ def failed_health_projection(value,evidence):
                 'failing_streak':health['streak']if health else None,'health_exit_codes':logs}
     except Exception:return unavailable
 
+def authentication_status_snapshot(context):
+    """Failure diagnostic uses only the original caller's new private status pair."""
+    import stat
+    try:
+        root=Path(context['private'])/'public-offline-authentication'
+        info=root.lstat()
+        if (root.resolve(strict=True)!=root or not stat.S_ISDIR(info.st_mode)or info.st_uid!=os.getuid()
+                or stat.S_IMODE(info.st_mode)!=0o700):return None
+        names=set()
+        with os.scandir(root)as entries:
+            for entry in entries:
+                if len(names)>=256:return None
+                names.add(entry.name)
+        if any(re.fullmatch(r'entry\.[A-Za-z0-9]{8}',name)is None for name in names):return None
+        return root,(info.st_dev,info.st_ino),names
+    except (OSError,KeyError,TypeError):return None
+
+
+def fresh_authentication_status(snapshot):
+    import stat
+    unavailable={'status':'unavailable'}
+    if snapshot is None:return unavailable
+    root,identity,names=snapshot
+    try:
+        current=authentication_status_snapshot({'private':str(root.parent)})
+        if current is None or current[1]!=identity or not names.issubset(current[2]):return unavailable
+        added=current[2]-names
+        if len(added)!=1:return unavailable
+        record=root/added.pop();info=record.lstat()
+        if (not stat.S_ISDIR(info.st_mode)or info.st_uid!=os.getuid()or stat.S_IMODE(info.st_mode)!=0o700):return unavailable
+        values=[];identities=set()
+        def custody(info):
+            return (info.st_dev,info.st_ino,info.st_uid,info.st_mode,info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+        for name in('authentication.exit','reader.exit'):
+            path=record/name
+            fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+            try:
+                item=os.fstat(fd);key=(item.st_dev,item.st_ino)
+                if (not stat.S_ISREG(item.st_mode)or item.st_uid!=os.getuid()
+                        or stat.S_IMODE(item.st_mode)!=0o600 or item.st_nlink!=1
+                        or item.st_size>8 or key in identities):return unavailable
+                raw=os.read(fd,9)
+                if custody(item)!=custody(os.fstat(fd))or custody(item)!=custody(path.lstat()):return unavailable
+                identities.add(key)
+            finally:os.close(fd)
+            if re.fullmatch(rb'[0-9]{1,3}\n',raw)is None or not 0<=int(raw)<=255:return unavailable
+            values.append(int(raw))
+        after=record.lstat();parent=root.lstat()
+        if (info.st_dev,info.st_ino)!=(after.st_dev,after.st_ino)or (parent.st_dev,parent.st_ino)!=identity:return unavailable
+        return {'status':'observed','producer_exit':values[0],'reader_exit':values[1]}
+    except (OSError,ValueError,TypeError):return unavailable
+
+
 @contextmanager
 def observe_journey(q,record,*,health_context=None):
     """Observe the original producer results; never interpret private output.
@@ -315,13 +388,32 @@ def observe_journey(q,record,*,health_context=None):
     A returned command followed by an assertion is not a command-failure claim.
     """
     original=q.run;health=q.wait_for_local
+    inventory_original=getattr(q,'_inventory_trace',None)
+    inventory_phases=frozenset(('journal-read','observer-prepare','caller-spawn','caller-wait','caller-returned','caller-identity','retained-owner-recovery','capture-validation','capture-guard','capture-documents','capture-bindings','owner-log-read','denial-cause-check','complete'))
+    inventory_auth_before={};inventory_auth_status={}
+    def inventory_trace(kind,phase,code=None):
+        if kind not in('empty','corrupt')or phase not in inventory_phases:return
+        for key in('install_receipt','start_receipt','health_receipt','health_projection'):record.pop(key,None)
+        if phase=='journal-read':
+            inventory_auth_before[kind]=authentication_status_snapshot(health_context)if health_context is not None else None
+            inventory_auth_status.pop(kind,None)
+        if phase=='caller-returned':inventory_auth_status[kind]=fresh_authentication_status(inventory_auth_before.get(kind))
+        actual=code if type(code)is int and -255<=code<=255 else None
+        record.update(stage='inventory-denial',producer='returned'if phase in('caller-returned','complete')else'entered',exit_code=actual)
+        record['inventory_detail']={'kind':kind,'phase':phase,'caller_exit':actual}
+        if kind in inventory_auth_status:record['inventory_detail']['external_authentication']=inventory_auth_status[kind]
+    if inventory_original is not None:q._inventory_trace=inventory_trace
     record.update(stage='qualification-entry',producer='not-started',exit_code=None)
     def tracked(name,*args,**kwargs):
+        record.pop('external_authentication',None)
         record.pop('admission_error_class',None)
+        record.pop('inventory_detail',None)
+        record.pop('start_receipt',None)
         record.pop('install_receipt',None)
         record.pop('health_receipt',None)
         record.pop('health_projection',None)
         record.update(stage=JOURNEY_STAGES.get(name,'other-qualification-command'),producer='entered',exit_code=None)
+        auth_before=authentication_status_snapshot(health_context)if name=='essential-restored-public-start'and health_context is not None else None
         try:result=original(name,*args,**kwargs)
         except BaseException:
             record['producer']='raised'
@@ -340,6 +432,16 @@ def observe_journey(q,record,*,health_context=None):
                     try:record['health_receipt']=health_phase_receipt(regular_bytes(Path(args[1])/'focused-public-install.stderr',1024*1024))
                     except (OSError,ValueError):record['health_receipt']=None
                     if health_context is not None:record['health_projection']=failed_health_projection(health_context,args[1])
+            if name=='essential-restored-public-start'and len(args)>=2:
+                record['external_authentication']=fresh_authentication_status(auth_before)
+                from tools.release.native_runtime_probe import regular_bytes
+                try:
+                    raw=regular_bytes(Path(args[1])/(name+'.stderr'),1024*1024)
+                    record['start_receipt']=start_phase_receipt(raw)
+                    if record['start_receipt']and record['start_receipt']['phase']=='health':
+                        record['health_receipt']=health_phase_receipt(raw)
+                        if health_context is not None:record['health_projection']=failed_health_projection(health_context,args[1])
+                except (OSError,ValueError):record['start_receipt']=None
             if name=='fixture-full-runtime-admission'and record['exit_code']==2:
                 record['admission_error_class']=retained_admission_error(args[1])
             raise
@@ -354,7 +456,12 @@ def observe_journey(q,record,*,health_context=None):
         record['producer']='returned';return result
     q.run=tracked;q.wait_for_local=checked_health
     try:yield
-    finally:q.run=original;q.wait_for_local=health
+    except BaseException:
+        if record.get('stage')=='inventory-denial'and record.get('inventory_detail',{}).get('phase')!='complete':record['producer']='raised'
+        raise
+    finally:
+        q.run=original;q.wait_for_local=health
+        if inventory_original is not None:q._inventory_trace=inventory_original
 
 def essential(value,source,*,diagnostics=None):
     evidence=Path(value['evidence']);private=Path(value['private'])

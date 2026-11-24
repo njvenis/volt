@@ -266,9 +266,9 @@ def health_phase_receipt(raw):
         return r
     except (ValueError,UnicodeDecodeError,TypeError):return None
 
-# Fixed metadata-only projection: raw Health.Log.Output/config/env never enters
-# this subprocess stream. The daemon retains at most five health log entries.
-HEALTH_INSPECT_TEMPLATE='{"id":{{json .Id}},"name":{{json .Name}},"created":{{json .Created}},"image":{{json .Image}},"reference":{{json .Config.Image}},"owner":{{json (index .Config.Labels "volt.compose.owner-token")}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"revision":{{json (index .Config.Labels "org.opencontainers.image.revision")}},"snapshot":{{json (index .Config.Labels "org.volt.compose.source-snapshot")}},"started":{{json .State.StartedAt}},"status":{{json .State.Status}},"exit":{{json .State.ExitCode}},"oom":{{json .State.OOMKilled}},"restarting":{{json .State.Restarting}},"restarts":{{json .RestartCount}},"health":{{if .State.Health}}{"status":{{json .State.Health.Status}},"streak":{{json .State.Health.FailingStreak}},"logs":[{{range $i,$l:=.State.Health.Log}}{{if $i}},{{end}}{"exit":{{json $l.ExitCode}},"start":{{json $l.Start}},"end":{{json $l.End}}}{{end}}]}{{else}}null{{end}}}'
+HEALTH_CHECK_PHASES=frozenset(('identity-runtime', 'ready-marker', 'critical-marker', 'quiesce-marker', 'runtime-mode', 'recovery-process', 'recovery-port', 'broker-readiness', 'api-process', 'web-process', 'worker-process', 'beat-process', 'warning-process', 'warning-health', 'postgres', 'valkey', 'api-http', 'oidc-provider', 'oidc-proxy', 'oidc-publisher', 'verification-web', 'web-http'))
+# Only exact fixed marker lines are projected; arbitrary health output stays private.
+HEALTH_INSPECT_TEMPLATE='{"id":{{json .Id}},"name":{{json .Name}},"created":{{json .Created}},"image":{{json .Image}},"reference":{{json .Config.Image}},"owner":{{json (index .Config.Labels "volt.compose.owner-token")}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"revision":{{json (index .Config.Labels "org.opencontainers.image.revision")}},"snapshot":{{json (index .Config.Labels "org.volt.compose.source-snapshot")}},"started":{{json .State.StartedAt}},"status":{{json .State.Status}},"exit":{{json .State.ExitCode}},"oom":{{json .State.OOMKilled}},"restarting":{{json .State.Restarting}},"restarts":{{json .RestartCount}},"health":{{if .State.Health}}{"status":{{json .State.Health.Status}},"streak":{{json .State.Health.FailingStreak}},"logs":[{{range $i,$l:=.State.Health.Log}}{{if $i}},{{end}}{"exit":{{json $l.ExitCode}},"start":{{json $l.Start}},"end":{{json $l.End}},"checks":[{{$sep := ""}}{{range $line := split $l.Output "\\n"}}{{if or (eq $line "VOLT_HEALTH_CHECK_V1 identity-runtime") (eq $line "VOLT_HEALTH_CHECK_V1 ready-marker") (eq $line "VOLT_HEALTH_CHECK_V1 critical-marker") (eq $line "VOLT_HEALTH_CHECK_V1 quiesce-marker") (eq $line "VOLT_HEALTH_CHECK_V1 runtime-mode") (eq $line "VOLT_HEALTH_CHECK_V1 recovery-process") (eq $line "VOLT_HEALTH_CHECK_V1 recovery-port") (eq $line "VOLT_HEALTH_CHECK_V1 broker-readiness") (eq $line "VOLT_HEALTH_CHECK_V1 api-process") (eq $line "VOLT_HEALTH_CHECK_V1 web-process") (eq $line "VOLT_HEALTH_CHECK_V1 worker-process") (eq $line "VOLT_HEALTH_CHECK_V1 beat-process") (eq $line "VOLT_HEALTH_CHECK_V1 warning-process") (eq $line "VOLT_HEALTH_CHECK_V1 warning-health") (eq $line "VOLT_HEALTH_CHECK_V1 postgres") (eq $line "VOLT_HEALTH_CHECK_V1 valkey") (eq $line "VOLT_HEALTH_CHECK_V1 api-http") (eq $line "VOLT_HEALTH_CHECK_V1 oidc-provider") (eq $line "VOLT_HEALTH_CHECK_V1 oidc-proxy") (eq $line "VOLT_HEALTH_CHECK_V1 oidc-publisher") (eq $line "VOLT_HEALTH_CHECK_V1 verification-web") (eq $line "VOLT_HEALTH_CHECK_V1 web-http")}}{{$sep}}{{json $line}}{{$sep = ","}}{{end}}{{end}}]}{{end}}]}{{else}}null{{end}}}'
 
 def failed_health_projection(value,evidence):
     """Failure-only observation. No adoption, lifecycle command or authority."""
@@ -311,19 +311,21 @@ def failed_health_projection(value,evidence):
         for k in('exit','restarts'):
             if type(after[k])is not int or not 0<=after[k]<=2147483647:return unavailable
         if after['status']not in ('created','running','paused','restarting','removing','exited','dead'):return unavailable
-        health=after['health'];logs=[]
+        health=after['health'];logs=[];checks=[]
         if health is not None:
             if (type(health)is not dict or set(health)!={'status','streak','logs'}or health['status']not in('starting','healthy','unhealthy')
                     or type(health['streak'])is not int or not 0<=health['streak']<=2147483647
                     or type(health['logs'])is not list or len(health['logs'])>5):return unavailable
             for log in health['logs']:
-                if type(log)is not dict or set(log)!={'exit','start','end'}or type(log['exit'])is not int or not -1<=log['exit']<=255:return unavailable
+                if type(log)is not dict or set(log)!={'exit','start','end','checks'}or type(log['exit'])is not int or not -1<=log['exit']<=255:return unavailable
                 # No raw timestamps exported. Typed exit sequence alone has no identity.
                 if any(type(log[k])is not str or len(log[k])>64 for k in('start','end')):return unavailable
-                logs.append(log['exit'])
+                markers=log['checks']
+                if (type(markers)is not list or len(markers)>1 or any(type(v)is not str or not v.startswith('VOLT_HEALTH_CHECK_V1 ')or v[21:]not in HEALTH_CHECK_PHASES for v in markers)):return unavailable
+                logs.append(log['exit']);checks.append(markers[0][21:]if markers else None)
         return {'status':'observed','container_state':after['status'],'container_exit':after['exit'],'oom_killed':after['oom'],
                 'restarting':after['restarting'],'restart_count':after['restarts'],'health_status':health['status']if health else'absent',
-                'failing_streak':health['streak']if health else None,'health_exit_codes':logs}
+                'failing_streak':health['streak']if health else None,'health_exit_codes':logs,'health_check_phases':checks}
     except Exception:return unavailable
 
 def authentication_status_snapshot(context):

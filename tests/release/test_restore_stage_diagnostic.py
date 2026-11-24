@@ -60,4 +60,17 @@ exit 7
    q._inventory_trace('empty','caller-returned',True);self.assertIsNone(record['inventory_detail']['caller_exit'])
   self.assertIs(q._inventory_trace,original)
   with patch.object(q,'_inventory_trace',side_effect=ValueError('PRIVATE')):self.assertIsNone(q._inventory_event('corrupt','caller-wait'))
+ def test_fresh_existing_auth_status_pair_is_numeric_and_has_no_old_record_adoption(self):
+  with tempfile.TemporaryDirectory()as d:
+   root=Path(d);auth=root/'public-offline-authentication';auth.mkdir(mode=0o700);old=auth/'entry.aaaaaaaa';old.mkdir(mode=0o700)
+   for name in('authentication.exit','reader.exit'):(old/name).write_text('0\n')
+   before=h.authentication_status_snapshot({'private':str(root)})
+   self.assertEqual(h.fresh_authentication_status(before),{'status':'unavailable'})
+   fresh=auth/'entry.bbbbbbbb';fresh.mkdir(mode=0o700)
+   for name,value in [('authentication.exit','2\n'),('reader.exit','0\n')]:
+    p=fresh/name;p.write_text(value);p.chmod(0o600)
+   self.assertEqual(h.fresh_authentication_status(before),{'status':'observed','producer_exit':2,'reader_exit':0})
+   (fresh/'reader.exit').write_text('PRIVATE\n');self.assertEqual(h.fresh_authentication_status(before),{'status':'unavailable'})
+   (fresh/'reader.exit').write_text('0\n');(auth/'entry.cccccccc').mkdir(mode=0o700);self.assertEqual(h.fresh_authentication_status(before),{'status':'unavailable'})
+
 if __name__=='__main__':unittest.main()

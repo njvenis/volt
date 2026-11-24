@@ -326,6 +326,44 @@ def failed_health_projection(value,evidence):
                 'failing_streak':health['streak']if health else None,'health_exit_codes':logs}
     except Exception:return unavailable
 
+def authentication_status_snapshot(context):
+    """Failure diagnostic uses only the original caller's new private status pair."""
+    import stat
+    try:
+        root=Path(context['private'])/'public-offline-authentication'
+        info=root.lstat()
+        if (root.resolve(strict=True)!=root or not stat.S_ISDIR(info.st_mode)or info.st_uid!=os.getuid()
+                or stat.S_IMODE(info.st_mode)!=0o700):return None
+        names={p.name for p in root.iterdir()}
+        if any(re.fullmatch(r'entry\.[A-Za-z0-9]{8}',name)is None for name in names):return None
+        return root,(info.st_dev,info.st_ino),names
+    except (OSError,KeyError,TypeError):return None
+
+
+def fresh_authentication_status(snapshot):
+    from tools.release.native_runtime_probe import regular_bytes
+    import stat
+    unavailable={'status':'unavailable'}
+    if snapshot is None:return unavailable
+    root,identity,names=snapshot
+    try:
+        current=authentication_status_snapshot({'private':str(root.parent)})
+        if current is None or current[1]!=identity or not names.issubset(current[2]):return unavailable
+        added=current[2]-names
+        if len(added)!=1:return unavailable
+        record=root/added.pop();info=record.lstat()
+        if (not stat.S_ISDIR(info.st_mode)or info.st_uid!=os.getuid()or stat.S_IMODE(info.st_mode)!=0o700):return unavailable
+        values=[]
+        for name in('authentication.exit','reader.exit'):
+            raw=regular_bytes(record/name,8)
+            if re.fullmatch(rb'[0-9]{1,3}\n',raw)is None or not 0<=int(raw)<=255:return unavailable
+            values.append(int(raw))
+        after=record.lstat();parent=root.lstat()
+        if (info.st_dev,info.st_ino)!=(after.st_dev,after.st_ino)or (parent.st_dev,parent.st_ino)!=identity:return unavailable
+        return {'status':'observed','producer_exit':values[0],'reader_exit':values[1]}
+    except (OSError,ValueError,TypeError):return unavailable
+
+
 @contextmanager
 def observe_journey(q,record,*,health_context=None):
     """Observe the original producer results; never interpret private output.
@@ -346,6 +384,7 @@ def observe_journey(q,record,*,health_context=None):
     if inventory_original is not None:q._inventory_trace=inventory_trace
     record.update(stage='qualification-entry',producer='not-started',exit_code=None)
     def tracked(name,*args,**kwargs):
+        record.pop('external_authentication',None)
         record.pop('admission_error_class',None)
         record.pop('inventory_detail',None)
         record.pop('start_receipt',None)
@@ -353,6 +392,7 @@ def observe_journey(q,record,*,health_context=None):
         record.pop('health_receipt',None)
         record.pop('health_projection',None)
         record.update(stage=JOURNEY_STAGES.get(name,'other-qualification-command'),producer='entered',exit_code=None)
+        auth_before=authentication_status_snapshot(health_context)if name=='essential-restored-public-start'and health_context is not None else None
         try:result=original(name,*args,**kwargs)
         except BaseException:
             record['producer']='raised'
@@ -372,6 +412,7 @@ def observe_journey(q,record,*,health_context=None):
                     except (OSError,ValueError):record['health_receipt']=None
                     if health_context is not None:record['health_projection']=failed_health_projection(health_context,args[1])
             if name=='essential-restored-public-start'and len(args)>=2:
+                record['external_authentication']=fresh_authentication_status(auth_before)
                 from tools.release.native_runtime_probe import regular_bytes
                 try:
                     raw=regular_bytes(Path(args[1])/(name+'.stderr'),1024*1024)

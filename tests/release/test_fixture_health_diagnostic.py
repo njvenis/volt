@@ -79,6 +79,7 @@ cat "$ROW"
         with tempfile.TemporaryDirectory()as d:
             value,e,row=self.fixture(Path(d));counter=[0]
             def run(*args,**kwargs):
+                if args[0][2]=='logs':return subprocess.CompletedProcess(args,0)
                 counter[0]+=1;r=row|({'started':'DIFFERENT'}if counter[0]==2 else{});kwargs['stdout'].write(json.dumps(r).encode());return subprocess.CompletedProcess(args,0)
             with patch.object(h.subprocess,'run',side_effect=run):self.assertEqual(h.failed_health_projection(value,e),{'status':'unavailable'})
             self.assertEqual(counter[0],2)

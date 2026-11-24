@@ -3,7 +3,7 @@ import json,os,subprocess,tempfile,time,unittest
 from pathlib import Path
 from unittest.mock import patch
 from tools.release import hosted_arm_essential as h
-from tests.release.test_fixture_health_diagnostic import FixtureHealthTests
+from tests.release import test_fixture_health_diagnostic as fixture
 ROOT=Path(__file__).resolve().parents[2]
 STAMP=b'2026-11-24T12:01:02.123456789Z '
 class BootLogTests(unittest.TestCase):
@@ -19,7 +19,7 @@ class BootLogTests(unittest.TestCase):
   for raw in(b'G7_READINESS=ready\n',b'PRIVATE G7_READINESS=ready\n',b'\xef\xbb\xbf'+STAMP+b'G7_READINESS=ready\n',STAMP+b'G7_READINESS=unknown\n'):
    self.assertEqual(h.boot_log_events(raw)['events'],[])
  def setup(self,root):
-  value,e,row=FixtureHealthTests().fixture(root);bin=root/'bin';bin.mkdir();data=root/'row';data.write_text(json.dumps(row));logs=root/'logs';logs.write_bytes(STAMP+b'G7_LOCAL_START=host-release-validated\n');calls=root/'calls'
+  value,e,row=fixture.FixtureHealthTests().fixture(root);bin=root/'bin';bin.mkdir();data=root/'row';data.write_text(json.dumps(row));logs=root/'logs';logs.write_bytes(STAMP+b'G7_LOCAL_START=host-release-validated\n');calls=root/'calls'
   script=bin/'docker';script.write_text('''#!/bin/sh
 printf '%s\\n' "$*" >> "$CALLS"
 case "$1:$2" in
@@ -49,7 +49,7 @@ esac
     self.assertLess(time.monotonic()-start,2.8)
  def test_post_log_identity_drift_discards_all_events(self):
   with tempfile.TemporaryDirectory()as d:
-   value,e,row=FixtureHealthTests().fixture(Path(d));counter=[0]
+   value,e,row=fixture.FixtureHealthTests().fixture(Path(d));counter=[0]
    def run(argv,**kw):
     if argv[2]=='logs':kw['stdout'].write(STAMP+b'G7_READINESS=ready\n')
     else:

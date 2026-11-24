@@ -12,6 +12,6 @@ dependencies = [
     "psycopg[binary]==3.3.8",
     "uvicorn==0.54.0",
     "authlib==1.9.5",
-    "httpx2==2.16.0",
+    "httpx2==2.16.2",
     "cryptography==50.0.2",
 ]

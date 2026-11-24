@@ -375,12 +375,18 @@ def observe_journey(q,record,*,health_context=None):
     original=q.run;health=q.wait_for_local
     inventory_original=getattr(q,'_inventory_trace',None)
     inventory_phases=frozenset(('journal-read','observer-prepare','caller-spawn','caller-wait','caller-returned','caller-identity','retained-owner-recovery','capture-validation','capture-guard','capture-documents','capture-bindings','owner-log-read','denial-cause-check','complete'))
+    inventory_auth_before={};inventory_auth_status={}
     def inventory_trace(kind,phase,code=None):
         if kind not in('empty','corrupt')or phase not in inventory_phases:return
         for key in('install_receipt','start_receipt','health_receipt','health_projection'):record.pop(key,None)
+        if phase=='journal-read':
+            inventory_auth_before[kind]=authentication_status_snapshot(health_context)if health_context is not None else None
+            inventory_auth_status.pop(kind,None)
+        if phase=='caller-returned':inventory_auth_status[kind]=fresh_authentication_status(inventory_auth_before.get(kind))
         actual=code if type(code)is int and -255<=code<=255 else None
         record.update(stage='inventory-denial',producer='returned'if phase in('caller-returned','complete')else'entered',exit_code=actual)
         record['inventory_detail']={'kind':kind,'phase':phase,'caller_exit':actual}
+        if kind in inventory_auth_status:record['inventory_detail']['external_authentication']=inventory_auth_status[kind]
     if inventory_original is not None:q._inventory_trace=inventory_trace
     record.update(stage='qualification-entry',producer='not-started',exit_code=None)
     def tracked(name,*args,**kwargs):
@@ -435,6 +441,9 @@ def observe_journey(q,record,*,health_context=None):
         record['producer']='returned';return result
     q.run=tracked;q.wait_for_local=checked_health
     try:yield
+    except BaseException:
+        if record.get('stage')=='inventory-denial'and record.get('inventory_detail',{}).get('phase')!='complete':record['producer']='raised'
+        raise
     finally:
         q.run=original;q.wait_for_local=health
         if inventory_original is not None:q._inventory_trace=inventory_original

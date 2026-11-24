@@ -66,7 +66,11 @@ inspect_runtime_image() {
 emit_fixture_install_receipt() {
   # Diagnostic only, on the already private ordinary fixture caller's stderr.
   # No new selector, file/mount, authority, raw producer text or install decision.
-  [ "$INSTALL_RECEIPT_ACTION" = install ] || return 0
+  case "$INSTALL_RECEIPT_ACTION" in
+    install) receipt_prefix=VOLT_FIXTURE_INSTALL_RECEIPT; receipt_profile=volt_fixture_install_exit_v1 ;;
+    start) receipt_prefix=VOLT_FIXTURE_START_RECEIPT; receipt_profile=volt_fixture_start_exit_v1 ;;
+    *) return 0 ;;
+  esac
   case "$VERIFIER_IMAGE" in 127.0.0.1:46150/volt-installer-verifier@sha256:*) ;; *) return 0 ;; esac
   receipt_digest=${VERIFIER_IMAGE##*@sha256:}
   case "$receipt_digest" in ''|*[!0-9a-f]*) return 0 ;; esac
@@ -84,7 +88,7 @@ emit_fixture_install_receipt() {
   [ "$1" -le 255 ] || return 0
   # Start our own whole line even after an unterminated private child diagnostic.
   # Failed reporting never changes the operation or its existing cleanup route.
-  printf '\nVOLT_FIXTURE_INSTALL_RECEIPT {"phase":"%s","profile":"volt_fixture_install_exit_v1","status":%s}\n' "$INSTALL_RECEIPT_PHASE" "$1" >&2 || :
+  printf '\n%s {"phase":"%s","profile":"%s","status":%s}\n' "$receipt_prefix" "$INSTALL_RECEIPT_PHASE" "$receipt_profile" "$1" >&2 || :
   if [ "$INSTALL_RECEIPT_PHASE" = health ] && [ "$1" -ne 0 ]; then
     case "${INSTALL_HEALTH_PASS:-}" in closed|configured) ;; *) return 0 ;; esac
     case "${INSTALL_HEALTH_CAUSE:-}" in owner-before-poll|owner-after-healthy|unhealthy|wait-budget) ;; *) return 0 ;; esac
@@ -95,7 +99,7 @@ emit_fixture_install_receipt() {
 
 cleanup() {
   cleanup_original_status=$?
-  if [ "${INSTALL_RECEIPT_ACTION:-}" = install ]; then emit_fixture_install_receipt "$cleanup_original_status"; fi
+  case "${INSTALL_RECEIPT_ACTION:-}" in install|start) emit_fixture_install_receipt "$cleanup_original_status" ;; esac
   if [ -n "$LOCK_NAME" ]; then
     if [ "$LOCK_CREATED" -ne 1 ] || ! remove_lock_owner; then
       printf '%s\n' 'volt installer: lifecycle owner cleanup uncertain; all registered resources and workspace retained' >&2

@@ -607,13 +607,26 @@ exec "$REAL_DOCKER" "$@"
     return {**environment, 'PATH': str(binary) + os.pathsep + environment['PATH']}
 
 
+def _inventory_trace(kind,phase,code=None):
+    """No-op observation hook for the one private hosted coordinator instance."""
+    pass
+
+
+def _inventory_event(kind,phase,code=None):
+    # Observation failure can never alter original commands, decisions or exits.
+    try:_inventory_trace(kind,phase,code)
+    except Exception:pass
+
+
 def qualify_inventory_rejection(*, kind: str, launcher: Path, state: Path, private: Path,
                                 evidence: Path, environment: dict, admission: dict) -> None:
     """Require the real exact bound owner's specific empty/corrupt inventory cause."""
     if kind not in ('empty', 'corrupt'):
         raise ValueError('only fixed empty/corrupt inventory probes are supported')
+    _inventory_event(kind,'journal-read')
     info = json.loads((state / 'instance.json').read_text())
     capture = private / ('inventory-owner-' + kind)
+    _inventory_event(kind,'observer-prepare')
     observed_env = restore_admit_observer_environment(capture=capture, environment=environment,
         info=info, admission=admission)
     command = ['sh', str(launcher), 'restore-admit', '--directory', str(state)]
@@ -627,21 +640,28 @@ def qualify_inventory_rejection(*, kind: str, launcher: Path, state: Path, priva
         'scope': 'instrumented current-source inventory cause replay; not original9657 run',
         'recorded_at': time.time()}
     (evidence / (name + '.invocation.json')).write_text(json.dumps(record, indent=2) + '\n')
+    _inventory_event(kind,'caller-spawn')
     with (evidence / (name + '.stdout')).open('x') as stdout, (evidence / (name + '.stderr')).open('x') as stderr:
         process = subprocess.Popen(argv, cwd=private, env=observed_env, stdout=stdout, stderr=stderr,
             start_new_session=True)
+        _inventory_event(kind,'caller-wait')
         code = process.wait(timeout=900)
+    _inventory_event(kind,'caller-returned',code)
     (evidence / (name + '.exit')).write_text(str(code) + '\n')
+    _inventory_event(kind,'caller-identity',code)
     if code == 0 or (capture / 'caller.pid').read_text().strip() != str(process.pid):
         raise RuntimeError('negative inventory action or exact caller identity was not established')
     if not (capture / 'guard.status').exists():
         # Full-pin cleanup correctly retains a stopped owner. Observe it only
         # AFTER this exact original caller's actual wait; never replay denial.
+        _inventory_event(kind,'retained-owner-recovery',code)
         recover = subprocess.run([str(capture / 'bin/docker'), '--volt-capture-retained-restore-owner'],
             cwd=private, env=observed_env, capture_output=True, timeout=30)
         (capture / 'retained-observer.exit').write_text(str(recover.returncode) + '\n')
+    _inventory_event(kind,'capture-validation',code)
     validate_inventory_rejection_capture(kind=kind, capture=capture, info=info,
         admission=admission, evidence=evidence, name=name, caller_pid=process.pid, caller_exit=code)
+    _inventory_event(kind,'complete',code)
 
 
 def validate_inventory_rejection_capture(*, kind: str, capture: Path, info: dict,
@@ -650,16 +670,19 @@ def validate_inventory_rejection_capture(*, kind: str, capture: Path, info: dict
     """Validate bound original records, including separately recovered retained owners."""
     if kind not in ('empty', 'corrupt') or type(caller_pid) is not int or caller_pid <= 0 or type(caller_exit) is not int or caller_exit == 0:
         raise ValueError('original exact failed caller and fixed inventory case required')
+    _inventory_event(kind,'capture-guard',caller_exit)
     if ((capture / 'caller.pid').read_text().strip() != str(caller_pid)
             or not (capture / 'guard.status').is_file()
             or (capture / 'guard.status').read_text().strip() != 'captured'
             or (capture / 'duplicate.status').exists()):
         raise RuntimeError('exact original owner logs were not captured; no cause credit')
+    _inventory_event(kind,'capture-documents',caller_exit)
     plan_raw = (capture / 'plan.json').read_bytes()
     plan = host_dependency_json(capture / 'plan.json')
     observed = host_dependency_json(capture / 'observed.json')
     request = host_dependency_json(capture / 'request.json')
     owner = host_dependency_json(capture / 'owner.json')
+    _inventory_event(kind,'capture-bindings',caller_exit)
     operation = plan.get('operation_id')
     if (not isinstance(operation, str) or str(uuid.UUID(operation)) != operation or uuid.UUID(operation).version != 4
             or plan.get('operation') != 'restore-admit' or plan.get('phase') != 'plan'
@@ -673,6 +696,7 @@ def validate_inventory_rejection_capture(*, kind: str, capture: Path, info: dict
         raise RuntimeError('captured owner request/plan/current-operation/source binding contradicts the replay')
     required = ('offline store inventory is malformed' if kind == 'empty'
                 else 'offline imports differ from captured store inventories')
+    _inventory_event(kind,'owner-log-read',caller_exit)
     messages = []
     for path in (capture / 'owner.stdout', capture / 'owner.stderr'):
         if path.stat().st_size > 8 * 1024 * 1024:
@@ -680,6 +704,7 @@ def validate_inventory_rejection_capture(*, kind: str, capture: Path, info: dict
         for line in path.read_text().splitlines():
             if 'offline-lifecycle-failed: ' in line:
                 messages.append(line.split('offline-lifecycle-failed: ', 1)[1])
+    _inventory_event(kind,'denial-cause-check',caller_exit)
     actual = observed['data']['inventories']
     if (messages != [required] or kind == 'empty' and actual['postgres']['postgres_version'] is not None
             or kind == 'corrupt' and actual['state'] == info['backup_inventory']['state']):

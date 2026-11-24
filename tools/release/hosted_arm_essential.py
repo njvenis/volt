@@ -227,6 +227,26 @@ def install_phase_receipt(raw):
     except (ValueError,UnicodeDecodeError):return None
     return record
 
+def start_phase_receipt(raw):
+    """Read ONE source-produced closed record, not an error phrase matcher.
+
+    Diagnostic only. Status is the original shell exit BEFORE unchanged cleanup,
+    so it can differ from the caller result if cleanup subsequently failed.
+    """
+    if type(raw)is not bytes or len(raw)>1024*1024:return None
+    prefix=b'VOLT_FIXTURE_START_RECEIPT '
+    rows=[line for line in raw.splitlines(keepends=True)if line.startswith(prefix)]
+    if len(rows)!=1 or not rows[0].endswith(b'\n')or len(rows[0])>512:return None
+    try:
+        encoded=rows[0][len(prefix):-1];record=json.loads(encoded.decode('ascii'),object_pairs_hook=pairs)
+        if (type(record)is not dict or set(record)!={'phase','profile','status'}
+                or record['profile']!='volt_fixture_start_exit_v1'
+                or type(record['phase'])is not str or record['phase']not in INSTALL_PHASES
+                or type(record['status'])is not int or not 0<=record['status']<=255
+                or json.dumps(record,sort_keys=True,separators=(',',':')).encode()!=encoded):return None
+    except (ValueError,UnicodeDecodeError):return None
+    return record
+
 def retained_install_receipt(evidence):
     from tools.release.native_runtime_probe import regular_bytes
     try:return install_phase_receipt(regular_bytes(Path(evidence)/'focused-public-install.stderr',1024*1024))
@@ -315,9 +335,20 @@ def observe_journey(q,record,*,health_context=None):
     A returned command followed by an assertion is not a command-failure claim.
     """
     original=q.run;health=q.wait_for_local
+    inventory_original=getattr(q,'_inventory_trace',None)
+    inventory_phases=frozenset(('journal-read','observer-prepare','caller-spawn','caller-wait','caller-returned','caller-identity','retained-owner-recovery','capture-validation','capture-guard','capture-documents','capture-bindings','owner-log-read','denial-cause-check','complete'))
+    def inventory_trace(kind,phase,code=None):
+        if kind not in('empty','corrupt')or phase not in inventory_phases:return
+        for key in('install_receipt','start_receipt','health_receipt','health_projection'):record.pop(key,None)
+        actual=code if type(code)is int and -255<=code<=255 else None
+        record.update(stage='inventory-denial',producer='returned'if phase in('caller-returned','complete')else'entered',exit_code=actual)
+        record['inventory_detail']={'kind':kind,'phase':phase,'caller_exit':actual}
+    if inventory_original is not None:q._inventory_trace=inventory_trace
     record.update(stage='qualification-entry',producer='not-started',exit_code=None)
     def tracked(name,*args,**kwargs):
         record.pop('admission_error_class',None)
+        record.pop('inventory_detail',None)
+        record.pop('start_receipt',None)
         record.pop('install_receipt',None)
         record.pop('health_receipt',None)
         record.pop('health_projection',None)
@@ -340,6 +371,15 @@ def observe_journey(q,record,*,health_context=None):
                     try:record['health_receipt']=health_phase_receipt(regular_bytes(Path(args[1])/'focused-public-install.stderr',1024*1024))
                     except (OSError,ValueError):record['health_receipt']=None
                     if health_context is not None:record['health_projection']=failed_health_projection(health_context,args[1])
+            if name=='essential-restored-public-start'and len(args)>=2:
+                from tools.release.native_runtime_probe import regular_bytes
+                try:
+                    raw=regular_bytes(Path(args[1])/(name+'.stderr'),1024*1024)
+                    record['start_receipt']=start_phase_receipt(raw)
+                    if record['start_receipt']and record['start_receipt']['phase']=='health':
+                        record['health_receipt']=health_phase_receipt(raw)
+                        if health_context is not None:record['health_projection']=failed_health_projection(health_context,args[1])
+                except (OSError,ValueError):record['start_receipt']=None
             if name=='fixture-full-runtime-admission'and record['exit_code']==2:
                 record['admission_error_class']=retained_admission_error(args[1])
             raise
@@ -354,7 +394,9 @@ def observe_journey(q,record,*,health_context=None):
         record['producer']='returned';return result
     q.run=tracked;q.wait_for_local=checked_health
     try:yield
-    finally:q.run=original;q.wait_for_local=health
+    finally:
+        q.run=original;q.wait_for_local=health
+        if inventory_original is not None:q._inventory_trace=inventory_original
 
 def essential(value,source,*,diagnostics=None):
     evidence=Path(value['evidence']);private=Path(value['private'])

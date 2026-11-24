@@ -1,10 +1,10 @@
 """Full health shell with private fixed-path service substitutes, not native ARM proof."""
-import json,os,subprocess,tempfile,unittest
+import hashlib,json,os,subprocess,tempfile,unittest
 from pathlib import Path
 from tools.release import hosted_arm_essential as h
 ROOT=Path(__file__).resolve().parents[2]
 class HealthSubcheckTests(unittest.TestCase):
- def run_health(self,root,live,phase=None):
+ def run_health(self,root,live,phase=None,diagnostics=True):
   state=root/'state';state.mkdir();(root/'app').mkdir();bin=root/'bin';bin.mkdir()
   for name in('api','ce-web','ce-worker','ce-beat','exception-warning-worker','recovery-control'):(state/('pid-'+name)).write_text(str(live.pid))
   (state/'ready').touch();(state/'runtime-mode').write_text('runtime')
@@ -33,6 +33,9 @@ class HealthSubcheckTests(unittest.TestCase):
   if process:
    dead=subprocess.Popen(['sh','-c','exit 0']);dead.wait();(state/('pid-'+process)).write_text(str(dead.pid))
   source=(ROOT/'docker/g7/healthcheck.sh').read_text()
+  if not diagnostics:
+   source='#!/bin/bash\nset -eu\n'+'\n'.join(v for v in source.split('trap health_exit EXIT\n',1)[1].splitlines()if not v.lstrip().startswith('health_phase='))+'\n'
+   self.assertEqual(hashlib.sha256(source.encode()).hexdigest(),'8cd8f008467621e06ae3ae57c3fd96f1e0b9813567b989400d9c897ad15305fa')
   for original,fixed in [('/usr/local/bin/uvm-g7-identity-runtime',str(identity)),('/run/uvm-g7',str(state)),('/opt/uvm/venv/bin/python',str(python)),('/usr/local/bin/python3.14',str(python)),('/opt/uvm/app',str(root/'app'))]:source=source.replace(original,fixed)
   script=root/'health';script.write_text(source)
   return subprocess.run(['bash',str(script)],env=env,capture_output=True,timeout=4)
@@ -47,8 +50,12 @@ class HealthSubcheckTests(unittest.TestCase):
      self.assertEqual(lines,[b'VOLT_HEALTH_CHECK_V1 '+phase.encode()])
      expected=23 if phase=='identity-runtime'else 7 if phase in('broker-readiness','recovery-port','warning-health')else 2 if phase=='postgres'else 22 if phase in('api-http','web-http','oidc-provider','oidc-proxy')else 1
      self.assertEqual(r.returncode,expected)
+     with tempfile.TemporaryDirectory()as old:
+      baseline=self.run_health(Path(old),live,phase,diagnostics=False)
+      self.assertEqual(r.returncode,baseline.returncode);self.assertNotIn(b'VOLT_HEALTH_CHECK_V1',baseline.stderr)
    with tempfile.TemporaryDirectory()as d:
     r=self.run_health(Path(d),live);self.assertEqual(r.returncode,0,r.stderr);self.assertNotIn(b'VOLT_HEALTH_CHECK',r.stderr)
+   with tempfile.TemporaryDirectory()as old:self.assertEqual(self.run_health(Path(old),live,diagnostics=False).returncode,0)
   finally:live.terminate();live.wait(timeout=3)
  def test_docker_template_engine_projects_only_exact_allowlist_without_daemon(self):
   # Uses local context metadata only; no Docker daemon or fixture contact.

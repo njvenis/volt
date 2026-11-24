@@ -61,6 +61,9 @@ cat "$ROW"
                 self.assertNotIn('aaaa',json.dumps(r));self.assertNotIn('2026',json.dumps(r));self.assertNotIn('sha256',json.dumps(r))
                 for key,wrong in [('owner','9'*64),('image','sha256:'+'9'*64),('revision','9'*40),('exit',False),('oom',0)]:
                     data.write_text(json.dumps(row|{key:wrong}));self.assertEqual(h.failed_health_projection(value,e),{'status':'unavailable'})
+                for markers in([True],['VOLT_HEALTH_CHECK_V1 PRIVATE'],['VOLT_HEALTH_CHECK_V1 broker-readiness']*2,'PRIVATE'):
+                    changed=json.loads(json.dumps(row));changed['health']['logs'][0]['checks']=markers;data.write_text(json.dumps(changed))
+                    self.assertEqual(h.failed_health_projection(value,e),{'status':'unavailable'})
                 data.write_text(json.dumps(row));(e/'fixture-full-runtime-admission.exit').write_text('2\n');self.assertEqual(h.failed_health_projection(value,e),{'status':'unavailable'})
             self.assertNotIn('Health.Log.Output',h.HEALTH_INSPECT_TEMPLATE);self.assertNotIn('.Config.Env',h.HEALTH_INSPECT_TEMPLATE)
     def test_actual_cli_oversize_and_deadline_are_finite_unavailable(self):

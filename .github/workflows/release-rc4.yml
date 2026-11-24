@@ -310,18 +310,50 @@ jobs:
             --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$root/payload/installer.bundle.tar.gz"
           docker pull "$runtime_ref"
           docker image inspect "$runtime_ref" > "$root/runtime-image-inspect.json"
-          docker run --rm --network bridge --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+          offline_root="$root/offline-authentication-closure"
+          offline_uid=$(id -u)
+          offline_gid=$(id -g)
+          test ! -e "$offline_root" && test ! -L "$offline_root"
+          umask 077
+          mkdir -m 700 "$offline_root"
+          test "$(stat -c '%u:%g:%a' "$offline_root")" = "$offline_uid:$offline_gid:700"
+          cleanup_offline_root() {
+            if [ -d "$offline_root" ] && [ ! -L "$offline_root" ]; then rm -rf -- "$offline_root"; fi
+          }
+          trap cleanup_offline_root EXIT
+          docker pull --platform linux/amd64 "$verifier_ref"
+          docker run --rm --pull=never --platform linux/amd64 --network bridge \
+            --user "$offline_uid:$offline_gid" --read-only --cap-drop=ALL --security-opt=no-new-privileges \
             --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --mount "type=bind,src=$offline_root,dst=/run/volt-offline-artifacts" \
             --mount "type=bind,src=$root/payload,dst=/package,readonly" \
             --mount "type=bind,src=$root/runtime-index.json,dst=/inputs/index.json,readonly" \
             --mount "type=bind,src=$root/runtime-image-inspect.json,dst=/inputs/image.json,readonly" \
             "$verifier_ref" --bundle /package/installer.bundle.tar.gz \
             --bundle-signature /package/installer.bundle.sigstore.json \
+            --export-offline-artifacts --expected-verifier-reference "$verifier_ref" \
             --signer "$COSIGN_IDENTITY" --issuer "$COSIGN_ISSUER" \
             --reference "$runtime_ref" --source-revision "$CANDIDATE_SOURCE_SHA" \
             --source-snapshot "$source_snapshot" --version 0.1.0-rc.4 \
             --platform linux/amd64 --image-inspect /inputs/image.json --index /inputs/index.json \
             --output-dir /tmp/admission
+          test -s "$offline_root/closure.json"
+          docker run --rm --pull=never --platform linux/amd64 --network none \
+            --user "$offline_uid:$offline_gid" --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --mount "type=bind,src=$offline_root,dst=/run/volt-offline-artifacts,readonly" \
+            --mount "type=bind,src=$root/payload,dst=/package,readonly" \
+            --mount "type=bind,src=$root/runtime-index.json,dst=/inputs/index.json,readonly" \
+            --mount "type=bind,src=$root/runtime-image-inspect.json,dst=/inputs/image.json,readonly" \
+            "$verifier_ref" --bundle /package/installer.bundle.tar.gz \
+            --bundle-signature /package/installer.bundle.sigstore.json \
+            --offline-artifacts --expected-verifier-reference "$verifier_ref" \
+            --signer "$COSIGN_IDENTITY" --issuer "$COSIGN_ISSUER" \
+            --reference "$runtime_ref" --source-revision "$CANDIDATE_SOURCE_SHA" \
+            --source-snapshot "$source_snapshot" --version 0.1.0-rc.4 \
+            --platform linux/amd64 --image-inspect /inputs/image.json --index /inputs/index.json \
+            --output-dir /tmp/admission
+          rm -rf -- "$offline_root"
           python3 tools/release/build_easy_installer.py \
             --output "$root/payload/volt-compose-0.1.0-rc.4-installer.tar.gz" \
             --bundle "$root/payload/installer.bundle.tar.gz" \

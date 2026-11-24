@@ -334,14 +334,17 @@ def authentication_status_snapshot(context):
         info=root.lstat()
         if (root.resolve(strict=True)!=root or not stat.S_ISDIR(info.st_mode)or info.st_uid!=os.getuid()
                 or stat.S_IMODE(info.st_mode)!=0o700):return None
-        names={p.name for p in root.iterdir()}
+        names=set()
+        with os.scandir(root)as entries:
+            for entry in entries:
+                if len(names)>=256:return None
+                names.add(entry.name)
         if any(re.fullmatch(r'entry\.[A-Za-z0-9]{8}',name)is None for name in names):return None
         return root,(info.st_dev,info.st_ino),names
     except (OSError,KeyError,TypeError):return None
 
 
 def fresh_authentication_status(snapshot):
-    from tools.release.native_runtime_probe import regular_bytes
     import stat
     unavailable={'status':'unavailable'}
     if snapshot is None:return unavailable
@@ -353,9 +356,21 @@ def fresh_authentication_status(snapshot):
         if len(added)!=1:return unavailable
         record=root/added.pop();info=record.lstat()
         if (not stat.S_ISDIR(info.st_mode)or info.st_uid!=os.getuid()or stat.S_IMODE(info.st_mode)!=0o700):return unavailable
-        values=[]
+        values=[];identities=set()
+        def custody(info):
+            return (info.st_dev,info.st_ino,info.st_uid,info.st_mode,info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
         for name in('authentication.exit','reader.exit'):
-            raw=regular_bytes(record/name,8)
+            path=record/name
+            fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+            try:
+                item=os.fstat(fd);key=(item.st_dev,item.st_ino)
+                if (not stat.S_ISREG(item.st_mode)or item.st_uid!=os.getuid()
+                        or stat.S_IMODE(item.st_mode)!=0o600 or item.st_nlink!=1
+                        or item.st_size>8 or key in identities):return unavailable
+                raw=os.read(fd,9)
+                if custody(item)!=custody(os.fstat(fd))or custody(item)!=custody(path.lstat()):return unavailable
+                identities.add(key)
+            finally:os.close(fd)
             if re.fullmatch(rb'[0-9]{1,3}\n',raw)is None or not 0<=int(raw)<=255:return unavailable
             values.append(int(raw))
         after=record.lstat();parent=root.lstat()

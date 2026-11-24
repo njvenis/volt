@@ -73,4 +73,24 @@ exit 7
    (fresh/'reader.exit').write_text('PRIVATE\n');self.assertEqual(h.fresh_authentication_status(before),{'status':'unavailable'})
    (fresh/'reader.exit').write_text('0\n');(auth/'entry.cccccccc').mkdir(mode=0o700);self.assertEqual(h.fresh_authentication_status(before),{'status':'unavailable'})
 
+ def test_auth_status_custody_alias_nonprivate_uid_and_directory_overflow_are_unavailable(self):
+  for fault in('hardlink','mode','uid','overflow'):
+   with self.subTest(fault=fault),tempfile.TemporaryDirectory()as d:
+    root=Path(d);auth=root/'public-offline-authentication';auth.mkdir(mode=0o700)
+    before=h.authentication_status_snapshot({'private':str(root)})
+    record=auth/'entry.aaaaaaaa';record.mkdir(mode=0o700)
+    producer=record/'authentication.exit';reader=record/'reader.exit'
+    producer.write_text('0\n');producer.chmod(0o600)
+    if fault=='hardlink':os.link(producer,reader)
+    else:reader.write_text('0\n');reader.chmod(0o600)
+    if fault=='mode':reader.chmod(0o644)
+    if fault=='overflow':
+     for i in range(256):(auth/('entry.'+str(i).zfill(8))).mkdir(mode=0o700)
+    if fault=='uid':
+     original=os.fstat
+     def foreign_uid(fd):
+      item=original(fd);return SimpleNamespace(**{name:getattr(item,name)for name in ('st_dev','st_ino','st_mode','st_nlink','st_size','st_mtime_ns','st_ctime_ns')},st_uid=os.getuid()+1)
+     with patch.object(h.os,'fstat',side_effect=foreign_uid):self.assertEqual(h.fresh_authentication_status(before),{'status':'unavailable'})
+    else:self.assertEqual(h.fresh_authentication_status(before),{'status':'unavailable'})
+
 if __name__=='__main__':unittest.main()
